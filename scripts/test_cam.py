@@ -1,0 +1,561 @@
+"""cam.py 的端到端测试：伪造 HOME、伪造 Anthropic 接口，不碰真实账号。
+
+运行：python3 scripts/test_cam.py
+"""
+import http.server
+import importlib
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+class MockAnthropic(http.server.BaseHTTPRequestHandler):
+    calls = []
+    # access token -> 账号资料
+    tokens = {}
+    refresh_map = {}
+    # sessionKey -> 网页账号资料；cloudflare=True 时所有网页请求返回挑战页
+    web_keys = {}
+    cloudflare = False
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _send_html(self, code, html):
+        b = html.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _cookie_key(self):
+        c = self.headers.get("Cookie") or ""
+        for part in c.split(";"):
+            part = part.strip()
+            if part.startswith("sessionKey="):
+                return part[len("sessionKey="):]
+        return None
+
+    def _web(self):
+        """返回 True 表示已处理网页接口。"""
+        if self.cloudflare:
+            self._send_html(403, "<html><body>Just a moment...<script>cf-chl</script></body></html>")
+            return True
+        sk = self._cookie_key()
+        who = self.web_keys.get(sk)
+        if self.path == "/api/organizations":
+            if not who:
+                return self._send(403, {"error": {"message": "unauthorized"}}) or True
+            caps = ["chat"] + ([f"claude_{who['plan']}"] if who.get("plan") else [])
+            return self._send(200, [{"uuid": "org-web", "name": who.get("org", "Web Org"), "capabilities": caps}]) or True
+        if self.path == "/api/account":
+            if not who:
+                return self._send(403, {"error": {"message": "unauthorized"}}) or True
+            return self._send(200, {"email_address": who["email"]}) or True
+        if self.path.startswith("/api/organizations/") and self.path.endswith("/usage"):
+            if not who:
+                return self._send(403, {"error": {"message": "unauthorized"}}) or True
+            return self._send(200, {
+                "five_hour": {"utilization": who["u5"], "resets_at": "2099-01-01T00:00:00Z"},
+                "seven_day": {"utilization": who["u7"], "resets_at": "2099-01-05T00:00:00Z"},
+            }) or True
+        return False
+
+    def do_GET(self):
+        MockAnthropic.calls.append(("GET", self.path, self.headers.get("Authorization") or self.headers.get("x-api-key")))
+        if self.path in ("/api/organizations", "/api/account") or (
+                self.path.startswith("/api/organizations/") and self.path.endswith("/usage")):
+            if self._web():
+                return
+        auth = (self.headers.get("Authorization") or "")[7:]
+        if self.path == "/api/oauth/usage":
+            who = self.tokens.get(auth)
+            if not who:
+                return self._send(401, {"error": {"message": "invalid token"}})
+            return self._send(200, {
+                "five_hour": {"utilization": who["u5"], "resets_at": "2099-01-01T00:00:00Z"},
+                "seven_day": {"utilization": who["u7"], "resets_at": "2099-01-05T00:00:00Z"},
+                "seven_day_opus": None,
+            })
+        if self.path == "/api/oauth/profile":
+            who = self.tokens.get(auth)
+            if not who:
+                return self._send(401, {"error": {"message": "invalid token"}})
+            return self._send(200, {"account": {"email": who["email"], "has_claude_max": who["plan"] == "max",
+                                                "has_claude_pro": who["plan"] == "pro"},
+                                    "organization": {"name": who["email"] + "'s Org", "rate_limit_tier": "tier_x"}})
+        if self.path.startswith("/v1/models"):
+            ok = self.headers.get("x-api-key") == "sk-ant-api-good"
+            return self._send(200 if ok else 401, {"data": []} if ok else {"error": {"message": "bad key"}})
+        if self.path.startswith("/v1/organizations/cost_report"):
+            if "page=p2" in self.path:
+                return self._send(200, {"data": [{"results": [{"amount": "250"}]}], "has_more": False})
+            return self._send(200, {"data": [{"results": [{"amount": "1000.5"}, {"amount": "49.5"}]}],
+                                    "has_more": True, "next_page": "p2"})
+        self._send(404, {"error": {"message": "nope"}})
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        MockAnthropic.calls.append(("POST", self.path, body.get("refresh_token")))
+        if self.path == "/v1/oauth/token":
+            new = self.refresh_map.get(body.get("refresh_token"))
+            if not new:
+                return self._send(400, {"error": {"message": "invalid_grant"}})
+            return self._send(200, {"access_token": new[0], "refresh_token": new[1], "expires_in": 28800})
+        self._send(404, {})
+
+
+def creds(at, rt, expires_ms, sub="max"):
+    return {"claudeAiOauth": {"accessToken": at, "refreshToken": rt, "expiresAt": expires_ms,
+                              "scopes": ["user:inference", "user:profile"], "subscriptionType": sub}}
+
+
+def oauth_account(uuid, email):
+    return {"accountUuid": uuid, "emailAddress": email, "organizationUuid": "org-" + uuid,
+            "organizationName": email + " org", "displayName": email.split("@")[0]}
+
+
+class CamTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockAnthropic)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        os.environ["CAM_API_BASE"] = base
+        os.environ["CAM_CLAUDE_WEB_BASE"] = base
+        os.environ["CAM_TOKEN_URLS"] = base + "/v1/oauth/token"
+        os.environ["CAM_NO_KEYCHAIN"] = "1"
+        os.environ["NO_COLOR"] = "1"
+        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            os.environ.pop(k, None)
+        sys.path.insert(0, HERE)
+        import cam
+        cls.cam = importlib.reload(cam)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        os.environ["HOME"] = self.tmp
+        os.environ["USERPROFILE"] = self.tmp
+        os.environ.pop("CAM_HOME", None)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.makedirs(os.path.join(self.tmp, ".claude", "projects", "proj1"))
+        self.creds_path = os.path.join(self.tmp, ".claude", ".credentials.json")
+        self.cj_path = os.path.join(self.tmp, ".claude.json")
+        with open(self.cj_path, "w") as f:
+            json.dump({"numStartups": 42, "projects": {"/work/x": {"allowedTools": ["Bash"]}},
+                       "mcpServers": {"m": {"command": "x"}}}, f)
+        MockAnthropic.calls = []
+        MockAnthropic.tokens = {}
+        MockAnthropic.refresh_map = {}
+        MockAnthropic.web_keys = {}
+        MockAnthropic.cloudflare = False
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ---- helpers
+    def login(self, at, rt, uuid, email, expires_ms=None, sub="max"):
+        """模拟用户在 Claude Code 里 /login。"""
+        if expires_ms is None:
+            expires_ms = int((time.time() + 3600) * 1000)
+        with open(self.creds_path, "w") as f:
+            json.dump(creds(at, rt, expires_ms, sub), f)
+        cj = json.load(open(self.cj_path))
+        cj["oauthAccount"] = oauth_account(uuid, email)
+        json.dump(cj, open(self.cj_path, "w"))
+
+    def live(self):
+        return json.load(open(self.creds_path))["claudeAiOauth"], json.load(open(self.cj_path))
+
+    def run_cam(self, *args):
+        return self.cam.main(list(args))
+
+    def data(self):
+        return self.cam.Store().load()
+
+    # ---- tests
+    def test_import_switch_keeps_everything(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.assertEqual(self.run_cam("import", "--label", "A"), 0)
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com", sub="pro")
+        self.assertEqual(self.run_cam("import", "--label", "B"), 0)
+        d = self.data()
+        self.assertEqual([a["label"] for a in d["accounts"]], ["A", "B"])
+        b_id = d["accounts"][1]["id"]
+        self.assertEqual(d["active"]["claude_code"], b_id)
+        self.assertEqual(d["accounts"][1]["plan"], "pro")
+
+        # 会话记录（不应被触碰）
+        hist = os.path.join(self.tmp, ".claude", "projects", "proj1", "s.jsonl")
+        open(hist, "w").write('{"x":1}\n')
+
+        # Claude Code 运行期间自己刷新了 B 的 token
+        self.login("at-B2", "rt-B2", "uuid-B", "b@x.com", sub="pro")
+
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        live, cj = self.live()
+        self.assertEqual(live["accessToken"], "at-A1")
+        self.assertEqual(cj["oauthAccount"]["emailAddress"], "a@x.com")
+        # .claude.json 其它字段原样保留
+        self.assertEqual(cj["numStartups"], 42)
+        self.assertEqual(cj["mcpServers"], {"m": {"command": "x"}})
+        self.assertEqual(open(hist).read(), '{"x":1}\n')
+        # B 的最新 token 被回写，没有丢
+        sec_b = self.cam.Store().load_secret(b_id)
+        self.assertEqual(sec_b["claudeAiOauth"]["refreshToken"], "rt-B2")
+        # 有备份
+        backups = os.listdir(os.path.join(self.tmp, ".claude-accounts", "backups"))
+        self.assertEqual(len(backups), 1)
+        bk = json.load(open(os.path.join(self.tmp, ".claude-accounts", "backups", backups[0], "credentials.json")))
+        self.assertEqual(bk["data"]["claudeAiOauth"]["accessToken"], "at-B2")
+
+        # 切回 B，拿到的是刷新后的 token
+        self.assertEqual(self.run_cam("switch", "2"), 0)
+        live, _ = self.live()
+        self.assertEqual(live["refreshToken"], "rt-B2")
+        # 再切到 B：无变化
+        self.assertEqual(self.run_cam("switch", "b@x.com"), 0)
+        self.assertEqual(len(os.listdir(os.path.join(self.tmp, ".claude-accounts", "backups"))), 2)
+
+        if os.name != "nt":
+            mode = os.stat(self.creds_path).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+            mode = os.stat(self.cam.Store().secret_path(b_id)).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+
+    def test_unknown_live_account_is_auto_imported_before_switch(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        # 用户没 import 就直接 /login 了另一个账号 C
+        self.login("at-C1", "rt-C1", "uuid-C", "c@x.com")
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        d = self.data()
+        self.assertIn("c@x.com", [a.get("email") for a in d["accounts"]])
+        c = [a for a in d["accounts"] if a.get("email") == "c@x.com"][0]
+        self.assertEqual(self.cam.Store().load_secret(c["id"])["claudeAiOauth"]["refreshToken"], "rt-C1")
+
+    def test_switch_errors(self):
+        self.assertEqual(self.run_cam("switch", "nobody"), 1)
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import")
+        self.run_cam("add-web", "--label", "W")
+        self.assertEqual(self.run_cam("switch", "W"), 1)
+        # 当前账号不能删
+        self.assertEqual(self.run_cam("rm", "a@x.com"), 1)
+        self.assertEqual(self.run_cam("rm", "W"), 0)
+
+    def test_usage_refresh_active_and_inactive(self):
+        past = int((time.time() - 60) * 1000)
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        MockAnthropic.tokens = {"at-A2": {"u5": 10.0, "u7": 20.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 95.0, "u7": 50.0, "email": "b@x.com", "plan": "pro"}}
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        self.assertEqual(self.run_cam("usage"), 0)
+        d = self.data()
+        a, b = d["accounts"]
+        self.assertIsNone(a["usage"]["error"], a["usage"])
+        self.assertEqual(a["usage"]["five_hour"]["utilization"], 10.0)
+        self.assertEqual(b["usage"]["five_hour"]["utilization"], 95.0)
+        self.assertEqual(a["plan"], "max")
+        self.assertEqual(b["org_name"], "b@x.com's Org")
+        # 非当前账号刷新后，轮换的 refresh token 被保存
+        self.assertEqual(self.cam.Store().load_secret(a["id"])["claudeAiOauth"]["refreshToken"], "rt-A2")
+        # 当前账号从不刷新
+        self.assertNotIn(("POST", "/v1/oauth/token", "rt-B1"), MockAnthropic.calls)
+        # 切回 A，用的是刷新后的 token
+        self.run_cam("switch", "A")
+        self.assertEqual(self.live()[0]["accessToken"], "at-A2")
+
+    def test_usage_error_is_kept_per_account(self):
+        self.login("at-bad", "rt-bad", "uuid-A", "a@x.com")
+        self.run_cam("import")
+        self.run_cam("usage")
+        u = self.data()["accounts"][0]["usage"]
+        self.assertIn("401", u["error"])
+
+    def test_web_account_usage(self):
+        self.run_cam("add-web", "--label", "网页号")
+        wid = self.data()["accounts"][0]["id"]
+        # 没填 sessionKey：友好提示，不报错崩溃
+        self.run_cam("usage")
+        u = self.data()["accounts"][0]["usage"]
+        self.assertIn("sessionKey", u["error"])
+
+        # 填入 sessionKey 后自动拿到额度、邮箱、套餐
+        MockAnthropic.web_keys = {"sk-ant-sid-xyz": {"u5": 42.0, "u7": 15.0, "email": "web@x.com",
+                                                     "plan": "pro", "org": "我的组织"}}
+        self.run_cam("set", wid, "--session-key", "sk-ant-sid-xyz")
+        self.run_cam("usage")
+        a = self.data()["accounts"][0]
+        self.assertIsNone(a["usage"]["error"], a["usage"])
+        self.assertEqual(a["usage"]["five_hour"]["utilization"], 42.0)
+        self.assertEqual(a["email"], "web@x.com")
+        self.assertEqual(a["plan"], "pro")
+
+        # sessionKey 过期：提示重新复制
+        MockAnthropic.web_keys = {}
+        self.run_cam("usage")
+        self.assertIn("过期", self.data()["accounts"][0]["usage"]["error"])
+
+        # Cloudflare 挑战页：提示是网络拦截，不是账号问题
+        MockAnthropic.web_keys = {"sk-ant-sid-xyz": {"u5": 1.0, "u7": 1.0, "email": "web@x.com", "plan": "pro"}}
+        MockAnthropic.cloudflare = True
+        self.run_cam("usage")
+        self.assertIn("验证", self.data()["accounts"][0]["usage"]["error"])
+
+    def test_api_account(self):
+        self.run_cam("add-api", "--label", "API", "--key", "sk-ant-api-good", "--admin-key", "sk-ant-admin-x")
+        self.run_cam("usage")
+        u = self.data()["accounts"][0]["usage"]
+        self.assertTrue(u["key_valid"])
+        self.assertEqual(u["cost_month_usd"], 13.0)  # (1000.5+49.5+250) 美分
+
+    def test_manual_fields_and_renewal(self):
+        self.run_cam("add-web", "--label", "W")
+        self.assertEqual(self.run_cam("set", "W", "--expires", "2020-01-31", "--auto-renew", "--price", "$20"), 0)
+        acc = self.data()["accounts"][0]
+        import datetime as dt
+        exp = dt.date.fromisoformat(acc["manual"]["expires_at"])
+        self.assertGreaterEqual(exp, dt.date.today())
+        self.assertLess((exp - dt.date.today()).days, 32)
+        self.assertEqual(self.run_cam("set", "W", "--expires", "bad"), 1)
+
+    def test_local_usage_attribution(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        d = self.data()
+        a_id = d["accounts"][0]["id"]
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+        d["switch_log"] = [{"id": a_id, "at": (now - dt.timedelta(hours=5)).isoformat()},
+                           {"id": "bbbb", "at": (now - dt.timedelta(hours=1)).isoformat()}]
+        self.cam.Store().save(d)
+
+        def ev(mid, hours_ago, out):
+            return json.dumps({"type": "assistant", "requestId": "r" + mid,
+                               "timestamp": (now - dt.timedelta(hours=hours_ago)).isoformat().replace("+00:00", "Z"),
+                               "message": {"id": mid, "usage": {"input_tokens": 1, "output_tokens": out,
+                                                                "cache_read_input_tokens": 5}}})
+        p = os.path.join(self.tmp, ".claude", "projects", "proj1", "x.jsonl")
+        with open(p, "w") as f:
+            f.write("\n".join([ev("m1", 3, 100), ev("m1", 3, 100), ev("m2", 0.5, 7), ev("m0", 10, 1000),
+                               "not json", '{"type":"user"}']) + "\n")
+        rep = self.cam.local_usage(self.data(), 7)
+        by = {}
+        for r in rep["rows"]:
+            by.setdefault(r["account_id"], 0)
+            by[r["account_id"]] += r["output"]
+        self.assertEqual(by.get(a_id), 100)  # 去重
+        self.assertEqual(by.get("bbbb"), 7)
+        self.assertEqual(by.get("unattributed"), 1000)
+
+    def test_auto_import_on_ls(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.assertEqual(self.run_cam("ls"), 0)
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.assertEqual(self.run_cam(), 0)
+        d = self.data()
+        self.assertEqual(sorted(a["email"] for a in d["accounts"]), ["a@x.com", "b@x.com"])
+        # 再运行不会重复导入
+        self.run_cam("ls")
+        self.assertEqual(len(self.data()["accounts"]), 2)
+
+    def test_renewal_keeps_original_day(self):
+        import datetime as dt
+        self.run_cam("add-web", "--label", "W")
+        self.run_cam("set", "W", "--expires", "2025-01-31", "--auto-renew")
+        m = self.data()["accounts"][0]["manual"]
+        self.assertEqual(m["renew_day"], 31)
+        d = dt.date.fromisoformat(m["expires_at"])
+        import calendar
+        self.assertEqual(d.day, min(31, calendar.monthrange(d.year, d.month)[1]))
+
+    def _two_accounts(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        d = self.data()
+        return d["accounts"][0]["id"], d["accounts"][1]["id"]
+
+    def test_rules_dir_and_time(self):
+        import datetime as dt
+        a_id, b_id = self._two_accounts()
+        work = os.path.join(self.tmp, "work")
+        os.makedirs(os.path.join(work, "proj", "sub"))
+        os.makedirs(os.path.join(self.tmp, "workshop"))
+        self.assertEqual(self.run_cam("rule", "add-dir", work, "A"), 0)
+        self.assertEqual(self.run_cam("rule", "add-dir", os.path.join(work, "proj"), "B"), 0)
+        self.assertEqual(self.run_cam("rule", "add-dir", work, "nobody"), 1)
+        d = self.data()
+        self.assertEqual(self.cam.match_dir_rule(d, os.path.join(work, "x"))["account"], a_id) if os.path.isdir(os.path.join(work, "x")) else None
+        self.assertEqual(self.cam.match_dir_rule(d, work)["account"], a_id)
+        self.assertEqual(self.cam.match_dir_rule(d, os.path.join(work, "proj", "sub"))["account"], b_id)  # 最长匹配
+        self.assertIsNone(self.cam.match_dir_rule(d, os.path.join(self.tmp, "workshop")))  # 不是前缀误判
+
+        # 时间规则：周一到周五 9-18 用 A；22:00-02:00（跨午夜）用 B
+        store = self.cam.Store()
+        self.cam.save_rules(store, {"rules": d["rules"] + [
+            {"type": "time", "days": "1-5", "start": "09:00", "end": "18:00", "account": a_id},
+            {"type": "time", "days": [5], "start": "22:00", "end": "02:00", "account": b_id}]})
+        d = self.data()
+        mon10 = dt.datetime(2026, 10, 12, 10, 0)  # 周一
+        sat10 = dt.datetime(2026, 10, 17, 10, 0)
+        fri23 = dt.datetime(2026, 10, 16, 23, 0)
+        sat01 = dt.datetime(2026, 10, 17, 1, 0)
+        sun01 = dt.datetime(2026, 10, 18, 1, 0)
+        self.assertEqual(self.cam.match_time_rule(d, mon10)["account"], a_id)
+        self.assertIsNone(self.cam.match_time_rule(d, sat10))
+        self.assertEqual(self.cam.match_time_rule(d, fri23)["account"], b_id)
+        self.assertEqual(self.cam.match_time_rule(d, sat01)["account"], b_id)
+        self.assertIsNone(self.cam.match_time_rule(d, sun01))
+
+        # 当前是 B；进入周一 10 点的时间段 → 切到 A
+        res = self.cam.apply_time_rules(store, mon10)
+        self.assertTrue(res and res[2])
+        self.assertEqual(self.live()[0]["accessToken"], "at-A1")
+        # 时间段内手动切回 B，规则不会再改回去
+        self.run_cam("switch", "B")
+        self.assertIsNone(self.cam.apply_time_rules(store, mon10.replace(hour=11)))
+        self.assertEqual(self.live()[0]["accessToken"], "at-B1")
+        # 离开时间段再进入，才会再次生效
+        self.cam.apply_time_rules(store, sat10)
+        res = self.cam.apply_time_rules(store, mon10)
+        self.assertEqual(self.live()[0]["accessToken"], "at-A1")
+
+        with self.assertRaises(self.cam.CamError):
+            self.cam.save_rules(store, {"rules": [{"type": "time", "days": "8", "start": "1:00", "end": "2:00", "account": a_id}]})
+        with self.assertRaises(self.cam.CamError):
+            self.cam.save_rules(store, {"rules": [{"type": "time", "days": "1", "start": "25:00", "end": "2:00", "account": a_id}]})
+        with self.assertRaises(self.cam.CamError):
+            self.cam.save_rules(store, {"alert_threshold": 0})
+        self.assertEqual(self.run_cam("rule", "ls"), 0)
+
+    @unittest.skipIf(os.name == "nt", "用 sh 脚本模拟 claude，Windows 上跳过")
+    def test_cam_claude_wrapper_args(self):
+        a_id, b_id = self._two_accounts()
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        fake = os.path.join(bindir, "claude")
+        out = os.path.join(self.tmp, "args.txt")
+        with open(fake, "w") as f:
+            f.write(f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {out}\n")
+        os.chmod(fake, 0o755)
+        work = os.path.join(self.tmp, "work")
+        os.makedirs(work)
+        self.run_cam("rule", "add-dir", work, "A")
+        import subprocess
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "cam.py"), "claude", "--resume", "-p", "hi there"],
+                           cwd=work, env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(open(out).read().splitlines(), ["--resume", "-p", "hi there"])
+        self.assertEqual(self.live()[0]["accessToken"], "at-A1")
+
+    def test_menubar_plugin(self):
+        os.environ["CAM_MENU_NO_NOTIFY"] = "1"
+        os.environ["CAM_MENU_REFRESH_MIN"] = "0"
+        sys.path.insert(0, os.path.join(HERE, "..", "extras", "swiftbar"))
+        import cam_menu
+        cam_menu = importlib.reload(cam_menu)
+        cam_menu.cam = self.cam
+        store = self.cam.Store()
+        lines = []
+        cam_menu.render(store, cam_menu.background_work(store), out=lines.append)
+        self.assertTrue(lines[0].startswith("Claude ⚠"))
+        # 登录后插件运行一次就自动保存，标题显示账号
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.login_then = None
+        lines = []
+        cam_menu.render(store, cam_menu.background_work(store), out=lines.append)
+        self.assertIn("a@x.com", lines[0])
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        lines = []
+        cam_menu.render(store, cam_menu.background_work(store), out=lines.append)
+        switch_lines = [l for l in lines if 'param2="switch"' in l]
+        self.assertTrue(switch_lines, lines)
+        self.assertTrue(all("|" in l for l in lines if l != "---"))
+
+    def test_http_api(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        self.run_cam("add-api", "--label", "API", "--key", "sk-ant-api-supersecretvalue1234")
+        store = self.cam.Store()
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(method, path, body=None, tok=token):
+            req = urllib.request.Request(base + path, method=method,
+                                         data=json.dumps(body).encode() if body is not None else None,
+                                         headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+            try:
+                with opener.open(req) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+
+        try:
+            st, html = call("GET", "/", tok="")
+            self.assertEqual(st, 200)
+            self.assertIn("<html", html.lower())
+            self.assertEqual(call("GET", "/api/state", tok="wrong")[0], 401)
+            st, txt = call("GET", "/api/state")
+            self.assertEqual(st, 200)
+            for secret in ("rt-A1", "at-B1", "supersecretvalue"):
+                self.assertNotIn(secret, txt)
+            state = json.loads(txt)
+            a_id = state["accounts"][0]["id"]
+            st, txt = call("POST", f"/api/accounts/{a_id}/switch")
+            self.assertEqual(st, 200, txt)
+            self.assertEqual(self.live()[0]["accessToken"], "at-A1")
+            st, txt = call("PATCH", f"/api/accounts/{a_id}", {"expires_at": "2099-12-31", "note": "工作用"})
+            self.assertEqual(st, 200, txt)
+            acc = json.loads(txt)["accounts"][0]
+            self.assertEqual(acc["manual"]["note"], "工作用")
+            self.assertGreater(acc["days_left"], 1000)
+            self.assertEqual(call("PATCH", f"/api/accounts/{a_id}", {"expires_at": "nope"})[0], 400)
+            self.assertEqual(call("GET", "/api/local-usage?days=3")[0], 200)
+            self.assertEqual(call("DELETE", f"/api/accounts/{a_id}")[0], 400)  # 当前账号
+            st, txt = call("PUT", "/api/rules", {"rules": [{"type": "time", "days": [1, 2], "start": "9:00",
+                                                             "end": "18:30", "account": a_id}], "alert_threshold": 80})
+            self.assertEqual(st, 200, txt)
+            rv = json.loads(call("GET", "/api/rules")[1])
+            self.assertEqual(rv["alert_threshold"], 80)
+            self.assertEqual(rv["rules"][0]["start"], "09:00")
+            self.assertEqual(call("PUT", "/api/rules", {"rules": [{"type": "dir", "path": "", "account": a_id}]})[0], 400)
+        finally:
+            srv.shutdown()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

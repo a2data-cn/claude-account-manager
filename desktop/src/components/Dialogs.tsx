@@ -1,0 +1,254 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { Account, Kind } from "../types";
+
+function useModal(open: boolean) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const d = ref.current;
+    if (!d) return;
+    if (open && !d.open) d.showModal();
+    if (!open && d.open) d.close();
+  }, [open]);
+  return ref;
+}
+
+export interface EditValues {
+  label: string;
+  plan: string;
+  price: string;
+  expires_at: string;
+  cycle: string;
+  auto_renew: boolean;
+  note: string;
+  session_key?: string;
+  api_key?: string;
+  admin_key?: string;
+}
+
+export function EditDialog({
+  account,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  account: Account | null;
+  onClose: () => void;
+  onSave: (a: Account, v: EditValues) => void;
+  onDelete: (a: Account) => void;
+}) {
+  const ref = useModal(!!account);
+  const [v, setV] = useState<EditValues | null>(null);
+
+  useEffect(() => {
+    if (!account) return;
+    const m = account.manual || {};
+    setV({
+      label: account.label || "",
+      plan: m.plan || "",
+      price: m.price || "",
+      expires_at: m.expires_at || "",
+      cycle: m.cycle || "monthly",
+      auto_renew: !!m.auto_renew,
+      note: m.note || "",
+      session_key: "",
+      api_key: "",
+      admin_key: "",
+    });
+  }, [account]);
+
+  if (!account || !v) return <dialog ref={ref} onClose={onClose} />;
+  const set = (k: keyof EditValues) => (e: { target: { value: string } }) => setV({ ...v, [k]: e.target.value });
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const out: EditValues = { ...v, label: v.label.trim(), price: v.price.trim(), note: v.note.trim() };
+    for (const k of ["session_key", "api_key", "admin_key"] as const) {
+      if (!out[k]?.trim()) delete out[k];
+    }
+    onSave(account, out);
+  };
+
+  return (
+    <dialog ref={ref} onClose={onClose}>
+      <form onSubmit={submit}>
+        <h3>编辑：{account.label || account.email}</h3>
+        <div className="field">
+          <label htmlFor="f-label">名称</label>
+          <input id="f-label" value={v.label} maxLength={60} onChange={set("label")} />
+        </div>
+        <div className="row2">
+          <div className="field">
+            <label htmlFor="f-plan">套餐（自动获取失败时填）</label>
+            <select id="f-plan" value={v.plan} onChange={set("plan")}>
+              <option value="">自动</option>
+              <option value="pro">Pro</option>
+              <option value="max">Max</option>
+              <option value="team">Team</option>
+              <option value="enterprise">Enterprise</option>
+              <option value="free">Free</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="f-price">价格</label>
+            <input id="f-price" value={v.price} placeholder="例如 $100/月" onChange={set("price")} />
+          </div>
+        </div>
+        <div className="row2">
+          <div className="field">
+            <label htmlFor="f-exp">到期 / 下次续费</label>
+            <input id="f-exp" type="date" value={v.expires_at} onChange={set("expires_at")} />
+          </div>
+          <div className="field">
+            <label htmlFor="f-cycle">计费周期</label>
+            <select id="f-cycle" value={v.cycle} onChange={set("cycle")}>
+              <option value="monthly">每月</option>
+              <option value="yearly">每年</option>
+            </select>
+          </div>
+        </div>
+        <label className="check">
+          <input type="checkbox" checked={v.auto_renew} onChange={(e) => setV({ ...v, auto_renew: e.target.checked })} />
+          自动续期（过期后按周期顺延）
+        </label>
+        {account.kind === "claude_web" && (
+          <div className="field">
+            <label htmlFor="f-session">claude.ai sessionKey（可选，用于自动获取网页版用量）</label>
+            <input id="f-session" type="password" autoComplete="off" placeholder="留空表示不修改" value={v.session_key} onChange={set("session_key")} />
+          </div>
+        )}
+        {account.kind === "api" && (
+          <>
+            <div className="field">
+              <label htmlFor="f-api">API Key（留空不修改）</label>
+              <input id="f-api" type="password" autoComplete="off" value={v.api_key} onChange={set("api_key")} />
+            </div>
+            <div className="field">
+              <label htmlFor="f-admin">Admin Key（可选，用于读取本月花费）</label>
+              <input id="f-admin" type="password" autoComplete="off" value={v.admin_key} onChange={set("admin_key")} />
+            </div>
+          </>
+        )}
+        <div className="field">
+          <label htmlFor="f-note">备注</label>
+          <textarea id="f-note" rows={2} value={v.note} onChange={set("note")} />
+        </div>
+        <div className="dlg-acts">
+          {!account.is_active && (
+            <button type="button" className="btn quiet danger" onClick={() => onDelete(account)}>
+              删除账号
+            </button>
+          )}
+          <button type="button" className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="btn primary">
+            保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
+export interface AddValues {
+  kind: Kind;
+  label?: string;
+  email?: string;
+  api_key?: string;
+  admin_key?: string;
+}
+
+export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: () => void; onAdd: (v: AddValues) => void }) {
+  const ref = useModal(open);
+  const [kind, setKind] = useState<Kind>("claude_code");
+  const [label, setLabel] = useState("");
+  const [email, setEmail] = useState("");
+  const [key, setKey] = useState("");
+  const [admin, setAdmin] = useState("");
+
+  useEffect(() => {
+    if (open) {
+      setKind("claude_code");
+      setLabel("");
+      setEmail("");
+      setKey("");
+      setAdmin("");
+    }
+  }, [open]);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    if (kind === "claude_code") return onAdd({ kind, label: label.trim() || undefined });
+    onAdd({
+      kind,
+      label: label.trim(),
+      email: kind === "claude_web" ? email.trim() : undefined,
+      api_key: kind === "api" ? key.trim() : undefined,
+      admin_key: kind === "api" ? admin.trim() : undefined,
+    });
+  };
+
+  return (
+    <dialog ref={ref} onClose={onClose}>
+      <form onSubmit={submit}>
+        <h3>添加账号</h3>
+        <div className="field">
+          <label htmlFor="a-kind">类型</label>
+          <select id="a-kind" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
+            <option value="claude_code">Claude Code（命令行）</option>
+            <option value="claude_web">claude.ai 网页版</option>
+            <option value="api">API Key</option>
+          </select>
+        </div>
+        {kind === "claude_code" ? (
+          <div className="hint">
+            <p>Claude Code 账号需要先在这台电脑上登录，这样切换时才拿得到完整凭据：</p>
+            <ol>
+              <li>
+                在终端运行 <code>claude</code>，输入 <code>/login</code> 登录要添加的账号
+              </li>
+              <li>回到这里点“导入当前登录”</li>
+            </ol>
+            <p>导入前会先保存上一个账号的最新凭据，不会丢。</p>
+            <div className="field">
+              <label htmlFor="a-label0">名称（可选）</label>
+              <input id="a-label0" value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="field">
+              <label htmlFor="a-label">名称</label>
+              <input id="a-label" value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
+            </div>
+            {kind === "claude_web" && (
+              <div className="field">
+                <label htmlFor="a-email">邮箱（可选，只用于显示）</label>
+                <input id="a-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+            )}
+            {kind === "api" && (
+              <>
+                <div className="field">
+                  <label htmlFor="a-key">API Key</label>
+                  <input id="a-key" type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label htmlFor="a-admin">Admin Key（可选）</label>
+                  <input id="a-admin" type="password" autoComplete="off" value={admin} onChange={(e) => setAdmin(e.target.value)} />
+                </div>
+              </>
+            )}
+          </>
+        )}
+        <div className="dlg-acts">
+          <button type="button" className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="btn primary">
+            {kind === "claude_code" ? "导入当前登录" : "添加"}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}

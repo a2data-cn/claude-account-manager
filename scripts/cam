@@ -1,0 +1,3 @@
+#!/bin/sh
+# cam 启动器：把 scripts 目录加入 PATH 后可直接运行 cam
+exec python3 "$(dirname "$0")/cam.py" "$@"

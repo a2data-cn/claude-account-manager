@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#E9EDF2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141920" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<title>Claude 账号</title>
+<style>
+:root {
+  --paper: #E9EDF2;
+  --surface: #F7F9FB;
+  --ink: #18212C;
+  --muted: #5A6676;
+  --line: #CDD5DF;
+  --track: #DCE2EA;
+  --ok: #2C62C9;
+  --warn: #B87A08;
+  --hot: #BF3B33;
+  --live: #1E7F55;
+  --live-soft: #DCEFE5;
+  --focus: #2C62C9;
+  --radius-lg: 14px;
+  --radius-sm: 6px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #141920; --surface: #1C232C; --ink: #E5EAF0; --muted: #94A0AF; --line: #2E3843;
+    --track: #2A333E; --ok: #6E9BF0; --warn: #E0A93B; --hot: #EE776E; --live: #4CC08A; --live-soft: #1B3A2D;
+    --focus: #6E9BF0; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #141920; --surface: #1C232C; --ink: #E5EAF0; --muted: #94A0AF; --line: #2E3843;
+  --track: #2A333E; --ok: #6E9BF0; --warn: #E0A93B; --hot: #EE776E; --live: #4CC08A; --live-soft: #1B3A2D;
+  --focus: #6E9BF0; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.wrap { max-width: 960px; margin: 0 auto; padding: 20px 16px 48px; }
+
+header.top { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+header.top h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: .01em; }
+header.top .host { color: var(--muted); font-size: 13px; }
+header.top .spacer { flex: 1; }
+
+.btn {
+  border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius-sm);
+  padding: 7px 12px; cursor: pointer; font-size: 14px; white-space: nowrap; min-height: 36px;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.primary:hover { opacity: .9; }
+.btn:disabled { opacity: .5; cursor: progress; }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.quiet:hover { color: var(--ink); }
+
+/* 账号行 */
+.acc {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 16px 18px; margin-bottom: 12px;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 8px 28px;
+  grid-template-areas: "who gauges" "acts gauges"; grid-template-rows: auto 1fr;
+}
+.acc > .who { grid-area: who; }
+.acc > .gauges { grid-area: gauges; }
+.acc > .acts { grid-area: acts; align-self: end; }
+.acc.is-live { border-color: var(--live); box-shadow: inset 4px 0 0 var(--live); }
+.who { min-width: 0; }
+.who .name { font-size: 17px; font-weight: 650; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
+.who .mail { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.chip.live { background: var(--live-soft); border-color: transparent; color: var(--live); }
+.chip.plan { color: var(--ink); }
+.facts { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
+.facts li { margin: 2px 0; }
+.facts .due-soon { color: var(--warn); font-weight: 600; }
+.facts .due-now { color: var(--hot); font-weight: 600; }
+.facts .err { color: var(--warn); }
+.acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+
+/* 额度表：数字 + 进度 + 时间进度刻度 */
+.gauges { display: grid; gap: 12px; align-content: start; }
+.g-head { display: flex; align-items: baseline; gap: 8px; }
+.g-name { font-size: 13px; color: var(--muted); min-width: 64px; }
+.g-pct { font-size: 26px; font-weight: 700; line-height: 1.1; letter-spacing: -.02em; }
+.g-pct small { font-size: 14px; font-weight: 600; margin-left: 1px; }
+.g-reset { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; }
+.g-bar { position: relative; height: 8px; background: var(--track); border-radius: 4px; margin-top: 5px; overflow: visible; }
+.g-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--ok); }
+.g-fill.warn { background: var(--warn); }
+.g-fill.hot { background: var(--hot); }
+.g-tick { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); border-radius: 1px; opacity: .55; }
+.g-pace { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.g-pace.fast { color: var(--warn); }
+.g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
+.g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
+.g-mini b { color: var(--ink); font-weight: 600; }
+
+@media (max-width: 680px) {
+  .acc { grid-template-columns: 1fr; grid-template-areas: "who" "gauges" "acts"; padding: 14px; gap: 12px; }
+  .g-pct { font-size: 22px; }
+  header.top h1 { font-size: 18px; }
+  header.top .host { display: none; }
+}
+
+/* 区块 */
+section.block { margin-top: 28px; }
+section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+.hint { color: var(--muted); font-size: 13px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; }
+
+/* 本地消耗柱状图 */
+.bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
+.bars .day { flex: 1; display: flex; flex-direction: column-reverse; min-width: 0; height: 100%; position: relative; }
+.bars .seg { width: 100%; }
+.bars .day:hover::after {
+  content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: var(--paper); font-size: 12px; padding: 4px 8px; border-radius: 4px; white-space: pre; z-index: 2;
+}
+.axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); margin-top: 10px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+/* 空状态 / 登录 */
+.empty { text-align: left; padding: 22px; }
+.empty h2 { margin: 0 0 8px; font-size: 17px; }
+.empty ol { padding-left: 20px; margin: 8px 0 0; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+
+/* 对话框 */
+dialog { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink); padding: 0; width: min(440px, calc(100vw - 32px)); }
+dialog::backdrop { background: rgba(10, 14, 20, .45); }
+dialog form { padding: 18px; }
+dialog h3 { margin: 0 0 12px; font-size: 17px; }
+.field { display: grid; gap: 4px; margin-bottom: 12px; }
+.field label { font-size: 13px; color: var(--muted); }
+.field input, .field select, .field textarea {
+  border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 8px 10px; width: 100%;
+}
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 12px; }
+.dlg-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+.dlg-acts .danger { margin-right: auto; color: var(--hot); }
+
+.toast {
+  position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  background: var(--ink); color: var(--paper); padding: 10px 16px; border-radius: 8px; font-size: 14px;
+  max-width: calc(100vw - 32px); z-index: 10; opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+.toast.show { opacity: 1; }
+.toast.bad { background: var(--hot); color: #fff; }
+@media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+/* 规则 */
+.rules { list-style: none; margin: 0 0 12px; padding: 0; }
+.rules li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.rules li:last-child { border-bottom: 0; }
+.rules .r-what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.rules .r-kind { font-size: 12px; color: var(--muted); min-width: 32px; }
+.rules .now { color: var(--live); font-size: 12px; font-weight: 600; margin-left: 6px; }
+.rule-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; padding-top: 4px; }
+.rule-form .field { margin: 0; }
+.rule-form .grow { flex: 1 1 180px; }
+.rule-form input, .rule-form select { min-height: 36px; }
+.alert-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; }
+.alert-row input { width: 72px; border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 6px 8px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>Claude 账号</h1>
+    <span class="host" id="host"></span>
+    <span class="spacer"></span>
+    <button class="btn quiet" id="btn-add" type="button">添加账号</button>
+    <button class="btn" id="btn-refresh" type="button">刷新用量</button>
+  </header>
+
+  <main id="list" aria-live="polite"></main>
+
+  <section class="block" id="local-block" hidden>
+    <h2>本机 Claude Code 消耗（近 14 天，输出 token）</h2>
+    <div class="panel">
+      <div class="bars" id="bars" role="img" aria-label="每日输出 token 柱状图"></div>
+      <div class="axis" id="axis"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+    <p class="hint">按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
+  </section>
+
+  <section class="block" id="rules-block" hidden>
+    <h2>切号规则</h2>
+    <div class="panel">
+      <ul class="rules" id="rules-list"></ul>
+      <form class="rule-form" id="rule-form">
+        <div class="field"><label for="r-type">规则</label>
+          <select id="r-type"><option value="time">按时间段</option><option value="dir">按项目目录</option></select></div>
+        <div class="field grow" id="rw-path" hidden><label for="r-path">目录（含子目录）</label><input id="r-path" placeholder="~/work"></div>
+        <div class="field" id="rw-days"><label for="r-days">星期</label>
+          <select id="r-days"><option value="1-5">工作日</option><option value="6,7">周末</option><option value="1-7">每天</option></select></div>
+        <div class="field" id="rw-start"><label for="r-start">从</label><input id="r-start" type="time" value="09:00"></div>
+        <div class="field" id="rw-end"><label for="r-end">到</label><input id="r-end" type="time" value="18:00"></div>
+        <div class="field"><label for="r-acc">切到</label><select id="r-acc"></select></div>
+        <button class="btn primary" type="submit">添加规则</button>
+      </form>
+      <form class="alert-row" id="alert-form">
+        <label for="alert-pct">当前账号 5 小时额度超过</label>
+        <input id="alert-pct" type="number" min="1" max="100" step="1"> <span>% 时提醒，并告诉你哪个号余量最多</span>
+        <button class="btn" type="submit">保存</button>
+      </form>
+    </div>
+    <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p>
+  </section>
+
+  <p class="hint" id="footer"></p>
+</div>
+
+<dialog id="dlg-edit">
+  <form method="dialog" id="form-edit">
+    <h3 id="edit-title">账号信息</h3>
+    <div class="field"><label for="f-label">名称</label><input id="f-label" name="label" maxlength="60"></div>
+    <div class="row2">
+      <div class="field"><label for="f-plan">套餐（自动获取失败时填）</label>
+        <select id="f-plan" name="plan"><option value="">自动</option><option value="pro">Pro</option><option value="max">Max</option><option value="team">Team</option><option value="enterprise">Enterprise</option><option value="free">Free</option></select></div>
+      <div class="field"><label for="f-price">价格</label><input id="f-price" name="price" placeholder="例如 $100/月"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label for="f-exp">到期 / 下次续费</label><input id="f-exp" name="expires_at" type="date"></div>
+      <div class="field"><label for="f-cycle">计费周期</label>
+        <select id="f-cycle" name="cycle"><option value="monthly">每月</option><option value="yearly">每年</option></select></div>
+    </div>
+    <label class="check"><input type="checkbox" id="f-renew" name="auto_renew"> 自动续期（过期后按周期顺延）</label>
+    <div class="field" id="fw-session"><label for="f-session">claude.ai sessionKey（可选，用于自动获取网页版用量）</label><input id="f-session" name="session_key" type="password" autocomplete="off" placeholder="留空表示不修改"></div>
+    <div class="field" id="fw-api"><label for="f-api">API Key（留空不修改）</label><input id="f-api" name="api_key" type="password" autocomplete="off"></div>
+    <div class="field" id="fw-admin"><label for="f-admin">Admin Key（可选，用于读取本月花费）</label><input id="f-admin" name="admin_key" type="password" autocomplete="off"></div>
+    <div class="field"><label for="f-note">备注</label><textarea id="f-note" name="note" rows="2"></textarea></div>
+    <div class="dlg-acts">
+      <button class="btn quiet danger" type="button" id="btn-delete">删除账号</button>
+      <button class="btn" value="cancel" formnovalidate>取消</button>
+      <button class="btn primary" value="save" id="btn-save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-add">
+  <form method="dialog" id="form-add">
+    <h3>添加账号</h3>
+    <div class="field"><label for="a-kind">类型</label>
+      <select id="a-kind" name="kind">
+        <option value="claude_code">Claude Code（命令行）</option>
+        <option value="claude_web">claude.ai 网页版</option>
+        <option value="api">API Key</option>
+      </select></div>
+    <div id="add-code" class="hint">
+      <p>Claude Code 账号需要在电脑上登录后导入，这样切换时才拿得到完整凭据：</p>
+      <ol>
+        <li>在终端运行 <code>claude</code>，输入 <code>/login</code> 登录要添加的账号</li>
+        <li>回到这里点“导入当前登录”，或在终端运行 <code>cam import --label 名字</code></li>
+      </ol>
+      <p>当前账号的凭据会在导入前自动保存，不会丢。</p>
+    </div>
+    <div id="add-other" hidden>
+      <div class="field"><label for="a-label">名称</label><input id="a-label" name="label" maxlength="60"></div>
+      <div class="field" id="aw-email"><label for="a-email">邮箱（可选）</label><input id="a-email" name="email" type="email"></div>
+      <div class="field" id="aw-key"><label for="a-key">API Key</label><input id="a-key" name="api_key" type="password" autocomplete="off"></div>
+      <div class="field" id="aw-admin"><label for="a-admin">Admin Key（可选）</label><input id="a-admin" name="admin_key" type="password" autocomplete="off"></div>
+    </div>
+    <div class="dlg-acts">
+      <button class="btn" value="cancel" formnovalidate>取消</button>
+      <button class="btn primary" value="ok" id="btn-add-ok">导入当前登录</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s, el = document) => el.querySelector(s);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // ---- 后端适配：桌面版注入 window.__CAM_BRIDGE__（Tauri），否则走 HTTP
+  const bridge = window.__CAM_BRIDGE__ || null;
+  let token = "";
+  try {
+    const u = new URL(location.href);
+    const t = u.searchParams.get("t");
+    if (t) { localStorage.setItem("cam-token", t); u.searchParams.delete("t"); history.replaceState(null, "", u.pathname + u.search + u.hash); }
+    token = localStorage.getItem("cam-token") || "";
+  } catch (_) { /* 无痕模式等情况下 localStorage 不可用 */ }
+
+  async function api(method, path, body) {
+    if (bridge) return bridge(method, path, body);
+    const res = await fetch(path, {
+      method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let data = null;
+    try { data = await res.json(); } catch (_) { data = null; }
+    if (!res.ok) {
+      const err = new Error((data && data.error) || ("HTTP " + res.status));
+      err.status = res.status; throw err;
+    }
+    return data;
+  }
+
+  let toastTimer;
+  function toast(msg, bad) {
+    const t = $("#toast");
+    t.textContent = msg; t.className = "toast show" + (bad ? " bad" : "");
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = "toast"), bad ? 5000 : 2600);
+  }
+
+  // ---- 格式化
+  const KIND = { claude_code: "Claude Code", claude_web: "网页版", api: "API" };
+  const PLAN = { pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free", api: "API" };
+  function untilText(iso) {
+    if (!iso) return "";
+    const ms = new Date(iso) - Date.now();
+    if (isNaN(ms)) return "";
+    if (ms <= 0) return "已重置";
+    const m = Math.round(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24);
+    if (d >= 1) return `${d} 天 ${h % 24} 小时后重置`;
+    if (h >= 1) return `${h} 小时 ${m % 60} 分后重置`;
+    return `${m} 分钟后重置`;
+  }
+  function ago(iso) {
+    if (!iso) return "从未";
+    const s = (Date.now() - new Date(iso)) / 1000;
+    if (s < 60) return "刚刚";
+    if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+    if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+    return Math.floor(s / 86400) + " 天前";
+  }
+  const WINDOW_MS = { five_hour: 5 * 3600e3, seven_day: 7 * 86400e3, seven_day_opus: 7 * 86400e3, seven_day_sonnet: 7 * 86400e3 };
+  const WINDOW_NAME = { five_hour: "5 小时", seven_day: "7 天", seven_day_opus: "7 天 Opus", seven_day_sonnet: "7 天 Sonnet" };
+
+  function gauge(key, w) {
+    const pct = Math.max(0, Math.min(100, w.utilization));
+    const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
+    // 时间刻度：这个窗口已经过去了多少
+    let elapsed = null;
+    if (w.resets_at) {
+      const left = new Date(w.resets_at) - Date.now();
+      if (!isNaN(left)) elapsed = Math.max(0, Math.min(100, 100 - (left / WINDOW_MS[key]) * 100));
+    }
+    let pace = "";
+    if (elapsed !== null && elapsed > 3) {
+      const ratio = pct / elapsed;
+      pace = ratio > 1.15
+        ? `<div class="g-pace fast">用得比时间快，照这个速度会提前用完</div>`
+        : `<div class="g-pace">窗口已过 ${Math.round(elapsed)}%</div>`;
+    }
+    return `<div class="g">
+      <div class="g-head"><span class="g-name">${WINDOW_NAME[key]}</span>
+        <span class="g-pct">${pct.toFixed(0)}<small>%</small></span>
+        <span class="g-reset">${esc(untilText(w.resets_at))}</span></div>
+      <div class="g-bar" title="竖线表示窗口时间已过去的比例"><div class="g-fill ${cls}" style="width:${pct}%"></div>
+        ${elapsed !== null ? `<div class="g-tick" style="left:calc(${elapsed}% - 1px)"></div>` : ""}</div>
+      ${pace}</div>`;
+  }
+
+  function dueFact(a) {
+    if (a.days_left === null || a.days_left === undefined) return "";
+    const m = a.manual || {};
+    const d = a.days_left;
+    const txt = d > 0 ? `${d} 天后到期（${esc(m.expires_at)}）` : d === 0 ? `今天到期` : `已过期 ${-d} 天`;
+    const cls = d <= 2 ? "due-now" : d <= 7 ? "due-soon" : "";
+    return `<li class="${cls}">${txt}${m.auto_renew ? "，自动续期" : ""}${m.price ? "，" + esc(m.price) : ""}</li>`;
+  }
+
+  function accountRow(a) {
+    const u = a.usage || {};
+    const plan = a.plan_display ? `<span class="chip plan">${esc(PLAN[a.plan_display] || a.plan_display)}</span>` : "";
+    const live = a.is_active ? `<span class="chip live">Claude Code 正在用</span>` : "";
+    const facts = [
+      `<li>${KIND[a.kind]}${a.org_name ? "，" + esc(a.org_name) : ""}</li>`,
+      dueFact(a),
+      a.kind === "api" && a.api_key_hint ? `<li>Key ${esc(a.api_key_hint)}${u.key_valid === true ? "，有效" : u.key_valid === false ? "，无效" : ""}</li>` : "",
+      (a.manual || {}).note ? `<li>${esc(a.manual.note)}</li>` : "",
+      u.error ? `<li class="err">${esc(u.error)}</li>` : "",
+      `<li>用量更新于 ${ago(u.fetched_at)}</li>`,
+    ].join("");
+
+    let gauges = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
+      .filter((k) => u[k]).map((k) => gauge(k, u[k])).join("");
+    if (u.cost_month_usd !== undefined && u.cost_month_usd !== null) {
+      gauges += `<div class="g"><div class="g-head"><span class="g-name">本月花费</span><span class="g-pct">$${Number(u.cost_month_usd).toFixed(2)}</span></div></div>`;
+    }
+    if (!gauges) {
+      gauges = `<div class="g-empty">${a.kind === "claude_web" && !a.has_session_key
+        ? "网页版账号默认不抓取用量。填写 sessionKey 后可尝试自动获取，或在“编辑”里手动记录到期日。"
+        : a.kind === "api" && !a.has_admin_key ? "填写 Admin Key 后可显示本月花费。" : "还没有用量数据，点“刷新用量”。"}</div>`;
+    }
+
+    const acts = [];
+    if (a.kind === "claude_code" && !a.is_active) acts.push(`<button class="btn primary" data-act="switch" data-id="${a.id}">切换到这个账号</button>`);
+    if (a.kind === "claude_web") acts.push(`<button class="btn primary" data-act="open" data-id="${a.id}">在电脑上打开</button>`);
+    acts.push(`<button class="btn" data-act="refresh" data-id="${a.id}">刷新</button>`);
+    acts.push(`<button class="btn quiet" data-act="edit" data-id="${a.id}">编辑</button>`);
+
+    return `<article class="acc${a.is_active ? " is-live" : ""}" aria-label="${esc(a.label)}">
+      <div class="who">
+        <div class="name">${esc(a.label || a.email || "未命名")} ${plan} ${live}</div>
+        ${a.email && a.email !== a.label ? `<div class="mail">${esc(a.email)}</div>` : ""}
+        <ul class="facts">${facts}</ul>
+      </div>
+      <div class="gauges">${gauges}</div>
+      <div class="acts">${acts.join("")}</div>
+    </article>`;
+  }
+
+  // ---- 渲染
+  let state = null;
+  function render() {
+    const list = $("#list");
+    $("#host").textContent = state ? `${state.host}（${state.platform}）` : "";
+    if (!state.accounts.length) {
+      list.innerHTML = `<div class="panel empty"><h2>还没有账号</h2>
+        <p class="hint"><b>用 Claude Code（命令行）</b>：确认终端里 <code>claude</code> 已登录，点下面的按钮导入。以后 <code>/login</code> 换号会自动保存。</p>
+        <p><button class="btn primary" data-act="import">导入当前登录</button></p>
+        <p class="hint" style="margin-top:14px"><b>用网页版 claude.ai</b>：点“添加账号”选网页版，每个号一个独立浏览器窗口，登录状态长期保留。填入 sessionKey 后可自动显示额度。</p></div>`;
+      return;
+    }
+    // Claude Code 当前账号排最前，其余按 5 小时余量从多到少
+    const sorted = [...state.accounts].sort((x, y) => {
+      if (x.is_active !== y.is_active) return x.is_active ? -1 : 1;
+      if (x.kind !== y.kind) return ["claude_code", "claude_web", "api"].indexOf(x.kind) - ["claude_code", "claude_web", "api"].indexOf(y.kind);
+      const ux = x.usage && x.usage.five_hour ? x.usage.five_hour.utilization : 999;
+      const uy = y.usage && y.usage.five_hour ? y.usage.five_hour.utilization : 999;
+      return ux - uy;
+    });
+    list.innerHTML = sorted.map(accountRow).join("");
+    $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
+  }
+
+  function renderLogin(msg) {
+    $("#list").innerHTML = `<div class="panel empty"><h2>需要访问令牌</h2>
+      <p class="hint">${esc(msg || "请用电脑上 cam serve 打印出来的完整地址打开（带 ?t=…），或把令牌粘贴到下面。")}</p>
+      <form id="tok-form" style="display:flex;gap:8px;margin-top:10px"><label class="sr" for="tok">令牌</label>
+      <input id="tok" class="btn" style="flex:1;text-align:left" autocomplete="off" placeholder="令牌">
+      <button class="btn primary">进入</button></form></div>`;
+    $("#tok-form").onsubmit = (e) => {
+      e.preventDefault(); token = $("#tok").value.trim();
+      try { localStorage.setItem("cam-token", token); } catch (_) {}
+      load();
+    };
+  }
+
+  const COLORS = ["var(--ok)", "var(--live)", "var(--warn)", "#8B6BD6", "#2D9BB0", "#C0568F", "var(--muted)"];
+  async function loadLocal() {
+    try {
+      const rep = await api("GET", "/api/local-usage?days=14");
+      if (!rep.rows.length) { $("#local-block").hidden = true; return; }
+      const names = Object.fromEntries(state.accounts.map((a) => [a.id, a.label]));
+      const ids = [...new Set(rep.rows.map((r) => r.account_id))];
+      const color = Object.fromEntries(ids.map((id, i) => [id, id === "unattributed" ? "var(--muted)" : COLORS[i % (COLORS.length - 1)]]));
+      const days = [];
+      for (let i = 13; i >= 0; i--) { const d = new Date(Date.now() - i * 86400e3); days.push(d.toLocaleDateString("sv-SE")); }
+      const byDay = Object.fromEntries(days.map((d) => [d, []]));
+      rep.rows.forEach((r) => { if (byDay[r.date]) byDay[r.date].push(r); });
+      const max = Math.max(1, ...days.map((d) => byDay[d].reduce((s, r) => s + r.output, 0)));
+      const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : String(n);
+      $("#bars").innerHTML = days.map((d) => {
+        const rows = byDay[d];
+        const tip = d + (rows.length ? "\n" + rows.map((r) => `${names[r.account_id] || "未归属"}：${fmt(r.output)}`).join("\n") : "\n无");
+        return `<div class="day" data-tip="${esc(tip)}">${rows.map((r) =>
+          `<div class="seg" style="height:${(r.output / max) * 100}%;background:${color[r.account_id]}"></div>`).join("")}</div>`;
+      }).join("");
+      $("#axis").innerHTML = `<span>${days[0].slice(5)}</span><span>峰值 ${fmt(max)}</span><span>${days[13].slice(5)}</span>`;
+      $("#legend").innerHTML = ids.map((id) => `<span><i style="background:${color[id]}"></i>${esc(names[id] || "未归属")}</span>`).join("");
+      $("#local-block").hidden = false;
+    } catch (_) { $("#local-block").hidden = true; }
+  }
+
+  async function load() {
+    try {
+      state = await api("GET", "/api/state");
+      render(); loadLocal(); loadRules();
+    } catch (e) {
+      if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
+      else $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`;
+    }
+  }
+
+  async function busy(btn, fn) {
+    const all = btn ? [btn] : [];
+    all.forEach((b) => (b.disabled = true));
+    try { return await fn(); } finally { all.forEach((b) => (b.disabled = false)); }
+  }
+
+  async function refresh(id, btn) {
+    await busy(btn, async () => {
+      try {
+        state = await api("POST", "/api/refresh", id ? { id } : {});
+        render(); loadLocal();
+        const errs = state.accounts.filter((a) => (!id || a.id === id) && a.usage && a.usage.error).length;
+        toast(errs ? `已刷新，${errs} 个账号没拿到用量` : "用量已更新");
+      } catch (e) { toast(e.message, true); }
+    });
+  }
+
+  // ---- 编辑
+  let editing = null;
+  function openEdit(a) {
+    editing = a;
+    const m = a.manual || {};
+    $("#edit-title").textContent = `编辑：${a.label || a.email || ""}`;
+    $("#f-label").value = a.label || "";
+    $("#f-plan").value = m.plan || "";
+    $("#f-price").value = m.price || "";
+    $("#f-exp").value = m.expires_at || "";
+    $("#f-cycle").value = m.cycle || "monthly";
+    $("#f-renew").checked = !!m.auto_renew;
+    $("#f-note").value = m.note || "";
+    ["#f-session", "#f-api", "#f-admin"].forEach((s) => ($(s).value = ""));
+    $("#fw-session").hidden = a.kind !== "claude_web";
+    $("#fw-api").hidden = a.kind !== "api";
+    $("#fw-admin").hidden = a.kind !== "api";
+    $("#btn-delete").hidden = a.is_active;
+    $("#dlg-edit").showModal();
+  }
+  $("#dlg-edit").addEventListener("close", async () => {
+    if ($("#dlg-edit").returnValue !== "save" || !editing) return;
+    const body = {
+      label: $("#f-label").value.trim(), plan: $("#f-plan").value, price: $("#f-price").value.trim(),
+      expires_at: $("#f-exp").value, cycle: $("#f-cycle").value, auto_renew: $("#f-renew").checked, note: $("#f-note").value.trim(),
+    };
+    for (const [k, s] of [["session_key", "#f-session"], ["api_key", "#f-api"], ["admin_key", "#f-admin"]]) {
+      if ($(s).value.trim()) body[k] = $(s).value.trim();
+    }
+    try { state = await api("PATCH", "/api/accounts/" + editing.id, body); render(); toast("已保存"); }
+    catch (e) { toast(e.message, true); }
+  });
+  $("#btn-delete").onclick = async () => {
+    if (!editing || !confirm(`删除“${editing.label}”？凭据会移到备份目录，不会直接销毁。`)) return;
+    try { state = await api("DELETE", "/api/accounts/" + editing.id); $("#dlg-edit").close("cancel"); render(); toast("已删除"); }
+    catch (e) { toast(e.message, true); }
+  };
+
+  // ---- 添加
+  function syncAddKind() {
+    const k = $("#a-kind").value;
+    $("#add-code").hidden = k !== "claude_code";
+    $("#add-other").hidden = k === "claude_code";
+    $("#aw-email").hidden = k !== "claude_web";
+    $("#aw-key").hidden = k !== "api";
+    $("#aw-admin").hidden = k !== "api";
+    $("#btn-add-ok").textContent = k === "claude_code" ? "导入当前登录" : "添加";
+  }
+  $("#a-kind").onchange = syncAddKind;
+  $("#btn-add").onclick = () => { $("#form-add").reset(); syncAddKind(); $("#dlg-add").showModal(); };
+  $("#dlg-add").addEventListener("close", async () => {
+    if ($("#dlg-add").returnValue !== "ok") return;
+    const kind = $("#a-kind").value;
+    const body = { kind };
+    if (kind !== "claude_code") {
+      body.label = $("#a-label").value.trim() || (kind === "api" ? "API" : "网页账号");
+      if (kind === "claude_web") body.email = $("#a-email").value.trim();
+      if (kind === "api") { body.api_key = $("#a-key").value.trim(); body.admin_key = $("#a-admin").value.trim(); }
+    }
+    await doAdd(body);
+  });
+  async function doAdd(body) {
+    try {
+      state = await api("POST", "/api/accounts", body); render();
+      toast(body.kind === "claude_code" ? "已导入当前登录的账号" : "已添加");
+    } catch (e) { toast(e.message, true); }
+  }
+
+  // ---- 切号规则
+  let rules = null;
+  const DAY_TXT = { "1,2,3,4,5": "工作日", "6,7": "周末", "1,2,3,4,5,6,7": "每天" };
+  function dayText(days) {
+    const k = days.join(",");
+    return DAY_TXT[k] || "周" + days.map((d) => "一二三四五六日"[d - 1]).join("、");
+  }
+  function inWindow(r, now = new Date()) {
+    const wd = now.getDay() === 0 ? 7 : now.getDay();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const toM = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+    const st = toM(r.start), en = toM(r.end);
+    if (st < en) return r.days.includes(wd) && mins >= st && mins < en;
+    const prev = ((wd + 5) % 7) + 1;
+    return (r.days.includes(wd) && mins >= st) || (r.days.includes(prev) && mins < en);
+  }
+  function renderRules() {
+    const codeAccs = state.accounts.filter((a) => a.kind === "claude_code");
+    const block = $("#rules-block");
+    if (!rules || !codeAccs.length) { block.hidden = true; return; }
+    block.hidden = false;
+    const names = Object.fromEntries(state.accounts.map((a) => [a.id, a.label || a.email]));
+    const firstLive = rules.rules.find((r) => r.type === "time" && inWindow(r));
+    $("#rules-list").innerHTML = rules.rules.length ? rules.rules.map((r) => `<li>
+      <span class="r-kind">${r.type === "dir" ? "目录" : "时间"}</span>
+      <span class="r-what">${r.type === "dir" ? esc(r.path) : `${dayText(r.days)} ${esc(r.start)}–${esc(r.end)}`}
+        → <b>${esc(names[r.account] || "已删除的账号")}</b>${firstLive && firstLive.id === r.id ? '<span class="now">当前时间段</span>' : ""}</span>
+      <button class="btn quiet" data-act="rule-rm" data-id="${esc(r.id)}">删除</button></li>`).join("")
+      : `<li class="hint">还没有规则。比如：工作日 9:00–18:00 自动用工作号。</li>`;
+    const sel = $("#r-acc"), keep = sel.value;
+    sel.innerHTML = codeAccs.map((a) => `<option value="${a.id}">${esc(a.label || a.email)}</option>`).join("");
+    if (keep && codeAccs.some((a) => a.id === keep)) sel.value = keep;
+    if (document.activeElement !== $("#alert-pct")) $("#alert-pct").value = rules.alert_threshold;
+  }
+  async function loadRules() {
+    try { rules = await api("GET", "/api/rules"); renderRules(); } catch (_) { $("#rules-block").hidden = true; }
+  }
+  async function saveRules(body, msg) {
+    try { rules = await api("PUT", "/api/rules", body); renderRules(); toast(msg); load(); }
+    catch (e) { toast(e.message, true); }
+  }
+  function syncRuleType() {
+    const dir = $("#r-type").value === "dir";
+    $("#rw-path").hidden = !dir;
+    ["#rw-days", "#rw-start", "#rw-end"].forEach((s) => ($(s).hidden = dir));
+  }
+  $("#r-type").onchange = syncRuleType;
+  $("#rule-form").onsubmit = (e) => {
+    e.preventDefault();
+    const r = $("#r-type").value === "dir"
+      ? { type: "dir", path: $("#r-path").value.trim(), account: $("#r-acc").value }
+      : { type: "time", days: $("#r-days").value, start: $("#r-start").value, end: $("#r-end").value, account: $("#r-acc").value };
+    saveRules({ rules: [...rules.rules, r] }, "规则已添加");
+  };
+  $("#alert-form").onsubmit = (e) => {
+    e.preventDefault();
+    saveRules({ alert_threshold: Number($("#alert-pct").value) }, "提醒阈值已保存");
+  };
+
+  // ---- 事件委托
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    const id = b.dataset.id;
+    const a = state && state.accounts.find((x) => x.id === id);
+    switch (b.dataset.act) {
+      case "switch":
+        await busy(b, async () => {
+          try { const r = await api("POST", `/api/accounts/${id}/switch`); toast(r.message || "已切换"); await load(); }
+          catch (err) { toast(err.message, true); }
+        }); break;
+      case "open":
+        try { const r = await api("POST", `/api/accounts/${id}/open`); toast(r.message || "已打开"); }
+        catch (err) { toast(err.message, true); } break;
+      case "refresh": refresh(id, b); break;
+      case "edit": if (a) openEdit(a); break;
+      case "import": doAdd({ kind: "claude_code" }); break;
+      case "rule-rm":
+        if (rules) saveRules({ rules: rules.rules.filter((r) => r.id !== id) }, "规则已删除");
+        break;
+    }
+  });
+  $("#btn-refresh").onclick = (e) => refresh(null, e.currentTarget);
+
+  // 倒计时每分钟重绘；页面回到前台时重新拉取
+  setInterval(() => state && render(), 60000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+  load();
+})();
+</script>
+</body>
+</html>
