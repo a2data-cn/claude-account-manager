@@ -1,4 +1,4 @@
-mod engine;
+use cam_engine as engine;
 mod server;
 
 use crate::engine::{
@@ -180,7 +180,14 @@ fn on_menu(app: &AppHandle, id: &str) {
             std::thread::spawn(move || {
                 let store = Store::new();
                 let res: Result<(), String> = if let Some(acc) = id.strip_prefix("switch:") {
-                    claude::switch_account(&store, acc).map(|_| ())
+                    claude::switch_account(&store, acc).map(|r| {
+                        if r.changed {
+                            if let Some(w) = claude::running_warning(&claude::running_claude_processes()) {
+                                let _ = app.emit("toast", json!({"message": w, "bad": true}));
+                                notify(&app, &format!("已切换到 {}", r.label), &w);
+                            }
+                        }
+                    })
                 } else if let Some(acc) = id.strip_prefix("open:") {
                     let (code, out) = api::route(&store, "POST", &format!("/api/accounts/{acc}/open"), &json!({}));
                     if code == 200 {
@@ -189,7 +196,8 @@ fn on_menu(app: &AppHandle, id: &str) {
                         Err(out["error"].as_str().unwrap_or("打开失败").to_string())
                     }
                 } else if id == "refresh" {
-                    usage::refresh_usage(&store, None).map(|_| ())
+                    // 用户点的“刷新用量”，允许替过期的账号续登录
+                    usage::refresh_usage(&store, None, true).map(|_| ())
                 } else {
                     Ok(())
                 };
@@ -324,7 +332,7 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
-/// 当前账号 5 小时额度超过阈值时提醒一次（每个额度窗口只提醒一次），并给出余量最多的号。
+/// 当前账号 5 小时额度超过阈值时提醒一次（每个额度窗口只提醒一次）。
 fn check_alert(app: &AppHandle, warned: &mut HashSet<String>) {
     let Ok(data) = Store::new().load() else { return };
     let Some(act) = active_code_id(&data) else { return };
@@ -337,20 +345,19 @@ fn check_alert(app: &AppHandle, warned: &mut HashSet<String>) {
     let Some(pct) = w.get("utilization").and_then(|v| v.as_f64()) else {
         return;
     };
-    let key = format!("{}|{}", act, w.get("resets_at").and_then(|v| v.as_str()).unwrap_or(""));
+    let resets = w.get("resets_at").and_then(|v| v.as_str()).unwrap_or("");
+    let key = format!("{}|{}", act, resets);
     if pct < rules::alert_threshold(&data) as f64 || !warned.insert(key) {
         return;
     }
     let name = s(acc, "label").or(s(acc, "email")).unwrap_or("当前账号");
-    let tip = match rules::best_alternative(&data, &act) {
-        Some((u, n)) => format!("余量最多的是 {}（已用 {:.0}%），可在托盘菜单里一键切换。", n, u),
-        None => "暂时没有其它可用的账号。".to_string(),
-    };
-    notify(app, &format!("{} 的 5 小时额度已用 {:.0}%", name, pct), &tip);
+    notify(app, &format!("{} 的 5 小时额度已用 {:.0}%", name, pct), &usage::fmt_reset(resets));
 }
 
 fn background(app: AppHandle) {
     std::thread::spawn(move || {
+        // 后台任务只让一个进程做（桌面版、cam serve、菜单栏插件谁先拿到谁做），拿到后一直持有到退出
+        let mut lease: Option<engine::store::LockGuard> = None;
         let mut last_mtime = accounts_mtime();
         let mut last_refresh: Option<Instant> = None;
         let mut last_fp = String::new();
@@ -359,6 +366,19 @@ fn background(app: AppHandle) {
         let mut first = true;
         loop {
             let store = Store::new();
+            if lease.is_none() {
+                lease = store.try_background_lock().unwrap_or(None);
+            }
+            if lease.is_none() {
+                // cam serve 在做后台任务；这里只把它写的数据同步到窗口和托盘
+                let m = accounts_mtime();
+                if m != last_mtime {
+                    last_mtime = m;
+                    notify_changed(&app);
+                }
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
             // 1. 发现新登录的账号自动保存（macOS 钥匙串查询较慢，30 秒一次）
             let with_kc = first || last_kc.elapsed() >= Duration::from_secs(30);
             if with_kc {
@@ -377,10 +397,12 @@ fn background(app: AppHandle) {
             // 2. 时间规则
             match rules::apply_time_rules(&store) {
                 Ok(Some(r)) if r.changed => {
+                    let warn = claude::running_warning(&claude::running_claude_processes())
+                        .unwrap_or_else(|| "正在运行的会话需要重启。".into());
                     notify(
                         &app,
                         "已按规则切换账号",
-                        &format!("进入时间段，Claude Code 已切换到 {}。正在运行的会话需要重启。", r.label),
+                        &format!("进入时间段，Claude Code 已切换到 {}。{}", r.label, warn),
                     );
                 }
                 Err(e) => eprintln!("时间规则执行失败：{e}"),
@@ -400,7 +422,8 @@ fn background(app: AppHandle) {
                     .unwrap_or(true)
             {
                 last_refresh = Some(Instant::now());
-                if usage::refresh_usage(&store, None).is_ok() {
+                // 定时刷新不替不常用的账号续登录，见 usage::refresh_usage
+                if usage::refresh_usage(&store, None, false).is_ok() {
                     check_alert(&app, &mut warned);
                 }
             }

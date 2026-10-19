@@ -1,0 +1,26 @@
+{
+  "_说明": "自动续期：到期日已过且勾选自动续期时，按月或按年顺延，记住原始扣费日（renew_day）。",
+  "cases": [
+    {"name": "按月，从 31 号开始，月末不会越变越早", "today": "2026-10-19",
+     "manual": {"expires_at": "2025-01-31", "auto_renew": true},
+     "expect": {"expires_at": "2026-10-31", "auto_renew": true, "renew_day": 31}},
+    {"name": "已经停在 30 号，靠 renew_day 回到 31 号", "today": "2026-10-19",
+     "manual": {"expires_at": "2026-09-30", "auto_renew": true, "renew_day": 31},
+     "expect": {"expires_at": "2026-10-31", "auto_renew": true, "renew_day": 31}},
+    {"name": "按年，闰日", "today": "2026-10-19",
+     "manual": {"expires_at": "2024-02-29", "auto_renew": true, "cycle": "yearly"},
+     "expect": {"expires_at": "2027-02-28", "auto_renew": true, "cycle": "yearly", "renew_day": 29}},
+    {"name": "当天到期不顺延", "today": "2026-10-19",
+     "manual": {"expires_at": "2026-10-19", "auto_renew": true},
+     "expect": {"expires_at": "2026-10-19", "auto_renew": true}},
+    {"name": "还没到期不动", "today": "2026-10-19",
+     "manual": {"expires_at": "2026-11-03", "auto_renew": true},
+     "expect": {"expires_at": "2026-11-03", "auto_renew": true}},
+    {"name": "没勾自动续期不动", "today": "2026-10-19",
+     "manual": {"expires_at": "2025-01-31", "auto_renew": false},
+     "expect": {"expires_at": "2025-01-31", "auto_renew": false}},
+    {"name": "跨年", "today": "2027-01-05",
+     "manual": {"expires_at": "2026-12-15", "auto_renew": true},
+     "expect": {"expires_at": "2027-01-15", "auto_renew": true, "renew_day": 15}}
+  ]
+}

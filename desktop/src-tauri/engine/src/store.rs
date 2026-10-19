@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 pub type R<T> = Result<T, String>;
 
@@ -67,8 +67,26 @@ pub fn read_json(path: &Path) -> R<Option<Value>> {
     }
 }
 
+/// 符号链接解析到它指向的文件（指向的文件不存在也行），其它情况原样返回。
+pub fn resolve_link(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf();
+    for _ in 0..16 {
+        match fs::read_link(&p) {
+            Ok(t) => p = if t.is_absolute() { t } else { p.parent().map(|d| d.join(&t)).unwrap_or(t) },
+            Err(_) => break,
+        }
+    }
+    p
+}
+
+pub fn read_bytes(path: &Path) -> Option<Vec<u8>> {
+    fs::read(path).ok()
+}
+
 /// 先写临时文件再原子替换，避免写到一半崩溃导致文件损坏。
+/// 目标是符号链接（比如 dotfiles 管理的 ~/.claude.json）时写到链接指向的文件，保留链接本身。
 pub fn write_json_atomic(path: &Path, data: &Value, private: bool) -> R<()> {
+    let path = &resolve_link(path);
     let dir = path.parent().ok_or("无效路径")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!(".tmp-{}", new_id()));
@@ -95,15 +113,72 @@ pub fn write_json_atomic(path: &Path, data: &Value, private: bool) -> R<()> {
     })
 }
 
+/// 读-改-写一个别人也会写的 JSON 文件（~/.claude.json，Claude Code 运行时也会写）。
+/// 写入前再读一次，内容变了就重新合并；写完再读回来确认改动还在（`check` 返回 false 就重来）。
+pub fn update_json_file(
+    path: &Path,
+    mut mutate: impl FnMut(&mut Map<String, Value>),
+    check: impl Fn(&Value) -> bool,
+) -> R<()> {
+    let real = resolve_link(path);
+    for _ in 0..5 {
+        let before = read_bytes(&real);
+        let mut obj = match &before {
+            Some(b) if !b.iter().all(u8::is_ascii_whitespace) => match serde_json::from_slice::<Value>(b) {
+                Ok(Value::Object(m)) => m,
+                Ok(_) => Map::new(),
+                Err(e) => return Err(format!("文件损坏，无法解析：{}（{}）", path.display(), e)),
+            },
+            _ => Map::new(),
+        };
+        mutate(&mut obj);
+        if read_bytes(&real) != before {
+            continue;
+        }
+        write_json_atomic(&real, &Value::Object(obj), false)?;
+        if check(&read_json(&real)?.unwrap_or_else(|| json!({}))) {
+            return Ok(());
+        }
+    }
+    Err(format!("{} 一直在被其它程序改写，请先退出正在运行的 claude 再试", path.display()))
+}
+
 pub struct Store {
     pub root: PathBuf,
 }
 
-pub struct LockGuard(PathBuf);
+/// 系统级文件锁（Unix flock，Windows LockFileEx），和 cam.py 的 FileLock 是同一种锁。
+/// 进程退出或崩溃时由操作系统释放；文件关闭（drop）即解锁。
+pub struct LockGuard(#[allow(dead_code)] fs::File);
 
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+fn open_lock_file(path: &Path) -> R<fs::File> {
+    if let Some(d) = path.parent() {
+        let _ = fs::create_dir_all(d);
+    }
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("无法打开锁文件 {}：{}", path.display(), e))?;
+    set_private(path, false);
+    Ok(f)
+}
+
+/// 不等待，拿到锁返回 Some。
+pub fn try_lock_file(path: &Path) -> R<Option<LockGuard>> {
+    let f = open_lock_file(path)?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(LockGuard(f))),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(format!("加锁失败：{}", e)),
+    }
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -133,35 +208,26 @@ impl Store {
         self.secrets_dir().join(format!("{}.json", id))
     }
 
-    /// 跨进程锁（与 cam.py 用同一个锁文件）。
+    /// 跨进程锁（与 cam.py 用同一个锁文件、同一种锁）。同一进程里的不同线程之间也互斥。
+    /// 旧版本用的是 .lock（独占创建文件），换成新文件名，避免旧版把新锁当残留删掉。
     pub fn lock(&self) -> R<LockGuard> {
-        let path = self.root.join(".lock");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let path = self.root.join("accounts.lock");
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    let _ = write!(f, "{}", std::process::id());
-                    return Ok(LockGuard(path));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let stale = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| SystemTime::now().duration_since(t).ok())
-                        .map(|d| d > Duration::from_secs(60))
-                        .unwrap_or(false);
-                    if stale {
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                    if Instant::now() > deadline {
-                        return Err(format!("数据目录被占用（{}），请稍后重试", path.display()));
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => return Err(format!("无法创建锁文件：{}", e)),
+            if let Some(g) = try_lock_file(&path)? {
+                return Ok(g);
             }
+            if Instant::now() > deadline {
+                return Err(format!("数据目录被占用（{}），请稍后重试", path.display()));
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// 后台任务（自动导入、时间规则、定时刷新）只让一个进程做：
+    /// 桌面版、cam serve、菜单栏插件谁先拿到谁做，拿到的进程一直持有到退出。
+    pub fn try_background_lock(&self) -> R<Option<LockGuard>> {
+        try_lock_file(&self.root.join("background.lock"))
     }
 
     pub fn load(&self) -> R<Value> {

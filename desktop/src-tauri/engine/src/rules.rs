@@ -56,7 +56,8 @@ fn parse_days(v: &Value) -> R<Vec<u32>> {
     Ok(days)
 }
 
-fn validate(data: &Value, rules: &Value) -> R<Vec<Value>> {
+/// 校验并规范化规则（与 cam.py 的 validate_rules 一致）。
+pub fn validate(data: &Value, rules: &Value) -> R<Vec<Value>> {
     let ids: Vec<&str> = accounts(data)
         .iter()
         .filter(|a| s(a, "kind") == Some("claude_code"))
@@ -189,21 +190,4 @@ pub fn apply_time_rules(store: &Store) -> R<Option<SwitchResult>> {
         return Ok(None);
     }
     switch_account(store, &target).map(Some)
-}
-
-/// 返回余量最多的其它 Claude Code 账号 (已用百分比, 名称)。
-pub fn best_alternative(data: &Value, exclude: &str) -> Option<(f64, String)> {
-    accounts(data)
-        .iter()
-        .filter(|a| s(a, "kind") == Some("claude_code") && s(a, "id") != Some(exclude))
-        .filter(|a| {
-            a.get("usage")
-                .map(|u| u.get("error").map(|e| e.is_null()).unwrap_or(true))
-                .unwrap_or(false)
-        })
-        .filter_map(|a| {
-            let u = a.get("usage")?.get("five_hour")?.get("utilization")?.as_f64()?;
-            Some((u, s(a, "label").or(s(a, "email")).unwrap_or("未命名").to_string()))
-        })
-        .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal))
 }

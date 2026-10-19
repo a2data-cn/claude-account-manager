@@ -94,7 +94,24 @@ def notify(title, body):
 
 
 def background_work(store):
-    """自动导入、时间规则、定时刷新、额度提醒。任何一步失败都不影响菜单显示。"""
+    """自动导入、时间规则、定时刷新、额度提醒。任何一步失败都不影响菜单显示。
+
+    桌面版或 cam serve 在运行时由它们负责后台任务，这里只显示菜单，避免几个进程同时轮询。
+    """
+    lease = store.background_lock()
+    if not lease.try_acquire():
+        st = load_state(store)
+        st["bg_owner"] = "other"
+        return st
+    try:
+        st = _background_work(store)
+        st.pop("bg_owner", None)
+        return st
+    finally:
+        lease.release()
+
+
+def _background_work(store):
     st = load_state(store)
     try:
         acc = cam.auto_import(store)
@@ -106,14 +123,16 @@ def background_work(store):
     try:
         res = cam.apply_time_rules(store)
         if res and res[2]:
-            notify("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}，正在运行的会话需要重启。")
+            warn = cam.running_warning(cam.running_claude_processes()) or "正在运行的会话需要重启。"
+            notify("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}。{warn}")
     except Exception as e:  # noqa: BLE001
         st["last_error"] = f"时间规则：{e}"
     now = dt.datetime.now().timestamp()
     if REFRESH_MIN > 0 and now - float(st.get("last_refresh") or 0) >= REFRESH_MIN * 60:
         st["last_refresh"] = now
         try:
-            data = cam.refresh_usage(store)
+            # 定时刷新不替不常用的账号续登录，见 cam.refresh_usage
+            data = cam.refresh_usage(store, allow_token_refresh=False)
             st.pop("last_error", None)
             limit = cam.rules_view(data)["alert_threshold"]
             act = data["active"].get("claude_code")
@@ -130,13 +149,7 @@ def background_work(store):
                 key = f"{a['id']}|{w.get('resets_at')}"
                 if w["utilization"] >= limit and key not in warned:
                     warned.add(key)
-                    if is_active_code:
-                        alt = cam.best_alternative(data, a["id"])
-                        tip = (f"余量最多的是 {alt[1]['label']}（已用 {alt[0]:.0f}%），在菜单栏里点一下即可切换。"
-                               if alt else "暂时没有其它可用的账号。")
-                    else:
-                        tip = "这是网页账号，额度满后在浏览器里换号继续使用。"
-                    notify(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", tip)
+                    notify(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", cam.fmt_reset(w.get("resets_at")))
             st["warned"] = sorted(warned)[-50:]
         except Exception as e:  # noqa: BLE001
             st["last_error"] = f"刷新用量：{e}"
@@ -268,9 +281,13 @@ def render(store, st, out=print):
     # ---- 操作
     out(f"刷新全部用量 | {action('usage')}")
     out(f"打开终端查看 | {action(terminal=True, refresh=False)}")
-    if st.get("last_refresh"):
+    if st.get("bg_owner") == "other":
+        out("自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
+    elif st.get("last_refresh"):
         t = dt.datetime.fromtimestamp(float(st["last_refresh"])).strftime("%H:%M")
         out(f"用量更新于 {t} | size=12 color=gray")
+    if (data.get("live_mismatch") or {}).get("message"):
+        out(f"⚠ {esc(data['live_mismatch']['message'])[:90]} | size=12 color=#B87A08,#E0A93B")
     if st.get("last_error"):
         out(f"⚠ {esc(st['last_error'])[:90]} | size=12 color=#B87A08,#E0A93B")
 

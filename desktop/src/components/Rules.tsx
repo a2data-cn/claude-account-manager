@@ -162,7 +162,7 @@ export function Rules({
         >
           <label htmlFor="alert-pct">当前账号 5 小时额度超过</label>
           <input id="alert-pct" type="number" min={1} max={100} value={alert} onChange={(e) => setAlert(e.target.value)} />
-          <span>% 时弹通知，并告诉你哪个号余量最多</span>
+          <span>% 时弹通知，并告诉你多久后重置</span>
           <button className="btn" type="submit">
             保存
           </button>

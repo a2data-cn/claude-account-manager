@@ -91,6 +91,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
     json!({
         "version": VERSION, "backend": "desktop", "host": host, "platform": platform,
         "active": data.get("active").cloned().unwrap_or(json!({})), "accounts": accs,
+        "warning": data.get("live_mismatch").and_then(|m| m.get("message")).cloned().unwrap_or(Value::Null),
         "generated_at": now_iso()
     })
 }
@@ -169,6 +170,10 @@ pub fn update_manual(store: &Store, key: &str, f: &Value) -> R<()> {
                         return Err("到期日格式应为 YYYY-MM-DD".into());
                     }
                     v = json!(x.chars().take(10).collect::<String>());
+                    // 换了到期日，续期日按新日期重新算
+                    if let Some(o) = m.as_object_mut() {
+                        o.remove("renew_day");
+                    }
                 }
             }
             if k == "cycle" {
@@ -227,7 +232,8 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
     let res: R<Value> = (|| match (method, parts) {
         ("GET", ["state"]) => Ok(public_state(store, &store.load()?)),
         ("POST", ["refresh"]) => {
-            let d = refresh_usage(store, s(body, "id"))?;
+            // 来自用户点击“刷新”，允许替过期的账号续登录
+            let d = refresh_usage(store, s(body, "id"), true)?;
             Ok(public_state(store, &d))
         }
         ("GET", ["local-usage"]) => {
@@ -251,10 +257,19 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
         }
         ("POST", ["accounts", id, "switch"]) => {
             let r = switch_account(store, id)?;
+            let procs = if r.changed { running_claude_processes() } else { Vec::new() };
+            let message = if r.changed {
+                format!(
+                    "已切换到 {}。{}",
+                    r.label,
+                    running_warning(&procs).unwrap_or_else(|| "正在运行的 claude 会话需要重启".into())
+                )
+            } else {
+                "已经是当前账号".into()
+            };
             Ok(json!({
-                "ok": true, "changed": r.changed, "account": r.id,
-                "message": if r.changed { format!("已切换到 {}，正在运行的 claude 会话需要重启", r.label) } else { "已经是当前账号".into() },
-                "backup": r.backup.map(|p| p.display().to_string())
+                "ok": true, "changed": r.changed, "account": r.id, "running_claude": procs.len(),
+                "message": message, "backup": r.backup.map(|p| p.display().to_string())
             }))
         }
         ("POST", ["accounts", id, "open"]) => {

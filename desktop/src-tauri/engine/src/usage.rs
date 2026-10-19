@@ -29,9 +29,9 @@ fn token_urls() -> Vec<String> {
         .collect()
 }
 
-fn agent() -> ureq::Agent {
+fn agent(timeout_secs: u64) -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(timeout_secs))
         .user_agent(concat!("claude-account-manager/", env!("CARGO_PKG_VERSION")))
         .try_proxy_from_env(true)
         .build()
@@ -39,7 +39,17 @@ fn agent() -> ureq::Agent {
 
 /// 返回 (状态码, JSON)。网络错误时状态码为 0。
 pub fn http_json(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&Value>) -> (u16, Value) {
-    let mut req = agent().request(method, url).set("Accept", "application/json");
+    http_json_timeout(method, url, headers, body, 20)
+}
+
+pub fn http_json_timeout(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+    timeout_secs: u64,
+) -> (u16, Value) {
+    let mut req = agent(timeout_secs).request(method, url).set("Accept", "application/json");
     for (k, v) in headers {
         req = req.set(k, v);
     }
@@ -90,56 +100,98 @@ fn get_with(url: &str, h: &[(String, String)]) -> (u16, Value) {
     http_json("GET", url, &refs, None)
 }
 
+/// 带 OAuth access token 请求 api.anthropic.com 的只读接口。
+pub fn get_oauth(token: &str, path: &str, timeout_secs: u64) -> (u16, Value) {
+    let h = oauth_headers(token);
+    let refs: Vec<(&str, &str)> = h.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    http_json_timeout("GET", &format!("{}{}", api_base(), path), &refs, None, timeout_secs)
+}
+
 fn refresh_oauth(refresh_token: &str) -> R<Value> {
     let mut last = String::new();
     for url in token_urls() {
-        let (code, body) = http_json(
+        // 在数据锁里调用，超时设短一些，别让其它操作等太久
+        let (code, body) = http_json_timeout(
             "POST",
             &url,
             &[("Content-Type", "application/json")],
             Some(&json!({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": OAUTH_CLIENT_ID})),
+            8,
         );
         if code == 200 && s(&body, "access_token").is_some() {
             return Ok(body);
         }
         last = err_msg(code, &body);
         if code == 400 || code == 401 {
-            break;
+            // refresh token 本身无效，换地址也没用
+            return Err(format!(
+                "登录已失效（{}），需要用这个账号重新登录 Claude Code 后再导入",
+                last
+            ));
         }
     }
-    Err(format!(
-        "刷新登录失败（{}），请用该账号重新登录 Claude Code 后再导入",
-        last
-    ))
+    Err(format!("续登录失败（{}），稍后再试", last))
 }
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
-/// 当前生效账号只读不刷新，由 Claude Code 自己刷新。
-fn ensure_fresh_token(store: &Store, data: &Value, acc: &Value) -> R<(String, Value)> {
-    let id = s(acc, "id").unwrap_or_default().to_string();
-    let is_active = active_code_id(data).as_deref() == Some(id.as_str());
-    if is_active {
+fn find_acc<'a>(data: &'a Value, id: &str) -> R<&'a Value> {
+    accounts(data)
+        .iter()
+        .find(|a| s(a, "id") == Some(id))
+        .ok_or_else(|| "账号已被删除".to_string())
+}
+
+/// 不联网能拿到的 access token：当前账号读 Claude Code 正在用的；其它账号读保存的、且没过期的。
+fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Value)>> {
+    let saved = store.load_secret(id).get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
+    if active_code_id(data).as_deref() == Some(id) {
         let (creds, _) = read_live();
         if let Some(c) = creds {
             let ob = oauth_block(&c);
-            let oa = read_oauth_account();
-            if let (Some(t), Some(i)) = (s(&ob, "accessToken"), identify(data, &oa, &c)) {
-                if s(&accounts(data)[i], "id") == Some(id.as_str()) {
-                    return Ok((t.to_string(), ob.clone()));
+            if let (Some(t), Some(i)) = (s(&ob, "accessToken"), identify(data, &read_oauth_account(), &c)) {
+                if s(&accounts(data)[i], "id") == Some(id) {
+                    return Ok(Some((t.to_string(), ob.clone())));
                 }
             }
         }
+        // 当前账号从不在这里刷新，交给 Claude Code
+        let t = s(&saved, "accessToken").ok_or("没有保存凭据")?.to_string();
+        return Ok(Some((t, saved)));
     }
-    let mut secret = store.load_secret(&id);
+    let t = s(&saved, "accessToken").ok_or("没有保存凭据")?.to_string();
+    let exp = saved.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    Ok(if exp > now_ms() + 120_000 { Some((t, saved)) } else { None })
+}
+
+/// 返回 (access token, oauth 块)。
+/// 当前生效账号只读不刷新，由 Claude Code 自己刷新。其它账号的 token 过期时，在数据锁里重新确认
+/// “它仍然不是当前账号”后再换新，和切换操作互斥：不会出现刚切过去、Claude Code 和这里拿着同一个
+/// refresh token 各刷一次、把账号弄成需要重新登录的情况。
+/// allow_refresh=false 时（后台定时任务）不换 token，只用还没过期的。
+pub fn ensure_fresh_token(store: &Store, id: &str, allow_refresh: bool) -> R<(String, Value)> {
+    let data = store.load()?;
+    find_acc(&data, id)?;
+    if let Some(t) = usable_token(store, &data, id)? {
+        return Ok(t);
+    }
+    if !allow_refresh {
+        return Err(
+            "登录已过期。后台不会替它续登录（避免和 Claude Code 抢 refresh token），手动刷新一次或切换到这个账号即可"
+                .into(),
+        );
+    }
+    let _g = store.lock()?;
+    let mut data = store.load()?;
+    find_acc(&data, id)?;
+    // 等锁期间可能已切成当前账号，或已被别的进程刷新
+    if let Some(t) = usable_token(store, &data, id)? {
+        return Ok(t);
+    }
+    let mut secret = store.load_secret(id);
     let mut ob = secret.get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
-    let token = s(&ob, "accessToken").ok_or("没有保存凭据")?.to_string();
-    let exp = ob.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
-    if is_active || exp > now_ms() + 120_000 {
-        return Ok((token, ob));
-    }
     let rt = s(&ob, "refreshToken")
         .ok_or("登录已过期且没有 refresh token")?
         .to_string();
@@ -155,7 +207,14 @@ fn ensure_fresh_token(store: &Store, data: &Value, acc: &Value) -> R<(String, Va
         secret["raw"]["claudeAiOauth"] = ob.clone();
     }
     secret["saved_at"] = json!(now_iso());
-    store.save_secret(&id, &secret)?;
+    store.save_secret(id, &secret)?;
+    if let Some(r) = s(&ob, "refreshToken") {
+        let fp = token_fp(r);
+        if let Some(a) = accounts_mut(&mut data).iter_mut().find(|a| s(a, "id") == Some(id)) {
+            a["token_fp"] = json!(fp);
+        }
+        store.save(&mut data)?;
+    }
     Ok((s(&ob, "accessToken").unwrap_or_default().to_string(), ob))
 }
 
@@ -172,9 +231,20 @@ fn pick_window(body: &Value, key: &str) -> Value {
 const WINDOWS: [&str; 4] = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"];
 
 /// 返回 (usage, 要合并进账号的元数据)
-fn fetch_code(store: &Store, data: &Value, acc: &Value) -> R<(Value, Map<String, Value>)> {
-    let (token, ob) = ensure_fresh_token(store, data, acc)?;
+fn fetch_code(store: &Store, acc: &Value, allow_refresh: bool) -> R<(Value, Map<String, Value>)> {
+    let (token, ob) = ensure_fresh_token(store, s(acc, "id").unwrap_or_default(), allow_refresh)?;
     let h = oauth_headers(&token);
+    // 先拿账号资料：既用来补邮箱、套餐，也用来核对这份凭据是不是这个账号的
+    let (c2, prof) = get_with(&format!("{}/api/oauth/profile", api_base()), &h);
+    if c2 == 200 {
+        let a = prof.get("account").cloned().unwrap_or_default();
+        if !identity_agrees(acc, s(&a, "uuid"), s(&a, "email")) {
+            return Err(format!(
+                "这个账号保存的登录实际属于 {}，可能被旧的 claude 会话覆盖了。请用这个账号重新登录 Claude Code 后再导入",
+                s(&a, "email").or(s(&a, "uuid")).unwrap_or("其它账号")
+            ));
+        }
+    }
     let (code, body) = get_with(&format!("{}/api/oauth/usage", api_base()), &h);
     if code != 200 {
         return Err(err_msg(code, &body));
@@ -192,10 +262,12 @@ fn fetch_code(store: &Store, data: &Value, acc: &Value) -> R<(Value, Map<String,
         }
     }
     let mut meta = Map::new();
-    let (c2, prof) = get_with(&format!("{}/api/oauth/profile", api_base()), &h);
     if c2 == 200 {
         let a = prof.get("account").cloned().unwrap_or_default();
         let o = prof.get("organization").cloned().unwrap_or_default();
+        if let (Some(v), None) = (s(&a, "uuid"), s(acc, "account_uuid")) {
+            meta.insert("account_uuid".into(), json!(v));
+        }
         if let Some(v) = s(&a, "email") {
             meta.insert("email".into(), json!(v));
         }
@@ -343,8 +415,10 @@ fn fetch_api(store: &Store, acc: &Value) -> R<(Value, Map<String, Value>)> {
     Ok((usage, Map::new()))
 }
 
-/// 刷新用量。网络请求在锁外并发进行，最后合并写回。
-pub fn refresh_usage(store: &Store, only: Option<&str>) -> R<Value> {
+/// 刷新用量。网络请求在锁外并发进行，最后合并写回；只有换 token 那一步在锁内（见 ensure_fresh_token）。
+/// 后台定时任务传 allow_token_refresh=false：不常用的账号 token 过期后就不再替它续，
+/// 少一些和 Claude Code 抢 refresh token 的机会，也少一些多账号同时在线的请求。
+pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: bool) -> R<Value> {
     let data = {
         let _g = store.lock()?;
         let mut d = store.load()?;
@@ -362,10 +436,9 @@ pub fn refresh_usage(store: &Store, only: Option<&str>) -> R<Value> {
         let handles: Vec<_> = targets
             .iter()
             .map(|acc| {
-                let data = &data;
                 sc.spawn(move || {
                     let r = match s(acc, "kind") {
-                        Some("claude_code") => fetch_code(store, data, acc),
+                        Some("claude_code") => fetch_code(store, acc, allow_token_refresh),
                         Some("claude_web") => fetch_web(store, acc),
                         _ => fetch_api(store, acc),
                     };
@@ -409,34 +482,69 @@ pub fn refresh_usage(store: &Store, only: Option<&str>) -> R<Value> {
     Ok(fresh)
 }
 
-fn add_months(d: chrono::NaiveDate, n: u32) -> chrono::NaiveDate {
-    d.checked_add_months(chrono::Months::new(n)).unwrap_or(d)
+/// “3小时20分后重置”，与 cam.py 的 fmt_reset 一致。
+pub fn fmt_reset(resets_at: &str) -> String {
+    let Some(t) = parse_time(resets_at) else { return String::new() };
+    let secs = (t - Utc::now()).num_seconds();
+    if secs <= 0 {
+        return "已重置".into();
+    }
+    let (h, m) = (secs / 3600, secs / 60 % 60);
+    if h >= 24 {
+        format!("{}天{}小时后重置", h / 24, h % 24)
+    } else if h > 0 {
+        format!("{}小时{}分后重置", h, m)
+    } else {
+        format!("{}分后重置", m)
+    }
 }
 
-/// 自动续期：到期日已过时按周期顺延。
+/// 加 n 个月，日子取 day（没有就用原来的日子），超过当月天数时取月末。与 cam.py 的 add_months 一致。
+fn add_months(d: chrono::NaiveDate, n: u32, day: u32) -> chrono::NaiveDate {
+    let m0 = d.month0() + n;
+    let (y, m) = (d.year() + (m0 / 12) as i32, m0 % 12 + 1);
+    let last = (28..=31)
+        .rev()
+        .find(|dd| chrono::NaiveDate::from_ymd_opt(y, m, *dd).is_some())
+        .unwrap_or(28);
+    chrono::NaiveDate::from_ymd_opt(y, m, day.min(last)).unwrap_or(d)
+}
+
+/// 自动续期：到期日已过且标记自动续期时，按周期顺延。
 pub fn roll_renewals(data: &mut Value) {
-    let today = chrono::Local::now().date_naive();
+    roll_renewals_at(data, chrono::Local::now().date_naive());
+}
+
+pub fn roll_renewals_at(data: &mut Value, today: chrono::NaiveDate) {
     for a in accounts_mut(data).iter_mut() {
         let m = &mut a["manual"];
         if m.get("auto_renew").and_then(|v| v.as_bool()) != Some(true) {
             continue;
         }
-        let Some(exp) = s(m, "expires_at")
+        let Some(mut d) = s(m, "expires_at")
             .and_then(|e| e.get(..10))
             .and_then(|e| chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d").ok())
         else {
             continue;
         };
         let step = if s(m, "cycle") == Some("yearly") { 12 } else { 1 };
-        // 按原始日期计算，避免 1 月 31 日 → 2 月 28 日后一直停在 28 日
-        let mut k = 0u32;
-        let mut d = exp;
-        while d < today && k < 1200 {
-            k += step;
-            d = add_months(exp, k);
+        // 记住原始扣费日，避免 1 月 31 日顺延到 2 月 28 日后一直停在 28 日
+        let anchor = m
+            .get("renew_day")
+            .and_then(|v| v.as_u64())
+            .filter(|d| (1..=31).contains(d))
+            .map(|d| d as u32)
+            .unwrap_or(d.day());
+        let mut changed = false;
+        let mut guard = 0;
+        while d < today && guard < 1200 {
+            d = add_months(d, step, anchor);
+            changed = true;
+            guard += 1;
         }
-        if k > 0 {
+        if changed {
             m["expires_at"] = json!(d.format("%Y-%m-%d").to_string());
+            m["renew_day"] = json!(anchor);
         }
     }
 }
@@ -467,7 +575,7 @@ pub fn local_usage(data: &Value, days: i64) -> Value {
         .flatten()
         .filter_map(|e| Some((parse_time(s(e, "at")?)?, s(e, "id")?.to_string())))
         .collect();
-    log.sort_by(|a, b| a.0.cmp(&b.0));
+    log.sort_by_key(|a| a.0);
 
     let mut files = Vec::new();
     walk_jsonl(&claude_config_dir().join("projects"), &mut files, 0);

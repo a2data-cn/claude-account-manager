@@ -1,0 +1,21 @@
+{
+  "_说明": "按序号 / id / 名称 / 邮箱 / id 前缀找账号（cam switch <账号> 等命令用）。expect 为 null 表示应当报错。",
+  "accounts": [
+    {"id": "1a2b3c4d", "kind": "claude_code", "label": "工作号", "email": "w@x.com"},
+    {"id": "2", "kind": "claude_code", "label": "Personal", "email": "p@x.com"},
+    {"id": "ab12cd34", "kind": "claude_web", "label": "dup", "email": null},
+    {"id": "ab99ee00", "kind": "api", "label": "dup", "email": null}
+  ],
+  "cases": [
+    {"key": "1", "expect": "1a2b3c4d", "name": "序号"},
+    {"key": "2", "expect": "2", "name": "有同名 id 时按 id，不按序号"},
+    {"key": "personal", "expect": "2", "name": "名称不区分大小写"},
+    {"key": "W@X.COM", "expect": "1a2b3c4d", "name": "邮箱"},
+    {"key": " 工作号 ", "expect": "1a2b3c4d", "name": "去掉首尾空格"},
+    {"key": "ab99", "expect": "ab99ee00", "name": "唯一的 id 前缀"},
+    {"key": "ab", "expect": null, "name": "id 前缀不唯一"},
+    {"key": "dup", "expect": null, "name": "名称重复"},
+    {"key": "nobody", "expect": null, "name": "不存在"},
+    {"key": "9", "expect": null, "name": "序号越界"}
+  ]
+}

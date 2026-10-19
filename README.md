@@ -30,7 +30,7 @@ bash extras/swiftbar/install.sh
 - 每 10 分钟刷新用量
 - 额度超过阈值时弹系统通知
 
-所以装了它，不开桌面版也是全自动的。
+所以装了它，不开桌面版也是全自动的。桌面版或 `cam serve` 同时在运行时，后台任务交给它们做，插件只负责显示菜单（菜单底部会写“自动刷新由桌面版或 cam serve 负责”），不会几个程序同时轮询。
 
 ## 第一次使用（每个账号做一次）
 
@@ -43,7 +43,7 @@ bash extras/swiftbar/install.sh
 完成后：
 - **切换**：`cam switch 工作号`，或在桌面版 / 托盘 / 手机上点一下
 - **用量**：后台每 10 分钟自动刷新
-- **登录过期**：不常用的号 token 过期时会在后台自动续上
+- **登录过期**：后台定时刷新不会替不常用的号续登录（避免和 Claude Code 抢 refresh token），过期后会提示“登录已过期”。手动刷新一次（`cam usage`，或在桌面版 / 菜单栏 / 手机上点“刷新”）就会自动续上；切换到这个号也行
 - **到期日**：官方没有接口，在"编辑"里填一次并勾选"自动续期"，之后每个周期会自动顺延
 
 ## 切换时不会丢的东西
@@ -58,7 +58,11 @@ bash extras/swiftbar/install.sh
 - 把当前账号最新的 token 回写保存。Claude Code 运行时会刷新 token，不回写的话下次切回来就失效了。
 - 把切换前的现场备份到 `~/.claude-accounts/backups/`，保留最近 30 份。
 
-正在运行的 `claude` 进程内存里还是旧账号，切换后需要退出重开。
+正在运行的 `claude` 进程内存里还是旧账号，切换后需要退出重开。不重开的话，它刷新 token 后还可能把旧账号写回凭据文件。所以切换时工具会检查有没有 `claude` 在运行：
+- `cam switch` 在终端里会先列出这些进程并问一句是否继续（加 `-y` 不问）
+- 桌面版、手机面板、时间规则、`cam claude` 切换后会提示还有几个 `claude` 在运行
+
+万一旧会话真的把旧账号写回了，工具以凭据为准，把 token 存回它真正的主人名下，不会覆盖别的号，并在 `cam` / `cam doctor` / 菜单栏里提示“Claude Code 实际在用的登录属于某某”。退出所有 `claude` 会话后重新切换一次即可。
 
 ## 脚本版
 
@@ -73,9 +77,38 @@ cam set 工作号 --expires 2026-11-03 --auto-renew --price '$100/月'
 cam serve --lan           # 启动 Web 面板，手机扫链接即可访问
 cam local --days 7        # 本机每天消耗了多少 token、记在哪个号上
 cam doctor                # 找不到账号等问题时，逐项检查（不显示密钥）
+cam env install           # 用 Anthropic 官方安装器安装 Claude Code
+cam env clean             # 清理 Claude Code 缓存（默认只预演，加 --apply 才执行）
 ```
 
 Windows 用 `scripts\cam.cmd`，用法相同。
+
+### Claude Code 环境：检查、安装、清理
+
+`cam doctor`（也可以写成 `cam env doctor`）除了检查登录和数据目录，还会查出几类常见的“切换了却不生效”：
+- PATH 里有好几份 `claude`（比如 npm 版和原生版并存），会列出来并标明实际运行的是哪个
+- 设置了 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 等环境变量，或者 `settings.json` 里配了 `apiKeyHelper`、`~/.claude.json` 里存着 `primaryApiKey`。这些都优先于订阅登录，切换账号就没有效果
+- 当前有几个 `claude` 进程在运行
+
+```bash
+cam env install            # 没装就用官方原生安装器装（curl -fsSL https://claude.ai/install.sh | bash，Windows 用 install.ps1）
+cam env install --npm      # 改用 npm install -g @anthropic-ai/claude-code
+cam env install --force    # 已经装了也重装，可用来升级
+```
+
+运行前会显示完整的安装命令并确认，非交互环境要加 `-y`。
+
+```bash
+cam env clean                      # 预演：列出将删除的缓存和大小，不改任何东西
+cam env clean --apply              # 删除可以重新生成的缓存（cache、statsig、shell-snapshots、debug 等）
+cam env clean --logout --apply     # 同时退出 Claude Code 登录
+cam env clean --purge --apply      # 把整个 Claude Code 配置移到备份目录，相当于全新安装
+```
+
+- 默认只删一份固定名单里的缓存。会话记录（`projects/`）、`settings.json`、`CLAUDE.md`、commands / agents / skills / plugins、`~/.claude.json` 里的项目配置、cam 自己的数据目录都不动
+- `--logout` 退出前先把当前账号的最新凭据存进 cam，之后 `cam switch` 能切回来；退出前的登录状态另外备份在 `backups/`
+- `--purge` 不删除，而是把 `~/.claude/`、`~/.claude.json`（macOS 还有钥匙串里的登录）移到 `~/.claude-accounts/env-backups/<时间>/`，要恢复时移回去即可。这一步会带走会话记录和设置，所以会再确认一次（`-y` 跳过）
+- 有 `claude` 正在运行时拒绝执行，先退出它们，或加 `--force`
 
 ### 切号规则
 
@@ -88,7 +121,7 @@ cam rule add-time 个人号 --days 1-5 --start 18:00 --end 09:00   # 可以跨�
 cam rule add-dir ~/work 工作号
 cd ~/work/some-project && cam claude --continue
 
-# 额度提醒阈值（当前号 5 小时额度超过 85% 时提醒，并告诉你哪个号余量最多）
+# 额度提醒阈值（当前号 5 小时额度超过 85% 时提醒，并告诉你多久后重置）
 cam rule alert 85
 cam rule ls
 ```
@@ -139,7 +172,7 @@ npm run tauri build    # 打包，产物在 src-tauri/target/release/bundle/
 
 桌面版功能：
 - 关闭窗口后缩到托盘继续运行。托盘菜单列出所有账号和额度，点一下即可切换。macOS 菜单栏直接显示当前账号的 5 小时用量百分比。
-- 后台自动发现新登录的账号、执行时间规则、刷新用量，额度超过阈值时弹系统通知。
+- 后台自动发现新登录的账号、执行时间规则、刷新用量，额度超过阈值时弹系统通知。同一台电脑上桌面版、`cam serve`、菜单栏插件只有一个在做这些事，谁先启动谁做，其它的只同步显示。
 - 在"手机与设置"里开启 Web 面板后，手机扫二维码就能查看和切换。
 
 macOS 首次打开未签名应用时，需要右键选择"打开"。
@@ -153,7 +186,7 @@ macOS 首次打开未签名应用时，需要右键选择"打开"。
 ## 数据与安全
 
 - 所有数据存在 `~/.claude-accounts/`（可用 `CAM_HOME` 改位置），目录权限 700、凭据文件权限 600，不上传任何地方
-- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`
+- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
 - 用量和资料接口是 Claude Code 自己在用的接口，并非公开 API，Anthropic 改动后可能需要更新本工具；拿不到数据时界面会显示原因，不影响切换
 - 删除账号时凭据会移到 backups 目录，不直接销毁
 
@@ -165,6 +198,17 @@ scripts/test_cam.py   脚本版端到端测试（伪造 HOME 和接口，不碰�
 scripts/build-desktop-*  桌面版一键编译脚本
 extras/swiftbar/      macOS 菜单栏小工具
 web/panel.html        Web 面板（手机 / 浏览器），脚本版和桌面版共用
-desktop/              Tauri 桌面版（src-tauri/src/engine 是与 cam.py 对应的 Rust 实现）
-docs/DESIGN.md        数据格式、切换流程、HTTP API
+desktop/              Tauri 桌面版
+desktop/src-tauri/engine/  核心逻辑 crate cam-engine，与 cam.py 对应的 Rust 实现，不依赖 Tauri
+tests/shared/         两边共用的测试数据（身份识别、账号查找、切号规则、自动续期）
+docs/DESIGN.md        数据格式、切换流程、锁、HTTP API
 ```
+
+## 测试
+
+```bash
+python3 scripts/test_cam.py                         # 脚本版
+cd desktop/src-tauri && cargo test -p cam-engine    # Rust 核心逻辑，不需要 Tauri 的系统依赖
+```
+
+两边都会跑 `tests/shared/` 里的同一份数据，改规则时两边要一起改，否则测试会失败。

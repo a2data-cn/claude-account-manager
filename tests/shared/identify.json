@@ -1,0 +1,32 @@
+{
+  "_说明": "账号识别。scripts/test_cam.py 和 desktop/src-tauri/engine/tests 都跑这份数据，保证两套实现认人的规则一致。token_fp 是 refresh token 的 sha256 前 16 位。",
+  "accounts": [
+    {"id": "a", "kind": "claude_code", "email": "a@x.com", "account_uuid": "ua", "token_fp": "ba2fd7183518f57b"},
+    {"id": "b", "kind": "claude_code", "email": "b@x.com", "account_uuid": "ub", "token_fp": "2823ef31b6c4802a"},
+    {"id": "c", "kind": "claude_code", "email": "C@X.com"},
+    {"id": "w", "kind": "claude_web", "email": "d@x.com"}
+  ],
+  "identify": [
+    {"name": "token 指纹优先于 oauthAccount", "refresh_token": "rt-a",
+     "oauth_account": {"accountUuid": "ub", "emailAddress": "b@x.com"}, "expect": "a"},
+    {"name": "token 换过后按 accountUuid", "refresh_token": "rt-new",
+     "oauth_account": {"accountUuid": "ub"}, "expect": "b"},
+    {"name": "accountUuid 优先于邮箱", "refresh_token": "rt-new",
+     "oauth_account": {"accountUuid": "ua", "emailAddress": "b@x.com"}, "expect": "a"},
+    {"name": "邮箱不区分大小写", "refresh_token": "rt-new",
+     "oauth_account": {"emailAddress": "c@x.com"}, "expect": "c"},
+    {"name": "网页账号不参与", "refresh_token": "rt-new",
+     "oauth_account": {"emailAddress": "d@x.com"}, "expect": null},
+    {"name": "都对不上", "refresh_token": "rt-new",
+     "oauth_account": {"accountUuid": "uz", "emailAddress": "z@x.com"}, "expect": null},
+    {"name": "没有 refresh token 也没有 oauthAccount", "refresh_token": null,
+     "oauth_account": {}, "expect": null}
+  ],
+  "agrees": [
+    {"name": "uuid 相同", "account": {"account_uuid": "u1", "email": "a@x.com"}, "uuid": "u1", "email": "zzz@x.com", "expect": true},
+    {"name": "uuid 不同（不再看邮箱）", "account": {"account_uuid": "u1", "email": "a@x.com"}, "uuid": "u2", "email": "a@x.com", "expect": false},
+    {"name": "一方没有 uuid 时比邮箱", "account": {"email": "A@x.com"}, "uuid": "u2", "email": "a@X.com", "expect": true},
+    {"name": "邮箱不同", "account": {"account_uuid": "u1", "email": "a@x.com"}, "uuid": null, "email": "b@x.com", "expect": false},
+    {"name": "缺信息视为一致", "account": {}, "uuid": "u1", "email": "a@x.com", "expect": true}
+  ]
+}

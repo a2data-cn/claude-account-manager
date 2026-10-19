@@ -15,6 +15,8 @@
   cam add-api --label 名字 --key sk-ant-... [--admin-key sk-ant-admin...]
   cam serve [--lan] [--port 8787]  启动 Web 面板（手机也能看）
   cam local [--days 30]            本地 Claude Code token 消耗统计
+  cam env install                  用官方安装器安装 Claude Code
+  cam env clean [--logout|--purge] 清理 Claude Code 环境（默认只预演，加 --apply 执行）
 """
 from __future__ import annotations
 
@@ -37,11 +39,17 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-VERSION = "1.0.0"
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+VERSION = "1.1.0"
 
 # --------------------------------------------------------------------------- 路径
 
@@ -122,7 +130,17 @@ def read_json(path, default=None):
         raise CamError(f"文件损坏，无法解析：{path}（{e}）")
 
 
+def read_bytes(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
 def write_json_atomic(path, data, private=False):
+    # 目标是符号链接（比如 dotfiles 管理的 ~/.claude.json）时写到链接指向的文件，保留链接本身
+    path = os.path.realpath(path)
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
@@ -149,39 +167,54 @@ class CamError(Exception):
 
 
 class FileLock:
-    """跨进程的简易锁，避免桌面版和脚本同时写 accounts.json。"""
+    """跨进程锁：Unix 用 flock，Windows 用 LockFileEx（Rust 版 File::lock 用的是同一种锁）。
 
-    def __init__(self, path, timeout=10.0):
+    锁由操作系统持有，进程退出或崩溃时自动释放，不会留下残留锁，也不会被别人误删。
+    每次加锁都单独打开文件，所以同一进程里的不同线程之间也互斥。
+    """
+
+    def __init__(self, path, timeout=30.0):
         self.path = path
         self.timeout = timeout
+        self.fd = None
+
+    def try_acquire(self):
+        """不等待，拿到锁返回 True。"""
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if IS_WIN:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self.fd = fd
+        return True
+
+    def release(self):
+        if self.fd is None:
+            return
+        if IS_WIN:
+            try:
+                os.lseek(self.fd, 0, os.SEEK_SET)
+                msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        os.close(self.fd)  # Unix 上关闭文件即释放 flock
+        self.fd = None
 
     def __enter__(self):
-        import time
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        deadline = time.time() + self.timeout
-        while True:
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                return self
-            except FileExistsError:
-                # 超过 60 秒的锁视为残留
-                try:
-                    if time.time() - os.path.getmtime(self.path) > 60:
-                        os.unlink(self.path)
-                        continue
-                except OSError:
-                    continue
-                if time.time() > deadline:
-                    raise CamError(f"数据目录被占用（{self.path}），请稍后重试")
-                time.sleep(0.05)
+        deadline = time.monotonic() + self.timeout
+        while not self.try_acquire():
+            if time.monotonic() > deadline:
+                raise CamError(f"数据目录被占用（{self.path}），请稍后重试")
+            time.sleep(0.05)
+        return self
 
     def __exit__(self, *a):
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
+        self.release()
 
 
 # --------------------------------------------------------------------------- 存储
@@ -201,7 +234,12 @@ class Store:
                 pass
 
     def lock(self):
-        return FileLock(os.path.join(self.root, ".lock"))
+        # 旧版本用的是 .lock（独占创建文件），换成新文件名，避免旧版把新锁当残留删掉
+        return FileLock(os.path.join(self.root, "accounts.lock"))
+
+    def background_lock(self):
+        """后台任务（自动导入、时间规则、定时刷新）只让一个进程做：桌面版、cam serve、菜单栏插件谁先拿到谁做。"""
+        return FileLock(os.path.join(self.root, "background.lock"), timeout=0)
 
     def load(self):
         data = read_json(self.accounts_path, None) or {}
@@ -344,41 +382,99 @@ def read_oauth_account():
     return cj.get("oauthAccount")
 
 
+def update_json_file(path, mutate, attempts=5):
+    """读-改-写一个别人也会写的 JSON 文件（~/.claude.json，Claude Code 运行时也会写）。
+
+    写入前再读一次，内容变了就重新合并；写完再读回来确认改动还在。这样不会用旧内容覆盖掉
+    Claude Code 刚写进去的项目设置。
+    """
+    real = os.path.realpath(path)
+    for _ in range(attempts):
+        before = read_bytes(real)
+        try:
+            obj = json.loads(before) if before and before.strip() else {}
+        except json.JSONDecodeError as e:
+            raise CamError(f"文件损坏，无法解析：{path}（{e}）")
+        if not isinstance(obj, dict):
+            obj = {}
+        want = mutate(obj)
+        if read_bytes(real) != before:
+            continue
+        write_json_atomic(real, obj)
+        if want is None or want((read_json(real, {}) or {})):
+            return obj
+    raise CamError(f"{path} 一直在被其它程序改写，请先退出正在运行的 claude 再试")
+
+
 def write_oauth_account(oauth_account):
-    path = claude_json_file()
-    cj = read_json(path, {}) or {}
-    if oauth_account is None:
-        cj.pop("oauthAccount", None)
-    else:
-        cj["oauthAccount"] = oauth_account
-    write_json_atomic(path, cj)
+    def mutate(cj):
+        if oauth_account is None:
+            cj.pop("oauthAccount", None)
+        else:
+            cj["oauthAccount"] = oauth_account
+        return lambda now: now.get("oauthAccount") == oauth_account
+    update_json_file(claude_json_file(), mutate)
 
 
 def oauth_block(creds):
     return (creds or {}).get("claudeAiOauth") or {}
 
 
-def identify_code_account(data, oauth_account, creds):
-    """根据 accountUuid / 邮箱 / refresh token 找到已保存的账号。"""
-    oa = oauth_account or {}
-    uuid = oa.get("accountUuid")
-    email = (oa.get("emailAddress") or "").lower()
-    rt = oauth_block(creds).get("refreshToken")
-    code_accs = [a for a in data["accounts"] if a["kind"] == "claude_code"]
+def token_fp(rt):
+    return hashlib.sha256(rt.encode()).hexdigest()[:16]
+
+
+def match_identity(accs, uuid=None, email=None):
+    """按 accountUuid、邮箱在账号列表里找人。"""
     if uuid:
-        for a in code_accs:
+        for a in accs:
             if a.get("account_uuid") == uuid:
                 return a
+    email = (email or "").lower()
     if email:
-        for a in code_accs:
+        for a in accs:
             if (a.get("email") or "").lower() == email:
                 return a
+    return None
+
+
+def identity_agrees(acc, uuid=None, email=None):
+    """账号已知的身份和给出的身份是否一致；任何一方缺信息时视为一致。"""
+    if acc.get("account_uuid") and uuid:
+        return acc["account_uuid"] == uuid
+    if acc.get("email") and email:
+        return acc["email"].lower() == email.lower()
+    return True
+
+
+def identify_code_account(data, oauth_account, creds):
+    """找出当前登录属于哪个已保存账号。
+
+    先比 refresh token 指纹：token 本身就是凭据，比 ~/.claude.json 里的 oauthAccount 可靠
+    （oauthAccount 可能和凭据对不上，比如切换前打开的 claude 会话刷新后把旧账号的 token 写回了）。
+    token 换过（刷新或重新登录）时才退回到 accountUuid / 邮箱。
+    """
+    code_accs = [a for a in data["accounts"] if a["kind"] == "claude_code"]
+    rt = oauth_block(creds).get("refreshToken")
     if rt:
-        fp = hashlib.sha256(rt.encode()).hexdigest()[:16]
+        fp = token_fp(rt)
         for a in code_accs:
             if a.get("token_fp") == fp:
                 return a
-    return None
+    oa = oauth_account or {}
+    return match_identity(code_accs, oa.get("accountUuid"), oa.get("emailAddress"))
+
+
+def token_owner(access_token, timeout=6):
+    """用 /api/oauth/profile 问出这个 access token 真正属于谁，返回 {"uuid","email"}；问不到返回 None。"""
+    st, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(access_token),
+                         timeout=timeout)
+    if st != 200 or not isinstance(prof, dict):
+        return None
+    a = prof.get("account") or {}
+    if not (a.get("uuid") or a.get("email")):
+        return None
+    return {"uuid": a.get("uuid"), "email": a.get("email")}
 
 
 def apply_oauth_account_meta(acc, oauth_account, creds):
@@ -393,23 +489,44 @@ def apply_oauth_account_meta(acc, oauth_account, creds):
     if ob.get("subscriptionType"):
         acc["plan"] = ob["subscriptionType"]
     if ob.get("refreshToken"):
-        acc["token_fp"] = hashlib.sha256(ob["refreshToken"].encode()).hexdigest()[:16]
+        acc["token_fp"] = token_fp(ob["refreshToken"])
 
 
 def snapshot_live(store, data, label=None, create_if_unknown=True):
-    """把当前生效的 Claude Code 登录保存回对应账号；未知账号自动导入。返回账号或 None。"""
+    """把当前生效的 Claude Code 登录保存回对应账号；未知账号自动导入。返回账号或 None。
+
+    凭据和 ~/.claude.json 里的 oauthAccount 对不上时，以凭据为准：token 存进它真正的主人名下，
+    不会覆盖别的账号，并在 data["live_mismatch"] 里留下说明。
+    """
     creds, where = read_live_credentials()
-    if not creds or not oauth_block(creds).get("accessToken"):
+    ob = oauth_block(creds)
+    if not creds or not ob.get("accessToken"):
         return None
-    oa = read_oauth_account()
+    oa = read_oauth_account() or {}
+    code_accs = [a for a in data["accounts"] if a["kind"] == "claude_code"]
     acc = identify_code_account(data, oa, creds)
+    by_token = acc is not None and acc.get("token_fp") == token_fp(ob.get("refreshToken") or "")
+    oa_uuid, oa_email = oa.get("accountUuid"), oa.get("emailAddress")
+    owner = None
+    if not by_token:
+        # token 换过了，只能靠 oauthAccount 认人；先联网核对一下这份凭据到底是谁的
+        owner = token_owner(ob["accessToken"])
+        if owner and (acc is None or not identity_agrees(acc, owner["uuid"], owner["email"])):
+            acc = match_identity(code_accs, owner["uuid"], owner["email"])
+    # oauthAccount 是否描述的就是这份凭据的主人
+    if acc is not None:
+        oa_ok = bool(oa) and identity_agrees(acc, oa_uuid, oa_email)
+    else:
+        oa_ok = bool(oa) and (owner is None or identity_agrees(
+            {"account_uuid": owner["uuid"], "email": owner["email"]}, oa_uuid, oa_email))
     if acc is None:
         if not create_if_unknown:
             return None
+        email = (owner or {}).get("email") or (oa_email if oa_ok else None)
         acc = {
             "id": new_id(), "kind": "claude_code",
-            "label": label or (oa or {}).get("emailAddress") or "未命名账号",
-            "email": None, "plan": None, "org_name": None, "account_uuid": None,
+            "label": label or email or "未命名账号",
+            "email": email, "plan": None, "org_name": None, "account_uuid": (owner or {}).get("uuid"),
             "manual": {}, "usage": None, "created_at": now_iso(), "last_switched_at": now_iso(),
         }
         data["accounts"].append(acc)
@@ -418,8 +535,20 @@ def snapshot_live(store, data, label=None, create_if_unknown=True):
             data["switch_log"].append({"id": acc["id"], "at": now_iso()})
     elif label:
         acc["label"] = label
-    apply_oauth_account_meta(acc, oa, creds)
-    store.save_secret(acc["id"], {"claudeAiOauth": oauth_block(creds), "oauthAccount": oa,
+    if oa_ok:
+        data.pop("live_mismatch", None)
+        saved_oa = oa
+    else:
+        # oauthAccount 是别人的：不用它改这个账号的资料，也不把它存进这个账号
+        saved_oa = store.load_secret(acc["id"]).get("oauthAccount")
+        if oa:
+            data["live_mismatch"] = {
+                "at": now_iso(), "account": acc["id"], "claude_json_email": oa_email,
+                "message": (f"Claude Code 实际在用的登录属于“{acc['label']}”，但 ~/.claude.json 里写的是 {oa_email}。"
+                            "通常是切换前打开的 claude 会话刷新 token 后写回了旧账号。退出所有 claude 会话后重新切换一次即可。"),
+            }
+    apply_oauth_account_meta(acc, saved_oa if oa_ok else None, creds)
+    store.save_secret(acc["id"], {"claudeAiOauth": ob, "oauthAccount": saved_oa,
                                   "raw": creds, "store": where, "saved_at": now_iso()})
     data["active"]["claude_code"] = acc["id"]
     return acc
@@ -465,6 +594,78 @@ def backup_live(store, tag):
     return d
 
 
+def _is_claude_cmd(argv0, cmdline):
+    """argv0 是可执行文件（或进程名），cmdline 是完整命令行。"""
+    exe = argv0.replace("\\", "/")
+    name = exe.rsplit("/", 1)[-1]
+    low_exe = exe.lower()
+    # Claude 桌面 App（macOS 上叫 Claude，Windows 上装在 AnthropicClaude 下）不算
+    if "/claude.app/" in low_exe or "anthropicclaude" in low_exe or "/windowsapps/" in low_exe:
+        return False
+    if name in ("claude", "claude.exe") or "/claude/versions/" in exe:  # 原生安装版
+        return True
+    if name.lower() in ("node", "node.exe", "bun", "bun.exe"):  # npm 安装版
+        low = cmdline.replace("\\", "/").lower()
+        return "@anthropic-ai/claude-code" in low or "claude-code/cli" in low
+    return False
+
+
+def running_claude_processes():
+    """正在运行的 Claude Code 进程 [(pid, 命令行)]，不含本进程。查不到时返回空列表。
+
+    切换账号后，这些进程内存里还是旧账号的 token，刷新后还可能把旧账号写回凭据文件。
+    """
+    me = os.getpid()
+    found = []
+    try:
+        if IS_WIN:
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe'\" | "
+                  "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }")
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                               timeout=15)
+            for line in r.stdout.splitlines():
+                parts = line.split("\t", 2)
+                if len(parts) == 3 and parts[0].isdigit() and _is_claude_cmd(parts[1], parts[2]):
+                    found.append((int(parts[0]), parts[2] or parts[1]))
+        elif os.path.isdir("/proc/self"):
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit() or int(pid) == me:
+                    continue
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        argv = f.read().split(b"\0")
+                except OSError:
+                    continue
+                argv = [a.decode("utf-8", "replace") for a in argv if a]
+                if argv and _is_claude_cmd(argv[0], " ".join(argv)):
+                    found.append((int(pid), " ".join(argv)))
+        else:
+            # macOS：comm 是可执行文件完整路径（可能带空格），args 是完整命令行
+            def ps(field):
+                r = subprocess.run(["ps", "-A", "-o", f"pid=,{field}="], capture_output=True, text=True, timeout=10)
+                out = {}
+                for line in r.stdout.splitlines():
+                    pid, _, rest = line.strip().partition(" ")
+                    if pid.isdigit():
+                        out[int(pid)] = rest.strip()
+                return out
+            comm, args = ps("comm"), ps("args")
+            for pid, exe in comm.items():
+                if pid != me and _is_claude_cmd(exe, args.get(pid, exe)):
+                    found.append((pid, args.get(pid, exe)))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return found
+
+
+def running_warning(procs):
+    if not procs:
+        return ""
+    pids = "、".join(str(p) for p, _ in procs[:5]) + ("…" if len(procs) > 5 else "")
+    return (f"有 {len(procs)} 个 claude 进程正在运行（pid {pids}），它们还在用切换前的账号，"
+            "并可能在刷新 token 后把旧账号写回。请退出这些会话后重开（可用 claude --continue 接着聊）。")
+
+
 def switch_code_account(store, key):
     with store.lock():
         data = store.load()
@@ -485,6 +686,7 @@ def switch_code_account(store, key):
         raw["claudeAiOauth"] = ob
         write_live_credentials(raw, where)  # 第 4 步
         write_oauth_account(secret.get("oauthAccount"))
+        data.pop("live_mismatch", None)  # 凭据和 oauthAccount 现在是同一个账号的
         data["active"]["claude_code"] = target["id"]  # 第 5 步
         target["last_switched_at"] = now_iso()
         data["switch_log"].append({"id": target["id"], "at": now_iso()})
@@ -534,45 +736,80 @@ def oauth_headers(token):
 def refresh_oauth(refresh_token):
     last = None
     for url in TOKEN_URLS:
-        st, body = http_json("POST", url, body={
+        # 在数据锁里调用，超时设短一些，别让其它操作等太久
+        st, body = http_json("POST", url, timeout=8, body={
             "grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": OAUTH_CLIENT_ID})
         if st == 200 and body.get("access_token"):
             return body
         last = err_msg(st, body)
         if st in (400, 401):  # refresh token 本身无效，换地址也没用
-            break
-    raise CamError(f"刷新登录失败（{last}），请用该账号重新登录 Claude Code 后 cam import")
+            raise CamError(f"登录已失效（{last}），需要用这个账号重新登录 Claude Code 后 cam import")
+    raise CamError(f"续登录失败（{last}），稍后再试")
 
 
-def ensure_fresh_token(store, data, acc):
-    """返回可用 access token。当前生效账号只读不刷新。"""
-    is_active = data["active"].get("claude_code") == acc["id"]
-    if is_active:
+def _usable_token(store, data, acc):
+    """不联网能拿到的 access token：当前账号读 Claude Code 正在用的；其它账号读保存的、且没过期的。"""
+    if data["active"].get("claude_code") == acc["id"]:
         creds, _ = read_live_credentials()
         ob = oauth_block(creds)
-        oa = read_oauth_account()
-        if ob.get("accessToken") and identify_code_account(data, oa, creds) is acc:
+        if ob.get("accessToken") and identify_code_account(data, read_oauth_account(), creds) is acc:
             return ob["accessToken"], ob
-    secret = store.load_secret(acc["id"])
-    ob = dict(secret.get("claudeAiOauth") or {})
+        ob = dict(store.load_secret(acc["id"]).get("claudeAiOauth") or {})
+        if not ob.get("accessToken"):
+            raise CamError("没有保存凭据")
+        return ob["accessToken"], ob  # 当前账号从不在这里刷新，交给 Claude Code
+    ob = dict(store.load_secret(acc["id"]).get("claudeAiOauth") or {})
     if not ob.get("accessToken"):
         raise CamError("没有保存凭据")
-    exp = ob.get("expiresAt") or 0
-    if is_active or exp > (dt.datetime.now().timestamp() + 120) * 1000:
+    if (ob.get("expiresAt") or 0) > (time.time() + 120) * 1000:
         return ob["accessToken"], ob
-    if not ob.get("refreshToken"):
-        raise CamError("登录已过期且没有 refresh token")
-    tok = refresh_oauth(ob["refreshToken"])
-    ob["accessToken"] = tok["access_token"]
-    if tok.get("refresh_token"):
-        ob["refreshToken"] = tok["refresh_token"]
-    ob["expiresAt"] = int((dt.datetime.now().timestamp() + int(tok.get("expires_in", 28800))) * 1000)
-    secret["claudeAiOauth"] = ob
-    if isinstance(secret.get("raw"), dict):
-        secret["raw"]["claudeAiOauth"] = ob
-    secret["saved_at"] = now_iso()
-    store.save_secret(acc["id"], secret)
-    return ob["accessToken"], ob
+    return None
+
+
+def ensure_fresh_token(store, acc_id, allow_refresh=True):
+    """返回 (access token, oauth 块)。
+
+    当前生效账号只读不刷新，由 Claude Code 自己刷新。其它账号的 token 过期时，在数据锁里重新确认
+    “它仍然不是当前账号”后再换新，和切换操作互斥：不会出现刚切过去、Claude Code 和这里拿着同一个
+    refresh token 各刷一次、把账号弄成需要重新登录的情况。
+    allow_refresh=False 时（后台定时任务）不换 token，只用还没过期的。
+    """
+    data = store.load()
+    acc = next((a for a in data["accounts"] if a["id"] == acc_id), None)
+    if acc is None:
+        raise CamError("账号已被删除")
+    got = _usable_token(store, data, acc)
+    if got:
+        return got
+    if not allow_refresh:
+        raise CamError("登录已过期。后台不会替它续登录（避免和 Claude Code 抢 refresh token），"
+                       "手动刷新一次或切换到这个账号即可")
+    with store.lock():
+        data = store.load()
+        acc = next((a for a in data["accounts"] if a["id"] == acc_id), None)
+        if acc is None:
+            raise CamError("账号已被删除")
+        got = _usable_token(store, data, acc)  # 等锁期间可能已切成当前账号，或已被别的进程刷新
+        if got:
+            return got
+        secret = store.load_secret(acc_id)
+        ob = dict(secret.get("claudeAiOauth") or {})
+        if not ob.get("refreshToken"):
+            raise CamError("登录已过期且没有 refresh token")
+        tok = refresh_oauth(ob["refreshToken"])
+        ob["accessToken"] = tok["access_token"]
+        if tok.get("refresh_token"):
+            ob["refreshToken"] = tok["refresh_token"]
+        ob["expiresAt"] = int((time.time() + int(tok.get("expires_in", 28800))) * 1000)
+        secret["claudeAiOauth"] = ob
+        if isinstance(secret.get("raw"), dict):
+            secret["raw"]["claudeAiOauth"] = ob
+        secret["saved_at"] = now_iso()
+        store.save_secret(acc_id, secret)
+        if ob.get("refreshToken"):
+            acc["token_fp"] = token_fp(ob["refreshToken"])
+            store.save(data)
+        return ob["accessToken"], ob
 
 
 def pick_window(body, key):
@@ -585,8 +822,15 @@ def pick_window(body, key):
     return {"utilization": float(u), "resets_at": w.get("resets_at")}
 
 
-def fetch_code_usage(store, data, acc):
-    token, ob = ensure_fresh_token(store, data, acc)
+def fetch_code_usage(store, acc, allow_refresh=True):
+    token, ob = ensure_fresh_token(store, acc["id"], allow_refresh)
+    # 先拿账号资料：既用来补邮箱、套餐，也用来核对这份凭据是不是这个账号的
+    st2, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(token))
+    if st2 == 200 and isinstance(prof, dict):
+        a = prof.get("account") or {}
+        if not identity_agrees(acc, a.get("uuid"), a.get("email")):
+            raise CamError(f"这个账号保存的登录实际属于 {a.get('email') or a.get('uuid')}，"
+                           "可能被旧的 claude 会话覆盖了。请用这个账号重新登录 Claude Code 后 cam import")
     st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", headers=oauth_headers(token))
     if st != 200:
         raise CamError(err_msg(st, body))
@@ -597,10 +841,11 @@ def fetch_code_usage(store, data, acc):
     if isinstance(extra, dict) and extra.get("is_enabled"):
         usage["extra_usage"] = {k: extra.get(k) for k in ("monthly_limit", "used_credits", "utilization")}
     # 账号资料（邮箱、套餐），失败不影响用量
-    st2, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(token))
     if st2 == 200 and isinstance(prof, dict):
         a = prof.get("account") or {}
         o = prof.get("organization") or {}
+        if a.get("uuid") and not acc.get("account_uuid"):
+            acc["account_uuid"] = a["uuid"]
         if a.get("email"):
             acc["email"] = a["email"]
         if o.get("name"):
@@ -756,8 +1001,12 @@ def fetch_api_usage(store, acc):
     return usage
 
 
-def refresh_usage(store, only_id=None):
-    """拉取用量。网络请求在锁外进行，最后合并写回。"""
+def refresh_usage(store, only_id=None, allow_token_refresh=True):
+    """拉取用量。网络请求在锁外进行，最后合并写回；只有换 token 那一步在锁内（见 ensure_fresh_token）。
+
+    后台定时任务传 allow_token_refresh=False：不常用的账号 token 过期后就不再替它续，
+    少一些和 Claude Code 抢 refresh token 的机会，也少一些多账号同时在线的请求。
+    """
     with store.lock():
         data = store.load()
         # 顺手把 Claude Code 刚刷新过的 token 回写；新登录的账号自动导入
@@ -769,7 +1018,7 @@ def refresh_usage(store, only_id=None):
     def work(acc):
         try:
             if acc["kind"] == "claude_code":
-                u = fetch_code_usage(store, data, acc)
+                u = fetch_code_usage(store, acc, allow_token_refresh)
             elif acc["kind"] == "claude_web":
                 u = fetch_web_usage(store, acc)
             else:
@@ -782,7 +1031,8 @@ def refresh_usage(store, only_id=None):
             u = dict(acc.get("usage") or {})
             u["error"] = f"{type(e).__name__}: {e}"
         u["fetched_at"] = now_iso()
-        meta = {k: acc.get(k) for k in ("email", "plan", "org_name", "rate_limit_tier", "auto") if acc.get(k)}
+        meta = {k: acc.get(k) for k in ("email", "plan", "org_name", "rate_limit_tier", "auto", "account_uuid")
+                if acc.get(k)}
         results[acc["id"]] = (u, meta)
 
     threads = [threading.Thread(target=work, args=(a,)) for a in targets]
@@ -809,9 +1059,9 @@ def add_months(d: dt.date, n: int, day=None) -> dt.date:
     return dt.date(y, m, min(day or d.day, calendar.monthrange(y, m)[1]))
 
 
-def roll_renewals(data):
+def roll_renewals(data, today=None):
     """自动续期：到期日已过且标记自动续期时，顺延一个月（年付则一年）。"""
-    today = dt.date.today()
+    today = today or dt.date.today()
     for a in data["accounts"]:
         m = a.get("manual") or {}
         exp = m.get("expires_at")
@@ -975,18 +1225,6 @@ def save_rules(store, body):
         return rules_view(data)
 
 
-def best_alternative(data, exclude_id):
-    cands = []
-    for a in data["accounts"]:
-        if a["kind"] != "claude_code" or a["id"] == exclude_id:
-            continue
-        w = (a.get("usage") or {}).get("five_hour")
-        if w and not (a.get("usage") or {}).get("error"):
-            cands.append((w["utilization"], a))
-    cands.sort(key=lambda x: x[0])
-    return cands[0] if cands else None
-
-
 def run_claude(store, args):
     """按目录规则切号后启动 claude，参数原样透传。"""
     data = store.load()
@@ -995,6 +1233,9 @@ def run_claude(store, args):
         acc, _, changed = switch_code_account(store, r["account"])
         if changed:
             print(color(f"[cam] 按目录规则切换到 {acc['label']}", "d"), file=sys.stderr)
+            warn = running_warning(running_claude_processes())
+            if warn:
+                print(color(f"[cam] {warn}", "y"), file=sys.stderr)
     exe = shutil.which("claude")
     if not exe:
         raise CamError("找不到 claude 命令，请确认 Claude Code 已安装")
@@ -1139,7 +1380,7 @@ def public_state(store, data):
         accs.append(p)
     return {"version": VERSION, "backend": "python", "host": socket.gethostname(),
             "platform": platform.system(), "active": data["active"], "accounts": accs,
-            "generated_at": now_iso()}
+            "warning": (data.get("live_mismatch") or {}).get("message"), "generated_at": now_iso()}
 
 
 def mask(s):
@@ -1293,8 +1534,11 @@ def make_handler(store, token):
                     aid = parts[1]
                     if method == "POST" and parts[2:] == ["switch"]:
                         acc, backup, changed = switch_code_account(store, aid)
+                        procs = running_claude_processes() if changed else []
+                        msg = (f"已切换到 {acc['label']}。" + (running_warning(procs) or "正在运行的 claude 会话需要重启")
+                               if changed else "已经是当前账号")
                         return self._send(200, {"ok": True, "changed": changed, "account": acc["id"],
-                                                "message": "已切换，正在运行的 claude 会话需要重启" if changed else "已经是当前账号"})
+                                                "running_claude": len(procs), "message": msg})
                     if method == "POST" and parts[2:] == ["open"]:
                         open_web_account(store, find_account(store.load(), aid))
                         return self._send(200, {"ok": True, "message": "已在电脑上打开浏览器窗口"})
@@ -1364,12 +1608,26 @@ def serve(store, host, port, auto_refresh_min):
             print(f"  局域网：http://{ip}:{port}/?t={token}")
         print("  手机和电脑在同一网络下打开上面的地址即可；在外网访问建议用 Tailscale 等组网工具，不要直接暴露端口。")
     def watch():
-        """后台：发现新登录自动导入；按间隔自动刷新用量；快用完时提醒。"""
-        import time
+        """后台：发现新登录自动导入；按间隔自动刷新用量；快用完时提醒。
+
+        同一台电脑上只让一个进程做这些事（桌面版、cam serve、菜单栏插件谁先拿到后台锁谁做），
+        避免几个进程同时轮询、同时刷新。
+        """
+        lease = store.background_lock()
+        told = False
         last_fp = None
         last_refresh = 0.0
         warned = set()
         while True:
+            if lease.fd is None and not lease.try_acquire():
+                if not told:
+                    told = True
+                    print("[后台] 桌面版或另一个 cam serve 正在执行后台任务，这里只提供面板")
+                time.sleep(30)
+                continue
+            if told:
+                told = False
+                print("[后台] 已接手后台任务")
             try:
                 fp = live_fingerprint()
                 if fp != last_fp:
@@ -1380,10 +1638,10 @@ def serve(store, host, port, auto_refresh_min):
                         last_refresh = 0.0
                 res = apply_time_rules(store)
                 if res and res[2]:
-                    print(f"[规则] 进入时间段，已切换到 {res[0]['label']}")
+                    print(f"[规则] 进入时间段，已切换到 {res[0]['label']}。{running_warning(running_claude_processes())}")
                 if auto_refresh_min > 0 and time.time() - last_refresh >= auto_refresh_min * 60:
                     last_refresh = time.time()
-                    data = refresh_usage(store)
+                    data = refresh_usage(store, allow_token_refresh=False)
                     limit = rules_view(data)["alert_threshold"]
                     act = data["active"].get("claude_code")
                     for a in data["accounts"]:
@@ -1393,9 +1651,7 @@ def serve(store, host, port, auto_refresh_min):
                         key = (a["id"], w.get("resets_at"))
                         if (w.get("utilization") or 0) >= limit and key not in warned:
                             warned.add(key)
-                            alt = best_alternative(data, a["id"])
-                            tip = f"；余量最多的是 {alt[1]['label']}（已用 {alt[0]:.0f}%），cam switch {alt[1]['id']}" if alt else ""
-                            print(f"[提醒] {a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%，{fmt_reset(w.get('resets_at'))}{tip}")
+                            print(f"[提醒] {a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%，{fmt_reset(w.get('resets_at'))}")
             except Exception as e:
                 print("后台任务出错：", e, file=sys.stderr)
             time.sleep(30 if use_keychain() else 5)
@@ -1479,6 +1735,8 @@ def print_accounts(store, data):
             print("     " + color("⚠ " + u["error"], "y"))
         if (a.get("manual") or {}).get("note"):
             print("     " + color("备注：" + a["manual"]["note"], "d"))
+    if st.get("warning"):
+        print("\n" + color("⚠ " + st["warning"], "y"))
 
 
 # --------------------------------------------------------------------------- 命令
@@ -1531,7 +1789,25 @@ def cmd_add_api(store, args):
     print(f"已添加 API 账号 {acc['label']}，id={acc['id']}")
 
 
+def confirm(question):
+    """交互终端里问一句 y/N；非交互（脚本、管道）时返回 False。"""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
 def cmd_switch(store, args):
+    target = find_account(store.load(), args.account)
+    procs = running_claude_processes() if target["id"] != store.load()["active"].get("claude_code") else []
+    asked = procs and not args.yes and sys.stdin.isatty()
+    if asked:
+        print(color("⚠ " + running_warning(procs), "y"))
+        if not confirm("仍然切换？"):
+            print("已取消")
+            return
     acc, backup, changed = switch_code_account(store, args.account)
     if not changed:
         print(f"{acc['label']} 已经是当前账号")
@@ -1539,6 +1815,8 @@ def cmd_switch(store, args):
     print(color(f"✓ 已切换到 {acc['label']}（{acc.get('email') or '-'}）", "g"))
     print(color(f"  切换前的登录状态已备份到 {backup}", "d"))
     print("  会话记录、项目、设置都没有动；正在运行的 claude 需要退出重开，可用 claude --continue 接着聊。")
+    if procs and not asked:
+        print(color("  ⚠ " + running_warning(procs), "y"))
 
 
 def cmd_set(store, args):
@@ -1602,12 +1880,259 @@ def cmd_rule(store, args):
             print(f"当前正处于该时间段，已切换到 {res[0]['label']}")
 
 
+# --------------------------------------------------------------------------- Claude Code 环境：检查、安装、清理
+
+NATIVE_INSTALL_SH = "https://claude.ai/install.sh"
+NATIVE_INSTALL_PS1 = "https://claude.ai/install.ps1"
+# 可以重新生成的缓存。按名字逐个删除，不用通配符，名单以外的东西一概不动
+CACHE_ITEMS = ("cache", "statsig", "shell-snapshots", "session-env", "debug", "ide", "telemetry", "paste-cache",
+               "downloads", ".last-cleanup", ".last-update-result.json")
+# 这些环境变量会让 Claude Code 不走订阅登录，切换账号看起来就“不生效”
+OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+
+
+def install_kind(real):
+    low = real.replace("\\", "/").lower()
+    if "/.claude/local/" in low:
+        return "npm（本地）"
+    if "node_modules" in low or "/npm/" in low:
+        return "npm"
+    if "/.local/share/claude/" in low or "/.local/bin/" in low:
+        return "原生"
+    if "homebrew" in low or "/cellar/" in low or "caskroom" in low:
+        return "Homebrew"
+    return "其它"
+
+
+def claude_installs():
+    """PATH 里所有的 claude，按真实路径去重，排在前面的是实际会运行的那个。返回 [(路径, 真实路径, 安装方式)]。"""
+    names = ("claude.exe", "claude.cmd", "claude") if IS_WIN else ("claude",)
+    seen, out = set(), []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                real = os.path.realpath(p)
+                if real not in seen:
+                    seen.add(real)
+                    out.append((p, real, install_kind(real)))
+    return out
+
+
+def claude_version(exe):
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
+        return (r.stdout or r.stderr).strip().splitlines()[0] if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+def override_findings():
+    """会让 Claude Code 不用订阅登录的设置（它们优先于登录凭据）。"""
+    out = [f"环境变量 {k} 已设置" for k in OVERRIDE_ENV if os.environ.get(k)]
+    for name in ("settings.json", "settings.local.json"):
+        path = os.path.join(claude_config_dir(), name)
+        try:
+            s = read_json(path, {}) or {}
+        except CamError:
+            continue
+        if not isinstance(s, dict):
+            continue
+        if s.get("apiKeyHelper"):
+            out.append(f"{path} 里设置了 apiKeyHelper")
+        env = s.get("env") if isinstance(s.get("env"), dict) else {}
+        out += [f"{path} 的 env 里设置了 {k}" for k in OVERRIDE_ENV if env.get(k)]
+    try:
+        if (read_json(claude_json_file(), {}) or {}).get("primaryApiKey"):
+            out.append(f"{claude_json_file()} 里存着 API Key（primaryApiKey）")
+    except CamError:
+        pass
+    return out
+
+
+def path_size(p):
+    if not os.path.isdir(p) or os.path.islink(p):
+        try:
+            return os.lstat(p).st_size
+        except OSError:
+            return 0
+    total = 0
+    for root, _, files in os.walk(p):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def remove_path(p):
+    if os.path.isdir(p) and not os.path.islink(p):
+        shutil.rmtree(p)
+    else:
+        os.unlink(p)
+
+
+def keychain_delete():
+    r = subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", getpass.getuser()],
+                       capture_output=True, timeout=15)
+    if r.returncode != 0:  # 和 keychain_read 一样，account 不是用户名时只按 service 删
+        subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE], capture_output=True, timeout=15)
+
+
+def cmd_env_install(store, args):
+    ok = color("✓", "g")
+    found = claude_installs()
+    if found and not args.force:
+        print(f"{ok} 已经装好了：{found[0][0]}（{install_kind(found[0][1])}，{claude_version(found[0][0]) or '版本未知'}）")
+        print("  要重新安装或升级，加 --force")
+        print_install_conflicts(found)
+        return
+    if args.npm:
+        npm = shutil.which("npm")
+        if not npm:
+            raise CamError("没找到 npm。请先装 Node.js 18 以上，或去掉 --npm 改用官方原生安装器")
+        cmd, shown = [npm, "install", "-g", "@anthropic-ai/claude-code"], "npm install -g @anthropic-ai/claude-code"
+    elif IS_WIN:
+        shown = f"irm {NATIVE_INSTALL_PS1} | iex"
+        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", shown]
+    else:
+        if not shutil.which("curl"):
+            raise CamError("没找到 curl，请先安装 curl，或加 --npm 用 npm 安装")
+        shown = f"curl -fsSL {NATIVE_INSTALL_SH} | bash"
+        cmd = ["bash", "-c", shown]
+    print(f"将运行 Anthropic 官方安装命令：{shown}")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise CamError("非交互环境请加 -y 确认")
+        if not confirm("继续？"):
+            print("已取消")
+            return
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        raise CamError(f"安装命令失败（退出码 {rc}），见上面的输出")
+    found = claude_installs()
+    if not found:
+        local = os.path.join(home(), ".local", "bin", "claude.exe" if IS_WIN else "claude")
+        if not os.path.exists(local):
+            raise CamError("安装命令跑完了，但没找到 claude，见上面的输出")
+        print(f"{ok} 已安装到 {local}（{claude_version(local) or '版本未知'}）")
+        print(color(f"  但 {os.path.dirname(local)} 不在 PATH 里，把它加进 PATH 后重开终端", "y"))
+    else:
+        print(f"{ok} 已安装：{found[0][0]}（{claude_version(found[0][0]) or '版本未知'}）")
+        print_install_conflicts(found)
+    print("下一步：运行 claude 登录，然后运行 cam，会自动保存这个账号")
+
+
+def print_install_conflicts(found):
+    if len(found) <= 1:
+        return
+    print(color(f"⚠ PATH 里有 {len(found)} 份 claude，实际运行的是第一个：", "y"))
+    for p, real, kind in found:
+        print(f"    {p}（{kind}）" + (f" → {real}" if real != p else ""))
+    print("  多份并存容易出现“升级了却没生效”。保留一份即可，npm 版可用 npm uninstall -g @anthropic-ai/claude-code 卸载")
+
+
+def cmd_env_clean(store, args):
+    """分层清理。默认只预演；--apply 才执行。会话记录、设置、CLAUDE.md、插件和 cam 自己的数据永远不动（--purge 除外）。"""
+    cfg = claude_config_dir()
+    cache = [os.path.join(cfg, n) for n in CACHE_ITEMS if os.path.lexists(os.path.join(cfg, n))]
+    if args.purge:
+        root_real = os.path.realpath(store.root)
+        if root_real == os.path.realpath(cfg) or root_real.startswith(os.path.realpath(cfg) + os.sep):
+            raise CamError(f"cam 的数据目录 {store.root} 在 {cfg} 里面，不能整体移走")
+        print("将把整个 Claude Code 配置移到备份目录（不删除，随时可以移回来）：")
+        for p in (cfg, claude_json_file()):
+            if os.path.lexists(p):
+                print(f"  {p}（{human_size(path_size(p))}）")
+        if use_keychain():
+            print("  钥匙串里的 Claude Code 登录（内容先存进备份）")
+        print("包括会话记录、项目设置、CLAUDE.md、插件——相当于全新安装。已保存的账号凭据会先存进 cam，以后能切回来。")
+    else:
+        print("将删除这些可以重新生成的缓存：" if cache else "没有需要清理的缓存。")
+        for p in cache:
+            print(f"  {p}（{human_size(path_size(p))}）")
+        if args.logout:
+            print("将退出 Claude Code 登录：删除凭据" + ("（含钥匙串）" if use_keychain() else "")
+                  + "，并去掉 ~/.claude.json 里的 oauthAccount。当前账号的最新凭据会先存进 cam，可以随时切回来。")
+        print(color("不会动：会话记录（projects/）、settings.json、CLAUDE.md、commands/agents/skills/plugins、"
+                    "~/.claude.json 里的项目配置、cam 的数据目录。", "d"))
+    if not args.apply:
+        print(color("\n这只是预演，加 --apply 才会执行。", "y"))
+        return
+    procs = running_claude_processes()
+    if procs and not args.force:
+        raise CamError(f"有 {len(procs)} 个 claude 进程正在运行，清理可能弄坏它们。请先退出，或加 --force")
+    if args.purge and not args.yes:
+        if not sys.stdin.isatty():
+            raise CamError("非交互环境请加 -y 确认")
+        if not confirm("确定要把整个 Claude Code 配置移走？"):
+            print("已取消")
+            return
+    if args.logout or args.purge:
+        with store.lock():
+            data = store.load()
+            snapshot_live(store, data)  # 先把当前账号的最新 token 存好
+            data["active"]["claude_code"] = None
+            data.pop("live_mismatch", None)
+            store.save(data)
+    if args.purge:
+        dest = os.path.join(store.root, "env-backups", dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
+        os.makedirs(dest)
+        if not IS_WIN:
+            os.chmod(dest, 0o700)
+        if use_keychain():
+            kc = keychain_read()
+            if kc:
+                write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
+                keychain_delete()
+        cj = claude_json_file()
+        if os.path.lexists(cfg):
+            shutil.move(cfg, os.path.join(dest, "claude-config"))
+        if os.path.lexists(cj):
+            shutil.move(cj, os.path.join(dest, "claude.json"))
+        print(color(f"✓ 已移到 {dest}", "g"))
+        print("  需要恢复时，把里面的 claude-config 移回 " + cfg + "，claude.json 移回 " + cj)
+        return
+    for p in cache:
+        remove_path(p)
+    if cache:
+        print(color(f"✓ 已清理 {len(cache)} 项缓存", "g"))
+    if args.logout:
+        backup = backup_live(store, "env-logout")
+        if use_keychain():
+            keychain_delete()
+        if os.path.exists(claude_credentials_file()):
+            os.unlink(claude_credentials_file())
+        if os.path.exists(claude_json_file()):
+            write_oauth_account(None)
+        print(color(f"✓ 已退出登录，退出前的登录状态备份在 {backup}", "g"))
+        print("  运行 claude 重新登录，或 cam switch <账号> 切回已保存的账号")
+
+
 def cmd_doctor(store):
     """逐项检查，不打印任何密钥。"""
-    ok, bad, info = color("✓", "g"), color("✗", "r"), color("·", "d")
+    ok, bad, info, warn = color("✓", "g"), color("✗", "r"), color("·", "d"), color("!", "y")
     print(f"cam {VERSION}，Python {platform.python_version()}，{platform.system()} {platform.release()}")
-    claude = shutil.which("claude")
-    print(f"{ok if claude else bad} Claude Code 命令：{claude or '没找到（npm install -g @anthropic-ai/claude-code）'}")
+    found = claude_installs()
+    if found:
+        p, real, kind = found[0]
+        print(f"{ok} Claude Code 命令：{p}（{kind}，{claude_version(p) or '版本未知'}）")
+        print_install_conflicts(found)
+    else:
+        print(f"{bad} Claude Code 命令：没找到。运行 cam env install 用官方安装器安装")
+    for f in override_findings():
+        print(f"{warn} {f}：它会优先于订阅登录，切换账号可能不生效")
+    procs = running_claude_processes()
+    print(f"{info} 正在运行的 claude 进程：{len(procs)} 个" + ("（切换账号后需要重开）" if procs else ""))
     print(f"{info} 配置目录：{claude_config_dir()}" + ("" if os.path.isdir(claude_config_dir()) else "（不存在）"))
     f = claude_credentials_file()
     if os.path.exists(f):
@@ -1640,6 +2165,8 @@ def cmd_doctor(store):
     print(f"{info} 数据目录：{store.root}，已保存 {len(data['accounts'])} 个账号")
     if creds and oauth_block(creds).get("accessToken"):
         print(f"{ok if acc else bad} 当前登录" + (f"已保存为“{acc['label']}”" if acc else "还没保存，运行 cam 会自动保存"))
+    if (data.get("live_mismatch") or {}).get("message"):
+        print(f"{warn} {data['live_mismatch']['message']}")
     exp = oauth_block(creds).get("expiresAt") if creds else None
     if exp:
         left = exp / 1000 - dt.datetime.now().timestamp()
@@ -1670,6 +2197,7 @@ def main(argv=None):
     s.add_argument("account", nargs="?")
     s = sub.add_parser("switch", aliases=["use"], help="切换 Claude Code 账号")
     s.add_argument("account")
+    s.add_argument("-y", "--yes", action="store_true", help="有 claude 正在运行时也不再确认")
     sub.add_parser("current", aliases=["whoami"], help="显示当前 Claude Code 账号")
     s = sub.add_parser("add-web", help="添加网页版账号")
     s.add_argument("--label", required=True)
@@ -1706,6 +2234,20 @@ def main(argv=None):
     s = sub.add_parser("json", help="输出账号状态 JSON（给其它脚本用）")
     sub.add_parser("claude", help="按目录规则切号后启动 claude（参数原样透传）")
     sub.add_parser("doctor", help="检查环境，排查找不到账号等问题（不显示密钥）")
+    s = sub.add_parser("env", help="Claude Code 环境：检查 / 安装 / 清理")
+    esub = s.add_subparsers(dest="env_cmd")
+    esub.add_parser("doctor", help="同 cam doctor")
+    e = esub.add_parser("install", help="用 Anthropic 官方安装器安装 Claude Code")
+    e.add_argument("--npm", action="store_true", help="改用 npm 全局安装")
+    e.add_argument("--force", action="store_true", help="已经装了也重新安装（可用来升级）")
+    e.add_argument("-y", "--yes", action="store_true", help="不再确认")
+    e = esub.add_parser("clean", help="清理 Claude Code 环境（默认只预演，不改任何东西）")
+    e.add_argument("--logout", action="store_true", help="同时退出登录（凭据先存进 cam，随时能切回来）")
+    e.add_argument("--purge", action="store_true",
+                   help="把整个 Claude Code 配置（含会话记录、设置）移到 cam 的 env-backups 目录，相当于全新安装")
+    e.add_argument("--apply", action="store_true", help="真正执行；不加只显示将要做什么")
+    e.add_argument("--force", action="store_true", help="有 claude 正在运行时也执行")
+    e.add_argument("-y", "--yes", action="store_true", help="--purge 时不再确认")
     s = sub.add_parser("rule", help="切号规则")
     rsub = s.add_subparsers(dest="rule_cmd")
     rsub.add_parser("ls", help="列出规则")
@@ -1786,8 +2328,12 @@ def main(argv=None):
                       f"缓存读 {r['cache_read']:>12,}  合计(不含缓存读) {tot:>11,}")
         elif c == "serve":
             serve(store, "0.0.0.0" if args.lan else "127.0.0.1", args.port, args.refresh_every)
-        elif c == "doctor":
+        elif c == "doctor" or (c == "env" and args.env_cmd in (None, "doctor")):
             cmd_doctor(store)
+        elif c == "env" and args.env_cmd == "install":
+            cmd_env_install(store, args)
+        elif c == "env" and args.env_cmd == "clean":
+            cmd_env_clean(store, args)
         elif c == "rule":
             cmd_rule(store, args)
         elif c == "json":

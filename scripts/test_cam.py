@@ -171,23 +171,34 @@ class CamTest(unittest.TestCase):
         MockAnthropic.refresh_map = {}
         MockAnthropic.web_keys = {}
         MockAnthropic.cloudflare = False
+        # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有
+        self._real_procs = self.cam.running_claude_processes
+        self.cam.running_claude_processes = lambda: []
 
     def tearDown(self):
+        self.cam.running_claude_processes = self._real_procs
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ---- helpers
     def login(self, at, rt, uuid, email, expires_ms=None, sub="max"):
         """模拟用户在 Claude Code 里 /login。"""
+        self.write_creds(at, rt, expires_ms, sub)
+        with open(self.cj_path) as f:
+            cj = json.load(f)
+        cj["oauthAccount"] = oauth_account(uuid, email)
+        with open(self.cj_path, "w") as f:
+            json.dump(cj, f)
+
+    def write_creds(self, at, rt, expires_ms=None, sub="max"):
+        """只改凭据文件，不动 ~/.claude.json（模拟正在运行的 claude 刷新 token 后写回）。"""
         if expires_ms is None:
             expires_ms = int((time.time() + 3600) * 1000)
         with open(self.creds_path, "w") as f:
             json.dump(creds(at, rt, expires_ms, sub), f)
-        cj = json.load(open(self.cj_path))
-        cj["oauthAccount"] = oauth_account(uuid, email)
-        json.dump(cj, open(self.cj_path, "w"))
 
     def live(self):
-        return json.load(open(self.creds_path))["claudeAiOauth"], json.load(open(self.cj_path))
+        with open(self.creds_path) as f, open(self.cj_path) as g:
+            return json.load(f)["claudeAiOauth"], json.load(g)
 
     def run_cam(self, *args):
         return self.cam.main(list(args))
@@ -501,6 +512,290 @@ class CamTest(unittest.TestCase):
         self.assertTrue(switch_lines, lines)
         self.assertTrue(all("|" in l for l in lines if l != "---"))
 
+    # ---- 锁
+
+    def test_lock_excludes_threads_and_is_released_when_process_dies(self):
+        import subprocess
+        store = self.cam.Store()
+        with store.lock():
+            other = self.cam.FileLock(os.path.join(store.root, "accounts.lock"))
+            self.assertFalse(other.try_acquire())  # 同一进程的另一次加锁也要等
+        self.assertTrue(other.try_acquire())
+        other.release()
+        # 子进程拿着锁时被强杀：锁由系统回收，不用等 60 秒
+        code = ("import sys,time; sys.path.insert(0, sys.argv[1]); import cam; "
+                "l = cam.Store().lock(); l.__enter__(); print('locked', flush=True); time.sleep(60)")
+        p = subprocess.Popen([sys.executable, "-c", code, HERE], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(p.stdout.readline().strip(), "locked")
+            self.assertFalse(other.try_acquire())
+        finally:
+            p.kill()
+            p.wait()
+            p.stdout.close()
+        t0 = time.monotonic()
+        with store.lock():
+            pass
+        self.assertLess(time.monotonic() - t0, 2)
+
+    def test_background_work_has_single_owner(self):
+        store = self.cam.Store()
+        lease = store.background_lock()
+        self.assertTrue(lease.try_acquire())
+        try:
+            self.assertFalse(store.background_lock().try_acquire())
+            os.environ["CAM_MENU_NO_NOTIFY"] = "1"
+            sys.path.insert(0, os.path.join(HERE, "..", "extras", "swiftbar"))
+            import cam_menu
+            cam_menu = importlib.reload(cam_menu)
+            cam_menu.cam = self.cam
+            self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+            st = cam_menu.background_work(store)
+            self.assertEqual(st.get("bg_owner"), "other")
+            self.assertEqual(self.data()["accounts"], [])  # 后台任务归别人，这里没动数据
+        finally:
+            lease.release()
+        self.assertIsNone(cam_menu.background_work(store).get("bg_owner"))
+        self.assertEqual(len(self.data()["accounts"]), 1)
+
+    # ---- 账号识别：凭据和 oauthAccount 对不上时不能把 token 存错账号
+
+    def _switched_to_b(self):
+        a_id, b_id = self._two_accounts()
+        self.run_cam("switch", "A")
+        self.run_cam("switch", "B")
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")
+        return a_id, b_id
+
+    def test_old_session_writes_back_unchanged_token(self):
+        a_id, b_id = self._switched_to_b()
+        # 切换前开着的 claude 会话把 A 的凭据原样写回了；~/.claude.json 仍然写着 B
+        self.write_creds("at-A1", "rt-A1")
+        self.run_cam("ls")
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A1")
+        self.assertEqual(store.load_secret(a_id)["oauthAccount"]["emailAddress"], "a@x.com")
+        self.assertEqual(d["active"]["claude_code"], a_id)  # 实际生效的是 A
+        self.assertIn("“A”", d["live_mismatch"]["message"])
+        self.assertIn("b@x.com", d["live_mismatch"]["message"])
+        b = [a for a in d["accounts"] if a["id"] == b_id][0]
+        self.assertEqual(b["email"], "b@x.com")
+        # 重新切到 B 后恢复一致，提醒消失
+        self.run_cam("switch", "B")
+        self.assertNotIn("live_mismatch", self.data())
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")
+
+    def test_old_session_writes_back_refreshed_token(self):
+        a_id, b_id = self._switched_to_b()
+        # 旧会话刷新了 A 的 token 后写回：指纹对不上，靠 profile 接口认出是 A
+        MockAnthropic.tokens = {"at-A2": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}}
+        self.write_creds("at-A2", "rt-A2")
+        self.run_cam("ls")
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual(d["active"]["claude_code"], a_id)
+        self.assertIn("live_mismatch", d)
+
+    def test_new_login_before_claude_json_updated(self):
+        a_id, b_id = self._two_accounts()
+        # 新登录 C：凭据已写入，~/.claude.json 还没来得及更新
+        MockAnthropic.tokens = {"at-C1": {"u5": 1.0, "u7": 1.0, "email": "c@x.com", "plan": "pro"}}
+        self.write_creds("at-C1", "rt-C1")
+        self.run_cam("ls")
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        c = [a for a in d["accounts"] if a.get("email") == "c@x.com"]
+        self.assertEqual(len(c), 1)
+        self.assertEqual(store.load_secret(c[0]["id"])["claudeAiOauth"]["refreshToken"], "rt-C1")
+
+    def test_usage_refuses_credentials_of_another_account(self):
+        a_id, b_id = self._two_accounts()
+        # A 保存的 token 实际上是 B 的（以前版本可能存错过）
+        store = self.cam.Store()
+        sec = store.load_secret(a_id)
+        sec["claudeAiOauth"]["accessToken"] = "at-B1"
+        store.save_secret(a_id, sec)
+        MockAnthropic.tokens = {"at-B1": {"u5": 5.0, "u7": 5.0, "email": "b@x.com", "plan": "pro"}}
+        self.run_cam("usage")
+        a = [x for x in self.data()["accounts"] if x["id"] == a_id][0]
+        self.assertIn("b@x.com", a["usage"]["error"])
+        self.assertEqual(a["email"], "a@x.com")
+
+    # ---- token 刷新
+
+    def test_background_refresh_never_rotates_tokens(self):
+        past = int((time.time() - 60) * 1000)
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        d = self.cam.refresh_usage(self.cam.Store(), allow_token_refresh=False)
+        self.assertNotIn(("POST", "/v1/oauth/token", "rt-A1"), MockAnthropic.calls)
+        self.assertIn("过期", d["accounts"][0]["usage"]["error"])
+
+    def test_refresh_rechecks_active_account_inside_lock(self):
+        past = int((time.time() - 60) * 1000)
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        a_id = self.data()["accounts"][0]["id"]
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        store = self.cam.Store()
+        out = {}
+        with store.lock():
+            t = threading.Thread(target=lambda: out.setdefault("tok", self.cam.ensure_fresh_token(store, a_id)))
+            t.start()
+            time.sleep(0.3)  # 线程发现 A 过期，正在等锁
+            # 等锁期间切到了 A（相当于 switch_code_account 做的事）
+            d = store.load()
+            d["active"]["claude_code"] = a_id
+            store.save(d)
+            self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
+        t.join(10)
+        self.assertEqual(out["tok"][0], "at-A1")  # 当前账号：只读，不刷新
+        self.assertNotIn(("POST", "/v1/oauth/token", "rt-A1"), MockAnthropic.calls)
+
+    def test_invalid_refresh_token_says_relogin(self):
+        past = int((time.time() - 60) * 1000)
+        self.login("at-A1", "rt-dead", "uuid-A", "a@x.com", expires_ms=past)
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        self.run_cam("usage")
+        self.assertIn("重新登录", self.data()["accounts"][0]["usage"]["error"])
+
+    # ---- ~/.claude.json
+
+    @unittest.skipIf(os.name == "nt", "Windows 上创建符号链接需要权限")
+    def test_claude_json_symlink_is_kept(self):
+        dot = os.path.join(self.tmp, "dotfiles")
+        os.makedirs(dot)
+        target = os.path.join(dot, "claude.json")
+        shutil.move(self.cj_path, target)
+        os.symlink(target, self.cj_path)
+        self._two_accounts()
+        self.run_cam("switch", "A")
+        self.assertTrue(os.path.islink(self.cj_path))
+        with open(target) as f:
+            self.assertEqual(json.load(f)["oauthAccount"]["emailAddress"], "a@x.com")
+
+    def test_claude_json_concurrent_write_is_merged(self):
+        calls = []
+
+        def mutate(cj):
+            calls.append(1)
+            if len(calls) == 1:
+                # 我们读完之后、写入之前，Claude Code 改了文件
+                with open(self.cj_path) as f:
+                    other = json.load(f)
+                other["projects"]["/work/new"] = {"allowedTools": []}
+                with open(self.cj_path, "w") as f:
+                    json.dump(other, f)
+            cj["oauthAccount"] = {"emailAddress": "z@x.com"}
+
+        self.cam.update_json_file(self.cj_path, mutate)
+        with open(self.cj_path) as f:
+            cj = json.load(f)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("/work/new", cj["projects"])  # Claude Code 的改动还在
+        self.assertEqual(cj["oauthAccount"]["emailAddress"], "z@x.com")
+        self.assertEqual(cj["numStartups"], 42)
+
+    # ---- 环境检查与清理
+
+    def _fake_claude_env(self):
+        cfg = os.path.join(self.tmp, ".claude")
+        for d in ("cache", "shell-snapshots", "statsig", "commands", "skills"):
+            os.makedirs(os.path.join(cfg, d), exist_ok=True)
+        for f in ("cache/x", "shell-snapshots/s.sh", "statsig/a", "commands/c.md", "skills/s.md",
+                  "settings.json", "CLAUDE.md", "projects/proj1/s.jsonl", ".last-cleanup"):
+            with open(os.path.join(cfg, f), "w") as fh:
+                fh.write("{}" if f.endswith(".json") else "x")
+        return cfg
+
+    def test_env_clean_cache_is_dry_run_by_default_and_whitelisted(self):
+        cfg = self._fake_claude_env()
+        self.assertEqual(self.run_cam("env", "clean"), 0)
+        self.assertTrue(os.path.exists(os.path.join(cfg, "cache", "x")))  # 预演不删
+        self.assertEqual(self.run_cam("env", "clean", "--apply"), 0)
+        for gone in ("cache", "shell-snapshots", "statsig", ".last-cleanup"):
+            self.assertFalse(os.path.exists(os.path.join(cfg, gone)), gone)
+        for kept in ("commands/c.md", "skills/s.md", "settings.json", "CLAUDE.md", "projects/proj1/s.jsonl"):
+            self.assertTrue(os.path.exists(os.path.join(cfg, kept)), kept)
+
+    def test_env_clean_refuses_while_claude_runs(self):
+        self._fake_claude_env()
+        self.cam.running_claude_processes = lambda: [(123, "claude")]
+        self.assertEqual(self.run_cam("env", "clean", "--apply"), 1)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, ".claude", "cache")))
+        self.assertEqual(self.run_cam("env", "clean", "--apply", "--force"), 0)
+
+    def test_env_clean_logout_keeps_projects_and_can_switch_back(self):
+        self._fake_claude_env()
+        a_id, b_id = self._two_accounts()
+        self.write_creds("at-B2", "rt-B2")  # Claude Code 刚刷新过 B
+        self.assertEqual(self.run_cam("env", "clean", "--logout", "--apply"), 0)
+        self.assertFalse(os.path.exists(self.creds_path))
+        with open(self.cj_path) as f:
+            cj = json.load(f)
+        self.assertNotIn("oauthAccount", cj)
+        self.assertEqual(cj["projects"], {"/work/x": {"allowedTools": ["Bash"]}})
+        self.assertIsNone(self.data()["active"]["claude_code"])
+        self.assertEqual(self.cam.Store().load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B2")
+        self.assertEqual(self.run_cam("switch", "B"), 0)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B2")
+
+    def test_env_clean_purge_moves_everything_to_backup(self):
+        cfg = self._fake_claude_env()
+        a_id, _ = self._two_accounts()
+        self.assertEqual(self.run_cam("env", "clean", "--purge", "--apply"), 1)  # 非交互必须 -y
+        self.assertTrue(os.path.isdir(cfg))
+        self.assertEqual(self.run_cam("env", "clean", "--purge", "--apply", "-y"), 0)
+        self.assertFalse(os.path.exists(cfg))
+        self.assertFalse(os.path.exists(self.cj_path))
+        root = os.path.join(self.tmp, ".claude-accounts", "env-backups")
+        dest = os.path.join(root, os.listdir(root)[0])
+        self.assertTrue(os.path.exists(os.path.join(dest, "claude-config", "projects", "proj1", "s.jsonl")))
+        with open(os.path.join(dest, "claude.json")) as f:
+            self.assertEqual(json.load(f)["numStartups"], 42)
+        self.assertEqual(len(self.data()["accounts"]), 2)  # cam 的数据不动
+
+    def test_doctor_reports_overrides_and_duplicate_installs(self):
+        import contextlib
+        import io
+        bins = []
+        for name in ("a", "b"):
+            d = os.path.join(self.tmp, "bin-" + name)
+            os.makedirs(d)
+            p = os.path.join(d, "claude.cmd" if os.name == "nt" else "claude")
+            with open(p, "w") as f:
+                f.write("#!/bin/sh\necho 9.9.9\n")
+            os.chmod(p, 0o755)
+            bins.append(d)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = os.pathsep.join(bins)  # 不带系统 PATH，免得算上本机真装的 claude
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-x"
+        with open(os.path.join(self.tmp, ".claude", "settings.json"), "w") as f:
+            json.dump({"apiKeyHelper": "/bin/echo"}, f)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                self.cam.cmd_doctor(self.cam.Store())
+                self.cam.cmd_env_install(self.cam.Store(), self.cam.argparse.Namespace(force=False, npm=False, yes=False))
+        finally:
+            os.environ["PATH"] = old_path
+            os.environ.pop("ANTHROPIC_API_KEY")
+        out = buf.getvalue()
+        self.assertIn("ANTHROPIC_API_KEY", out)
+        self.assertIn("apiKeyHelper", out)
+        self.assertIn("2 份 claude", out)
+        self.assertIn("已经装好了", out)
+        self.assertNotIn("sk-ant-x", out)
+
     def test_http_api(self):
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
         self.run_cam("import", "--label", "A")
@@ -555,6 +850,66 @@ class CamTest(unittest.TestCase):
             self.assertEqual(call("PUT", "/api/rules", {"rules": [{"type": "dir", "path": "", "account": a_id}]})[0], 400)
         finally:
             srv.shutdown()
+
+
+SHARED = os.path.join(HERE, "..", "tests", "shared")
+
+
+def shared(name):
+    with open(os.path.join(SHARED, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+class SharedFixtureTest(unittest.TestCase):
+    """tests/shared 里的数据 Rust 版（desktop/src-tauri/engine/tests）也跑一遍，两边规则必须一致。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, HERE)
+        import cam
+        cls.cam = cam
+
+    def test_identify(self):
+        fx = shared("identify.json")
+        data = {"accounts": fx["accounts"]}
+        for c in fx["identify"]:
+            creds = {"claudeAiOauth": {"refreshToken": c["refresh_token"]}} if c["refresh_token"] else {}
+            acc = self.cam.identify_code_account(data, c["oauth_account"], creds)
+            self.assertEqual(acc["id"] if acc else None, c["expect"], c["name"])
+        for c in fx["agrees"]:
+            self.assertEqual(self.cam.identity_agrees(c["account"], c["uuid"], c["email"]), c["expect"], c["name"])
+
+    def test_find_account(self):
+        fx = shared("find_account.json")
+        data = {"accounts": fx["accounts"]}
+        for c in fx["cases"]:
+            if c["expect"] is None:
+                with self.assertRaises(self.cam.CamError, msg=c["name"]):
+                    self.cam.find_account(data, c["key"])
+            else:
+                self.assertEqual(self.cam.find_account(data, c["key"])["id"], c["expect"], c["name"])
+
+    def test_rules(self):
+        import datetime as dt
+        fx = shared("rules.json")
+        data = {"accounts": fx["accounts"]}
+        for c in fx["validate"]:
+            if c["expect"] is None:
+                with self.assertRaises(self.cam.CamError, msg=c["name"]):
+                    self.cam.validate_rules(data, c["input"])
+            else:
+                self.assertEqual(self.cam.validate_rules(data, c["input"]), c["expect"], c["name"])
+        data["rules"] = fx["match_rules"]
+        for c in fx["match"]:
+            r = self.cam.match_time_rule(data, dt.datetime.fromisoformat(c["at"]))
+            self.assertEqual(r["id"] if r else None, c["expect"], c["name"])
+
+    def test_renewals(self):
+        import datetime as dt
+        for c in shared("renewals.json")["cases"]:
+            data = {"accounts": [{"id": "x", "manual": dict(c["manual"])}]}
+            self.cam.roll_renewals(data, dt.date.fromisoformat(c["today"]))
+            self.assertEqual(data["accounts"][0]["manual"], c["expect"], c["name"])
 
 
 if __name__ == "__main__":
