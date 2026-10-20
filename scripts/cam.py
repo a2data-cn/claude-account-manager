@@ -1530,8 +1530,94 @@ def save_rules(store, body):
         return rules_view(data)
 
 
+RISK_PROMPT_DEFAULTS = {"risk_prompt": True, "risk_confirm_below": 60, "risk_strong_below": 30}
+
+
+def risk_prefs(data):
+    p = dict(RISK_PROMPT_DEFAULTS)
+    p.update({k: v for k, v in (data.get("prefs") or {}).items() if k in RISK_PROMPT_DEFAULTS})
+    return p
+
+
+def save_risk_prefs(store, prompt=None, confirm=None, strong=None):
+    with store.lock():
+        data = store.load()
+        prefs = data.setdefault("prefs", {})
+        cur = risk_prefs(data)
+        confirm = cur["risk_confirm_below"] if confirm is None else confirm
+        strong = cur["risk_strong_below"] if strong is None else strong
+        for name, v in (("confirm", confirm), ("strong", strong)):
+            if not isinstance(v, int) or not 0 <= v <= 100:
+                raise CamError(f"{name} 阈值应为 0–100 的整数")
+        if strong > confirm:
+            raise CamError("strong 阈值不能高于 confirm 阈值")
+        prefs["risk_confirm_below"], prefs["risk_strong_below"] = confirm, strong
+        if prompt is not None:
+            prefs["risk_prompt"] = bool(prompt)
+        store.save(data)
+        return risk_prefs(data)
+
+
+def launch_tier(score, region_status_, prefs):
+    """启动前的提醒档位：ok（一行带过）/ remind（打印提醒）/ confirm（问 y/N）/ strong（要输入“继续”）。
+    出口不在支持名单内时不看分数，直接最高档。"""
+    if region_status_ == "unsupported" or score < prefs["risk_strong_below"]:
+        return "strong"
+    if score < prefs["risk_confirm_below"]:
+        return "confirm"
+    return "remind" if score < 90 else "ok"
+
+
+def risk_prompt_before_launch(store, ask=input, interactive=None):
+    """启动 claude 前把环境风险打出来；分数低时让用户确认。只提醒、只问，不拦：返回 False 表示用户自己选择了不启动。
+
+    CAM_NO_RISK_PROMPT=1 或 cam risk --off 可关掉。非交互环境（脚本、CI）只打印不问。
+    """
+    if os.environ.get("CAM_NO_RISK_PROMPT"):
+        return True
+    data = store.load()
+    prefs = risk_prefs(data)
+    if not prefs["risk_prompt"]:
+        return True
+    if not cached_region_loc(data):  # 一小时内没检测过就现场测一次（一两秒）
+        try:
+            check_region(store, max_age=REGION_FRESH_SECS)
+            data = store.load()
+        except Exception as e:  # noqa: BLE001  检测失败不影响启动
+            print(color(f"[cam] 环境检测失败：{e}", "y"), file=sys.stderr)
+    risks = risk_items(data)
+    sc = risk_score(risks)
+    tier = launch_tier(sc["score"], region_view(data)["status"], prefs)
+    err = sys.stderr
+    if tier == "ok":
+        print(color(f"[cam] 环境风险 {sc['score']}/100：{sc['label']}", "d"), file=err)
+        return True
+    print(color(f"[cam] 环境风险 {sc['score']}/100：{sc['label']}", "r" if tier == "strong" else "y"), file=err)
+    for r in risks:
+        if r["level"] in ("warn", "bad"):
+            print(color(f"[cam]   ! {r['text']}。{r['advice']}", "y"), file=err)
+    print(color("[cam]   cam doctor 查看完整的服务检查；cam risk 调整提醒阈值", "d"), file=err)
+    if tier == "remind":
+        return True
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if not interactive:
+        print(color("[cam] 非交互环境，不能确认，照常启动", "d"), file=err)
+        return True
+    try:
+        if tier == "confirm":
+            go = ask("[cam] 是否继续启动 claude？[y/N]：").strip().lower() == "y"
+        else:
+            go = ask("[cam] 不建议在当前环境使用。确认继续请输入「继续」，直接回车取消：").strip() == "继续"
+    except EOFError:
+        go = False
+    if not go:
+        print(color("[cam] 已取消启动", "d"), file=err)
+    return go
+
+
 def run_claude(store, args):
-    """按目录规则切号后启动 claude，参数原样透传。"""
+    """按目录规则切号后启动 claude，参数原样透传。启动前按环境风险提醒并（分数低时）让用户确认。"""
     data = store.load()
     r = match_dir_rule(data, os.getcwd())
     if r:
@@ -1544,6 +1630,8 @@ def run_claude(store, args):
     exe = shutil.which("claude")
     if not exe:
         raise CamError("找不到 claude 命令，请确认 Claude Code 已安装")
+    if not risk_prompt_before_launch(store):
+        return 1
     if IS_WIN:
         return subprocess.call([exe] + args)
     os.execv(exe, [exe] + args)
@@ -2296,6 +2384,28 @@ def cmd_set(store, args):
         raise CamError("没有要修改的内容，见 cam set -h")
     acc = update_manual(store, args.account, fields)
     print(f"已更新 {acc['label']}")
+
+
+def cmd_risk(store, args):
+    """查看 / 设置 cam claude 启动前的风险提醒档位。"""
+    if args.on or args.off or args.confirm is not None or args.strong is not None:
+        p = save_risk_prefs(store, prompt=True if args.on else False if args.off else None,
+                            confirm=args.confirm, strong=args.strong)
+        print("已保存。", end="")
+    data = store.load()
+    p = risk_prefs(data)
+    sc = risk_score(risk_items(data))
+    reg = region_view(data)
+    state = "开" if p["risk_prompt"] else "关"
+    print(f"启动前风险提醒：{state}（CAM_NO_RISK_PROMPT=1 也可临时关掉）")
+    print(f"  90 分以上：一行带过，直接启动")
+    print(f"  {p['risk_confirm_below']}–89 分：打印提醒，直接启动")
+    print(f"  {p['risk_strong_below']}–{p['risk_confirm_below'] - 1} 分：问“是否继续 [y/N]”")
+    print(f"  {p['risk_strong_below']} 分以下，或出口不在支持名单内：要输入“继续”才启动")
+    if reg["status"]:
+        print(f"当前（据后台缓存）：{sc['score']}/100，{sc['label']}；档位 {launch_tier(sc['score'], reg['status'], p)}")
+    else:
+        print("当前：还没有检测过，运行 cam doctor 或 cam claude 时会检测")
 
 
 def cmd_rule(store, args):
@@ -3344,6 +3454,11 @@ def main(argv=None):
     e.add_argument("--apply", action="store_true", help="真正执行；不加只显示将要做什么")
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也执行")
     e.add_argument("-y", "--yes", action="store_true", help="--purge 时不再确认")
+    s = sub.add_parser("risk", help="cam claude 启动前的环境风险提醒档位（只提醒和确认，不拦截）")
+    s.add_argument("--confirm", type=int, metavar="分", help="低于这个分数时问“是否继续 [y/N]”（默认 60）")
+    s.add_argument("--strong", type=int, metavar="分", help="低于这个分数时要输入“继续”才启动（默认 30）")
+    s.add_argument("--on", action="store_true", help="开启启动前提醒（默认开）")
+    s.add_argument("--off", action="store_true", help="关闭启动前提醒")
     s = sub.add_parser("rule", help="切号规则")
     rsub = s.add_subparsers(dest="rule_cmd")
     rsub.add_parser("ls", help="列出规则")
@@ -3432,6 +3547,8 @@ def main(argv=None):
             cmd_env_clean(store, args)
         elif c == "rule":
             cmd_rule(store, args)
+        elif c == "risk":
+            cmd_risk(store, args)
         elif c == "json":
             print(json.dumps(public_state(store, store.load()), ensure_ascii=False, indent=2))
         return 0

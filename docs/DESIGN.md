@@ -70,12 +70,13 @@
   { "id": "r2", "type": "dir",  "path": "~/work", "account": "a1b2c3" }
 ],
 "rule_state": { "time_rule": "r1" },   // 上一次检查时命中的时间规则
-"prefs": { "alert_threshold": 90 }
+"prefs": { "alert_threshold": 90, "risk_prompt": true, "risk_confirm_below": 60, "risk_strong_below": 30 }
 ```
 
 - 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。进入时有 `claude` 会话在跑就登记成 `pending_switch`（见“切换流程”），会话退出后再切；时间段过了还没切成就作废。
 - 目录规则：`cam claude` 启动时按当前目录做最长前缀匹配，切换后再执行 `claude`。
 - 额度提醒：当前账号 5 小时额度 ≥ 阈值时提醒一次（同一个额度窗口只提醒一次），附上多久后重置。**不会自动切换，也不推荐换哪个号。**
+- 启动前风险提醒（只在 `cam claude`）：`launch_tier(score, region_status, prefs)` 给出 ok / remind / confirm / strong 四档——≥90 一行带过；< 90 打印提醒；< `risk_confirm_below`（默认 60）问 y/N；< `risk_strong_below`（默认 30）或出口不在支持名单内要输入"继续"。非交互环境只打印。`risk_prompt: false` 或 `CAM_NO_RISK_PROMPT=1` 关掉。**不是拦截**：每一档都是用户自己选择继续或取消。
 - 自动发现：后台检测凭据文件变化（macOS 每 30 秒查一次钥匙串），发现没见过的账号就自动导入。
 
 ## 三类账号

@@ -517,6 +517,68 @@ class CamTest(unittest.TestCase):
         self.assertEqual(open(out).read().splitlines(), ["--resume", "-p", "hi there"])
         self.assertEqual(self.live()[0]["accessToken"], "at-A1")
 
+    def test_launch_risk_prompt_tiers(self):
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        asked = []
+
+        def ask_with(answer):
+            def ask(prompt):
+                asked.append(prompt)
+                return answer
+            return ask
+
+        # 100 分：不问，直接启动
+        self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
+        self.assertEqual(asked, [])
+        self.assertEqual(self.data()["region"]["loc"], "US")  # 顺手做了一次检测并缓存
+        # 出口不在名单：不看分数，要输入“继续”
+        MockAnthropic.trace_loc = "CN"
+        self.cam.check_region(store, max_age=0)
+        self.assertFalse(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
+        self.assertFalse(self.cam.risk_prompt_before_launch(store, ask=ask_with("y"), interactive=True))
+        self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with("继续"), interactive=True))
+        self.assertIn("输入「继续」", asked[-1])
+        # 非交互：只打印，照常启动
+        self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=False))
+        # 关掉提醒 / 环境变量临时关掉
+        self.assertEqual(self.run_cam("risk", "--off"), 0)
+        self.assertFalse(self.cam.risk_prefs(self.data())["risk_prompt"])
+        self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
+        self.assertEqual(self.run_cam("risk", "--on"), 0)
+        os.environ["CAM_NO_RISK_PROMPT"] = "1"
+        try:
+            self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
+        finally:
+            os.environ.pop("CAM_NO_RISK_PROMPT")
+        # 出口回到美国但时区指向香港：75 分 → 60–89 档只提醒不问；把 confirm 阈值调到 80 后变成要问 y/N
+        MockAnthropic.trace_loc = "US"
+        self.cam.check_region(store, max_age=0)
+        os.environ["CAM_TEST_TZ"] = "Asia/Hong_Kong=HK"
+        try:
+            sc = self.cam.risk_score(self.cam.risk_items(self.data()))
+            self.assertEqual(sc["score"], 40)  # 时区指向不支持地区 25 + 出口变化 15 + 当前账号两地使用 20
+            prefs = self.cam.risk_prefs(self.data())
+            self.assertEqual(self.cam.launch_tier(60, "supported", prefs), "remind")
+            self.assertEqual(self.cam.launch_tier(59, "supported", prefs), "confirm")
+            self.assertEqual(self.cam.launch_tier(29, "supported", prefs), "strong")
+            self.assertEqual(self.cam.launch_tier(100, "unsupported", prefs), "strong")
+            self.assertEqual(self.cam.launch_tier(95, "supported", prefs), "ok")
+            # 40 分：默认 60 以下问 y/N，默认不继续
+            asked.clear()
+            self.assertFalse(self.cam.risk_prompt_before_launch(store, ask=ask_with("n"), interactive=True))
+            self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with("Y"), interactive=True))
+            self.assertIn("[y/N]", asked[-1])
+            # 阈值调到 confirm 30 / strong 20 后，40 分只提醒不问
+            self.assertEqual(self.run_cam("risk", "--confirm", "30", "--strong", "20"), 0)
+            asked.clear()
+            self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
+            self.assertEqual(asked, [])
+            self.assertEqual(self.run_cam("risk", "--confirm", "70", "--strong", "80"), 1)  # strong 不能高于 confirm
+            self.assertEqual(self.run_cam("risk"), 0)
+        finally:
+            os.environ["CAM_TEST_TZ"] = "America/New_York=US"
+
     def test_menubar_plugin(self):
         os.environ["CAM_MENU_NO_NOTIFY"] = "1"
         os.environ["CAM_MENU_REFRESH_MIN"] = "0"
