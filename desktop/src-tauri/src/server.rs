@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use tiny_http::{Header, Request, Response, Server};
 
 const PANEL: &str = include_str!("../../../web/panel.html");
-const MANIFEST: &str = r##"{"name":"Claude 账号管理","short_name":"Claude 账号","start_url":"/","display":"standalone","background_color":"#E9EDF2","theme_color":"#E9EDF2"}"##;
+const MANIFEST: &str = r##"{"name":"Claude 账号管理","short_name":"Claude 账号","start_url":"/","display":"standalone","background_color":"#F4F2EC","theme_color":"#F4F2EC"}"##;
 
 pub type OnChange = Arc<dyn Fn() + Send + Sync>;
 

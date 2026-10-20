@@ -2209,7 +2209,7 @@ def make_handler(store, token):
 
 
 MANIFEST = {"name": "Claude 账号管理", "short_name": "Claude 账号", "start_url": "/", "display": "standalone",
-            "background_color": "#f5f2ea", "theme_color": "#f5f2ea"}
+            "background_color": "#F4F2EC", "theme_color": "#F4F2EC"}
 
 
 def lan_ips():

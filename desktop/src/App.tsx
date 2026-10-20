@@ -14,6 +14,7 @@ import {
 import { LocalUsage } from "./components/LocalUsage";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Privacy } from "./components/Privacy";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { Rules } from "./components/Rules";
 import type { Account, ServiceCheckItem, State, SwitchResult } from "./types";
 
@@ -361,6 +362,7 @@ export default function App() {
             </button>
           </nav>
         )}
+        <ThemeToggle toast={toast} />
         {tab === "accounts" && (
           <button className="btn" disabled={busy === "all"} onClick={() => refresh()}>
             {busy === "all" ? "刷新中…" : "刷新用量"}

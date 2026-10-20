@@ -3,7 +3,7 @@ import { api } from "../api";
 import { fmtTokens } from "../format";
 import type { Account, LocalRow } from "../types";
 
-const COLORS = ["var(--ok)", "var(--live)", "var(--warn)", "#8B6BD6", "#2D9BB0", "#C0568F"];
+const COLORS = ["var(--accent)", "var(--ok)", "var(--live)", "var(--violet)", "var(--warn)", "#2D9BB0"]; // 和手机面板同一套
 
 export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: string }) {
   const [rows, setRows] = useState<LocalRow[] | null>(null);
