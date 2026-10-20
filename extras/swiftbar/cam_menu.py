@@ -301,10 +301,12 @@ def render(store, st, out=print):
     pend = cam.pending_switch_view(data)
     if pend:
         out(f"⏳ {esc(pend['message'])[:90]} | size=12 color=#5A6676,#94A0AF")
-    reg = cam.region_view(data)
-    if reg["status"] == "unsupported":
-        out(f"⚠ {esc(reg['message'])[:90]} | size=12 color=#BF3B33,#E06C66")
-        out(f"   {esc(reg['advice'])[:90]} | size=11 color=#5A6676,#94A0AF")
+    for r in cam.risk_items(data):  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
+        if r["level"] not in ("warn", "bad"):
+            continue
+        out(f"⚠ {esc(r['text'])[:90]} | size=12 color=#BF3B33,#E06C66")
+        if r["advice"]:
+            out(f"   {esc(r['advice'])[:90]} | size=11 color=#5A6676,#94A0AF")
     if st.get("last_error"):
         out(f"⚠ {esc(st['last_error'])[:90]} | size=12 color=#B87A08,#E0A93B")
 

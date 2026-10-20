@@ -55,6 +55,7 @@ export interface State {
   warning?: string | null; // 后端提醒，比如凭据和 ~/.claude.json 对不上
   pending_switch?: PendingSwitch | null; // 已记录、等 claude 会话结束后由后台执行的切换
   region?: RegionInfo | null; // 后台上次检测到的出口地区，只用于提示
+  risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
 }
 
 export interface PendingSwitch {
@@ -75,9 +76,11 @@ export interface SwitchResult {
   running_claude?: number;
   account?: string;
   label?: string;
+  risks?: ServiceCheckItem[]; // 切换时的风险提醒（warn / bad），不影响切换本身
 }
 
 export interface ServiceCheckItem {
+  kind?: string; // summary / dns / region / api / web / proxy / vpn / region_change / warp / clock / status / timezone / account_regions / accounts
   level: "ok" | "bad" | "warn" | "info";
   text: string;
   advice: string; // 这意味着什么 / 建议怎么做，可能为空
@@ -90,6 +93,11 @@ export interface RegionInfo {
   checked_at: string | null;
   message: string;
   advice: string;
+  warp?: boolean; // 请求经过了 Cloudflare WARP / Zero Trust
+  prev_loc?: string | null; // 上一次检测到的不同出口地区（24 小时内变过）
+  changed_at?: string | null;
+  org?: string | null; // 出口 IP 的运营商
+  city?: string | null;
 }
 
 export interface LocalRow {

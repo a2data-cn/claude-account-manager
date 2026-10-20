@@ -132,6 +132,16 @@
 - **`~/.claude.json`**：读出来改完，写之前再读一次，内容变了（Claude Code 刚写过）就基于新内容重新改；写完再读回确认 `oauthAccount` 是想要的值。最多重试 5 次，还不行就提示先退出正在运行的 claude。
 - **符号链接**：`~/.claude.json` 等文件是符号链接（比如用 dotfiles 管理）时，写到链接指向的文件，保留链接本身。
 
+## 服务检查与环境风险提示（只提示，不拦）
+
+`cam doctor` / `GET /api/service-check` 实测服务，并把使用环境里的风险点逐项列出，每项带 `kind`、`level`、`text`、`advice`。所有判断只用来提示，**不拦任何操作**，是否继续由用户决定。
+
+- 出口地区：`claude.ai/cdn-cgi/trace`（连不上退到 `www.cloudflare.com`）的 `loc`，对照 `SUPPORTED_REGIONS`（Anthropic 官网公布的支持国家/地区）+ `REGION_DEPENDENCIES`（属地按所属国家看待）。同一个 trace 还给出 `warp`（经过 Cloudflare WARP / Zero Trust）和 `ts`（算本机时钟偏差）。再查 `speed.cloudflare.com/meta`（拒绝时退到 `ipinfo.io/json`，`parse_exit_meta` 统一两种格式）拿出口 IP 的 `asn`、运营商（`org`）、城市和国家（`meta_loc`，和 trace 的 `loc` 交叉核对）。
+- 后台缓存：持有后台租约的进程每隔几分钟调一次 `check_region`，把结果写进 `accounts.json` 的 `region`（`loc`、`ip`、`colo`、`ms`、`warp`、`skew`、`checked_at`，出口换了国家时另记 `prev_loc`、`changed_at`）和 `status_page`（`status.anthropic.com/api/v2/status.json` 的 `indicator`、`description`；连不上时删掉这个字段），并给当前账号的 `regions`（`[{"loc", "at"}]`，最多 8 个）记一笔。切换账号时也用一小时内的缓存给目标账号记一笔。
+- `risk_items(data)` 不联网，只看缓存和本机设置：出口不在名单（warn）、24 小时内出口变化（warn）、两个接口看到的国家不一致（warn）、运营商像云服务商 / 机房（`HOSTING_WORDS`，warn）、WARP（info）、时钟偏差超过 120 秒（warn）、官方状态页有故障（minor → warn，major / critical → bad）、系统时区指向的国家和出口不一致（指向不支持地区 → warn，否则 info；时区来自 `TZ` / `/etc/localtime` / `tzutil`，国家来自 tzdata 的 `zone1970.tab`）、系统语言 / 区域指向的国家和出口不一致（同上；来自 `AppleLocale` / `Get-Culture` / `LANG`）、当前账号 7 天内多地区使用（warn）、本机有 2 个以上 Claude Code 账号（info）。`/api/state` 的 `risks` 就是它，三个界面把 warn / bad 常显在顶部，`cam`、`cam switch` 和切换接口也会带上。
+- 服务检查另外实测：DNS、`api.anthropic.com`（有登录就用当前登录）、`claude.ai`（不带登录，识别人机验证页）、代理（环境变量 + `scutil --proxy` / 注册表 `Internet Settings` / GNOME `gsettings`）、VPN（默认路由的接口名或适配器描述像隧道：`route -n get default` / `ip route show default` / `Get-NetRoute`）。`device` 列出系统和架构（设备环境信息只列出，不改动、不伪装）。最后一条 `scope` 说明检测范围：只有本机能看到的信号，账号侧的信号看不到，所以“没有发现风险点”不等于一定合规。
+- 测试钩子：`CAM_STATUS_URL`、`CAM_CF_META_URL`、`CAM_IPINFO_URL`、`CAM_CLAUDE_WEB_BASE`、`CAM_TEST_TZ="Asia/Hong_Kong=HK"`、`CAM_TEST_LOCALE="zh_CN"`、`CAM_TEST_ROUTE_IF="utun4"`。
+
 ## HTTP API
 
 所有请求需要 `Authorization: Bearer <server-token>`（或首次访问 `?t=<token>`）。
@@ -139,12 +149,12 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | Web 面板 |
-| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`），只用于提示 |
+| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），前端把 warn / bad 的常显在顶部；都只用于提示 |
 | POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
-| POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup` |
+| POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup`。每种返回都带 `risks`（warn / bad 的风险提示），只提醒不拦 |
 | DELETE | `/api/pending-switch` | 取消登记中的等待切换，返回新的 state |
-| GET | `/api/service-check` | `{"items": [{"level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论，然后是 DNS、出口地区（对照 Anthropic 官方支持名单）、api.anthropic.com、claude.ai、代理，每项带建议；同 `cam doctor` 的服务检查，要几秒钟。只检测和提示，不干预任何操作 |
+| GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。只检测和提示，不干预任何操作 |
 | POST | `/api/accounts/{id}/open` | 在电脑上打开该网页账号的浏览器窗口 |
 | PATCH | `/api/accounts/{id}` | 修改 `label` 和 `manual.*` |
 | DELETE | `/api/accounts/{id}` | 删除账号（凭据移入 backups，不直接销毁） |

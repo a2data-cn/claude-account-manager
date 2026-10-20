@@ -28,6 +28,11 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     web_keys = {}
     cloudflare = False
     trace_loc = "US"
+    trace_warp = False
+    trace_ts_offset = 0  # 服务器时间相对本机的偏差（秒）
+    meta_org = "Comcast Cable Communications, LLC"  # /meta 返回的运营商
+    meta_country = None  # /meta 返回的国家，None 表示和 trace 一致
+    status_indicator = "none"  # 官方状态页：none / minor / major / critical
 
     def log_message(self, *a):
         pass
@@ -89,7 +94,15 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
                 return
         auth = (self.headers.get("Authorization") or "")[7:]
         if self.path == "/cdn-cgi/trace":
-            return self._send_html(200, f"fl=1\nip=1.2.3.4\nloc={self.trace_loc}\ncolo=SJC\n")
+            return self._send_html(200, f"fl=1\nip=1.2.3.4\nts={time.time() + self.trace_ts_offset:.3f}\n"
+                                        f"loc={self.trace_loc}\ncolo=SJC\nwarp={'on' if self.trace_warp else 'off'}\n")
+        if self.path == "/meta":
+            return self._send(200, {"clientIp": "1.2.3.4", "asn": 7922, "asOrganization": self.meta_org, "city": "San Jose",
+                                    "region": "California", "country": self.meta_country or self.trace_loc})
+        if self.path == "/status.json":
+            desc = {"none": "All Systems Operational", "minor": "Degraded Performance", "major": "Partial System Outage",
+                    "critical": "Major System Outage"}[self.status_indicator]
+            return self._send(200, {"status": {"indicator": self.status_indicator, "description": desc}})
         if self.path == "/api/oauth/usage":
             who = self.tokens.get(auth)
             if not who:
@@ -147,6 +160,11 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_API_BASE"] = base
         os.environ["CAM_CLAUDE_WEB_BASE"] = base
         os.environ["CAM_TOKEN_URLS"] = base + "/v1/oauth/token"
+        os.environ["CAM_STATUS_URL"] = base + "/status.json"
+        os.environ["CAM_CF_META_URL"] = base + "/meta"
+        os.environ["CAM_TEST_LOCALE"] = "en_US"
+        os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
+        os.environ["CAM_TEST_ROUTE_IF"] = ""
         os.environ["CAM_NO_KEYCHAIN"] = "1"
         os.environ["NO_COLOR"] = "1"
         for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
@@ -177,6 +195,11 @@ class CamTest(unittest.TestCase):
         MockAnthropic.web_keys = {}
         MockAnthropic.cloudflare = False
         MockAnthropic.trace_loc = "US"
+        MockAnthropic.trace_warp = False
+        MockAnthropic.trace_ts_offset = 0
+        MockAnthropic.status_indicator = "none"
+        MockAnthropic.meta_org = "Comcast Cable Communications, LLC"
+        MockAnthropic.meta_country = None
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
@@ -797,7 +820,7 @@ class CamTest(unittest.TestCase):
         self.assertIn("出口地区 US（美国） 在 Anthropic 支持名单内", text)
         self.assertIn("服务正常，当前登录可用", text)
         self.assertIn("可达", text)
-        self.assertTrue(all(set(i) == {"level", "text", "advice"} for i in items))
+        self.assertTrue(all(set(i) == {"kind", "level", "text", "advice"} for i in items))
         # 不在支持名单内：提醒并给建议，总体结论跟着变
         MockAnthropic.trace_loc = "CN"
         items = self.cam.service_check(self.cam.Store())
@@ -822,6 +845,122 @@ class CamTest(unittest.TestCase):
         cf = next(i for i in items if "人机验证" in i["text"])
         self.assertEqual(cf["level"], "warn")
         self.assertIn("不影响 Claude Code 切换", cf["advice"])
+
+    def test_risk_items_and_reminders(self):
+        a_id, b_id = self._two_accounts()  # 当前登录 B
+        store = self.cam.Store()
+        self.cam.check_region(store)
+        # 没有风险时只有“账号数”这条 info
+        risks = self.cam.public_state(store, self.data())["risks"]
+        self.assertEqual([r["kind"] for r in risks], ["accounts"])
+        self.assertTrue(all(set(r) == {"kind", "level", "text", "advice"} for r in risks))
+        # 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
+        MockAnthropic.trace_loc = "HK"
+        self.cam.check_region(store, max_age=0)
+        d = self.data()
+        kinds = {r["kind"]: r for r in self.cam.risk_items(d)}
+        self.assertEqual(kinds["region"]["level"], "warn")
+        self.assertIn("HK（香港） 不在 Anthropic 支持名单内", kinds["region"]["text"])
+        self.assertEqual(kinds["region_change"]["level"], "warn")
+        self.assertIn("US（美国） → HK（香港）", kinds["region_change"]["text"])
+        self.assertIn("刚刚", kinds["region_change"]["text"])
+        self.assertIn("2 个地区使用过：HK（香港）、US（美国）", kinds["account_regions"]["text"])
+        self.assertEqual(d["region"]["prev_loc"], "US")
+        # 变化提示在 24 小时内保留，再次检测到同一地区不会丢
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual(self.data()["region"]["prev_loc"], "US")
+        # 时区指向不支持地区而出口在支持地区：warn；指向支持地区：info；一致：不提
+        MockAnthropic.trace_loc = "SG"
+        self.cam.check_region(store, max_age=0)
+        os.environ["CAM_TEST_TZ"] = "Asia/Hong_Kong=HK"
+        try:
+            tz = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "timezone")
+            self.assertEqual(tz["level"], "warn")
+            self.assertIn("Asia/Hong_Kong 指向 HK（香港），与出口地区 SG（新加坡） 不一致", tz["text"])
+            os.environ["CAM_TEST_TZ"] = "Asia/Tokyo=JP"
+            tz = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "timezone")
+            self.assertEqual(tz["level"], "info")
+            os.environ["CAM_TEST_TZ"] = "Asia/Singapore=SG,MY"
+            self.assertFalse([r for r in self.cam.risk_items(self.data()) if r["kind"] == "timezone"])
+        finally:
+            os.environ["CAM_TEST_TZ"] = "America/New_York=US"
+        # 系统语言指向不支持地区：warn；指向支持地区：info
+        os.environ["CAM_TEST_LOCALE"] = "zh_CN.UTF-8"
+        try:
+            lc = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "locale")
+            self.assertEqual(lc["level"], "warn")
+            self.assertIn("zh_CN 指向 CN（中国大陆），与出口地区 SG（新加坡） 不一致", lc["text"])
+            os.environ["CAM_TEST_LOCALE"] = "ja-JP"
+            self.assertEqual(next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "locale")["level"], "info")
+        finally:
+            os.environ["CAM_TEST_LOCALE"] = "en_US"
+        # 机房出口 + 两个接口看到的国家不一致
+        MockAnthropic.meta_org = "DigitalOcean, LLC"
+        MockAnthropic.meta_country = "CA"
+        self.cam.check_region(store, max_age=0)
+        kinds = {r["kind"]: r for r in self.cam.risk_items(self.data())}
+        self.assertEqual(kinds["isp"]["level"], "warn")
+        self.assertIn("DigitalOcean, LLC（AS7922），像云服务商 / 机房", kinds["isp"]["text"])
+        self.assertEqual(kinds["region_mismatch"]["level"], "warn")
+        self.assertIn("trace 接口看到 SG（新加坡），meta 接口看到 CA（加拿大）", kinds["region_mismatch"]["text"])
+        MockAnthropic.meta_org = "Comcast Cable Communications, LLC"
+        MockAnthropic.meta_country = None
+        # WARP、时钟偏差、官方状态页
+        MockAnthropic.trace_warp = True
+        MockAnthropic.trace_ts_offset = -600
+        MockAnthropic.status_indicator = "major"
+        self.cam.check_region(store, max_age=0)
+        d = self.data()
+        kinds = {r["kind"]: r for r in self.cam.risk_items(d)}
+        self.assertEqual(kinds["warp"]["level"], "info")
+        self.assertEqual(kinds["clock"]["level"], "warn")
+        self.assertIn("+600 秒", kinds["clock"]["text"])
+        self.assertEqual(kinds["status"]["level"], "bad")
+        self.assertIn("Partial System Outage", kinds["status"]["text"])
+        self.assertEqual(d["status_page"]["indicator"], "major")
+        # 服务检查把风险项都列出来，总体结论跟着最严重的走；出口地区只出现一次
+        items = self.cam.service_check(store)
+        self.assertEqual(items[0]["level"], "bad")
+        self.assertIn("Anthropic 官方状态页", items[0]["text"])
+        kinds = [i["kind"] for i in items]
+        self.assertEqual(kinds.count("region"), 1)
+        for k in ("summary", "dns", "region", "isp", "api", "web", "proxy", "vpn", "region_change", "warp", "clock", "status",
+                  "accounts", "device", "scope"):
+            self.assertIn(k, kinds)
+        reg = next(i for i in items if i["kind"] == "region")
+        self.assertIn("San Jose, California", reg["text"])
+        self.assertIn("Comcast", next(i for i in items if i["kind"] == "isp")["text"])
+        self.assertEqual(kinds[-1], "scope")
+        self.assertIn("不等于一定合规", items[-1]["advice"])
+        # 状态恢复后缓存里的状态页记录也清掉
+        MockAnthropic.status_indicator = "none"
+        MockAnthropic.trace_warp = False
+        MockAnthropic.trace_ts_offset = 0
+        self.cam.check_region(store, max_age=0)
+        self.assertFalse([r for r in self.cam.risk_items(self.data()) if r["kind"] in ("status", "warp", "clock")])
+        # 切换接口带上提醒，但照样切；切过去的账号也记了一笔当前地区
+        res = self.cam.api_switch(store, "A")
+        self.assertTrue(res["changed"])
+        self.assertIn("region_change", [r["kind"] for r in res["risks"]])
+        self.assertEqual(self.data()["active"]["claude_code"], a_id)
+        a = next(x for x in self.data()["accounts"] if x["id"] == a_id)
+        self.assertEqual(a["regions"][0]["loc"], "SG")
+        # 运营商信息的两种来源格式
+        self.assertEqual(self.cam.parse_exit_meta({"org": "AS7922 Comcast Cable", "city": "Denver", "country": "us"}),
+                         {"asn": 7922, "org": "Comcast Cable", "city": "Denver", "meta_loc": "US"})
+        self.assertEqual(self.cam.parse_exit_meta({"asn": 14061, "asOrganization": "DigitalOcean, LLC", "country": "SG"})["asn"], 14061)
+        self.assertIsNone(self.cam.parse_exit_meta({"ip": "1.2.3.4"}))
+        # VPN / 隧道判断
+        self.assertTrue(self.cam.tunnel_kind("utun4"))
+        self.assertTrue(self.cam.tunnel_kind("Ethernet 2", "TAP-Windows Adapter V9"))
+        self.assertIsNone(self.cam.tunnel_kind("en0", "Apple Ethernet"))
+        os.environ["CAM_TEST_ROUTE_IF"] = "wg0"
+        try:
+            v = next(i for i in self.cam.service_check(None) if i["kind"] == "vpn")
+            self.assertEqual(v["level"], "info")
+            self.assertIn("wg0", v["text"])
+        finally:
+            os.environ["CAM_TEST_ROUTE_IF"] = ""
 
     def test_region_cached_for_display(self):
         self._two_accounts()

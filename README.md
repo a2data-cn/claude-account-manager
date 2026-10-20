@@ -91,14 +91,27 @@ Windows 用 `scripts\cam.cmd`，用法相同。
 - 设置了 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 等环境变量，或者 `settings.json` 里配了 `apiKeyHelper`、`~/.claude.json` 里存着 `primaryApiKey`。这些都优先于订阅登录，切换账号就没有效果
 - 当前有几个 `claude` 进程在运行
 
-最后一段"服务检查"实测 Claude 服务本身是否正常，排查"是网络问题还是账号问题"。第一行是总体结论（正常 / 可以使用但有风险 / 当前无法正常使用），下面每一项都附"→ 这意味着什么、建议怎么做"：
+最后一段"服务检查"实测 Claude 服务本身是否正常，并把使用环境里的风险点逐项列出来，排查"是网络问题、环境问题还是账号问题"。第一行是总体结论（正常 / 可以使用但有风险 / 当前无法正常使用），下面每一项都附"→ 这意味着什么、建议怎么做"。**全部只提醒，不拦任何操作**，是否继续由用户自己决定：
 - DNS：`api.anthropic.com`、`claude.ai` 解析到哪里
-- 出口地区：从 Cloudflare 看到的国家、IP 和节点，并对照 Anthropic 官网公布的支持国家/地区名单（美国、英国、日本等 180 多个；中国大陆、香港、澳门、俄罗斯等不在内）。不在名单内会醒目提醒：按 Anthropic 政策该地区不提供服务，继续使用可能导致账号被限制或封禁，建议换到支持地区的网络出口。**只提醒，不拦任何操作**；名单会变，以官网为准
+- 出口地区：从 Cloudflare 看到的国家、城市、IP 和节点，并对照 Anthropic 官网公布的支持国家/地区名单（美国、英国、日本等 180 多个；中国大陆、香港、澳门、俄罗斯等不在内）。不在名单内会醒目提醒：按 Anthropic 政策该地区不提供服务，继续使用可能导致账号被限制或封禁，建议换到支持地区的网络出口。在名单内也会说明：这只是 IP 这一项没问题，Anthropic 结合 IP 和其他信号综合判断所在地。名单会变，以官网为准
+- 网络服务商：出口 IP 属于哪个运营商（ASN）。属于云服务商 / 机房（DigitalOcean、AWS、阿里云等）而不是家庭或公司宽带时提醒：这类出口通常被当作 VPN / 代理流量看待
+- 出口地区判定一致性：Cloudflare 两个接口看到的国家不一致（IPv4 / IPv6 出口不同、代理只分流了一部分）时提醒
 - `api.anthropic.com`：用当前登录实测，区分"服务正常 / 登录已过期 / 拒绝访问（通常是地区不支持）/ 连不上 / 服务端故障"，并显示时延
 - `claude.ai`：是否可达，是否被公司网络的人机验证页拦住（只影响网页账号读额度，不影响切号）
-- 代理：当前终端的代理环境变量；有代理时出口地区就是代理的出口
+- 代理：当前终端的代理环境变量，以及系统级代理设置（macOS 网络设置、Windows Internet 选项、GNOME）；有代理时出口地区就是代理的出口
+- VPN：本机默认路由是否走隧道接口（utun / tun / wg / TAP 等）；走隧道时出口地区是 VPN 的出口，不代表人在哪里。只看默认路由，透明代理和路由器上的 VPN 看不出来
+- 出口地区变化：和上一次检测相比出口换了国家（出差、换网络、开关 VPN），24 小时内持续提醒。Anthropic 按使用者实际所在地判断，同一账号短时间内多地区使用也容易触发风控
+- Cloudflare WARP / Zero Trust：请求经过 WARP 时说明出口不是本机真实出口
+- 本机时钟：和服务器相差超过 2 分钟会提醒（影响登录续期、HTTPS 校验，也是风控信号）
+- Anthropic 官方状态页：`status.anthropic.com` 当前有无故障，有故障时说明是 Anthropic 侧的问题
+- 系统时区：时区指向的国家和出口地区不一致时提醒；指向不支持地区时特别说明"政策按人所在地判断，不按出口 IP"
+- 系统语言 / 区域：同上（macOS 的 AppleLocale、Windows 的 Get-Culture、Linux 的 LANG）
+- 设备：系统和架构。设备环境信息 Anthropic 会收集，这里只列出来，**本工具不会改动或伪装任何设备标识**
+- 账号使用地区：当前账号 7 天内从几个地区使用过（每次后台检测和切换都会记一笔），多地区使用是常见的风控触发点
+- 账号数：本机保存了几个 Claude Code 账号，并提示账号仅限本人使用
+- 检测范围：最后一条说明本工具只能看到本机和网络层面的信号，账号侧的信号看不到，所以"没有发现风险点"不等于一定合规
 
-桌面版的"手机与设置"页和手机面板底部也有"Claude 服务检测"按钮，结果一样。另外桌面版、`cam serve`、菜单栏插件会随用量刷新每隔几分钟记一次出口地区，面板和桌面版顶部常显"出口 US ✓"；不在名单内时页面顶部、菜单栏和 `cam` 列表都会显示提醒和建议。
+桌面版的"手机与设置"页和手机面板底部也有"Claude 服务检测"按钮，结果一样。另外桌面版、`cam serve`、菜单栏插件会随用量刷新每隔几分钟记一次出口地区、WARP、时钟偏差和官方状态页，面板和桌面版顶部常显"出口 US ✓"；上面这些风险点里级别为"提醒"或"故障"的（出口不在名单、出口变化、时区指向不支持地区、时钟偏差、官方故障、账号多地区）会常显在页面顶部、菜单栏和 `cam` 列表里，`cam switch` 和面板切换前也会再提醒一次，但照样切。
 
 ```bash
 cam env install            # 没装就用官方原生安装器装（curl -fsSL https://claude.ai/install.sh | bash，Windows 用 install.ps1）
@@ -204,7 +217,7 @@ macOS 首次打开未签名应用时，需要右键选择"打开"。
 ## 数据与安全
 
 - 所有数据存在 `~/.claude-accounts/`（可用 `CAM_HOME` 改位置），目录权限 700、凭据文件权限 600，不上传任何地方
-- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查另外会访问 `claude.ai/cdn-cgi/trace`（连不上时退到 `www.cloudflare.com/cdn-cgi/trace`）来看出口地区。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
+- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查和后台的出口地区记录另外会访问 `claude.ai/cdn-cgi/trace`（连不上时退到 `www.cloudflare.com/cdn-cgi/trace`）看出口地区，`speed.cloudflare.com/meta`（拒绝时退到 `ipinfo.io/json`）看出口 IP 的运营商和城市，以及 `status.anthropic.com` 的状态接口；这些请求只带出口 IP，不带任何账号信息。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
 - 用量和资料接口是 Claude Code 自己在用的接口，并非公开 API，Anthropic 改动后可能需要更新本工具；拿不到数据时界面会显示原因，不影响切换
 - 删除账号时凭据会移到 backups 目录，不直接销毁
 - 只有确认了"当前这份登录是谁的"才会存进对应账号：refresh token 和某个账号保存的一致，或者联网核对过。离线、或者 access token 已过期又换过 refresh token 时核对不了，就先暂存（`secrets/_pending-live.json`），不往任何账号里写，界面上会提示；联网后或切换时核对清楚再归档。这样旧会话写回的别人的 token 不会被存错账号

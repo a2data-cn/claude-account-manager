@@ -247,7 +247,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
   <section class="block" id="check-block" hidden>
     <h2>Claude 服务检测</h2>
     <div class="panel">
-      <p class="hint">检查 DNS 解析、出口地区、api.anthropic.com 和 claude.ai 是否正常，要等几秒钟。</p>
+      <p class="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
       <button class="btn" id="btn-check" type="button">开始检测</button>
       <ul class="checks" id="check-list" hidden></ul>
     </div>
@@ -482,7 +482,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
     const p = state.pending_switch;
     const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
-      + (reg.status === "unsupported" ? `<div class="notice bad" role="alert">⚠ ${esc(reg.message)}<span class="n-advice">${esc(reg.advice)}</span></div>` : "")
+      + (state.risks || []).filter((r) => r.level === "warn" || r.level === "bad").map((r) =>
+          `<div class="notice${r.level === "bad" || r.kind === "region" ? " bad" : ""}" role="alert">⚠ ${esc(r.text)}${r.advice ? `<span class="n-advice">${esc(r.advice)}</span>` : ""}</div>`).join("")
       + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "");
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>

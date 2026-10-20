@@ -1,11 +1,11 @@
 //! 端到端测试：临时目录当 Claude Code 配置目录和数据目录，本地起一个假的 Anthropic 接口，不碰真实账号。
 //! 对应 scripts/test_cam.py 里的同名场景。
 
-use cam_engine::api::{public_state, route};
+use cam_engine::api::{api_switch, public_state, route};
 use cam_engine::claude::{
     apply_pending_switch, apply_pending_switch_at, import_current, is_claude_cmd, switch_account, PENDING_ID,
 };
-use cam_engine::health::{check_region, service_check};
+use cam_engine::health::{check_region, parse_exit_meta, risk_items, service_check, tunnel_kind};
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
 use cam_engine::usage::{ensure_fresh_token, refresh_usage};
@@ -28,6 +28,15 @@ struct Mock {
     calls: Vec<(String, String, String)>,
     /// /cdn-cgi/trace 返回的地区，空表示 US
     trace_loc: String,
+    trace_warp: bool,
+    /// 服务器时间相对本机的偏差（秒）
+    trace_ts_offset: i64,
+    /// 官方状态页：空表示 none
+    status_indicator: String,
+    /// /meta 返回的运营商，空表示 Comcast
+    meta_org: String,
+    /// /meta 返回的国家，空表示和 trace 一致
+    meta_country: String,
 }
 
 fn mock() -> &'static Mutex<Mock> {
@@ -59,8 +68,39 @@ fn mock_base() -> &'static str {
                 m.calls.push((req.method().to_string(), path.clone(), rt.clone()));
                 if path == "/cdn-cgi/trace" {
                     let loc = if m.trace_loc.is_empty() { "US".to_string() } else { m.trace_loc.clone() };
+                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() + m.trace_ts_offset as f64;
+                    let warp = if m.trace_warp { "on" } else { "off" };
                     drop(m);
-                    let body = format!("fl=1\nip=1.2.3.4\nloc={}\ncolo=SJC\n", loc);
+                    let body = format!("fl=1\nip=1.2.3.4\nts={:.3}\nloc={}\ncolo=SJC\nwarp={}\n", ts, loc, warp);
+                    let _ = req.respond(tiny_http::Response::from_string(body));
+                    continue;
+                }
+                if path == "/meta" {
+                    let org = if m.meta_org.is_empty() { "Comcast Cable Communications, LLC" } else { m.meta_org.as_str() };
+                    let country = if !m.meta_country.is_empty() {
+                        m.meta_country.clone()
+                    } else if m.trace_loc.is_empty() {
+                        "US".to_string()
+                    } else {
+                        m.trace_loc.clone()
+                    };
+                    let body = json!({"clientIp": "1.2.3.4", "asn": 7922, "asOrganization": org, "city": "San Jose",
+                                      "region": "California", "country": country})
+                    .to_string();
+                    drop(m);
+                    let _ = req.respond(tiny_http::Response::from_string(body));
+                    continue;
+                }
+                if path == "/status.json" {
+                    let ind = if m.status_indicator.is_empty() { "none" } else { m.status_indicator.as_str() };
+                    let desc = match ind {
+                        "minor" => "Degraded Performance",
+                        "major" => "Partial System Outage",
+                        "critical" => "Major System Outage",
+                        _ => "All Systems Operational",
+                    };
+                    let body = json!({"status": {"indicator": ind, "description": desc}}).to_string();
+                    drop(m);
                     let _ = req.respond(tiny_http::Response::from_string(body));
                     continue;
                 }
@@ -120,6 +160,11 @@ impl Env {
         std::env::set_var("CAM_API_BASE", base);
         std::env::set_var("CAM_CLAUDE_WEB_BASE", base);
         std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", base));
+        std::env::set_var("CAM_STATUS_URL", format!("{}/status.json", base));
+        std::env::set_var("CAM_CF_META_URL", format!("{}/meta", base));
+        std::env::set_var("CAM_TEST_LOCALE", "en_US");
+        std::env::set_var("CAM_TEST_TZ", "America/New_York=US"); // 跑测试的机器时区不定，固定成和假出口一致
+        std::env::set_var("CAM_TEST_ROUTE_IF", "");
         for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
             std::env::remove_var(k);
         }
@@ -470,6 +515,151 @@ fn service_check_reports_region_and_services() {
     let items = service_check(&Store::new());
     let reg = items.iter().find(|i| i["text"].as_str().unwrap().starts_with("出口地区")).unwrap();
     assert_eq!(reg["level"], "ok");
+    mock().lock().unwrap().trace_loc = String::new();
+}
+
+fn kinds(items: &[Value]) -> Vec<String> {
+    items.iter().map(|i| i["kind"].as_str().unwrap_or("").to_string()).collect()
+}
+
+fn by_kind<'a>(items: &'a [Value], kind: &str) -> Option<&'a Value> {
+    items.iter().find(|i| i["kind"] == kind)
+}
+
+#[test]
+fn risk_items_and_reminders() {
+    let e = Env::new();
+    let (a, _b) = e.two_accounts(later()); // 当前登录 B
+    let store = Store::new();
+    check_region(&store, 300).unwrap();
+    // 没有风险时只有“账号数”这条 info
+    let risks = public_state(&store, &e.data())["risks"].as_array().cloned().unwrap();
+    assert_eq!(kinds(&risks), vec!["accounts"]);
+    assert!(risks.iter().all(|r| r.as_object().unwrap().len() == 4 && r.get("advice").is_some()));
+    // 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
+    mock().lock().unwrap().trace_loc = "HK".into();
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    let items = risk_items(&d, true);
+    let reg = by_kind(&items, "region").unwrap();
+    assert_eq!(reg["level"], "warn");
+    assert!(reg["text"].as_str().unwrap().contains("HK（香港） 不在 Anthropic 支持名单内"));
+    let ch = by_kind(&items, "region_change").unwrap();
+    assert_eq!(ch["level"], "warn");
+    assert!(ch["text"].as_str().unwrap().contains("US（美国） → HK（香港）"), "{}", ch);
+    assert!(ch["text"].as_str().unwrap().contains("刚刚"), "{}", ch);
+    let ar = by_kind(&items, "account_regions").unwrap();
+    assert!(ar["text"].as_str().unwrap().contains("2 个地区使用过：HK（香港）、US（美国）"), "{}", ar);
+    assert_eq!(d["region"]["prev_loc"], "US");
+    // 变化提示在 24 小时内保留，再次检测到同一地区不会丢
+    check_region(&store, 0).unwrap();
+    assert_eq!(e.data()["region"]["prev_loc"], "US");
+    // 时区指向不支持地区而出口在支持地区：warn；指向支持地区：info；一致：不提
+    mock().lock().unwrap().trace_loc = "SG".into();
+    check_region(&store, 0).unwrap();
+    std::env::set_var("CAM_TEST_TZ", "Asia/Hong_Kong=HK");
+    let items = risk_items(&e.data(), true);
+    let tz = by_kind(&items, "timezone").unwrap();
+    assert_eq!(tz["level"], "warn");
+    assert!(tz["text"].as_str().unwrap().contains("Asia/Hong_Kong 指向 HK（香港），与出口地区 SG（新加坡） 不一致"), "{}", tz);
+    std::env::set_var("CAM_TEST_TZ", "Asia/Tokyo=JP");
+    assert_eq!(by_kind(&risk_items(&e.data(), true), "timezone").unwrap()["level"], "info");
+    std::env::set_var("CAM_TEST_TZ", "Asia/Singapore=SG,MY");
+    assert!(by_kind(&risk_items(&e.data(), true), "timezone").is_none());
+    std::env::set_var("CAM_TEST_TZ", "America/New_York=US");
+    // 系统语言指向不支持地区：warn；指向支持地区：info
+    std::env::set_var("CAM_TEST_LOCALE", "zh_CN.UTF-8");
+    let lc = by_kind(&risk_items(&e.data(), true), "locale").cloned().unwrap();
+    assert_eq!(lc["level"], "warn");
+    assert!(lc["text"].as_str().unwrap().contains("zh_CN 指向 CN（中国大陆），与出口地区 SG（新加坡） 不一致"), "{}", lc);
+    std::env::set_var("CAM_TEST_LOCALE", "ja-JP");
+    assert_eq!(by_kind(&risk_items(&e.data(), true), "locale").unwrap()["level"], "info");
+    std::env::set_var("CAM_TEST_LOCALE", "en_US");
+    // 机房出口 + 两个接口看到的国家不一致
+    {
+        let mut m = mock().lock().unwrap();
+        m.meta_org = "DigitalOcean, LLC".into();
+        m.meta_country = "CA".into();
+    }
+    check_region(&store, 0).unwrap();
+    let items = risk_items(&e.data(), true);
+    let isp = by_kind(&items, "isp").unwrap();
+    assert_eq!(isp["level"], "warn");
+    assert!(isp["text"].as_str().unwrap().contains("DigitalOcean, LLC（AS7922），像云服务商 / 机房"), "{}", isp);
+    let mm = by_kind(&items, "region_mismatch").unwrap();
+    assert_eq!(mm["level"], "warn");
+    assert!(mm["text"].as_str().unwrap().contains("trace 接口看到 SG（新加坡），meta 接口看到 CA（加拿大）"), "{}", mm);
+    {
+        let mut m = mock().lock().unwrap();
+        m.meta_org = String::new();
+        m.meta_country = String::new();
+    }
+    // WARP、时钟偏差、官方状态页
+    {
+        let mut m = mock().lock().unwrap();
+        m.trace_warp = true;
+        m.trace_ts_offset = -600;
+        m.status_indicator = "major".into();
+    }
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    let items = risk_items(&d, true);
+    assert_eq!(by_kind(&items, "warp").unwrap()["level"], "info");
+    let clock = by_kind(&items, "clock").unwrap();
+    assert_eq!(clock["level"], "warn");
+    assert!(clock["text"].as_str().unwrap().contains("+600 秒"), "{}", clock);
+    let st = by_kind(&items, "status").unwrap();
+    assert_eq!(st["level"], "bad");
+    assert!(st["text"].as_str().unwrap().contains("Partial System Outage"), "{}", st);
+    assert_eq!(d["status_page"]["indicator"], "major");
+    // 服务检查把风险项都列出来，总体结论跟着最严重的走；出口地区只出现一次
+    let items = service_check(&store);
+    assert_eq!(items[0]["level"], "bad");
+    assert!(items[0]["text"].as_str().unwrap().contains("Anthropic 官方状态页"), "{}", items[0]);
+    let ks = kinds(&items);
+    assert_eq!(ks.iter().filter(|k| *k == "region").count(), 1);
+    for k in [
+        "summary", "dns", "region", "isp", "api", "web", "proxy", "vpn", "region_change", "warp", "clock", "status", "accounts",
+        "device", "scope",
+    ] {
+        assert!(ks.iter().any(|x| x == k), "缺少 {}：{:?}", k, ks);
+    }
+    assert!(by_kind(&items, "region").unwrap()["text"].as_str().unwrap().contains("San Jose, California"));
+    assert!(by_kind(&items, "isp").unwrap()["text"].as_str().unwrap().contains("Comcast"));
+    assert_eq!(ks.last().map(String::as_str), Some("scope"));
+    assert!(items.last().unwrap()["advice"].as_str().unwrap().contains("不等于一定合规"));
+    // 状态恢复后缓存里的状态页记录也清掉
+    {
+        let mut m = mock().lock().unwrap();
+        m.trace_warp = false;
+        m.trace_ts_offset = 0;
+        m.status_indicator = String::new();
+    }
+    check_region(&store, 0).unwrap();
+    let items = risk_items(&e.data(), true);
+    assert!(["status", "warp", "clock"].iter().all(|k| by_kind(&items, k).is_none()));
+    // 切换接口带上提醒，但照样切；切过去的账号也记了一笔当前地区
+    let res = api_switch(&store, "A", None).unwrap();
+    assert_eq!(res["changed"], true);
+    assert!(res["risks"].as_array().unwrap().iter().any(|r| r["kind"] == "region_change"), "{}", res);
+    let d = e.data();
+    assert_eq!(d["active"]["claude_code"], json!(a));
+    let acc = d["accounts"].as_array().unwrap().iter().find(|x| x["id"] == json!(a)).unwrap();
+    assert_eq!(acc["regions"][0]["loc"], "SG");
+    // 运营商信息的两种来源格式
+    let m = parse_exit_meta(&json!({"org": "AS7922 Comcast Cable", "city": "Denver", "country": "us"})).unwrap();
+    assert_eq!(m, json!({"asn": 7922, "org": "Comcast Cable", "city": "Denver", "meta_loc": "US"}));
+    assert_eq!(parse_exit_meta(&json!({"asn": 14061, "asOrganization": "DigitalOcean, LLC", "country": "SG"})).unwrap()["asn"], 14061);
+    assert!(parse_exit_meta(&json!({"ip": "1.2.3.4"})).is_none());
+    // VPN / 隧道判断
+    assert!(tunnel_kind("utun4", "").is_some());
+    assert!(tunnel_kind("Ethernet 2", "TAP-Windows Adapter V9").is_some());
+    assert!(tunnel_kind("en0", "Apple Ethernet").is_none());
+    std::env::set_var("CAM_TEST_ROUTE_IF", "wg0");
+    let v = by_kind(&service_check(&store), "vpn").unwrap().clone();
+    std::env::set_var("CAM_TEST_ROUTE_IF", "");
+    assert_eq!(v["level"], "info");
+    assert!(v["text"].as_str().unwrap().contains("wg0"), "{}", v);
     mock().lock().unwrap().trace_loc = String::new();
 }
 

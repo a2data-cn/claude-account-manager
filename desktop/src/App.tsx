@@ -11,7 +11,7 @@ type Tab = "accounts" | "settings";
 const KIND_ORDER = ["claude_code", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "✓", bad: "✗", warn: "!", info: "·" };
 
-/** Claude 服务检测：后端做 DNS、出口地区和两个域名的探测，要等几秒 */
+/** Claude 服务检测：后端做 DNS、出口地区、两个域名、代理 / VPN 的探测，再列出环境里的风险点，要等几秒。只提醒，不拦 */
 function ServiceCheck({ toast }: { toast: (m: string, bad?: boolean) => void }) {
   const [items, setItems] = useState<ServiceCheckItem[] | null>(null);
   const [checking, setChecking] = useState(false);
@@ -29,7 +29,7 @@ function ServiceCheck({ toast }: { toast: (m: string, bad?: boolean) => void }) 
     <section className="block">
       <h2>Claude 服务检测</h2>
       <div className="panel">
-        <p className="hint">检查 DNS 解析、出口地区、api.anthropic.com 和 claude.ai 是否正常，要等几秒钟。</p>
+        <p className="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
         <button className="btn" disabled={checking} onClick={check}>
           {checking ? "检测中…" : "开始检测"}
         </button>
@@ -232,12 +232,14 @@ export default function App() {
               ⚠ {state.warning}
             </div>
           )}
-          {state?.region?.status === "unsupported" && (
-            <div className="notice bad" role="alert">
-              ⚠ {state.region.message}
-              <span className="n-advice">{state.region.advice}</span>
-            </div>
-          )}
+          {(state?.risks ?? [])
+            .filter((r) => r.level === "warn" || r.level === "bad")
+            .map((r) => (
+              <div key={r.kind ?? r.text} className={`notice${r.level === "bad" || r.kind === "region" ? " bad" : ""}`} role="alert">
+                ⚠ {r.text}
+                {r.advice && <span className="n-advice">{r.advice}</span>}
+              </div>
+            ))}
           {state?.pending_switch && (
             <div className="notice pending" role="status">
               <span className="n-text">{state.pending_switch.message}</span>

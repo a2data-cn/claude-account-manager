@@ -920,6 +920,7 @@ def switch_code_account(store, key):
         data["active"]["claude_code"] = target["id"]  # 第 5 步
         target["last_switched_at"] = now_iso()
         data["switch_log"].append({"id": target["id"], "at": now_iso()})
+        note_account_region(data, target["id"], cached_region_loc(data))  # 给风险提示记一笔地区
         store.save(data)
         return target, backup, True
 
@@ -1690,7 +1691,8 @@ def public_state(store, data):
     return {"version": VERSION, "backend": "python", "host": socket.gethostname(),
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
-            "pending_switch": pending_switch_view(data), "region": region_view(data), "generated_at": now_iso()}
+            "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risk_items(data),
+            "generated_at": now_iso()}
 
 
 def mask(s):
@@ -1952,24 +1954,26 @@ def api_switch(store, aid, mode=None):
     """面板 / 桌面版的切换。有会话在跑且没指定 mode：让前端先问用户；mode=wait：登记等待；mode=now：直接切。"""
     data = store.load()
     target = find_account(data, aid)
+    risks = [r for r in risk_items(data) if r["level"] in ("warn", "bad")]  # 只提醒，不拦
     procs = running_claude_processes() if target["id"] != data["active"].get("claude_code") else []
     if procs and mode != "now":
         if mode != "wait":
             return {"ok": False, "choice_required": True, "running_claude": len(procs), "account": target["id"],
-                    "label": target["label"],
+                    "label": target["label"], "risks": risks,
                     "message": running_summary(procs) + "。等它们结束后再切换不会打断正在跑的任务；现在就切的话它们需要重开。"}
         with store.lock():
             data = store.load()
             defer_switch(data, target["id"], "manual")
             store.save(data)
         return {"ok": True, "changed": False, "deferred": True, "running_claude": len(procs), "account": target["id"],
+                "risks": risks,
                 "message": f"有 {len(procs)} 个 claude 会话在运行，等它们退出后会自动切换到 {target['label']}"}
     acc, backup, changed = switch_code_account(store, aid)
     procs = running_claude_processes() if changed else []
     msg = (f"已切换到 {acc['label']}。" + (running_warning(procs) or "正在运行的 claude 会话需要重启")
            if changed else "已经是当前账号")
     return {"ok": True, "changed": changed, "account": acc["id"], "running_claude": len(procs), "message": msg,
-            "backup": backup}
+            "backup": backup, "risks": risks}
 
 
 def serve(store, host, port, auto_refresh_min):
@@ -2115,9 +2119,11 @@ def print_accounts(store, data):
             print("     " + color("备注：" + a["manual"]["note"], "d"))
     if st.get("warning"):
         print("\n" + color("⚠ " + st["warning"], "y"))
-    reg = st.get("region") or {}
-    if reg.get("status") == "unsupported":
-        print("\n" + color(f"! {reg['message']}。{reg['advice']}（cam doctor 查看详情）", "y"))
+    risks = [r for r in st.get("risks") or [] if r["level"] in ("warn", "bad")]
+    for i, r in enumerate(risks):
+        print(("\n" if i == 0 else "") + color(f"! {r['text']}。{r['advice']}", "y"))
+    if risks:
+        print(color("  （cam doctor 查看完整的服务检查）", "d"))
 
 
 # --------------------------------------------------------------------------- 命令
@@ -2240,6 +2246,9 @@ def cmd_switch(store, args):
         raise CamError("请指定要切换到的账号")
     data = store.load()
     target = find_account(data, args.account)
+    for r in risk_items(data):  # 只提醒，不拦
+        if r["level"] in ("warn", "bad"):
+            print(color(f"! {r['text']}。{r['advice']}", "y"))
     procs = running_claude_processes() if target["id"] != data["active"].get("claude_code") else []
     wait = args.wait
     asked = False
@@ -2618,10 +2627,33 @@ REGION_NAMES = {"CN": "中国大陆", "HK": "香港", "MO": "澳门", "RU": "俄
                 "FR": "法国", "NL": "荷兰", "CA": "加拿大", "AU": "澳大利亚", "MY": "马来西亚", "TH": "泰国", "VN": "越南",
                 "ID": "印尼", "PH": "菲律宾", "IN": "印度", "AE": "阿联酋", "TR": "土耳其"}
 REGION_ADVICE = {
-    "supported": "",
+    "supported": "出口 IP 这一项没问题。Anthropic 结合 IP 和其他信号综合判断所在地，下面的代理 / VPN、时区、出口变化等就是这些信号里本机能看到的部分。",
     "unsupported": "按 Anthropic 政策这个地区不提供服务，继续使用可能导致账号被限制或封禁。建议换到支持地区的网络出口后再使用。",
     "unknown": "连不上 Cloudflare，判断不了出口地区。检查网络或代理后重新检测。",
 }
+
+
+STATUS_URL = os.environ.get("CAM_STATUS_URL", "https://status.anthropic.com/api/v2/status.json")
+CF_META_URL = os.environ.get("CAM_CF_META_URL", "https://speed.cloudflare.com/meta")  # 出口 IP 的运营商、城市
+IPINFO_URL = os.environ.get("CAM_IPINFO_URL", "https://ipinfo.io/json")  # Cloudflare 的 meta 接口拒绝时退到这里
+# 出口 IP 的运营商名里有这些就当作云服务商 / 机房（不是家庭或公司宽带）
+HOSTING_WORDS = ("hosting", "cloud", "data center", "datacenter", "server", "vps", "dedicated", "colocation",
+                 "amazon", "aws", "google llc", "google cloud", "microsoft corporation", "azure", "digitalocean", "linode",
+                 "akamai", "vultr", "choopa", "ovh", "hetzner", "alibaba", "aliyun", "tencent", "huawei", "oracle", "m247",
+                 "datacamp", "leaseweb", "contabo", "scaleway", "upcloud", "hostinger", "psychz", "quadranet",
+                 "colocrossing", "zenlayer", "gcore", "g-core", "cloudflare", "packethub", "clouvider", "performive",
+                 "bandwagon", "racknerd", "ucloud", "kamatera", "ionos", "fly.io", "oneprovider", "hostpapa")
+REGION_CHANGE_HOURS = 24      # 出口地区变了以后，提醒保留多久
+ACCOUNT_REGION_DAYS = 7       # 同一账号几天内从多个地区使用过就提醒
+ACCOUNT_REGION_KEEP = 8       # 每个账号最多记几个地区
+CLOCK_SKEW_WARN = 120         # 本机时钟与服务器相差超过这么多秒就提醒
+REGION_FRESH_SECS = 3600      # 切换账号时，多久以内的出口地区检测结果算有效
+# 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
+TUNNEL_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec", "tailscale", "zt", "nebula", "proton", "nordlynx",
+                   "mullvad", "clash", "mihomo", "sing", "hysteria", "surge")
+TUNNEL_WORDS = ("tap", "tun", "wintun", "wireguard", "vpn", "tunnel", "nordlynx", "clash", "mihomo", "sing-box",
+                "surge", "shadowsocks", "v2ray", "hysteria", "tailscale", "zerotier", "anyconnect", "fortinet",
+                "globalprotect", "pulse secure", "openvpn", "expressvpn", "mullvad", "proton")
 
 
 def region_label(loc):
@@ -2641,8 +2673,25 @@ def region_message(loc, status):
     return f"出口地区 {region_label(loc)} " + ("在 Anthropic 支持名单内" if status == "supported" else "不在 Anthropic 支持名单内")
 
 
+def fmt_ago(s):
+    d = parse_iso(s)
+    if not d:
+        return ""
+    secs = max(0, int((dt.datetime.now(dt.timezone.utc) - d).total_seconds()))
+    if secs < 60:
+        return "刚刚"
+    h, m = divmod(secs // 60, 60)
+    if h >= 24:
+        return f"{h // 24} 天前"
+    return f"{h} 小时前" if h else f"{m} 分钟前"
+
+
 def detect_region(timeout=6):
-    """从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的）。返回 {loc, ip, colo, ms} 或 None。"""
+    """从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的）。
+
+    返回 {loc, ip, colo, ms, warp, skew} 或 None：warp 是请求经过了 Cloudflare WARP / Zero Trust，
+    skew 是本机时钟比服务器快多少秒（没有 ts 字段时为 None）。
+    """
     t0 = time.time()
     st, txt = http_text(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace", timeout)
     if st != 200 or "loc=" not in txt:
@@ -2650,32 +2699,360 @@ def detect_region(timeout=6):
     if st != 200 or "loc=" not in txt:
         return None
     kv = dict(line.split("=", 1) for line in txt.splitlines() if "=" in line)
-    return {"loc": (kv.get("loc") or "").strip().upper() or None, "ip": kv.get("ip"), "colo": kv.get("colo"),
-            "ms": int((time.time() - t0) * 1000)}
+    skew = None
+    try:
+        skew = int(round(time.time() - float(kv["ts"])))
+    except (KeyError, ValueError):
+        pass
+    out = {"loc": (kv.get("loc") or "").strip().upper() or None, "ip": kv.get("ip"), "colo": kv.get("colo"),
+           "ms": int((time.time() - t0) * 1000),
+           "warp": kv.get("warp", "off").strip() in ("on", "plus") or kv.get("gateway", "off").strip() == "on",
+           "skew": skew, "asn": None, "org": None, "city": None, "meta_loc": None}
+    meta = fetch_exit_meta(timeout)
+    if meta:
+        out.update(meta)
+    return out
+
+
+def fetch_exit_meta(timeout=6):
+    """出口 IP 的 ASN、运营商、城市和国家：先问 Cloudflare 的 meta 接口，拒绝时退到 ipinfo.io。查不到返回 None。"""
+    for url in (CF_META_URL, IPINFO_URL):
+        st, txt = http_text(url, timeout)
+        if st != 200:
+            continue
+        try:
+            m = parse_exit_meta(json.loads(txt))
+        except json.JSONDecodeError:
+            m = None
+        if m:
+            return m
+    return None
+
+
+def parse_exit_meta(j):
+    """统一两种格式：Cloudflare {asn, asOrganization, city, region, country} 和 ipinfo {org: "AS7922 Comcast…", city, region, country}。"""
+    if not isinstance(j, dict):
+        return None
+    asn, org = j.get("asn"), j.get("asOrganization") or None
+    if not org and j.get("org"):
+        head, _, rest = str(j["org"]).partition(" ")
+        if head.startswith("AS") and head[2:].isdigit():
+            asn = asn or int(head[2:])
+            org = rest.strip() or None
+        else:
+            org = str(j["org"])
+    city = ", ".join(x for x in (j.get("city"), j.get("region")) if x)
+    loc = str(j.get("country") or "").strip().upper() or None
+    if not org and not loc:
+        return None
+    return {"asn": asn, "org": org, "city": city or None, "meta_loc": loc}
+
+
+def hosting_exit(org):
+    """运营商名像云服务商 / 机房时为 True（这类出口通常被当作 VPN / 代理流量）。"""
+    low = (org or "").lower()
+    return bool(low) and any(w in low for w in HOSTING_WORDS)
+
+
+def system_locale():
+    """本机系统语言 / 区域 (名称, 国家代码) 或 None。测试用 CAM_TEST_LOCALE="zh_CN"（空字符串表示查不到）。"""
+    t = os.environ.get("CAM_TEST_LOCALE")
+    if t is not None:
+        name = t
+    elif IS_MAC:
+        name = _run_text(["defaults", "read", "-g", "AppleLocale"]).strip()
+    elif IS_WIN:
+        name = _run_text(["powershell", "-NoProfile", "-Command", "(Get-Culture).Name"], timeout=15).strip()
+    else:
+        name = os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG") or ""
+    name = name.split(".", 1)[0].split("@", 1)[0].strip()
+    if not name or name.upper() in ("C", "POSIX"):
+        return None
+    parts = name.replace("-", "_").split("_")
+    cc = next((p.upper() for p in parts[1:] if len(p) == 2 and p.isalpha()), None)
+    return name, cc
+
+
+def fetch_status_page(timeout=6):
+    """Anthropic 官方状态页（status.anthropic.com）的总体状态：{indicator, description} 或 None（连不上）。"""
+    st, txt = http_text(STATUS_URL, timeout)
+    if st != 200:
+        return None
+    try:
+        status = (json.loads(txt) or {}).get("status") or {}
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(status, dict) or not status.get("indicator"):
+        return None
+    return {"indicator": str(status["indicator"]), "description": str(status.get("description") or "")}
+
+
+def system_timezone():
+    """本机时区 (时区名, [国家代码]) 或 None。国家代码来自 tzdata 的 zone1970.tab，查不到时为空列表。
+
+    测试用 CAM_TEST_TZ="Asia/Hong_Kong=HK"（空字符串表示查不到）。
+    """
+    t = os.environ.get("CAM_TEST_TZ")
+    if t is not None:
+        if not t:
+            return None
+        zone, _, cc = t.partition("=")
+        return zone, [c for c in cc.split(",") if c]
+    zone = (os.environ.get("TZ") or "").lstrip(":")
+    if not zone and not IS_WIN:
+        try:
+            link = os.readlink("/etc/localtime")
+            zone = link.split("zoneinfo/", 1)[1] if "zoneinfo/" in link else ""
+        except OSError:
+            zone = ""
+    if not zone and IS_WIN:
+        try:
+            zone = subprocess.run(["tzutil", "/g"], capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            zone = ""
+    if not zone:
+        return None
+    countries = []
+    for tab in ("/usr/share/zoneinfo/zone1970.tab", "/var/db/timezone/zoneinfo/zone1970.tab",
+                "/usr/share/zoneinfo/zone.tab", "/var/db/timezone/zoneinfo/zone.tab"):
+        try:
+            with open(tab, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if not line.startswith("#") and len(parts) >= 3 and parts[2] == zone:
+                        countries = [c for c in parts[0].split(",") if c]
+                        break
+        except OSError:
+            continue
+        if countries:
+            break
+    return zone, countries
+
+
+def _run_text(cmd, timeout=8):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def system_proxy():
+    """系统级代理设置（不是环境变量）：["HTTPS 127.0.0.1:7890", "PAC http://…"] 之类，没有时为空列表。"""
+    out = []
+    if IS_MAC:
+        kv = {}
+        for line in _run_text(["scutil", "--proxy"]).splitlines():
+            if " : " in line:
+                k, _, v = line.strip().partition(" : ")
+                kv[k] = v.strip()
+        for name, key in (("HTTPS", "HTTPS"), ("HTTP", "HTTP"), ("SOCKS", "SOCKS")):
+            if kv.get(f"{key}Enable") == "1" and kv.get(f"{key}Proxy"):
+                out.append(f"{name} {kv[f'{key}Proxy']}:{kv.get(f'{key}Port', '')}")
+        if kv.get("ProxyAutoConfigEnable") == "1":
+            out.append(f"PAC {kv.get('ProxyAutoConfigURLString', '')}")
+    elif IS_WIN:
+        key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        txt = _run_text(["reg", "query", key])
+        kv = {}
+        for line in txt.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) == 3 and parts[1].startswith("REG_"):
+                kv[parts[0]] = parts[2].strip()
+        if kv.get("ProxyEnable", "").lower() in ("0x1", "1") and kv.get("ProxyServer"):
+            out.append(f"系统代理 {kv['ProxyServer']}")
+        if kv.get("AutoConfigURL"):
+            out.append(f"PAC {kv['AutoConfigURL']}")
+    elif shutil.which("gsettings"):
+        mode = _run_text(["gsettings", "get", "org.gnome.system.proxy", "mode"]).strip().strip("'")
+        if mode == "manual":
+            host = _run_text(["gsettings", "get", "org.gnome.system.proxy.https", "host"]).strip().strip("'")
+            port = _run_text(["gsettings", "get", "org.gnome.system.proxy.https", "port"]).strip()
+            out.append(f"HTTPS {host}:{port}" if host else "系统代理（手动）")
+        elif mode == "auto":
+            out.append("PAC " + _run_text(["gsettings", "get", "org.gnome.system.proxy", "autoconfig-url"]).strip().strip("'"))
+    return out
+
+
+def tunnel_kind(name, desc=""):
+    """接口名 / 描述看起来是 VPN 或隧道时返回说明，否则 None。"""
+    low = (name or "").lower()
+    if any(low.startswith(p) for p in TUNNEL_PREFIXES):
+        return "VPN / 隧道接口"
+    d = (desc or "").lower()
+    if any(w in d for w in TUNNEL_WORDS):
+        return "VPN / 隧道适配器"
+    return None
+
+
+def default_route_tunnel():
+    """默认路由走的接口像 VPN / 隧道时返回 (接口名, 说明)，否则 None。只看默认路由，透明代理和路由器上的 VPN 看不出来。
+
+    测试用 CAM_TEST_ROUTE_IF="utun4"（空字符串表示没有）。
+    """
+    t = os.environ.get("CAM_TEST_ROUTE_IF")
+    if t is not None:
+        k = tunnel_kind(t)
+        return (t, k) if t and k else None
+    name, desc = "", ""
+    if IS_WIN:
+        ps = ("$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
+              "Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1; "
+              "if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue; "
+              "\"$($r.InterfaceAlias)`t$($a.InterfaceDescription)\" }")
+        line = _run_text(["powershell", "-NoProfile", "-Command", ps], timeout=15).strip().splitlines()
+        if line:
+            name, _, desc = line[0].partition("\t")
+    elif IS_MAC:
+        for line in _run_text(["route", "-n", "get", "default"]).splitlines():
+            if line.strip().startswith("interface:"):
+                name = line.split(":", 1)[1].strip()
+    else:
+        words = _run_text(["ip", "route", "show", "default"]).split()
+        if "dev" in words:
+            name = words[words.index("dev") + 1] if words.index("dev") + 1 < len(words) else ""
+    k = tunnel_kind(name, desc)
+    return (name, k) if name and k else None
+
+
+def note_account_region(data, acc_id, loc):
+    """记一笔“这个账号在这个出口地区用过”，给风险提示用（每个账号只留最近几个地区）。"""
+    if not acc_id or not loc:
+        return
+    for a in data.get("accounts") or []:
+        if a["id"] == acc_id:
+            regs = [r for r in (a.get("regions") or []) if r.get("loc") != loc]
+            regs.insert(0, {"loc": loc, "at": now_iso()})
+            a["regions"] = regs[:ACCOUNT_REGION_KEEP]
+
+
+def cached_region_loc(data, max_age=REGION_FRESH_SECS):
+    """后台最近一次检测到的出口地区；超过 max_age 秒或没检测过时为 None。"""
+    reg = data.get("region") or {}
+    at = parse_iso(reg.get("checked_at"))
+    if reg.get("loc") and at and (dt.datetime.now(dt.timezone.utc) - at).total_seconds() <= max_age:
+        return reg["loc"]
+    return None
 
 
 def region_view(data):
     """界面常显用的出口地区状态（不联网，用后台上次检测的结果）。没检测过时 status 为 None。"""
     c = data.get("region") or {}
     if not c.get("checked_at"):
-        return {"loc": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": ""}
+        return {"loc": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
+                "warp": False, "prev_loc": None, "changed_at": None, "org": None, "city": None}
     status = region_status(c.get("loc"))
     return {"loc": c.get("loc"), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
-            "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status]}
+            "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
+            "warp": bool(c.get("warp")), "prev_loc": c.get("prev_loc"), "changed_at": c.get("changed_at"),
+            "org": c.get("org"), "city": c.get("city")}
 
 
 def check_region(store, max_age=300):
-    """后台定时调用：检测一次出口地区记到 data["region"]，给界面常显。max_age 秒内查过就跳过。只记录，不干预任何操作。"""
+    """后台定时调用：检测出口地区（连带 WARP、时钟偏差）和 Anthropic 官方状态页，记到 data["region"] / data["status_page"]，
+    并给当前账号记一笔地区。max_age 秒内查过就跳过。只记录，不干预任何操作。"""
     data = store.load()
     at = parse_iso((data.get("region") or {}).get("checked_at"))
     if at and (dt.datetime.now(dt.timezone.utc) - at).total_seconds() < max_age:
         return region_view(data)
     r = detect_region() or {}
+    sp = fetch_status_page()
     with store.lock():
         data = store.load()
-        data["region"] = {"loc": r.get("loc"), "ip": r.get("ip"), "colo": r.get("colo"), "checked_at": now_iso()}
+        old = data.get("region") or {}
+        reg = {"loc": r.get("loc"), "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
+               "warp": bool(r.get("warp")), "skew": r.get("skew"), "asn": r.get("asn"), "org": r.get("org"),
+               "city": r.get("city"), "meta_loc": r.get("meta_loc"), "checked_at": now_iso()}
+        if old.get("loc") and reg["loc"] and old["loc"] != reg["loc"]:
+            reg["prev_loc"], reg["changed_at"] = old["loc"], reg["checked_at"]
+        elif old.get("prev_loc"):
+            reg["prev_loc"], reg["changed_at"] = old["prev_loc"], old.get("changed_at")
+        data["region"] = reg
+        if sp:
+            data["status_page"] = dict(sp, checked_at=reg["checked_at"])
+        else:
+            data.pop("status_page", None)
+        note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"])
         store.save(data)
     return region_view(data)
+
+
+def risk_items(data, include_region=True):
+    """根据后台缓存和本机设置算出的风险提示（不联网）：[{"kind", "level", "text", "advice"}]。
+
+    只提示，不拦任何操作；界面把 warn / bad 的常显在顶部，info 只在服务检查里列出。
+    """
+    out = []
+
+    def add(kind, level, text, advice=""):
+        out.append({"kind": kind, "level": level, "text": text, "advice": advice})
+
+    now = dt.datetime.now(dt.timezone.utc)
+    reg = data.get("region") or {}
+    loc = reg.get("loc") if reg.get("checked_at") else None
+    if include_region and loc and region_status(loc) == "unsupported":
+        add("region", "warn", region_message(loc, "unsupported"), REGION_ADVICE["unsupported"])
+    changed = parse_iso(reg.get("changed_at"))
+    if reg.get("prev_loc") and loc and changed and (now - changed).total_seconds() < REGION_CHANGE_HOURS * 3600:
+        add("region_change", "warn",
+            f"出口地区变化：{region_label(reg['prev_loc'])} → {region_label(loc)}（{fmt_ago(reg['changed_at'])}）",
+            "网络环境变了（出差、换网络、开关 VPN 或代理都会这样）。Anthropic 按使用者实际所在地判断是否支持，"
+            "同一账号短时间内从多个地区使用也容易触发风控。确认现在人所在的地区在支持名单内再继续。")
+    if loc and reg.get("meta_loc") and reg["meta_loc"] != loc:
+        add("region_mismatch", "warn",
+            f"出口地区判定不一致：trace 接口看到 {region_label(loc)}，meta 接口看到 {region_label(reg['meta_loc'])}",
+            "多半是 IPv4 和 IPv6 走了不同出口，或代理只分流了一部分流量。这种情况下服务端看到的地区可能和你以为的不一样，"
+            "先统一出口再判断。")
+    if hosting_exit(reg.get("org")):
+        add("isp", "warn", f"出口 IP 属于 {reg['org']}（AS{reg.get('asn')}），像云服务商 / 机房，不是家庭或公司宽带",
+            "这类出口通常被当作 VPN / 代理流量看待，是常见的风控信号之一；人所在地仍按实际位置判断。")
+    if reg.get("warp"):
+        add("warp", "info", "出口经过 Cloudflare WARP / Zero Trust",
+            "上面的出口地区是 WARP 的出口，不是本机网络的真实出口；Anthropic 按使用者所在地判断。")
+    skew = reg.get("skew")
+    if isinstance(skew, (int, float)) and abs(skew) > CLOCK_SKEW_WARN:
+        add("clock", "warn", f"本机时钟与服务器相差 {int(skew):+d} 秒",
+            "时钟偏差大会让登录续期和 HTTPS 校验失败，也是常见的风控信号。打开系统的自动校时。")
+    sp = data.get("status_page") or {}
+    ind = sp.get("indicator")
+    if ind and ind != "none":
+        add("status", "bad" if ind in ("major", "critical") else "warn",
+            f"Anthropic 官方状态页：{sp.get('description') or ind}（{ind}）",
+            "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。")
+    tz = system_timezone()
+    if tz and loc and tz[1] and loc not in tz[1]:
+        zone, home = tz[0], tz[1][0]
+        text = f"系统时区 {zone} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
+        if region_status(home) == "unsupported":
+            add("timezone", "warn", text,
+                "出口在支持地区，但本机设置显示人可能在不支持地区。Anthropic 按使用者实际所在地判断，不按出口 IP；"
+                "人确实在不支持地区的话，风险与出口无关。")
+        else:
+            add("timezone", "info", text, "出差或经过代理都会这样；人所在地在支持名单内就没问题。")
+    lc = system_locale()
+    if lc and loc and lc[1] and lc[1] != loc:
+        name, home = lc
+        text = f"系统语言 / 区域 {name} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
+        if region_status(home) == "unsupported":
+            add("locale", "warn", text,
+                "系统语言属于 Anthropic 会收集的设备环境信息。出口在支持地区但系统区域指向不支持地区，"
+                "说明人可能在不支持地区；政策按实际所在地判断。")
+        else:
+            add("locale", "info", text, "用外语系统或出差都会这样；人所在地在支持名单内就没问题。")
+    act = (data.get("active") or {}).get("claude_code")
+    acc = next((a for a in data.get("accounts") or [] if a["id"] == act), None)
+    if acc:
+        cutoff = now - dt.timedelta(days=ACCOUNT_REGION_DAYS)
+        locs = [r["loc"] for r in acc.get("regions") or []
+                if r.get("loc") and parse_iso(r.get("at")) and parse_iso(r["at"]) >= cutoff]
+        if len(locs) > 1:
+            add("account_regions", "warn",
+                f"当前账号“{acc['label']}”{ACCOUNT_REGION_DAYS} 天内从 {len(locs)} 个地区使用过：{'、'.join(region_label(l) for l in locs)}",
+                "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。")
+    n = sum(1 for a in data.get("accounts") or [] if a.get("kind") == "claude_code")
+    if n >= 2:
+        add("accounts", "info", f"本机保存了 {n} 个 Claude Code 账号",
+            "Anthropic 账号仅限本人使用，多人共用同一账号违反使用条款。")
+    return out
 
 
 def region_denied(msg):
@@ -2684,15 +3061,16 @@ def region_denied(msg):
 
 
 def service_check(store=None):
-    """检测 Claude 相关服务是否正常：DNS、出口地区、api.anthropic.com、claude.ai、代理。
+    """检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、代理、VPN，
+    再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
 
-    返回 [{"level", "text", "advice"}]，级别为 ok / bad / warn / info，第一项是总体结论。
-    不打印任何密钥，不干预任何操作。
+    返回 [{"kind", "level", "text", "advice"}]，级别为 ok / bad / warn / info，第一项是总体结论。
+    不打印任何密钥，不干预任何操作。传了 store 会顺便刷新界面常显的缓存。
     """
     out = []
 
-    def add(level, text, advice=""):
-        out.append({"level": level, "text": text, "advice": advice})
+    def add(kind, level, text, advice=""):
+        out.append({"kind": kind, "level": level, "text": text, "advice": advice})
 
     proxies = {k: os.environ[k] for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy")
                if os.environ.get(k)}
@@ -2701,19 +3079,29 @@ def service_check(store=None):
     for host in dict.fromkeys((api_host, web_host)):
         try:
             ips = sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
-            add("ok", f"DNS：{host} → {', '.join(ips[:3])}")
+            add("dns", "ok", f"DNS：{host} → {', '.join(ips[:3])}")
         except OSError as e:
-            add("bad", f"DNS：{host} 解析失败（{e}）",
+            add("dns", "bad", f"DNS：{host} 解析失败（{e}）",
                 "检查本机 DNS 或代理设置" + ("；设了代理的话通常由代理解析，可忽略" if proxies else ""))
     # 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息
-    r = detect_region()
-    if r and r["loc"]:
-        status = region_status(r["loc"])
-        add("ok" if status == "supported" else "warn",
-            f"{region_message(r['loc'], status)}（IP {r['ip']}，Cloudflare 节点 {r['colo']}，{r['ms']} ms）",
-            REGION_ADVICE[status])
+    data = {}
+    if store is not None:
+        check_region(store, max_age=0)  # 顺便更新界面常显的缓存和账号的地区记录
+        data = store.load()
+        r = data.get("region") or {}
     else:
-        add("warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
+        r = detect_region() or {}
+    if r.get("loc"):
+        status = region_status(r["loc"])
+        add("region", "ok" if status == "supported" else "warn",
+            f"{region_message(r['loc'], status)}（IP {r.get('ip')}" + (f"，{r['city']}" if r.get("city") else "")
+            + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms）", REGION_ADVICE[status])
+    else:
+        add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
+    if r.get("org") and not hosting_exit(r["org"]):
+        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}）", "看起来是普通宽带或运营商网络，不是机房出口")
+    elif not r.get("org"):
+        add("isp", "info", "网络服务商：查不到（连不上 Cloudflare 的 meta 接口）", "判断不了出口是不是机房；不影响其它检查")
     # api.anthropic.com：有登录就用当前登录实测
     creds = read_live_credentials()[0] if store is not None else None
     at = oauth_block(creds).get("accessToken") if creds else None
@@ -2726,48 +3114,65 @@ def service_check(store=None):
     msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
     region_hint = "通常是出口地区不在 Anthropic 支持范围，换一个出口后重试"
     if st == 0:
-        add("bad", f"{api_host}：连不上（{msg}）", "检查网络或代理；公司网络可能屏蔽了这个域名")
+        add("api", "bad", f"{api_host}：连不上（{msg}）", "检查网络或代理；公司网络可能屏蔽了这个域名")
     elif st == 403 or region_denied(msg):
-        add("bad", f"{api_host}：拒绝访问（HTTP {st}：{msg or '-'}）", region_hint)
+        add("api", "bad", f"{api_host}：拒绝访问（HTTP {st}：{msg or '-'}）", region_hint)
     elif at and st == 200:
-        add("ok", f"{api_host}：服务正常，当前登录可用（{ms} ms）")
+        add("api", "ok", f"{api_host}：服务正常，当前登录可用（{ms} ms）")
     elif at and st == 401:
-        add("warn", f"{api_host}：服务可达，但当前登录已过期或无效（{ms} ms）", "运行一次 claude 会自动续登录，不影响切换账号")
+        add("api", "warn", f"{api_host}：服务可达，但当前登录已过期或无效（{ms} ms）", "运行一次 claude 会自动续登录，不影响切换账号")
     elif st == 401:
-        add("ok", f"{api_host}：服务可达（未登录，{ms} ms）")
+        add("api", "ok", f"{api_host}：服务可达（未登录，{ms} ms）")
     elif st >= 500:
-        add("bad", f"{api_host}：服务端错误（HTTP {st}）", "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com")
+        add("api", "bad", f"{api_host}：服务端错误（HTTP {st}）", "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com")
     else:
-        add("warn", f"{api_host}：HTTP {st}（{msg or '-'}，{ms} ms）", "少见的返回，稍后重试；持续出现请把这一行发给作者")
+        add("api", "warn", f"{api_host}：HTTP {st}（{msg or '-'}，{ms} ms）", "少见的返回，稍后重试；持续出现请把这一行发给作者")
     # claude.ai：不带登录，看可达性和有没有被网络管控拦截
     t0 = time.time()
     code, body, raw = web_get("/api/organizations", "", timeout=10)
     ms = int((time.time() - t0) * 1000)
     msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
     if code == 0:
-        add("bad", f"{web_host}：连不上（{raw}）", "检查网络或代理")
+        add("web", "bad", f"{web_host}：连不上（{raw}）", "检查网络或代理")
     elif is_cloudflare(raw):
-        add("warn", f"{web_host}：返回人机验证页（{ms} ms）",
+        add("web", "warn", f"{web_host}：返回人机验证页（{ms} ms）",
             "公司网络或代理触发了 Cloudflare 人机验证；只影响网页账号读取额度，不影响 Claude Code 切换")
     elif region_denied(msg):
-        add("bad", f"{web_host}：拒绝访问（HTTP {code}：{msg}）", region_hint)
+        add("web", "bad", f"{web_host}：拒绝访问（HTTP {code}：{msg}）", region_hint)
     elif code in (200, 401, 403):
-        add("ok", f"{web_host}：可达（{ms} ms）")
+        add("web", "ok", f"{web_host}：可达（{ms} ms）")
     elif code >= 500:
-        add("bad", f"{web_host}：服务端错误（HTTP {code}）", "稍后再试")
+        add("web", "bad", f"{web_host}：服务端错误（HTTP {code}）", "稍后再试")
     else:
-        add("warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
-    add("info", "代理：" + ("；".join(f"{k}={v}" for k, v in proxies.items()) if proxies else "无（直连）"),
-        "请求经过代理，上面的出口地区是代理的出口" if proxies else "直连，出口地区就是本机网络的出口")
+        add("web", "warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
+    # 代理：环境变量 + 系统设置；VPN：默认路由
+    parts = [f"{k}={v}" for k, v in proxies.items()] + [f"系统设置 {p}" for p in system_proxy()]
+    add("proxy", "info", "代理：" + ("；".join(parts) if parts else "无（直连）"),
+        "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" if parts else "直连，出口地区就是本机网络的出口")
+    tun = default_route_tunnel()
+    if tun:
+        add("vpn", "info", f"VPN：默认路由走 {tun[0]}（{tun[1]}）",
+            "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。")
+    else:
+        add("vpn", "ok", "VPN：默认路由没有经过隧道接口", "只看本机默认路由；透明代理和路由器上的 VPN 看不出来")
+    out.extend(risk_items(data, include_region=False))
+    add("device", "info", f"设备：{platform.system()} {platform.release()}，{platform.machine()}，Python {platform.python_version()}",
+        "设备类型、系统、时区、语言这些设备环境信息 Anthropic 会收集；这里只是列出来，本工具不会改动或伪装任何设备标识。")
+    add("scope", "info", "检测范围：本机能看到的信号（出口 IP 和运营商、代理 / VPN、WARP、时钟、时区、系统语言、账号使用地区）",
+        "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，"
+        "所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。")
     # 总体结论放最前面
     first_bad = next((i for i in out if i["level"] == "bad"), None)
     first_warn = next((i for i in out if i["level"] == "warn"), None)
     if first_bad:
-        out.insert(0, {"level": "bad", "text": "总体：当前无法正常使用 —— " + first_bad["text"], "advice": first_bad["advice"]})
+        out.insert(0, {"kind": "summary", "level": "bad", "text": "总体：当前无法正常使用 —— " + first_bad["text"],
+                       "advice": first_bad["advice"]})
     elif first_warn:
-        out.insert(0, {"level": "warn", "text": "总体：可以使用，但有风险 —— " + first_warn["text"], "advice": first_warn["advice"]})
+        out.insert(0, {"kind": "summary", "level": "warn", "text": "总体：可以使用，但有风险 —— " + first_warn["text"],
+                       "advice": first_warn["advice"]})
     else:
-        out.insert(0, {"level": "ok", "text": "总体：Claude 服务正常，出口地区在支持名单内", "advice": ""})
+        out.insert(0, {"kind": "summary", "level": "ok", "text": "总体：Claude 服务正常，出口地区在支持名单内，没有发现风险点",
+                       "advice": ""})
     return out
 
 

@@ -101,6 +101,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             .and_then(|m| m.get("message")).cloned().unwrap_or(Value::Null),
         "pending_switch": pending_switch_view(data),
         "region": super::health::region_view(data),
+        "risks": super::health::risk_items(data, true),
         "generated_at": now_iso()
     })
 }
@@ -276,6 +277,11 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
     let target = accounts(&data)[find_index(&data, key)?].clone();
     let tid = s(&target, "id").unwrap_or_default().to_string();
     let label = s(&target, "label").unwrap_or("").to_string();
+    // 只提醒，不拦：把 warn / bad 的风险点随结果带给前端
+    let risks: Vec<Value> = super::health::risk_items(&data, true)
+        .into_iter()
+        .filter(|r| matches!(s(r, "level"), Some("warn") | Some("bad")))
+        .collect();
     let procs = if active_code_id(&data).as_deref() != Some(tid.as_str()) {
         running_claude_processes()
     } else {
@@ -285,6 +291,7 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
         if mode != Some("wait") {
             return Ok(json!({
                 "ok": false, "choice_required": true, "running_claude": procs.len(), "account": tid, "label": label,
+                "risks": risks,
                 "message": format!("{}。等它们结束后再切换不会打断正在跑的任务；现在就切的话它们需要重开。", running_summary(&procs))
             }));
         }
@@ -294,6 +301,7 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
         store.save(&mut data)?;
         return Ok(json!({
             "ok": true, "changed": false, "deferred": true, "running_claude": procs.len(), "account": tid,
+            "risks": risks,
             "message": format!("有 {} 个 claude 会话在运行，等它们退出后会自动切换到 {}", procs.len(), label)
         }));
     }
@@ -310,7 +318,7 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
     };
     Ok(json!({
         "ok": true, "changed": r.changed, "account": r.id, "running_claude": procs.len(),
-        "message": message, "backup": r.backup.map(|p| p.display().to_string())
+        "message": message, "backup": r.backup.map(|p| p.display().to_string()), "risks": risks
     }))
 }
 
