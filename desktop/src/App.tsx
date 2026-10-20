@@ -13,6 +13,7 @@ import {
 } from "./components/Dialogs";
 import { LocalUsage } from "./components/LocalUsage";
 import { PhoneAccess } from "./components/PhoneAccess";
+import { Privacy } from "./components/Privacy";
 import { Rules } from "./components/Rules";
 import type { Account, ServiceCheckItem, State, SwitchResult } from "./types";
 
@@ -123,7 +124,11 @@ function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, ba
         </div>
         <div>
           <span className="k">网络</span>
-          {reg.org ? `${reg.org}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}` : "查不到"}
+          {reg.lookup_mode === "off"
+            ? "外部 IP 查询已关闭"
+            : reg.org
+              ? `${reg.org}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}${reg.meta_source ? " · 数据：" + reg.meta_source : ""}`
+              : "查不到"}
         </div>
         <div>
           <span className="k">检测</span>
@@ -370,6 +375,7 @@ export default function App() {
             </div>
           </section>
           <ServiceCheck toast={toast} reload={load} />
+          <Privacy toast={toast} onChanged={load} />
         </>
       ) : (
         <main aria-live="polite">

@@ -6,7 +6,8 @@ use cam_engine::claude::{
     apply_pending_switch, apply_pending_switch_at, import_current, is_claude_cmd, switch_account, PENDING_ID,
 };
 use cam_engine::health::{
-    check_region, parse_exit_meta, risk_items, risk_score, service_check, system_dns_servers, tunnel_kind,
+    check_region, clear_region_history, parse_exit_meta, privacy_view, risk_items, risk_score, save_privacy, service_check,
+    system_dns_servers, tunnel_kind,
 };
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
@@ -45,6 +46,8 @@ struct Mock {
     rdap_country: String,
     /// /trace6 的地区：空表示 IPv6 不可用
     trace6_loc: String,
+    /// /cdn-cgi/trace 返回的出口 IP，空表示 1.2.3.4
+    trace_ip: String,
 }
 
 fn mock() -> &'static Mutex<Mock> {
@@ -78,9 +81,47 @@ fn mock_base() -> &'static str {
                     let loc = if m.trace_loc.is_empty() { "US".to_string() } else { m.trace_loc.clone() };
                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() + m.trace_ts_offset as f64;
                     let warp = if m.trace_warp { "on" } else { "off" };
+                    let ip = if m.trace_ip.is_empty() { "1.2.3.4".to_string() } else { m.trace_ip.clone() };
                     drop(m);
-                    let body = format!("fl=1\nip=1.2.3.4\nts={:.3}\nloc={}\ncolo=SJC\nwarp={}\n", ts, loc, warp);
+                    let body = format!("fl=1\nip={}\nts={:.3}\nloc={}\ncolo=SJC\nwarp={}\n", ip, ts, loc, warp);
                     let _ = req.respond(tiny_http::Response::from_string(body));
+                    continue;
+                }
+                if path.starts_with("/ipapiis") || path.starts_with("/ipinfo") {
+                    // ipapi.is：带 key 返回完整信息和标记，不带 key 只有简版；ipinfo.io：运营商和国家，没有标记
+                    let org = if m.meta_org.is_empty() { "Comcast Cable Communications, LLC".to_string() } else { m.meta_org.clone() };
+                    let country = if !m.meta_country.is_empty() {
+                        m.meta_country.clone()
+                    } else if m.trace_loc.is_empty() {
+                        "US".to_string()
+                    } else {
+                        m.trace_loc.clone()
+                    };
+                    let t = if m.ipapi_type.is_empty() { "residential".to_string() } else { m.ipapi_type.clone() };
+                    let rdap = match m.rdap_country.as_str() {
+                        "-" => None,
+                        "" => Some("us".to_string()),
+                        c => Some(c.to_lowercase()),
+                    };
+                    drop(m);
+                    let (code, body) = if path.starts_with("/ipinfo") {
+                        (200, json!({"ip": "1.2.3.4", "org": format!("AS7922 {}", org), "city": "San Jose", "region": "California", "country": country}))
+                    } else if t == "fail" {
+                        (429, json!({"error": "quota"}))
+                    } else if !path.contains("key=") {
+                        (200, json!({"ip": "1.2.3.4", "company": org, "asn": format!("AS7922 {}", org), "city": "San Jose",
+                                     "region": "California", "country": "United States"}))
+                    } else {
+                        let mut asn = json!({"asn": 7922, "org": org});
+                        if let Some(c) = rdap {
+                            asn["country"] = json!(c);
+                        }
+                        (200, json!({"ip": "1.2.3.4", "is_datacenter": t == "hosting", "is_vpn": t == "proxy", "is_proxy": false,
+                                     "is_tor": t == "tor", "is_mobile": t == "mobile", "asn": asn,
+                                     "company": {"name": org, "type": if t == "hosting" { "hosting" } else { "isp" }},
+                                     "location": {"country_code": country, "city": "San Jose", "state": "California"}}))
+                    };
+                    let _ = req.respond(tiny_http::Response::from_string(body.to_string()).with_status_code(code));
                     continue;
                 }
                 if path.starts_with("/ipapi") {
@@ -220,7 +261,11 @@ impl Env {
         std::env::set_var("CAM_STATUS_URL", format!("{}/status.json", base));
         std::env::set_var("CAM_CF_META_URL", format!("{}/meta", base));
         std::env::set_var("CAM_IPAPI_URL", format!("{}/ipapi", base));
-        std::env::set_var("CAM_IPAPI_IS_KEY", "");
+        std::env::set_var("CAM_IPAPI_IS_URL", format!("{}/ipapiis", base));
+        std::env::set_var("CAM_IPAPI_IS_KEY", "test-key"); // 默认按“配了 key”测，带类型标记
+        std::env::set_var("CAM_IPINFO_URL", format!("{}/ipinfo", base));
+        std::env::set_var("CAM_META_TTL", "0"); // 测试里每次都重查运营商；缓存单独测
+        std::env::remove_var("CAM_IP_LOOKUP");
         std::env::set_var("CAM_RDAP_URL", format!("{}/rdap/", base));
         std::env::set_var("CAM_CF_TRACE4_URL", format!("{}/trace4", base));
         std::env::set_var("CAM_CF_TRACE6_URL", format!("{}/trace6", base));
@@ -708,9 +753,10 @@ fn risk_items_and_reminders() {
     let mm = by_kind(&items, "region_mismatch").unwrap();
     assert_eq!(mm["level"], "warn");
     assert!(mm["text"].as_str().unwrap().contains("trace 接口看到 SG（新加坡），meta 接口看到 CA（加拿大）"), "{}", mm);
-    mock().lock().unwrap().ipapi_type = "fail".into(); // ip-api 查询失败 → 退到 Cloudflare meta（没有标记）→ 关键字判断
+    mock().lock().unwrap().ipapi_type = "fail".into(); // ipapi.is 查询失败 → 退到 ipinfo.io（没有标记）→ 按运营商名判断
     check_region(&store, 0).unwrap();
     assert!(e.data()["region"]["ip_type"].is_null());
+    assert_eq!(e.data()["region"]["meta_source"], "ipinfo.io");
     assert_eq!(by_kind(&risk_items(&e.data(), true), "isp").unwrap()["level"], "warn");
     {
         let mut m = mock().lock().unwrap();
@@ -823,6 +869,104 @@ fn risk_items_and_reminders() {
     assert_eq!(v["level"], "info");
     assert!(v["text"].as_str().unwrap().contains("wg0"), "{}", v);
     mock().lock().unwrap().trace_loc = String::new();
+}
+
+fn hits(prefix: &str) -> Vec<String> {
+    mock().lock().unwrap().calls.iter().filter(|c| c.1.starts_with(prefix)).map(|c| c.1.clone()).collect()
+}
+
+#[test]
+fn ip_lookup_sources_and_privacy() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    // 默认：ipapi.is（带 key，有类型标记），不碰 ip-api.com，也不查 RDAP
+    mock().lock().unwrap().calls.clear();
+    check_region(&store, 0).unwrap();
+    let reg = e.data()["region"].clone();
+    assert_eq!((reg["meta_source"].as_str(), reg["ip_type"].as_str(), reg["lookup_mode"].as_str()),
+               (Some("ipapi.is"), Some("residential"), Some("auto")));
+    assert_eq!(hits("/ipapiis"), vec!["/ipapiis?key=test-key".to_string()]);
+    assert!(hits("/ipapi").iter().all(|p| p.starts_with("/ipapiis")));
+    assert!(hits("/rdap/").is_empty());
+    let items = service_check(&store);
+    assert!(by_kind(&items, "isp").unwrap()["text"].as_str().unwrap().contains("（数据：ipapi.is）"));
+    // 没配 key：ipapi.is 简版，没有类型标记，另查 RDAP
+    std::env::set_var("CAM_IPAPI_IS_KEY", "");
+    mock().lock().unwrap().calls.clear();
+    check_region(&store, 0).unwrap();
+    let reg = e.data()["region"].clone();
+    assert_eq!((reg["meta_source"].as_str(), reg["org"].as_str(), reg["asn"].as_u64()),
+               (Some("ipapi.is"), Some("Comcast Cable Communications, LLC"), Some(7922)));
+    assert!(reg["ip_type"].is_null());
+    assert_eq!(hits("/ipapiis"), vec!["/ipapiis".to_string()]);
+    assert_eq!(hits("/rdap/").len(), 1);
+    // 保存的 key 生效，且不写进 accounts.json；换 key 后缓存的运营商信息作废
+    let pv = save_privacy(&store, &json!({"ipapi_key": "saved-key", "ipinfo_token": "tok"})).unwrap();
+    assert!(pv["has_ipapi_key"].as_bool().unwrap() && pv["has_ipinfo_token"].as_bool().unwrap());
+    let raw = std::fs::read_to_string(e.root.join("cam/accounts.json")).unwrap();
+    assert!(!raw.contains("saved-key"));
+    assert!(e.data()["region"].get("meta_at").is_none());
+    mock().lock().unwrap().calls.clear();
+    check_region(&store, 0).unwrap();
+    assert_eq!(hits("/ipapiis"), vec!["/ipapiis?key=saved-key".to_string()]);
+    assert_eq!(save_privacy(&store, &json!({"ipapi_key": ""})).unwrap()["has_ipapi_key"], false);
+    std::env::set_var("CAM_IPAPI_IS_KEY", "test-key");
+    // ip-api 模式：先问 ip-api.com
+    let pv = save_privacy(&store, &json!({"ip_lookup": "ip-api"})).unwrap();
+    assert_eq!(pv["ip_lookup"], "ip-api");
+    assert!(pv["sources"].as_array().unwrap().iter().any(|s| s["name"].as_str().unwrap().contains("ip-api.com")));
+    check_region(&store, 0).unwrap();
+    assert_eq!(e.data()["region"]["meta_source"], "ip-api.com");
+    // 关闭：只问 claude.ai 和状态页
+    let pv = save_privacy(&store, &json!({"ip_lookup": "off"})).unwrap();
+    let names: Vec<&str> = pv["sources"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["claude.ai/cdn-cgi/trace", "status.anthropic.com"]);
+    mock().lock().unwrap().calls.clear();
+    check_region(&store, 0).unwrap();
+    let mut paths: Vec<String> = mock().lock().unwrap().calls.iter().map(|c| c.1.clone()).collect();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths, vec!["/cdn-cgi/trace".to_string(), "/status.json".to_string()]);
+    let reg = e.data()["region"].clone();
+    assert_eq!((reg["loc"].as_str(), reg["lookup_mode"].as_str()), (Some("US"), Some("off")));
+    assert!(reg["org"].is_null() && reg["ip_type"].is_null());
+    let items = service_check(&store);
+    assert!(by_kind(&items, "isp").unwrap()["text"].as_str().unwrap().contains("外部 IP 查询已关闭"));
+    assert!(by_kind(&items, "ipv6").is_none() && by_kind(&items, "ip_origin").is_none());
+    assert_eq!(public_state(&store, &e.data())["region"]["lookup_mode"], "off");
+    assert!(save_privacy(&store, &json!({"ip_lookup": "everything"})).is_err());
+    save_privacy(&store, &json!({"ip_lookup": "auto"})).unwrap();
+    // 清除地区记录；接口路由
+    check_region(&store, 0).unwrap();
+    assert!(e.data()["accounts"].as_array().unwrap().iter().any(|a| a.get("regions").is_some()));
+    let pv = clear_region_history(&store).unwrap();
+    assert_eq!(pv["history"], json!({"accounts": 0, "checked_at": null}));
+    assert!(e.data().get("region").is_none());
+    let (code, body) = route(&store, "GET", "/api/privacy", &json!({}));
+    assert_eq!((code, body["ip_lookup"].as_str()), (200, Some("auto")));
+    let (code, body) = route(&store, "PUT", "/api/privacy", &json!({"ip_lookup": "off"}));
+    assert_eq!((code, body["ip_lookup"].as_str()), (200, Some("off")));
+    let (code, _) = route(&store, "DELETE", "/api/privacy/history", &json!({}));
+    assert_eq!(code, 200);
+    assert_eq!(privacy_view(&store).unwrap()["ip_lookup"], "off");
+}
+
+#[test]
+fn meta_cached_while_exit_ip_unchanged() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    std::env::set_var("CAM_META_TTL", "86400");
+    mock().lock().unwrap().calls.clear();
+    check_region(&store, 0).unwrap();
+    check_region(&store, 0).unwrap();
+    assert_eq!(hits("/ipapiis").len(), 1);
+    assert_eq!(e.data()["region"]["org"], "Comcast Cable Communications, LLC");
+    mock().lock().unwrap().trace_ip = "5.6.7.8".into(); // 出口 IP 变了才重查
+    check_region(&store, 0).unwrap();
+    assert_eq!(hits("/ipapiis").len(), 2);
+    std::env::set_var("CAM_META_TTL", "0");
 }
 
 #[test]

@@ -173,6 +173,12 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .host .risk.medium { color: var(--warn); }
 .host .risk.high { color: var(--hot); border-color: var(--hot); }
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+/* 隐私与数据源 */
+.sources { list-style: none; margin: 6px 0 10px; padding: 0; display: grid; gap: 5px; font-size: 13px; }
+.sources b { font-weight: 600; margin-right: 8px; }
+.sources span { color: var(--muted); }
+.pv-h { margin: 14px 0 0; font-size: 13px; font-weight: 650; }
+.pv-acts { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
 .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }

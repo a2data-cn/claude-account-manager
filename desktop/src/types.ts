@@ -126,6 +126,20 @@ export interface RegionInfo {
   org?: string | null; // 出口 IP 的运营商
   city?: string | null;
   ip_type?: "residential" | "hosting" | "proxy" | "tor" | "mobile" | null; // 数据库判定的 IP 类型，null = 数据源没有标记
+  meta_source?: string | null; // 运营商信息来自哪家（ipapi.is / ipinfo.io / Cloudflare / ip-api.com），界面上注明来源
+  lookup_mode?: "auto" | "ip-api" | "off" | null; // 检测时的外部 IP 查询设置
+}
+
+/** GET / PUT /api/privacy：外部 IP 查询设置和会访问哪些服务 */
+export interface PrivacyInfo {
+  ip_lookup: "auto" | "ip-api" | "off";
+  modes: { value: string; label: string }[];
+  env_override: boolean;
+  has_ipapi_key: boolean;
+  has_ipinfo_token: boolean;
+  meta_ttl_hours: number;
+  sources: { name: string; what: string }[];
+  history: { accounts: number; checked_at: string | null };
 }
 
 export interface LocalRow {

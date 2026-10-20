@@ -183,6 +183,12 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .host .risk.medium { color: var(--warn); }
 .host .risk.high { color: var(--hot); border-color: var(--hot); }
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+/* 隐私与数据源 */
+.sources { list-style: none; margin: 6px 0 10px; padding: 0; display: grid; gap: 5px; font-size: 13px; }
+.sources b { font-weight: 600; margin-right: 8px; }
+.sources span { color: var(--muted); }
+.pv-h { margin: 14px 0 0; font-size: 13px; font-weight: 650; }
+.pv-acts { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
 .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }
@@ -341,6 +347,23 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
       <p class="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
       <button class="btn" id="btn-check" type="button">开始检测</button>
       <ul class="checks" id="check-list" hidden></ul>
+    </div>
+  </section>
+
+  <section class="block" id="privacy-block" hidden>
+    <h2>隐私与数据源</h2>
+    <div class="panel">
+      <p class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。下面可以选择查不查运营商和 IP 类型、用哪家的数据。</p>
+      <div class="field"><label for="pv-mode">外部 IP 查询</label><select id="pv-mode"></select><span class="hint" id="pv-env" hidden>被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span></div>
+      <form class="row2" id="pv-form">
+        <div class="field"><label for="pv-key">ipapi.is key（免费注册，每天 1000 次，可商用，带机房 / VPN 标记）</label><input id="pv-key" type="password" autocomplete="off"></div>
+        <div class="field"><label for="pv-tok">ipinfo.io token（可选）</label><input id="pv-tok" type="password" autocomplete="off"></div>
+        <div class="pv-acts"><button class="btn" type="submit">保存 key</button><button class="btn quiet danger" type="button" id="pv-del" hidden>删除已保存的 key</button></div>
+      </form>
+      <h4 class="pv-h">当前设置下会访问</h4>
+      <ul class="sources" id="pv-sources"></ul>
+      <p class="hint" id="pv-ttl"></p>
+      <div class="alert-row"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div>
     </div>
   </section>
 
@@ -670,7 +693,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     const risks = (st.risks || []).filter((r) => r.level === "warn" || r.level === "bad");
     const exitTxt = reg.status === "unknown" ? "查不到" : `${esc(reg.loc)}${reg.city ? " · " + esc(reg.city) : ""}`;
     const exitCls = reg.status === "unsupported" ? "bad" : "";
-    const net = reg.org ? `${esc(reg.org)}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}` : "查不到";
+    const net = reg.lookup_mode === "off" ? "外部 IP 查询已关闭"
+      : reg.org ? `${esc(reg.org)}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}${reg.meta_source ? " · 数据：" + esc(reg.meta_source) : ""}` : "查不到";
     return `<section class="env ${esc(sc.grade)}" aria-label="环境状态">
       <div class="env-score"><div class="env-num">${esc(sc.score)}<small>/100</small></div><div class="env-lab">${esc(sc.label.split("，")[0])}</div></div>
       <div class="env-facts">
@@ -767,10 +791,42 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     } catch (_) { $("#local-block").hidden = true; }
   }
 
+  // ---- 隐私与数据源
+  function renderPrivacy(p) {
+    $("#pv-mode").innerHTML = p.modes.map((m) => `<option value="${esc(m.value)}"${m.value === p.ip_lookup ? " selected" : ""}>${esc(m.label)}</option>`).join("");
+    $("#pv-mode").disabled = p.env_override;
+    $("#pv-env").hidden = !p.env_override;
+    $("#pv-key").placeholder = p.has_ipapi_key ? "已配置，留空不修改" : "没配：每天 30 次，不带类型标记";
+    $("#pv-tok").placeholder = p.has_ipinfo_token ? "已配置，留空不修改" : "没配";
+    $("#pv-del").hidden = !(p.has_ipapi_key || p.has_ipinfo_token);
+    $("#pv-sources").innerHTML = p.sources.map((s) => `<li><b>${esc(s.name)}</b><span>${esc(s.what)}</span></li>`).join("");
+    $("#pv-ttl").textContent = `出口 IP 没变时，运营商信息 ${p.meta_ttl_hours} 小时内不重查。`;
+    $("#pv-hist").textContent = `地区记录：${p.history.accounts} 个账号记过使用地区（用来提醒“同一账号多地区使用”）`;
+    $("#privacy-block").hidden = false;
+  }
+  async function loadPrivacy() {
+    try { renderPrivacy(await api("GET", "/api/privacy")); } catch (_) { $("#privacy-block").hidden = true; }
+  }
+  async function savePrivacy(method, path, body, msg) {
+    try { renderPrivacy(await api(method, path, body)); toast(msg); load(); } catch (e) { toast(e.message, true); }
+  }
+  $("#pv-mode").onchange = (e) => savePrivacy("PUT", "/api/privacy", { ip_lookup: e.target.value }, "已保存，下次检测按新设置");
+  $("#pv-form").onsubmit = (e) => {
+    e.preventDefault();
+    const body = {};
+    if ($("#pv-key").value.trim()) body.ipapi_key = $("#pv-key").value.trim();
+    if ($("#pv-tok").value.trim()) body.ipinfo_token = $("#pv-tok").value.trim();
+    if (!Object.keys(body).length) return;
+    $("#pv-key").value = ""; $("#pv-tok").value = "";
+    savePrivacy("PUT", "/api/privacy", body, "已保存 key");
+  };
+  $("#pv-del").onclick = () => savePrivacy("PUT", "/api/privacy", { ipapi_key: "", ipinfo_token: "" }, "已删除 key");
+  $("#pv-clear").onclick = () => savePrivacy("DELETE", "/api/privacy/history", undefined, "已清除出口信息和地区记录");
+
   async function load() {
     try {
       state = await api("GET", "/api/state");
-      render(); loadLocal(); loadRules();
+      render(); loadLocal(); loadRules(); loadPrivacy();
       $("#check-block").hidden = false;
     } catch (e) {
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);

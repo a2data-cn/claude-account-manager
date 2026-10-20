@@ -446,6 +446,9 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
             Ok(public_state(store, &store.load()?))
         }
         ("POST", ["accounts", id, "switch"]) => api_switch(store, id, s(body, "mode")),
+        ("GET", ["privacy"]) => super::health::privacy_view(store),
+        ("PUT", ["privacy"]) => super::health::save_privacy(store, body),
+        ("DELETE", ["privacy", "history"]) => super::health::clear_region_history(store),
         ("DELETE", ["pending-switch"]) => {
             cancel_pending_switch(store)?;
             Ok(public_state(store, &store.load()?))

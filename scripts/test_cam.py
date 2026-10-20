@@ -32,7 +32,8 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     trace_ts_offset = 0  # 服务器时间相对本机的偏差（秒）
     meta_org = "Comcast Cable Communications, LLC"  # /meta 和 /ipapi 返回的运营商
     meta_country = None  # /meta 和 /ipapi 返回的国家，None 表示和 trace 一致
-    ipapi_type = "residential"  # /ipapi（ip-api.com 格式）的 IP 类型：residential / hosting / proxy / mobile / None=查询失败
+    ipapi_type = "residential"  # /ipapiis（ipapi.is）和 /ipapi（ip-api.com）的 IP 类型：residential / hosting / proxy / tor / mobile / None=查询失败
+    trace_ip = "1.2.3.4"  # /cdn-cgi/trace 返回的出口 IP
     rdap_country = "US"  # /rdap/<ip> 返回的注册国，None 表示记录没写
     trace6_loc = None  # /trace6 的地区，None 表示 IPv6 不可用
     status_indicator = "none"  # 官方状态页：none / minor / major / critical
@@ -97,8 +98,26 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
                 return
         auth = (self.headers.get("Authorization") or "")[7:]
         if self.path == "/cdn-cgi/trace":
-            return self._send_html(200, f"fl=1\nip=1.2.3.4\nts={time.time() + self.trace_ts_offset:.3f}\n"
+            return self._send_html(200, f"fl=1\nip={self.trace_ip}\nts={time.time() + self.trace_ts_offset:.3f}\n"
                                         f"loc={self.trace_loc}\ncolo=SJC\nwarp={'on' if self.trace_warp else 'off'}\n")
+        if self.path.startswith("/ipapiis"):  # ipapi.is：带 key 返回完整信息和标记，不带 key 只有简版
+            t = self.ipapi_type
+            if t is None:
+                return self._send(429, {"error": "quota"})
+            if "key=" not in self.path:
+                return self._send(200, {"ip": self.trace_ip, "company": self.meta_org, "asn": f"AS7922 {self.meta_org}",
+                                        "city": "San Jose", "region": "California", "country": "United States"})
+            asn = {"asn": 7922, "org": self.meta_org}
+            if self.rdap_country:
+                asn["country"] = self.rdap_country.lower()
+            return self._send(200, {"ip": self.trace_ip, "is_datacenter": t == "hosting", "is_vpn": t == "proxy", "is_proxy": False,
+                                    "is_tor": t == "tor", "is_mobile": t == "mobile", "asn": asn,
+                                    "company": {"name": self.meta_org, "type": "hosting" if t == "hosting" else "isp"},
+                                    "location": {"country_code": self.meta_country or self.trace_loc, "city": "San Jose",
+                                                 "state": "California"}})
+        if self.path.startswith("/ipinfo"):
+            return self._send(200, {"ip": self.trace_ip, "org": f"AS7922 {self.meta_org}", "city": "San Jose",
+                                    "region": "California", "country": self.meta_country or self.trace_loc})
         if self.path.startswith("/ipapi"):
             if self.ipapi_type is None:
                 return self._send(200, {"status": "fail", "message": "quota"})
@@ -183,7 +202,12 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_STATUS_URL"] = base + "/status.json"
         os.environ["CAM_CF_META_URL"] = base + "/meta"
         os.environ["CAM_IPAPI_URL"] = base + "/ipapi"
-        os.environ["CAM_IPAPI_IS_KEY"] = ""
+        os.environ["CAM_IPAPI_IS_URL"] = base + "/ipapiis"
+        os.environ["CAM_IPAPI_IS_KEY"] = "test-key"  # 默认按“配了 key”测，带类型标记
+        os.environ["CAM_IPINFO_URL"] = base + "/ipinfo"
+        os.environ["CAM_META_TTL"] = "0"  # 测试里每次都重查运营商；缓存单独测
+        os.environ["CAM_NO_BG_CHECK"] = "1"  # 不起后台检测进程
+        os.environ.pop("CAM_IP_LOOKUP", None)
         os.environ["CAM_RDAP_URL"] = base + "/rdap/"
         os.environ["CAM_CF_TRACE4_URL"] = base + "/trace4"
         os.environ["CAM_CF_TRACE6_URL"] = base + "/trace6"
@@ -229,6 +253,7 @@ class CamTest(unittest.TestCase):
         MockAnthropic.ipapi_type = "residential"
         MockAnthropic.rdap_country = "US"
         MockAnthropic.trace6_loc = None
+        MockAnthropic.trace_ip = "1.2.3.4"
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
@@ -557,10 +582,12 @@ class CamTest(unittest.TestCase):
                 return answer
             return ask
 
-        # 100 分：不问，直接启动
+        # 100 分：不问，直接启动。没检测过时只快速问一次 claude.ai 的出口，完整检测交给后台进程（测试里关掉了）
+        MockAnthropic.calls = []
         self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
         self.assertEqual(asked, [])
-        self.assertEqual(self.data()["region"]["loc"], "US")  # 顺手做了一次检测并缓存
+        self.assertEqual([c[1] for c in MockAnthropic.calls], ["/cdn-cgi/trace"])
+        self.assertIsNone(self.data().get("region"))
         # 出口不在名单：不看分数，要输入“继续”
         MockAnthropic.trace_loc = "CN"
         self.cam.check_region(store, max_age=0)
@@ -1039,9 +1066,10 @@ class CamTest(unittest.TestCase):
         kinds = {r["kind"]: r for r in self.cam.risk_items(self.data())}
         self.assertEqual(kinds["isp"]["level"], "warn")
         self.assertIn("DigitalOcean, LLC（AS7922），是机房 / 云服务器", kinds["isp"]["text"])
-        MockAnthropic.ipapi_type = None  # ip-api 查询失败 → 退到 Cloudflare meta（没有标记）→ 关键字判断
+        MockAnthropic.ipapi_type = None  # ipapi.is 查询失败 → 退到 ipinfo.io（没有标记）→ 按运营商名判断
         self.cam.check_region(store, max_age=0)
         self.assertIsNone(self.data()["region"]["ip_type"])
+        self.assertEqual(self.data()["region"]["meta_source"], "ipinfo.io")
         self.assertEqual({r["kind"]: r for r in self.cam.risk_items(self.data())}["isp"]["level"], "warn")
         MockAnthropic.ipapi_type = "residential"
         self.assertEqual(kinds["region_mismatch"]["level"], "warn")
@@ -1130,6 +1158,115 @@ class CamTest(unittest.TestCase):
             self.assertIn("wg0", v["text"])
         finally:
             os.environ["CAM_TEST_ROUTE_IF"] = ""
+
+    def test_ip_lookup_sources_and_privacy(self):
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        hits = lambda prefix: [c[1] for c in MockAnthropic.calls if c[1].startswith(prefix)]
+        # 默认：ipapi.is（带 key，有类型标记），不碰 ip-api.com
+        MockAnthropic.calls = []
+        self.cam.check_region(store, max_age=0)
+        reg = self.data()["region"]
+        self.assertEqual((reg["meta_source"], reg["ip_type"], reg["lookup_mode"]), ("ipapi.is", "residential", "auto"))
+        self.assertEqual(hits("/ipapiis"), ["/ipapiis?key=test-key"])
+        self.assertFalse([p for p in hits("/ipapi") if not p.startswith("/ipapiis")])
+        self.assertFalse(hits("/rdap/"))  # 带 key 的 ipapi.is 自己给注册国
+        self.assertIn("（数据：ipapi.is）", next(i for i in self.cam.service_check(store) if i["kind"] == "isp")["text"])
+        # 没配 key：ipapi.is 简版，没有类型标记，另查 RDAP 拿注册国
+        os.environ["CAM_IPAPI_IS_KEY"] = ""
+        try:
+            MockAnthropic.calls = []
+            self.cam.check_region(store, max_age=0)
+            reg = self.data()["region"]
+            self.assertEqual((reg["meta_source"], reg["ip_type"], reg["org"], reg["asn"]),
+                             ("ipapi.is", None, "Comcast Cable Communications, LLC", 7922))
+            self.assertEqual(hits("/ipapiis"), ["/ipapiis"])
+            self.assertEqual(len(hits("/rdap/")), 1)
+            # 保存的 key 生效，且不写进 accounts.json
+            pv = self.cam.save_privacy(store, {"ipapi_key": "saved-key", "ipinfo_token": "tok"})
+            self.assertTrue(pv["has_ipapi_key"] and pv["has_ipinfo_token"])
+            self.assertNotIn("saved-key", open(store.accounts_path, encoding="utf-8").read())
+            self.assertIsNone(self.data()["region"].get("meta_at"))  # 换了 key，缓存的运营商信息作废
+            MockAnthropic.calls = []
+            self.cam.check_region(store, max_age=0)
+            self.assertEqual(hits("/ipapiis"), ["/ipapiis?key=saved-key"])
+            self.assertFalse(self.cam.save_privacy(store, {"ipapi_key": ""})["has_ipapi_key"])
+        finally:
+            os.environ["CAM_IPAPI_IS_KEY"] = "test-key"
+        # ip-api 模式：先问 ip-api.com
+        pv = self.cam.save_privacy(store, {"ip_lookup": "ip-api"})
+        self.assertEqual(pv["ip_lookup"], "ip-api")
+        self.assertTrue(any("ip-api.com" in s["name"] for s in pv["sources"]))
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual(self.data()["region"]["meta_source"], "ip-api.com")
+        # 关闭：只问 claude.ai 和状态页
+        pv = self.cam.save_privacy(store, {"ip_lookup": "off"})
+        self.assertEqual([s["name"] for s in pv["sources"]], ["claude.ai/cdn-cgi/trace", "status.anthropic.com"])
+        MockAnthropic.calls = []
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual(sorted({c[1] for c in MockAnthropic.calls}), ["/cdn-cgi/trace", "/status.json"])
+        reg = self.data()["region"]
+        self.assertEqual((reg["loc"], reg["lookup_mode"], reg["org"], reg["ip_type"]), ("US", "off", None, None))
+        items = self.cam.service_check(store)
+        self.assertIn("外部 IP 查询已关闭", next(i for i in items if i["kind"] == "isp")["text"])
+        self.assertFalse([i for i in items if i["kind"] in ("ipv6", "ip_origin")])
+        self.assertEqual(self.cam.public_state(store, self.data())["region"]["lookup_mode"], "off")
+        with self.assertRaises(self.cam.CamError):
+            self.cam.save_privacy(store, {"ip_lookup": "everything"})
+        self.cam.save_privacy(store, {"ip_lookup": "auto"})
+        # 清除地区记录
+        self.cam.check_region(store, max_age=0)
+        self.assertTrue(any(a.get("regions") for a in self.data()["accounts"]))
+        pv = self.cam.clear_region_history(store)
+        self.assertEqual(pv["history"], {"accounts": 0, "checked_at": None})
+        self.assertNotIn("region", self.data())
+        # 命令行
+        self.assertEqual(self.run_cam("risk", "--ip-lookup", "off"), 0)
+        self.assertEqual(self.cam.privacy_view(store)["ip_lookup"], "off")
+        self.assertEqual(self.run_cam("risk", "--ip-lookup", "auto", "--clear-history"), 0)
+        self.assertEqual(self.cam.privacy_view(store)["ip_lookup"], "auto")
+
+    def test_meta_cached_while_exit_ip_unchanged(self):
+        self._two_accounts()
+        store = self.cam.Store()
+        old_ttl = self.cam.META_TTL
+        self.cam.META_TTL = 86400
+        try:
+            MockAnthropic.calls = []
+            self.cam.check_region(store, max_age=0)
+            self.cam.check_region(store, max_age=0)
+            self.assertEqual(len([c for c in MockAnthropic.calls if c[1].startswith("/ipapiis")]), 1)
+            self.assertEqual(self.data()["region"]["org"], "Comcast Cable Communications, LLC")
+            MockAnthropic.trace_ip = "5.6.7.8"  # 出口 IP 变了才重查
+            self.cam.check_region(store, max_age=0)
+            self.assertEqual(len([c for c in MockAnthropic.calls if c[1].startswith("/ipapiis")]), 2)
+        finally:
+            self.cam.META_TTL = old_ttl
+
+    def test_quick_region_for_launch(self):
+        self._two_accounts()
+        store = self.cam.Store()
+        self.assertFalse(self.cam.spawn_background_check())  # 测试里关掉了后台进程
+        MockAnthropic.trace_loc = "HK"
+        self.cam.check_region(store, max_age=0)
+        with store.lock():
+            d = store.load()
+            d["region"]["checked_at"] = "2020-01-01T00:00:00+00:00"  # 很久以前查的
+            store.save(d)
+        MockAnthropic.trace_loc, MockAnthropic.trace_ip = "US", "5.6.7.8"
+        q = self.cam.quick_trace(3)
+        self.assertEqual((q["loc"], q["ip"]), ("US", "5.6.7.8"))
+        d2 = self.cam.with_quick_region(self.data(), q)
+        self.assertEqual((d2["region"]["loc"], d2["region"]["prev_loc"]), ("US", "HK"))
+        self.assertNotIn("org", d2["region"])  # 出口 IP 变了，旧运营商信息不再适用
+        self.assertEqual(self.data()["region"]["loc"], "HK")  # 只是副本，不保存
+        self.assertIn("region_change", [r["kind"] for r in self.cam.risk_items(d2)])
+        MockAnthropic.calls = []
+        self.cam.risk_prompt_before_launch(store, ask=lambda _: "y", interactive=True)
+        self.assertEqual([c[1] for c in MockAnthropic.calls], ["/cdn-cgi/trace"])
+        # 后台进程的入口会做完整检测并保存
+        self.cam.background_region_check(store)
+        self.assertEqual(self.data()["region"]["ip"], "5.6.7.8")
 
     def test_region_cached_for_display(self):
         self._two_accounts()

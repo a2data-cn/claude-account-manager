@@ -77,8 +77,76 @@ fn ipinfo_url() -> String {
 fn ipapi_is_url() -> String {
     std::env::var("CAM_IPAPI_IS_URL").unwrap_or_else(|_| "https://api.ipapi.is/".into())
 }
-fn ipapi_is_key() -> String {
-    std::env::var("CAM_IPAPI_IS_KEY").unwrap_or_default()
+/// 外部 IP 查询的三种设置。规则和 cam.py 的 IP_LOOKUP_MODES 一致
+pub const IP_LOOKUP_MODES: &[(&str, &str)] = &[
+    ("auto", "自动：ipapi.is → ipinfo.io → Cloudflare（都可以商用）"),
+    ("ip-api", "自动，并优先用 ip-api.com（带机房 / 代理标记；仅限非商业用途，只有 http）"),
+    ("off", "关闭：只查 claude.ai 自己的出口信息和 Anthropic 状态页，不查运营商和 IP 类型"),
+];
+/// ipapi.is 的 key、ipinfo 的 token 存在 secrets 目录，不进 accounts.json
+pub const LOOKUP_SECRET_ID: &str = "_ip-lookup";
+const META_FIELDS: &[&str] = &["asn", "org", "city", "meta_loc", "ip_type", "reg_loc", "meta_source", "meta_at"];
+const STACK_FIELDS: &[&str] = &["v4_ip", "v4_loc", "v6_ip", "v6_loc"];
+
+/// 出口 IP 没变时，运营商 / 类型 / 注册国多久重查一次（秒）
+fn meta_ttl() -> i64 {
+    std::env::var("CAM_META_TTL").ok().and_then(|v| v.parse().ok()).unwrap_or(86400)
+}
+
+#[derive(Clone, Debug)]
+pub struct LookupConfig {
+    pub mode: String,
+    pub ipapi_key: String,
+    pub ipinfo_token: String,
+}
+
+/// 外部 IP 查询的设置。环境变量 CAM_IP_LOOKUP / CAM_IPAPI_IS_KEY / CAM_IPINFO_TOKEN 优先于保存的设置。
+pub fn ip_lookup_config(store: Option<&Store>) -> LookupConfig {
+    let (mut mode, mut key, mut tok) = ("auto".to_string(), String::new(), String::new());
+    if let Some(st) = store {
+        if let Ok(d) = st.load() {
+            if let Some(m) = d.get("prefs").and_then(|p| s(p, "ip_lookup")) {
+                mode = m.to_string();
+            }
+        }
+        let sec = st.load_secret(LOOKUP_SECRET_ID);
+        key = s(&sec, "ipapi_key").unwrap_or("").to_string();
+        tok = s(&sec, "ipinfo_token").unwrap_or("").to_string();
+    }
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    if let Some(m) = env("CAM_IP_LOOKUP") {
+        mode = m;
+    }
+    if !IP_LOOKUP_MODES.iter().any(|(m, _)| *m == mode) {
+        mode = "auto".into();
+    }
+    LookupConfig { mode, ipapi_key: env("CAM_IPAPI_IS_KEY").unwrap_or(key), ipinfo_token: env("CAM_IPINFO_TOKEN").unwrap_or(tok) }
+}
+
+fn with_param(url: &str, name: &str, value: &str) -> String {
+    if value.is_empty() {
+        return url.to_string();
+    }
+    let enc: String = value
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{:02X}", b) })
+        .collect();
+    format!("{}{}{}={}", url, if url.contains('?') { "&" } else { "?" }, name, enc)
+}
+
+/// 按顺序要问的运营商数据源 [(名字, 地址)]；off 时为空。
+pub fn meta_sources(cfg: &LookupConfig) -> Vec<(&'static str, String)> {
+    if cfg.mode == "off" {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if cfg.mode == "ip-api" {
+        out.push(("ip-api.com", ipapi_url()));
+    }
+    out.push(("ipapi.is", with_param(&ipapi_is_url(), "key", &cfg.ipapi_key)));
+    out.push(("ipinfo.io", with_param(&ipinfo_url(), "token", &cfg.ipinfo_token)));
+    out.push(("Cloudflare", cf_meta_url()));
+    out
 }
 fn ipapi_url() -> String {
     std::env::var("CAM_IPAPI_URL").unwrap_or_else(|_| {
@@ -195,15 +263,7 @@ pub fn fmt_ago(s: &str) -> String {
 /// 从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的）。
 /// 返回 {loc, ip, colo, ms, warp, skew} 或 None：warp 是请求经过了 Cloudflare WARP / Zero Trust，
 /// skew 是本机时钟比服务器快多少秒（没有 ts 字段时为 null）。
-pub fn detect_region() -> Option<Value> {
-    let t0 = Instant::now();
-    let (mut st, mut txt) = http_text(&format!("{}/cdn-cgi/trace", web_base()), 6);
-    if st != 200 || !txt.contains("loc=") {
-        (st, txt) = http_text("https://www.cloudflare.com/cdn-cgi/trace", 6);
-    }
-    if st != 200 || !txt.contains("loc=") {
-        return None;
-    }
+pub fn parse_trace(txt: &str, t0: Instant) -> Value {
     let get = |k: &str| {
         txt.lines()
             .find_map(|l| l.strip_prefix(&format!("{}=", k)))
@@ -216,47 +276,97 @@ pub fn detect_region() -> Option<Value> {
         .unwrap_or(0.0);
     let skew = get("ts").and_then(|t| t.parse::<f64>().ok()).map(|t| (now - t).round() as i64);
     let warp = matches!(get("warp").as_deref(), Some("on") | Some("plus")) || get("gateway").as_deref() == Some("on");
-    let mut out = json!({
+    json!({
         "loc": get("loc").map(|l| l.to_uppercase()), "ip": get("ip"), "colo": get("colo"),
-        "ms": t0.elapsed().as_millis() as u64, "warp": warp, "skew": skew,
-        "asn": null, "org": null, "city": null, "meta_loc": null, "ip_type": null, "reg_loc": null,
-        "v4_ip": null, "v4_loc": null, "v6_ip": null, "v6_loc": null
-    });
-    if let Some(meta) = fetch_exit_meta() {
-        for k in ["asn", "org", "city", "meta_loc", "ip_type", "reg_loc"] {
-            out[k] = meta.get(k).cloned().unwrap_or(Value::Null);
-        }
+        "ms": t0.elapsed().as_millis() as u64, "warp": warp, "skew": skew
+    })
+}
+
+/// 从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的），再并行查运营商 / 类型 / 注册国 /
+/// IPv4 / IPv6 出口。出口 IP 和数据源都没变、且 meta_ttl 内查过时，运营商那几项直接沿用 prev，不再问第三方。
+/// 设置为 off 时只查 claude.ai。与 cam.py 的 detect_region 一致。
+pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
+    let off = cfg.mode == "off";
+    let t0 = Instant::now();
+    let (mut st, mut txt) = http_text(&format!("{}/cdn-cgi/trace", web_base()), 6);
+    if (st != 200 || !txt.contains("loc=")) && !off {
+        (st, txt) = http_text("https://www.cloudflare.com/cdn-cgi/trace", 6);
     }
-    if let Some((ip, loc)) = trace_only(&cf_trace4_url()) {
-        out["v4_ip"] = json!(ip);
+    if st != 200 || !txt.contains("loc=") {
+        return None;
+    }
+    let mut out = parse_trace(&txt, t0);
+    for k in META_FIELDS.iter().chain(STACK_FIELDS) {
+        out[*k] = Value::Null;
+    }
+    out["lookup_mode"] = json!(cfg.mode);
+    if off {
+        return Some(out);
+    }
+    let ip = s(&out, "ip").unwrap_or("").to_string();
+    let fresh = s(prev, "meta_at")
+        .and_then(parse_time)
+        .map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < meta_ttl())
+        .unwrap_or(false);
+    let reuse = s(prev, "ip") == Some(ip.as_str()) && s(prev, "lookup_mode") == Some(cfg.mode.as_str()) && fresh;
+    let need_rdap = !reuse && cfg.ipapi_key.is_empty(); // 带 key 的 ipapi.is 自己会给注册国
+    let (v4, v6, meta, rdap) = std::thread::scope(|sc| {
+        let h4 = sc.spawn(|| trace_only(&cf_trace4_url()));
+        let h6 = sc.spawn(|| trace_only(&cf_trace6_url()));
+        let hm = (!reuse).then(|| sc.spawn(|| fetch_exit_meta(cfg)));
+        let hr = need_rdap.then(|| sc.spawn(|| fetch_ip_registration(&ip)));
+        (
+            h4.join().ok().flatten(),
+            h6.join().ok().flatten(),
+            hm.and_then(|h| h.join().ok()).flatten(),
+            hr.and_then(|h| h.join().ok()).flatten(),
+        )
+    });
+    if reuse {
+        for k in META_FIELDS {
+            out[*k] = prev.get(*k).cloned().unwrap_or(Value::Null);
+        }
+    } else {
+        if let Some(m) = meta {
+            for k in META_FIELDS {
+                if let Some(v) = m.get(*k) {
+                    out[*k] = v.clone();
+                }
+            }
+        }
+        if s(&out, "reg_loc").is_none() {
+            out["reg_loc"] = json!(if need_rdap { rdap } else { fetch_ip_registration(&ip) });
+        }
+        out["meta_at"] = json!(now_iso());
+    }
+    if let Some((ip4, loc)) = v4 {
+        out["v4_ip"] = json!(ip4);
         out["v4_loc"] = json!(loc);
     }
-    if let Some((ip, loc)) = trace_only(&cf_trace6_url()) {
-        out["v6_ip"] = json!(ip);
+    if let Some((ip6, loc)) = v6 {
+        out["v6_ip"] = json!(ip6);
         out["v6_loc"] = json!(loc);
-    }
-    if s(&out, "reg_loc").is_none() {
-        let ip = s(&out, "ip").unwrap_or("").to_string();
-        out["reg_loc"] = json!(fetch_ip_registration(&ip));
     }
     Some(out)
 }
 
-/// 出口 IP 的 ASN、运营商、城市、国家和类型。来源按优先级：ipapi.is（有 key 时，带 IP 类型 / VPN / Tor 标记）、
-/// ip-api.com（免费，带机房 / 代理 / 手机标记，只有 http）、Cloudflare meta、ipinfo.io（后两个没有标记）。查不到返回 None。
-pub fn fetch_exit_meta() -> Option<Value> {
-    let mut urls = Vec::new();
-    let key = ipapi_is_key();
-    if !key.is_empty() {
-        urls.push(format!("{}?key={}", ipapi_is_url(), key));
-    }
-    urls.extend([ipapi_url(), cf_meta_url(), ipinfo_url()]);
-    for url in urls.into_iter().filter(|u| !u.is_empty()) {
-        let (st, txt) = http_text(&url, 6);
+/// 用环境变量和默认设置检测一次（不读保存的设置）。
+pub fn detect_region() -> Option<Value> {
+    detect_region_with(&ip_lookup_config(None), &Value::Null)
+}
+
+/// 出口 IP 的 ASN、运营商、城市、国家和类型，按 meta_sources 的顺序问，第一个查到的为准。查不到返回 None。
+pub fn fetch_exit_meta(cfg: &LookupConfig) -> Option<Value> {
+    for (name, url) in meta_sources(cfg) {
+        if url.is_empty() {
+            continue;
+        }
+        let (st, txt) = http_text(&url, 5);
         if st != 200 {
             continue;
         }
-        if let Some(m) = serde_json::from_str::<Value>(&txt).ok().and_then(|j| parse_exit_meta(&j)) {
+        if let Some(mut m) = serde_json::from_str::<Value>(&txt).ok().and_then(|j| parse_exit_meta(&j)) {
+            m["meta_source"] = json!(name);
             return Some(m);
         }
     }
@@ -309,12 +419,15 @@ pub fn parse_exit_meta(j: &Value) -> Option<Value> {
     } else {
         asn = j.get("asn").and_then(|v| v.as_u64());
         org = s(j, "asOrganization").or_else(|| s(j, "isp")).map(String::from);
-        if let Some(v) = s(j, "as") {
+        if let Some(v) = s(j, "as").or_else(|| s(j, "asn")) {
             parse_as_field(v, &mut asn, &mut org);
         } else if org.is_none() {
             if let Some(v) = s(j, "org") {
                 parse_as_field(v, &mut asn, &mut org);
             }
+        }
+        if org.is_none() {
+            org = s(j, "company").map(String::from); // ipapi.is 不带 key 的简版
         }
         ip_type = if j.get("hosting").is_some() || j.get("proxy").is_some() {
             // ip-api.com
@@ -703,7 +816,7 @@ pub fn region_view(data: &Value) -> Value {
     let Some(checked) = s(&c, "checked_at").map(String::from) else {
         return json!({"loc": null, "ip": null, "status": null, "checked_at": null,
                       "message": "还没有检测过出口地区", "advice": "", "warp": false, "prev_loc": null, "changed_at": null,
-                      "org": null, "city": null, "ip_type": null});
+                      "org": null, "city": null, "ip_type": null, "meta_source": null, "lookup_mode": null});
     };
     let loc = s(&c, "loc").map(String::from);
     let status = region_status(loc.as_deref());
@@ -712,7 +825,8 @@ pub fn region_view(data: &Value) -> Value {
         "message": region_message(loc.as_deref(), status), "advice": region_advice(status),
         "warp": c.get("warp").and_then(|v| v.as_bool()).unwrap_or(false),
         "prev_loc": s(&c, "prev_loc"), "changed_at": s(&c, "changed_at"),
-        "org": s(&c, "org"), "city": s(&c, "city"), "ip_type": s(&c, "ip_type")
+        "org": s(&c, "org"), "city": s(&c, "city"), "ip_type": s(&c, "ip_type"),
+        "meta_source": s(&c, "meta_source"), "lookup_mode": s(&c, "lookup_mode")
     })
 }
 
@@ -725,8 +839,19 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
             return Ok(region_view(&data));
         }
     }
-    let r = detect_region().unwrap_or_else(|| json!({}));
-    let sp = fetch_status_page();
+    let cfg = ip_lookup_config(Some(store));
+    let prev = data.get("region").cloned().unwrap_or(Value::Null);
+    // 出口、状态页、本机设置三件事并行，互不等待
+    let (r, sp, env) = std::thread::scope(|sc| {
+        let hr = sc.spawn(|| detect_region_with(&cfg, &prev));
+        let hs = sc.spawn(fetch_status_page);
+        let he = sc.spawn(local_env);
+        (
+            hr.join().ok().flatten().unwrap_or_else(|| json!({})),
+            hs.join().ok().flatten(),
+            he.join().unwrap_or(Value::Null),
+        )
+    });
     let _g = store.lock()?;
     let mut data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
@@ -735,11 +860,11 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     let mut reg = json!({
         "loc": new_loc, "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
         "warp": r.get("warp").and_then(|v| v.as_bool()).unwrap_or(false), "skew": r.get("skew"),
-        "asn": r.get("asn"), "org": r.get("org"), "city": r.get("city"), "meta_loc": r.get("meta_loc"),
-        "ip_type": r.get("ip_type"), "reg_loc": r.get("reg_loc"),
-        "v4_ip": r.get("v4_ip"), "v4_loc": r.get("v4_loc"), "v6_ip": r.get("v6_ip"), "v6_loc": r.get("v6_loc"),
-        "env": local_env(), "checked_at": now
+        "lookup_mode": cfg.mode, "env": env, "checked_at": now
     });
+    for k in META_FIELDS.iter().chain(STACK_FIELDS) {
+        reg[*k] = r.get(*k).cloned().unwrap_or(Value::Null);
+    }
     match (s(&old, "loc"), new_loc.as_deref()) {
         (Some(o), Some(n)) if o != n => {
             reg["prev_loc"] = json!(o);
@@ -1156,23 +1281,32 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         None => add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）".into(), region_advice("unknown")),
     }
     let asn = r.get("asn").filter(|v| !v.is_null()).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    let src_note = s(&r, "meta_source").map(|m| format!("（数据：{}）", m)).unwrap_or_default();
+    let off = s(&r, "lookup_mode") == Some("off");
     match (s(&r, "org"), s(&r, "ip_type")) {
+        _ if off => add(
+            "isp",
+            "info",
+            "网络服务商 / IP 类型：外部 IP 查询已关闭".into(),
+            "出口地区照常检测；想看运营商、IP 类型、IPv6 和注册国，在设置里把“外部 IP 查询”改回自动（cam risk --ip-lookup auto）",
+        ),
         (Some(org), Some(t)) if t == "residential" || t == "mobile" => add(
             "isp",
             "info",
-            format!("网络服务商：{}（AS{}），IP 类型：{}", org, asn, ip_type_name(t)),
+            format!("网络服务商：{}（AS{}），IP 类型：{}{}", org, asn, ip_type_name(t), src_note),
             if t == "residential" { "数据库判定为普通宽带或运营商网络，不是机房 / 代理出口" } else { "手机网络的出口 IP 会变，地区判定也可能跳动" },
         ),
         (Some(org), None) if !hosting_exit(Some(org)) => add(
             "isp",
             "info",
-            format!("网络服务商：{}（AS{}），IP 类型：查不到（没有带标记的数据源）", org, asn),
-            "按运营商名看不像机房；想要数据库判定可配置 ipapi.is 的 key（CAM_IPAPI_IS_KEY）",
+            format!("网络服务商：{}（AS{}），IP 类型：数据源没给标记{}", org, asn, src_note),
+            "按运营商名看不像机房。想要数据库判定：到 ipapi.is 免费注册一个 key（每天 1000 次，可商用），cam risk --ipapi-key 填进去",
         ),
         (Some(_), _) => {} // 机房 / 代理 / Tor 出口由 risk_items 以 warn 给出
         (None, _) => add("isp", "info", "网络服务商：查不到（IP 信息接口都连不上）".into(), "判断不了出口是不是机房 / 代理；不影响其它检查"),
     }
     match (s(&r, "reg_loc"), s(&r, "loc")) {
+        _ if off => {}
         (Some(reg_loc), Some(l)) if reg_loc == l => {
             add("ip_origin", "ok", format!("IP 归属：注册在 {}，与定位一致（原生 IP）", region_label(Some(reg_loc))), "")
         }
@@ -1185,6 +1319,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         _ => {} // 不一致由 risk_items 给出
     }
     match (s(&r, "v4_loc"), s(&r, "v6_loc"), s(&r, "loc")) {
+        _ if off => {}
         (Some(v4), Some(v6), _) if v4 == v6 => add("ipv6", "ok", format!("IPv6：可用，出口 {}，地区与 IPv4 一致", s(&r, "v6_ip").unwrap_or("?")), ""),
         (_, None, Some(_)) => add("ipv6", "ok", "IPv6：不可用，只有 IPv4 出口".into(), "不会出现 IPv6 漏出真实出口的问题"),
         _ => {}
@@ -1317,4 +1452,127 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     };
     out.insert(0, summary);
     out
+}
+
+/// 当前设置下会访问哪些外部服务、各发了什么。只发出口 IP，不发任何账号信息。与 cam.py 一致。
+pub fn privacy_sources(cfg: &LookupConfig) -> Vec<Value> {
+    let mut out = vec![
+        json!({"name": "claude.ai/cdn-cgi/trace", "what": "出口国家、IP、时钟。这是 Anthropic 自己的网站，访问 Claude 时它本来就看得到"}),
+        json!({"name": "status.anthropic.com", "what": "Anthropic 官方状态页，不带任何本机信息"}),
+    ];
+    if cfg.mode == "off" {
+        return out;
+    }
+    if cfg.mode == "ip-api" {
+        out.push(json!({"name": "ip-api.com（http）", "what": "出口 IP 的运营商、城市、机房 / 代理标记。免费接口仅限非商业用途"}));
+    }
+    let ipapi = if cfg.ipapi_key.is_empty() {
+        "出口 IP 的运营商、城市（没配 key：每天 30 次，不带类型标记）"
+    } else {
+        "出口 IP 的运营商、城市、机房 / VPN / Tor 标记（已配置 key）"
+    };
+    out.push(json!({"name": "api.ipapi.is", "what": ipapi}));
+    out.push(json!({"name": "ipinfo.io", "what": "上一家查不到时：运营商、城市"}));
+    out.push(json!({"name": "speed.cloudflare.com", "what": "再查不到时：运营商、城市"}));
+    out.push(json!({"name": "rdap.org", "what": "出口 IP 的注册国"}));
+    out.push(json!({"name": "1.1.1.1 / Cloudflare IPv6", "what": "分别测 IPv4、IPv6 出口"}));
+    out.push(json!({"name": "www.cloudflare.com", "what": "claude.ai 连不上时，代替它看出口国家"}));
+    out
+}
+
+pub fn privacy_view(store: &Store) -> R<Value> {
+    let cfg = ip_lookup_config(Some(store));
+    let data = store.load()?;
+    let n = accounts(&data)
+        .iter()
+        .filter(|a| a.get("regions").and_then(|r| r.as_array()).map(|r| !r.is_empty()).unwrap_or(false))
+        .count();
+    let modes: Vec<Value> = IP_LOOKUP_MODES.iter().map(|(v, l)| json!({"value": v, "label": l})).collect();
+    let hours = (meta_ttl() as f64 / 3600.0 * 10.0).round() / 10.0;
+    Ok(json!({
+        "ip_lookup": cfg.mode, "modes": modes,
+        "env_override": std::env::var("CAM_IP_LOOKUP").map(|v| !v.is_empty()).unwrap_or(false),
+        "has_ipapi_key": !cfg.ipapi_key.is_empty(), "has_ipinfo_token": !cfg.ipinfo_token.is_empty(),
+        "meta_ttl_hours": hours, "sources": privacy_sources(&cfg),
+        "history": {"accounts": n, "checked_at": data.get("region").and_then(|r| s(r, "checked_at"))}
+    }))
+}
+
+fn drop_meta(data: &mut Value) {
+    if let Some(reg) = data.get_mut("region").and_then(|r| r.as_object_mut()) {
+        for k in META_FIELDS.iter().chain(STACK_FIELDS) {
+            reg.remove(*k);
+        }
+    }
+}
+
+/// 改外部 IP 查询的设置：{ip_lookup: auto / ip-api / off, ipapi_key, ipinfo_token}，key 传空字符串表示删除。
+/// 改了数据源或 key，缓存的运营商信息作废，下次检测重新查。与 cam.py 的 save_privacy 一致。
+pub fn save_privacy(store: &Store, body: &Value) -> R<Value> {
+    let mode = s(body, "ip_lookup");
+    if let Some(m) = mode {
+        if !IP_LOOKUP_MODES.iter().any(|(v, _)| *v == m) {
+            return Err("外部 IP 查询应为 auto / ip-api / off".into());
+        }
+    }
+    {
+        let _g = store.lock()?;
+        let mut data = store.load()?;
+        let mut changed = false;
+        if let Some(m) = mode {
+            let cur = data.get("prefs").and_then(|p| s(p, "ip_lookup")).unwrap_or("auto").to_string();
+            if m != cur {
+                if !data.get("prefs").map(|p| p.is_object()).unwrap_or(false) {
+                    data["prefs"] = json!({});
+                }
+                data["prefs"]["ip_lookup"] = json!(m);
+                changed = true;
+            }
+        }
+        let mut sec = store.load_secret(LOOKUP_SECRET_ID);
+        if !sec.is_object() {
+            sec = json!({});
+        }
+        let mut sec_changed = false;
+        for k in ["ipapi_key", "ipinfo_token"] {
+            if let Some(v) = body.get(k).and_then(|v| v.as_str()) {
+                let v = v.trim();
+                if v != s(&sec, k).unwrap_or("") {
+                    if v.is_empty() {
+                        sec.as_object_mut().map(|o| o.remove(k));
+                    } else {
+                        sec[k] = json!(v);
+                    }
+                    sec_changed = true;
+                }
+            }
+        }
+        if sec_changed {
+            store.save_secret(LOOKUP_SECRET_ID, &sec)?;
+        }
+        if changed || sec_changed {
+            drop_meta(&mut data);
+            store.save(&mut data)?;
+        }
+    }
+    privacy_view(store)
+}
+
+/// 清掉缓存的出口信息和每个账号的使用地区记录。
+pub fn clear_region_history(store: &Store) -> R<Value> {
+    {
+        let _g = store.lock()?;
+        let mut data = store.load()?;
+        if let Some(o) = data.as_object_mut() {
+            o.remove("region");
+            o.remove("status_page");
+        }
+        for a in accounts_mut(&mut data) {
+            if let Some(o) = a.as_object_mut() {
+                o.remove("regions");
+            }
+        }
+        store.save(&mut data)?;
+    }
+    privacy_view(store)
 }

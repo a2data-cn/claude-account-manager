@@ -43,6 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 if os.name == "nt":
     import msvcrt
@@ -1568,6 +1569,128 @@ def launch_tier(score, region_status_, prefs):
     return "remind" if score < 90 else "ok"
 
 
+def with_quick_region(data, q):
+    """把快速检测到的出口套到一份数据副本上（不保存），用来算启动前的提醒。出口 IP 变了时，旧的运营商信息不再适用。"""
+    data = json.loads(json.dumps(data))
+    reg = dict(data.get("region") or {})
+    now = now_iso()
+    if reg.get("loc") and q.get("loc") and reg["loc"] != q["loc"]:
+        reg["prev_loc"], reg["changed_at"] = reg["loc"], now
+    if reg.get("ip") != q.get("ip"):
+        for k in META_FIELDS + STACK_FIELDS:
+            reg.pop(k, None)
+    reg.update({k: q.get(k) for k in ("loc", "ip", "colo", "ms", "warp", "skew")}, checked_at=now)
+    data["region"] = reg
+    return data
+
+
+def spawn_background_check():
+    """另起一个后台进程做完整的环境检测（cam.py _check-region），不等它。CAM_NO_BG_CHECK=1 时不起。"""
+    if os.environ.get("CAM_NO_BG_CHECK"):
+        return False
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
+    if IS_WIN:
+        kw["creationflags"] = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+    else:
+        kw["start_new_session"] = True
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "_check-region"], **kw)
+        return True
+    except OSError:
+        return False
+
+
+def background_region_check(store):
+    """后台进程的入口：同一时间只跑一个，一分钟内查过就不再查。"""
+    lock = FileLock(os.path.join(store.root, "region-check.lock"), timeout=0)
+    if not lock.try_acquire():
+        return
+    try:
+        check_region(store, max_age=60)
+    finally:
+        lock.release()
+
+
+def privacy_sources(cfg):
+    """当前设置下会访问哪些外部服务、各发了什么。只发出口 IP，不发任何账号信息。"""
+    out = [{"name": "claude.ai/cdn-cgi/trace", "what": "出口国家、IP、时钟。这是 Anthropic 自己的网站，访问 Claude 时它本来就看得到"},
+           {"name": "status.anthropic.com", "what": "Anthropic 官方状态页，不带任何本机信息"}]
+    if cfg["mode"] == "off":
+        return out
+    if cfg["mode"] == "ip-api":
+        out.append({"name": "ip-api.com（http）", "what": "出口 IP 的运营商、城市、机房 / 代理标记。免费接口仅限非商业用途"})
+    out += [{"name": "api.ipapi.is", "what": "出口 IP 的运营商、城市"
+             + ("、机房 / VPN / Tor 标记（已配置 key）" if cfg["ipapi_key"] else "（没配 key：每天 30 次，不带类型标记）")},
+            {"name": "ipinfo.io", "what": "上一家查不到时：运营商、城市"},
+            {"name": "speed.cloudflare.com", "what": "再查不到时：运营商、城市"},
+            {"name": "rdap.org", "what": "出口 IP 的注册国"},
+            {"name": "1.1.1.1 / Cloudflare IPv6", "what": "分别测 IPv4、IPv6 出口"},
+            {"name": "www.cloudflare.com", "what": "claude.ai 连不上时，代替它看出口国家"}]
+    return out
+
+
+def privacy_view(store):
+    cfg = ip_lookup_config(store)
+    data = store.load()
+    return {"ip_lookup": cfg["mode"], "modes": [{"value": k, "label": v} for k, v in IP_LOOKUP_MODES.items()],
+            "env_override": bool(os.environ.get("CAM_IP_LOOKUP")),
+            "has_ipapi_key": bool(cfg["ipapi_key"]), "has_ipinfo_token": bool(cfg["ipinfo_token"]),
+            "meta_ttl_hours": round(META_TTL / 3600, 1), "sources": privacy_sources(cfg),
+            "history": {"accounts": sum(1 for a in data["accounts"] if a.get("regions")),
+                        "checked_at": (data.get("region") or {}).get("checked_at")}}
+
+
+def _drop_meta(data):
+    reg = data.get("region")
+    if isinstance(reg, dict):
+        for k in META_FIELDS + STACK_FIELDS:
+            reg.pop(k, None)
+
+
+def save_privacy(store, body):
+    """改外部 IP 查询的设置：{"ip_lookup": auto / ip-api / off, "ipapi_key": "…", "ipinfo_token": "…"}，key 传空字符串表示删除。
+    改了数据源或 key，缓存的运营商信息作废，下次检测重新查。规则和 Rust 版 health::save_privacy 一致。"""
+    mode = body.get("ip_lookup")
+    if mode is not None and mode not in IP_LOOKUP_MODES:
+        raise CamError("外部 IP 查询应为 auto / ip-api / off")
+    with store.lock():
+        data = store.load()
+        changed = False
+        if mode is not None and mode != (data.get("prefs") or {}).get("ip_lookup", "auto"):
+            data.setdefault("prefs", {})["ip_lookup"] = mode
+            changed = True
+        sec = store.load_secret(LOOKUP_SECRET_ID)
+        sec_changed = False
+        for k in ("ipapi_key", "ipinfo_token"):
+            v = body.get(k)
+            if isinstance(v, str):
+                v = v.strip()
+                if v != (sec.get(k) or ""):
+                    if v:
+                        sec[k] = v
+                    else:
+                        sec.pop(k, None)
+                    sec_changed = True
+        if sec_changed:
+            store.save_secret(LOOKUP_SECRET_ID, sec)
+        if changed or sec_changed:
+            _drop_meta(data)
+            store.save(data)
+    return privacy_view(store)
+
+
+def clear_region_history(store):
+    """清掉缓存的出口信息和每个账号的使用地区记录。"""
+    with store.lock():
+        data = store.load()
+        data.pop("region", None)
+        data.pop("status_page", None)
+        for a in data["accounts"]:
+            a.pop("regions", None)
+        store.save(data)
+    return privacy_view(store)
+
+
 def risk_prompt_before_launch(store, ask=input, interactive=None):
     """启动 claude 前把环境风险打出来；分数低时让用户确认。只提醒、只问，不拦：返回 False 表示用户自己选择了不启动。
 
@@ -1579,12 +1702,14 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
     prefs = risk_prefs(data)
     if not prefs["risk_prompt"]:
         return True
-    if not cached_region_loc(data):  # 一小时内没检测过就现场测一次（一两秒）
-        try:
-            check_region(store, max_age=REGION_FRESH_SECS)
-            data = store.load()
-        except Exception as e:  # noqa: BLE001  检测失败不影响启动
-            print(color(f"[cam] 环境检测失败：{e}", "y"), file=sys.stderr)
+    if not cached_region_loc(data):
+        # 一小时内没检测过：完整检测放到后台进程里做，这里只花最多 3 秒问一次 claude.ai 的出口，不拖慢启动
+        spawn_background_check()
+        q = quick_trace(3)
+        if q:
+            data = with_quick_region(data, q)
+        else:
+            print(color("[cam] 3 秒内没测到出口地区，先按上次的结果提醒；完整检测在后台进行", "d"), file=sys.stderr)
     risks = risk_items(data)
     sc = risk_score(risks)
     tier = launch_tier(sc["score"], region_view(data)["status"], prefs)
@@ -2031,6 +2156,12 @@ def make_handler(store, token):
                     return self._send(200, public_state(store, store.load()))
                 if method == "GET" and parts == ["service-check"]:
                     return self._send(200, {"items": service_check(store)})
+                if method == "GET" and parts == ["privacy"]:
+                    return self._send(200, privacy_view(store))
+                if method == "PUT" and parts == ["privacy"]:
+                    return self._send(200, save_privacy(store, self._body()))
+                if method == "DELETE" and parts == ["privacy", "history"]:
+                    return self._send(200, clear_region_history(store))
                 if method == "POST" and parts == ["accounts"]:
                     b = self._body()
                     if b.get("kind") == "claude_code":
@@ -2453,11 +2584,19 @@ def cmd_set(store, args):
 
 
 def cmd_risk(store, args):
-    """查看 / 设置 cam claude 启动前的风险提醒档位。"""
+    """查看 / 设置 cam claude 启动前的风险提醒档位，以及外部 IP 查询（隐私）设置。"""
     if args.on or args.off or args.confirm is not None or args.strong is not None:
         p = save_risk_prefs(store, prompt=True if args.on else False if args.off else None,
                             confirm=args.confirm, strong=args.strong)
         print("已保存。", end="")
+    body = {k: v for k, v in (("ip_lookup", args.ip_lookup), ("ipapi_key", args.ipapi_key),
+                                 ("ipinfo_token", args.ipinfo_token)) if v is not None}
+    if body:
+        save_privacy(store, body)
+        print("已保存外部 IP 查询设置。")
+    if args.clear_history:
+        clear_region_history(store)
+        print("已清除出口信息和账号使用地区记录。")
     data = store.load()
     p = risk_prefs(data)
     sc = risk_score(risk_items(data))
@@ -2472,6 +2611,13 @@ def cmd_risk(store, args):
         print(f"当前（据后台缓存）：{sc['score']}/100，{sc['label']}；档位 {launch_tier(sc['score'], reg['status'], p)}")
     else:
         print("当前：还没有检测过，运行 cam doctor 或 cam claude 时会检测")
+    pv = privacy_view(store)
+    print(f"\n外部 IP 查询：{pv['ip_lookup']}（{IP_LOOKUP_MODES[pv['ip_lookup']]}）"
+          + ("，被环境变量 CAM_IP_LOOKUP 覆盖" if pv["env_override"] else ""))
+    print(f"  ipapi.is key：{'已配置' if pv['has_ipapi_key'] else '没配'}；ipinfo token：{'已配置' if pv['has_ipinfo_token'] else '没配'}"
+          f"；出口 IP 没变时运营商信息 {pv['meta_ttl_hours']:g} 小时内不重查")
+    print("  会访问：" + "；".join(s["name"] for s in pv["sources"]) + "（只发出口 IP，不发账号信息）")
+    print("  改法：cam risk --ip-lookup auto|ip-api|off，--ipapi-key KEY（空字符串删除），--ipinfo-token TOKEN，--clear-history")
 
 
 def cmd_rule(store, args):
@@ -2815,11 +2961,22 @@ REGION_ADVICE = {
 STATUS_URL = os.environ.get("CAM_STATUS_URL", "https://status.anthropic.com/api/v2/status.json")
 CF_META_URL = os.environ.get("CAM_CF_META_URL", "https://speed.cloudflare.com/meta")  # 出口 IP 的运营商、城市
 IPINFO_URL = os.environ.get("CAM_IPINFO_URL", "https://ipinfo.io/json")  # Cloudflare 的 meta 接口拒绝时退到这里
-# IP 类型（家庭宽带 / 机房 / 代理 / 手机网络）：有 ipapi.is 的 key 用它的数据库；没有就用 ip-api.com 的免费接口（只有 http）
+# 出口 IP 的运营商 / 城市 / 类型。默认顺序 ipapi.is → ipinfo.io → Cloudflare，都可以商用：
+#   ipapi.is 免费注册 key 每天 1000 次、带机房 / VPN / Tor 标记，官方写明可商用；不带 key 每天 30 次、不带标记
+#   ipinfo.io 免费版可商用但要求注明来源（界面上标“数据：ipinfo.io”），不带类型标记
+# ip-api.com 免费接口仅限非商业用途、只有 http，只在设置里选了“ip-api”时才用
 IPAPI_IS_URL = os.environ.get("CAM_IPAPI_IS_URL", "https://api.ipapi.is/")
-IPAPI_IS_KEY = os.environ.get("CAM_IPAPI_IS_KEY", "")
 IPAPI_URL = os.environ.get("CAM_IPAPI_URL",
                            "http://ip-api.com/json/?fields=status,countryCode,city,regionName,isp,org,as,mobile,proxy,hosting,query")
+IP_LOOKUP_MODES = {
+    "auto": "自动：ipapi.is → ipinfo.io → Cloudflare（都可以商用）",
+    "ip-api": "自动，并优先用 ip-api.com（带机房 / 代理标记；仅限非商业用途，只有 http）",
+    "off": "关闭：只查 claude.ai 自己的出口信息和 Anthropic 状态页，不查运营商和 IP 类型",
+}
+LOOKUP_SECRET_ID = "_ip-lookup"  # ipapi.is 的 key、ipinfo 的 token 存在 secrets 目录，不进 accounts.json
+META_TTL = int(os.environ.get("CAM_META_TTL", "86400"))  # 出口 IP 没变时，运营商 / 类型 / 注册国多久重查一次（秒）
+META_FIELDS = ("asn", "org", "city", "meta_loc", "ip_type", "reg_loc", "meta_source", "meta_at")
+STACK_FIELDS = ("v4_ip", "v4_loc", "v6_ip", "v6_loc")
 RDAP_URL = os.environ.get("CAM_RDAP_URL", "https://rdap.org/ip/")  # IP 的注册国（原生 / 广播 IP）；空字符串表示不查
 CF_TRACE4_URL = os.environ.get("CAM_CF_TRACE4_URL", "https://1.1.1.1/cdn-cgi/trace")  # 只走 IPv4 的出口
 CF_TRACE6_URL = os.environ.get("CAM_CF_TRACE6_URL", "https://[2606:4700:4700::1111]/cdn-cgi/trace")  # 只走 IPv6 的出口
@@ -2888,47 +3045,112 @@ def fmt_ago(s):
     return f"{h} 小时前" if h else f"{m} 分钟前"
 
 
-def detect_region(timeout=6):
-    """从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的）。
-
-    返回 {loc, ip, colo, ms, warp, skew} 或 None：warp 是请求经过了 Cloudflare WARP / Zero Trust，
-    skew 是本机时钟比服务器快多少秒（没有 ts 字段时为 None）。
-    """
-    t0 = time.time()
-    st, txt = http_text(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace", timeout)
-    if st != 200 or "loc=" not in txt:
-        st, txt = http_text("https://www.cloudflare.com/cdn-cgi/trace", timeout)
-    if st != 200 or "loc=" not in txt:
-        return None
+def parse_trace(txt, t0):
     kv = dict(line.split("=", 1) for line in txt.splitlines() if "=" in line)
     skew = None
     try:
         skew = int(round(time.time() - float(kv["ts"])))
     except (KeyError, ValueError):
         pass
-    out = {"loc": (kv.get("loc") or "").strip().upper() or None, "ip": kv.get("ip"), "colo": kv.get("colo"),
-           "ms": int((time.time() - t0) * 1000),
-           "warp": kv.get("warp", "off").strip() in ("on", "plus") or kv.get("gateway", "off").strip() == "on",
-           "skew": skew, "asn": None, "org": None, "city": None, "meta_loc": None, "ip_type": None, "reg_loc": None,
-           "v4_ip": None, "v4_loc": None, "v6_ip": None, "v6_loc": None}
-    meta = fetch_exit_meta(timeout)
-    if meta:
-        out.update(meta)
-    v4, v6 = trace_only(CF_TRACE4_URL), trace_only(CF_TRACE6_URL)
-    if v4:
-        out["v4_ip"], out["v4_loc"] = v4
-    if v6:
-        out["v6_ip"], out["v6_loc"] = v6
-    if not out["reg_loc"]:
-        out["reg_loc"] = fetch_ip_registration(out["ip"])
+    return {"loc": (kv.get("loc") or "").strip().upper() or None, "ip": kv.get("ip"), "colo": kv.get("colo"),
+            "ms": int((time.time() - t0) * 1000),
+            "warp": kv.get("warp", "off").strip() in ("on", "plus") or kv.get("gateway", "off").strip() == "on",
+            "skew": skew}
+
+
+def quick_trace(timeout=3):
+    """只问 claude.ai 一次出口信息（启动 claude 前用，最多等 timeout 秒）。查不到返回 None。"""
+    t0 = time.time()
+    st, txt = http_text(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace", timeout)
+    if st != 200 or "loc=" not in txt:
+        return None
+    return parse_trace(txt, t0)
+
+
+def _age_secs(iso):
+    t = parse_iso(iso)
+    return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() if t else None
+
+
+def detect_region(timeout=6, cfg=None, prev=None):
+    """从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的），再并行查运营商 / 类型 / 注册国 /
+    IPv4 / IPv6 出口。出口 IP 和数据源都没变、且 META_TTL 内查过时，运营商那几项直接沿用 prev，不再问第三方。
+    设置为 off 时只查 claude.ai。返回 dict 或 None（claude.ai 都连不上）。"""
+    cfg = cfg or ip_lookup_config()
+    off = cfg["mode"] == "off"
+    t0 = time.time()
+    st, txt = http_text(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace", timeout)
+    if (st != 200 or "loc=" not in txt) and not off:
+        st, txt = http_text("https://www.cloudflare.com/cdn-cgi/trace", timeout)
+    if st != 200 or "loc=" not in txt:
+        return None
+    out = parse_trace(txt, t0)
+    out.update({k: None for k in META_FIELDS + STACK_FIELDS})
+    out["lookup_mode"] = cfg["mode"]
+    if off:
+        return out
+    prev = prev or {}
+    age = _age_secs(prev.get("meta_at"))
+    reuse = prev.get("ip") == out["ip"] and prev.get("lookup_mode") == cfg["mode"] and age is not None and age < META_TTL
+    jobs = {"v4": lambda: trace_only(CF_TRACE4_URL), "v6": lambda: trace_only(CF_TRACE6_URL)}
+    if not reuse:
+        jobs["meta"] = lambda: fetch_exit_meta(cfg)
+        if not cfg["ipapi_key"]:  # 带 key 的 ipapi.is 自己会给注册国
+            jobs["rdap"] = lambda: fetch_ip_registration(out["ip"])
+    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+        futs = {k: ex.submit(f) for k, f in jobs.items()}
+        res = {k: f.result() for k, f in futs.items()}
+    if reuse:
+        out.update({k: prev.get(k) for k in META_FIELDS})
+    else:
+        if res.get("meta"):
+            out.update(res["meta"])
+        if not out["reg_loc"]:
+            out["reg_loc"] = res.get("rdap") if "rdap" in res else fetch_ip_registration(out["ip"])
+        out["meta_at"] = now_iso()
+    if res["v4"]:
+        out["v4_ip"], out["v4_loc"] = res["v4"]
+    if res["v6"]:
+        out["v6_ip"], out["v6_loc"] = res["v6"]
     return out
 
 
-def fetch_exit_meta(timeout=6):
-    """出口 IP 的 ASN、运营商、城市、国家和类型。来源按优先级：ipapi.is（有 key 时，带 IP 类型 / VPN / Tor 标记）、
-    ip-api.com（免费，带机房 / 代理 / 手机标记，只有 http）、Cloudflare meta、ipinfo.io（后两个没有标记）。查不到返回 None。"""
-    urls = ([f"{IPAPI_IS_URL}?key={urllib.parse.quote(IPAPI_IS_KEY)}"] if IPAPI_IS_KEY else []) + [IPAPI_URL, CF_META_URL, IPINFO_URL]
-    for url in urls:
+def ip_lookup_config(store=None):
+    """外部 IP 查询的设置 {"mode", "ipapi_key", "ipinfo_token"}。环境变量 CAM_IP_LOOKUP / CAM_IPAPI_IS_KEY /
+    CAM_IPINFO_TOKEN 优先于保存的设置。"""
+    mode, key, tok = "auto", "", ""
+    if store is not None:
+        try:
+            mode = (store.load().get("prefs") or {}).get("ip_lookup") or "auto"
+            sec = store.load_secret(LOOKUP_SECRET_ID)
+            key, tok = sec.get("ipapi_key") or "", sec.get("ipinfo_token") or ""
+        except Exception:  # noqa: BLE001  读不到设置就用默认值
+            pass
+    mode = os.environ.get("CAM_IP_LOOKUP") or mode
+    return {"mode": mode if mode in IP_LOOKUP_MODES else "auto",
+            "ipapi_key": os.environ.get("CAM_IPAPI_IS_KEY") or key,
+            "ipinfo_token": os.environ.get("CAM_IPINFO_TOKEN") or tok}
+
+
+def _with_param(url, name, value):
+    if not value:
+        return url
+    return f"{url}{'&' if '?' in url else '?'}{name}={urllib.parse.quote(value)}"
+
+
+def meta_sources(cfg):
+    """按顺序要问的运营商数据源 [(名字, 地址)]；off 时为空。"""
+    if cfg["mode"] == "off":
+        return []
+    out = [("ip-api.com", IPAPI_URL)] if cfg["mode"] == "ip-api" else []
+    return out + [("ipapi.is", _with_param(IPAPI_IS_URL, "key", cfg["ipapi_key"])),
+                  ("ipinfo.io", _with_param(IPINFO_URL, "token", cfg["ipinfo_token"])),
+                  ("Cloudflare", CF_META_URL)]
+
+
+def fetch_exit_meta(cfg=None, timeout=5):
+    """出口 IP 的 ASN、运营商、城市、国家和类型，按 meta_sources 的顺序问，第一个查到的为准。查不到返回 None。"""
+    for name, url in meta_sources(cfg or ip_lookup_config()):
         if not url:
             continue
         st, txt = http_text(url, timeout)
@@ -2939,6 +3161,7 @@ def fetch_exit_meta(timeout=6):
         except json.JSONDecodeError:
             m = None
         if m:
+            m["meta_source"] = name
             return m
     return None
 
@@ -2970,7 +3193,8 @@ def parse_exit_meta(j):
     else:
         asn = j.get("asn") if isinstance(j.get("asn"), int) else None
         org = j.get("asOrganization") or j.get("isp") or None
-        as_field = j.get("as") if isinstance(j.get("as"), str) else (j.get("org") if not org else None)
+        as_field = (j.get("as") if isinstance(j.get("as"), str) else j.get("asn") if isinstance(j.get("asn"), str)
+                    else (j.get("org") if not org else None))
         if as_field:
             head, _, rest = str(as_field).partition(" ")
             if head.startswith("AS") and head[2:].isdigit():
@@ -2978,6 +3202,8 @@ def parse_exit_meta(j):
                 org = org or rest.strip() or None
             else:
                 org = org or str(as_field)
+        if not org and isinstance(j.get("company"), str):  # ipapi.is 不带 key 的简版
+            org = j["company"]
         if "hosting" in j or "proxy" in j:  # ip-api.com
             ip_type = "proxy" if j.get("proxy") else "hosting" if j.get("hosting") else "mobile" if j.get("mobile") else "residential"
     city = ", ".join(x for x in (loc_src.get("city"), loc_src.get("region") or loc_src.get("regionName") or loc_src.get("state")) if x)
@@ -3259,12 +3485,14 @@ def region_view(data):
     c = data.get("region") or {}
     if not c.get("checked_at"):
         return {"loc": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
-                "warp": False, "prev_loc": None, "changed_at": None, "org": None, "city": None}
+                "warp": False, "prev_loc": None, "changed_at": None, "org": None, "city": None, "ip_type": None,
+                "meta_source": None, "lookup_mode": None}
     status = region_status(c.get("loc"))
     return {"loc": c.get("loc"), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
             "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
             "warp": bool(c.get("warp")), "prev_loc": c.get("prev_loc"), "changed_at": c.get("changed_at"),
-            "org": c.get("org"), "city": c.get("city"), "ip_type": c.get("ip_type")}
+            "org": c.get("org"), "city": c.get("city"), "ip_type": c.get("ip_type"), "meta_source": c.get("meta_source"),
+            "lookup_mode": c.get("lookup_mode")}
 
 
 def check_region(store, max_age=300):
@@ -3274,16 +3502,17 @@ def check_region(store, max_age=300):
     at = parse_iso((data.get("region") or {}).get("checked_at"))
     if at and (dt.datetime.now(dt.timezone.utc) - at).total_seconds() < max_age:
         return region_view(data)
-    r = detect_region() or {}
-    sp = fetch_status_page()
+    cfg = ip_lookup_config(store)
+    with ThreadPoolExecutor(max_workers=3) as ex:  # 出口、状态页、本机设置三件事并行，互不等待
+        f_r = ex.submit(detect_region, 6, cfg, data.get("region") or {})
+        f_sp = ex.submit(fetch_status_page)
+        f_env = ex.submit(local_env)
+        r, sp, env = f_r.result() or {}, f_sp.result(), f_env.result()
     with store.lock():
         data = store.load()
         old = data.get("region") or {}
-        reg = {"loc": r.get("loc"), "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
-               "warp": bool(r.get("warp")), "skew": r.get("skew"), "asn": r.get("asn"), "org": r.get("org"),
-               "city": r.get("city"), "meta_loc": r.get("meta_loc"), "ip_type": r.get("ip_type"), "reg_loc": r.get("reg_loc"),
-               "v4_ip": r.get("v4_ip"), "v4_loc": r.get("v4_loc"), "v6_ip": r.get("v6_ip"), "v6_loc": r.get("v6_loc"),
-               "env": local_env(), "checked_at": now_iso()}
+        reg = {k: r.get(k) for k in ("loc", "ip", "colo", "ms", "skew") + META_FIELDS + STACK_FIELDS}
+        reg.update(warp=bool(r.get("warp")), lookup_mode=cfg["mode"], env=env, checked_at=now_iso())
         if old.get("loc") and reg["loc"] and old["loc"] != reg["loc"]:
             reg["prev_loc"], reg["changed_at"] = old["loc"], reg["checked_at"]
         elif old.get("prev_loc"):
@@ -3470,7 +3699,7 @@ def service_check(store=None):
         data = store.load()
         r = data.get("region") or {}
     else:
-        r = detect_region() or {}
+        r = detect_region(cfg=ip_lookup_config()) or {}
     if r.get("loc"):
         status = region_status(r["loc"])
         add("region", "ok" if status == "supported" else "warn",
@@ -3479,19 +3708,27 @@ def service_check(store=None):
     else:
         add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
     ip_type = r.get("ip_type")
-    if r.get("org") and ip_type in ("residential", "mobile"):
-        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：{IP_TYPE_NAMES[ip_type]}",
+    src_note = f"（数据：{r['meta_source']}）" if r.get("meta_source") else ""
+    if r.get("lookup_mode") == "off":
+        add("isp", "info", "网络服务商 / IP 类型：外部 IP 查询已关闭",
+            "出口地区照常检测；想看运营商、IP 类型、IPv6 和注册国，在设置里把“外部 IP 查询”改回自动（cam risk --ip-lookup auto）")
+    elif r.get("org") and ip_type in ("residential", "mobile"):
+        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：{IP_TYPE_NAMES[ip_type]}{src_note}",
             "数据库判定为普通宽带或运营商网络，不是机房 / 代理出口" if ip_type == "residential" else "手机网络的出口 IP 会变，地区判定也可能跳动")
     elif r.get("org") and ip_type is None and not hosting_exit(r["org"]):
-        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：查不到（没有带标记的数据源）",
-            "按运营商名看不像机房；想要数据库判定可配置 ipapi.is 的 key（CAM_IPAPI_IS_KEY）")
+        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：数据源没给标记{src_note}",
+            "按运营商名看不像机房。想要数据库判定：到 ipapi.is 免费注册一个 key（每天 1000 次，可商用），cam risk --ipapi-key 填进去")
     elif not r.get("org"):
         add("isp", "info", "网络服务商：查不到（IP 信息接口都连不上）", "判断不了出口是不是机房 / 代理；不影响其它检查")
-    if r.get("reg_loc") and r.get("loc") and r["reg_loc"] == r["loc"]:
+    if r.get("lookup_mode") == "off":
+        pass
+    elif r.get("reg_loc") and r.get("loc") and r["reg_loc"] == r["loc"]:
         add("ip_origin", "ok", f"IP 归属：注册在 {region_label(r['reg_loc'])}，与定位一致（原生 IP）")
     elif r.get("loc") and not r.get("reg_loc"):
         add("ip_origin_unknown", "info", "IP 归属：注册国查不到（RDAP 记录没写国家）", "美国 ARIN 的记录常常不写，不影响其它检查，不扣分")
-    if r.get("v4_loc") and r.get("v6_loc") and r["v4_loc"] == r["v6_loc"]:
+    if r.get("lookup_mode") == "off":
+        pass
+    elif r.get("v4_loc") and r.get("v6_loc") and r["v4_loc"] == r["v6_loc"]:
         add("ipv6", "ok", f"IPv6：可用，出口 {r.get('v6_ip')}，地区与 IPv4 一致")
     elif r.get("loc") and not r.get("v6_loc"):
         add("ipv6", "ok", "IPv6：不可用，只有 IPv4 出口", "不会出现 IPv6 漏出真实出口的问题")
@@ -3717,6 +3954,10 @@ def main(argv=None):
     s.add_argument("--strong", type=int, metavar="分", help="低于这个分数时要输入“继续”才启动（默认 30）")
     s.add_argument("--on", action="store_true", help="开启启动前提醒（默认开）")
     s.add_argument("--off", action="store_true", help="关闭启动前提醒")
+    s.add_argument("--ip-lookup", choices=list(IP_LOOKUP_MODES), help="外部 IP 查询：auto（默认，可商用的数据源）/ ip-api（加上 ip-api.com，仅限非商业）/ off（关闭）")
+    s.add_argument("--ipapi-key", metavar="KEY", help="ipapi.is 的 key（免费注册，每天 1000 次，可商用），空字符串删除")
+    s.add_argument("--ipinfo-token", metavar="TOKEN", help="ipinfo.io 的 token，空字符串删除")
+    s.add_argument("--clear-history", action="store_true", help="清除缓存的出口信息和账号使用地区记录")
     s = sub.add_parser("rule", help="切号规则")
     rsub = s.add_subparsers(dest="rule_cmd")
     rsub.add_parser("ls", help="列出规则")
@@ -3734,6 +3975,9 @@ def main(argv=None):
     r.add_argument("percent", type=int)
 
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["_check-region"]:  # 启动 claude 前另起的后台检测进程
+        background_region_check(Store())
+        return 0
     # cam claude …：后面的参数原样交给 claude，不经过 argparse
     if argv[:1] == ["claude"]:
         try:
