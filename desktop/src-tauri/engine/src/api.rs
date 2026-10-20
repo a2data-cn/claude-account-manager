@@ -140,6 +140,8 @@ const PUBLIC_FIELDS: [&str; 12] = [
 ];
 
 pub fn public_state(store: &Store, data: &Value) -> Value {
+    let risks = super::health::risk_items(data, true);
+    let risk_score = super::health::risk_score(&risks);
     let active = active_code_id(data);
     let accs: Vec<Value> = accounts(data)
         .iter()
@@ -188,8 +190,8 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             .and_then(|m| m.get("message")).cloned().unwrap_or(Value::Null),
         "pending_switch": pending_switch_view(data),
         "region": super::health::region_view(data),
-        "risks": super::health::risk_items(data, true),
-        "risk_score": super::health::risk_score(&super::health::risk_items(data, true)),
+        "risks": risks,
+        "risk_score": risk_score,
         "generated_at": now_iso()
     })
 }

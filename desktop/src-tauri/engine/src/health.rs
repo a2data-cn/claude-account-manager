@@ -343,7 +343,9 @@ pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
         if s(&out, "reg_loc").is_none() {
             out["reg_loc"] = json!(if need_rdap { rdap } else { fetch_ip_registration(&ip) });
         }
-        out["meta_at"] = json!(now_iso());
+        if s(&out, "org").is_some() || s(&out, "meta_loc").is_some() {
+            out["meta_at"] = json!(now_iso()); // 查到了才缓存；全失败的话下次重查
+        }
     }
     if let Some((ip4, loc)) = v4 {
         out["v4_ip"] = json!(ip4);
@@ -574,11 +576,49 @@ pub fn system_dns_servers() -> Vec<Value> {
 pub fn local_env() -> Value {
     let tz = system_timezone();
     let lc = system_locale();
+    let tun = default_route_tunnel();
     json!({
         "tz": tz.as_ref().map(|t| t.0.clone()), "tz_cc": tz.as_ref().map(|t| t.1.clone()).unwrap_or_default(),
         "locale": lc.as_ref().map(|l| l.0.clone()), "locale_cc": lc.as_ref().and_then(|l| l.1.clone()),
-        "dns": system_dns_servers()
+        "dns": system_dns_servers(), "proxy": proxy_parts(),
+        "tunnel": tun.map(|(n, k)| json!([n, k]))
     })
+}
+
+const PROXY_ENV_KEYS: &[&str] = &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"];
+
+/// 当前生效的代理：环境变量 + 系统设置。与 cam.py 的 proxy_parts 一致。
+pub fn proxy_parts() -> Vec<String> {
+    let mut parts: Vec<String> = PROXY_ENV_KEYS
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| format!("{}={}", k, v)))
+        .collect();
+    parts.extend(system_proxy().into_iter().map(|p| format!("系统设置 {}", p)));
+    parts
+}
+
+/// 代理、VPN 两行（服务检测和顶部环境卡共用，扣分一致）。env 是 local_env() 的结果。
+pub fn proxy_vpn_items(env: &Value) -> Vec<Value> {
+    let parts: Vec<String> = env
+        .get("proxy")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut out = vec![if parts.is_empty() {
+        json!({"kind": "proxy", "level": "ok", "text": "代理：无（直连）", "advice": "直连，出口地区就是本机网络的出口"})
+    } else {
+        json!({"kind": "proxy", "level": "info", "text": format!("代理：{}", parts.join("；")),
+               "advice": "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口"})
+    }];
+    let tun = env.get("tunnel").and_then(|t| t.as_array()).filter(|a| a.len() == 2);
+    out.push(match tun {
+        Some(t) => json!({"kind": "vpn", "level": "info",
+                          "text": format!("VPN：默认路由走 {}（{}）", t[0].as_str().unwrap_or("?"), t[1].as_str().unwrap_or("")),
+                          "advice": "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。"}),
+        None => json!({"kind": "vpn", "level": "ok", "text": "VPN：默认路由没有经过隧道接口",
+                       "advice": "只看本机默认路由；透明代理和路由器上的 VPN 看不出来"}),
+    });
+    out
 }
 
 /// 运营商名像云服务商 / 机房时为 true（这类出口通常被当作 VPN / 代理流量）。
@@ -632,7 +672,35 @@ fn run_text(cmd: &str, args: &[&str]) -> String {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    c.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    run_with_timeout(c, std::time::Duration::from_secs(10))
+}
+
+/// 跑系统命令，最多等 timeout；超时就结束它，返回已经读到的输出。卡住的命令不会拖住整轮检测。
+fn run_with_timeout(mut c: Command, timeout: std::time::Duration) -> String {
+    use std::io::Read;
+    c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    let Ok(mut child) = c.spawn() else { return String::new() };
+    let mut out = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(o) = out.as_mut() {
+            let _ = o.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(30)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned()
 }
 
 /// 本机时区 (时区名, 国家代码列表) 或 None。国家代码来自 tzdata 的 zone1970.tab，查不到时为空列表。
@@ -871,7 +939,10 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     for k in META_FIELDS.iter().chain(STACK_FIELDS) {
         reg[*k] = r.get(*k).cloned().unwrap_or(Value::Null);
     }
-    match (s(&old, "loc"), new_loc.as_deref()) {
+    // 中间失败过一次也和最后一次知道的出口比，出口变化不漏报（与 cam.py 一致）
+    let last = s(&old, "loc").or_else(|| s(&old, "last_loc")).map(String::from);
+    reg["last_loc"] = json!(new_loc.clone().or_else(|| last.clone()));
+    match (last.as_deref(), new_loc.as_deref()) {
         (Some(o), Some(n)) if o != n => {
             reg["prev_loc"] = json!(o);
             reg["changed_at"] = json!(now);
@@ -898,10 +969,10 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     let act = active_code_id(&data);
     note_account_region(&mut data, act.as_deref(), new_loc.as_deref());
     if new_loc.is_some() {
-        // 连得上 claude.ai 了：网络、证书、claude.ai 的旧问题不再算
+        // 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
         let mut drop_all = false;
         if let Some(items) = data.get_mut("service_status").and_then(|ss| ss.get_mut("items")).and_then(|i| i.as_array_mut()) {
-            items.retain(|i| s(i, "kind") == Some("api"));
+            items.retain(|i| !resolved_by_trace(i));
             drop_all = items.is_empty();
         }
         if drop_all {
@@ -912,6 +983,16 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     }
     store.save(&mut data)?;
     Ok(region_view(&data))
+}
+
+/// 后台连上了 claude.ai 的 trace，就能证明这条服务检测问题已经好了：DNS、证书、claude.ai 连不上。
+/// 人机验证、服务端错误、api.anthropic.com 的问题证明不了，留到下次服务检测或一小时后过期。与 cam.py 一致。
+fn resolved_by_trace(item: &Value) -> bool {
+    match s(item, "kind") {
+        Some("dns" | "tls") => true,
+        Some("web") => s(item, "text").map(|t| t.contains("连不上")).unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// 根据后台缓存和本机设置算出的风险提示（不联网）：[{kind, level, text, advice}]。
@@ -936,6 +1017,21 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                 "出口地区查不到：上次检测连不上 claude.ai 和 Cloudflare".into(),
                 region_advice("unknown"),
             );
+        }
+        // 代理 / VPN：和服务检测用同一份缓存，扣分一致
+        if s(&reg, "checked_at").is_some() {
+            if let Some(e) = reg.get("env").filter(|e| e.get("proxy").is_some()) {
+                for it in proxy_vpn_items(e) {
+                    if s(&it, "level") != Some("ok") {
+                        add(
+                            s(&it, "kind").unwrap_or(""),
+                            s(&it, "level").unwrap_or("info"),
+                            s(&it, "text").unwrap_or("").to_string(),
+                            s(&it, "advice").unwrap_or(""),
+                        );
+                    }
+                }
+            }
         }
         // 最近一次服务检测发现的连接问题（后台检测到网络恢复后会清掉）
         if let Some(ss) = data.get("service_status") {
@@ -1028,11 +1124,8 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             );
         }
     }
-    let env: Option<Value> = match reg.get("env").filter(|e| e.is_object()) {
-        Some(e) => Some(e.clone()),
-        None if s(&reg, "checked_at").is_some() => Some(local_env()), // 旧版缓存没有这一段
-        None => None,
-    };
+    // 旧版缓存没有这一段，就当作不知道；这里不现场跑系统命令
+    let env: Option<Value> = reg.get("env").filter(|e| e.is_object()).cloned();
     if let (Some(e), Some(l)) = (&env, loc.as_deref()) {
         for d in e.get("dns").and_then(|d| d.as_array()).cloned().unwrap_or_default() {
             let Some(c) = s(&d, "country") else { continue };
@@ -1101,7 +1194,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             )
         })
     });
-    if let (Some((zone, cc)), Some(l)) = (tz_cached.or_else(system_timezone), loc.as_deref()) {
+    if let (Some((zone, cc)), Some(l)) = (tz_cached, loc.as_deref()) {
         if !cc.is_empty() && !cc.iter().any(|c| c == l) {
             let home = cc[0].as_str();
             let text = format!("系统时区 {} 指向 {}，与出口地区 {} 不一致", zone, region_label(Some(home)), region_label(Some(l)));
@@ -1121,7 +1214,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     let lc_cached = env
         .as_ref()
         .and_then(|e| s(e, "locale").map(|n| (n.to_string(), s(e, "locale_cc").map(String::from))));
-    if let (Some((name, Some(home))), Some(l)) = (lc_cached.or_else(system_locale), loc.as_deref()) {
+    if let (Some((name, Some(home))), Some(l)) = (lc_cached, loc.as_deref()) {
         if home != l {
             let text = format!("系统语言 / 区域 {} 指向 {}，与出口地区 {} 不一致", name, region_label(Some(&home)), region_label(Some(l)));
             if region_status(Some(&home)) == "unsupported" {
@@ -1448,24 +1541,9 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         add("web", "warn", format!("{}：HTTP {}（{}，{} ms）", web_host, code, or_dash(&msg), ms), "少见的返回，稍后重试");
     }
     // 代理：环境变量 + 系统设置；VPN：默认路由
-    let mut parts: Vec<String> = proxies.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-    parts.extend(system_proxy().into_iter().map(|p| format!("系统设置 {}", p)));
-    add(
-        "proxy",
-        if parts.is_empty() { "ok" } else { "info" },
-        format!("代理：{}", if parts.is_empty() { "无（直连）".to_string() } else { parts.join("；") }),
-        if parts.is_empty() { "直连，出口地区就是本机网络的出口" } else { "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" },
-    );
-    match default_route_tunnel() {
-        Some((name, kind)) => add(
-            "vpn",
-            "info",
-            format!("VPN：默认路由走 {}（{}）", name, kind),
-            "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。",
-        ),
-        None => add("vpn", "ok", "VPN：默认路由没有经过隧道接口".into(), "只看本机默认路由；透明代理和路由器上的 VPN 看不出来"),
-    }
     drop(add);
+    let env = r.get("env").filter(|e| e.get("proxy").is_some()).cloned().unwrap_or_else(local_env);
+    out.extend(proxy_vpn_items(&env));
     out.extend(risk_items(&data, false));
     out.push(json!({
         "kind": "device", "level": "info",

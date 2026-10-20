@@ -1007,6 +1007,73 @@ fn region_unknown_and_service_status_keep_scores_consistent() {
 }
 
 #[test]
+fn header_score_matches_service_check() {
+    let e = Env::new();
+    e.two_accounts(later());
+    mock().lock().unwrap().tokens.insert("at-B1".into(), "b@x.com".into());
+    let store = Store::new();
+    for route in ["", "wg0", "utun4"] {
+        std::env::set_var("CAM_TEST_ROUTE_IF", route);
+        let items = service_check(&store);
+        let header = risk_score(&risk_items(&e.data(), true))["score"].clone();
+        assert_eq!(items[0]["score"], header, "{} {:?}", route, kinds(&items));
+    }
+    std::env::set_var("CAM_TEST_ROUTE_IF", "");
+    assert_eq!(e.data()["region"]["env"]["tunnel"], json!(["utun4", "VPN / 隧道接口"]));
+}
+
+#[test]
+fn review_regressions() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    std::env::set_var("CAM_META_TTL", "86400");
+    // IP 信息全部查失败：不缓存，下次重查
+    mock().lock().unwrap().ipapi_type = "fail".into();
+    let base = mock_base().to_string();
+    std::env::set_var("CAM_IPINFO_URL", "");
+    std::env::set_var("CAM_CF_META_URL", "");
+    check_region(&store, 0).unwrap();
+    assert!(e.data()["region"].get("meta_at").map(|v| v.is_null()).unwrap_or(true));
+    std::env::set_var("CAM_IPINFO_URL", format!("{}/ipinfo", base));
+    std::env::set_var("CAM_CF_META_URL", format!("{}/meta", base));
+    mock().lock().unwrap().ipapi_type = String::new();
+    mock().lock().unwrap().calls.clear();
+    check_region(&store, 0).unwrap();
+    assert_eq!(hits("/ipapiis").len(), 1);
+    assert_eq!(e.data()["region"]["org"], "Comcast Cable Communications, LLC");
+    std::env::set_var("CAM_META_TTL", "0");
+    // 中间失败过一次，下一次成功时仍能发现出口变了（US → 失败 → HK）
+    std::env::set_var("CAM_IP_LOOKUP", "off"); // off 时不去问真的 www.cloudflare.com
+    std::env::set_var("CAM_CLAUDE_WEB_BASE", "http://127.0.0.1:9");
+    check_region(&store, 0).unwrap();
+    std::env::set_var("CAM_CLAUDE_WEB_BASE", &base);
+    std::env::remove_var("CAM_IP_LOOKUP");
+    let d = e.data();
+    assert!(d["region"]["loc"].is_null());
+    assert_eq!(d["region"]["last_loc"], "US");
+    mock().lock().unwrap().trace_loc = "HK".into();
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    assert_eq!((d["region"]["prev_loc"].as_str(), d["region"]["loc"].as_str()), (Some("US"), Some("HK")));
+    mock().lock().unwrap().trace_loc = String::new();
+    // 后台连上 claude.ai 证明不了人机验证已经没了：这条留着
+    {
+        let _g = store.lock().unwrap();
+        let mut d = store.load().unwrap();
+        d["service_status"] = json!({"checked_at": cam_engine::store::now_iso(), "items": [
+            {"kind": "web", "level": "warn", "text": "claude.ai：返回人机验证页", "advice": ""},
+            {"kind": "dns", "level": "bad", "text": "DNS：claude.ai 解析失败", "advice": ""}
+        ]});
+        store.save(&mut d).unwrap();
+    }
+    check_region(&store, 0).unwrap();
+    let items = e.data()["service_status"]["items"].clone();
+    assert_eq!(items.as_array().unwrap().len(), 1);
+    assert_eq!(items[0]["kind"], "web");
+}
+
+#[test]
 fn region_cached_for_display() {
     let e = Env::new();
     e.two_accounts(later());

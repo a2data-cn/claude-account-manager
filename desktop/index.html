@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Claude 账号</title>
+    <script>
+      // 在 React 渲染前套上本机保存的主题，避免先闪一下明亮主题
+      try {
+        var t = localStorage.getItem("cam-theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

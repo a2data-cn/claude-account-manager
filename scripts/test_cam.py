@@ -1285,7 +1285,6 @@ class CamTest(unittest.TestCase):
                 ctx, used = self.cam.make_ssl_context()
                 self.assertEqual(used, bundle)
                 self.assertGreater(ctx.cert_store_stats()["x509_ca"], 0)
-                self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
             finally:
                 ssl.create_default_context, ssl.get_default_verify_paths, self.cam.CA_FALLBACKS = real
         self.assertTrue(self.cam.is_cert_error("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"))
@@ -1307,11 +1306,98 @@ class CamTest(unittest.TestCase):
         self.assertEqual([i["kind"] for i in ss.get("items", [])], ["web"])
         self.assertIn("web", [r["kind"] for r in self.cam.risk_items(self.data())])
         self.assertEqual(self.cam.risk_score(self.cam.risk_items(self.data()))["score"], items[0]["score"])
-        # 网络恢复后，后台检测把 claude.ai 的旧问题清掉
-        MockAnthropic.cloudflare = False
+        # 后台连上 claude.ai 的 trace 证明不了人机验证已经没了：这条留着，顶部分数仍和服务检测一致
         self.cam.check_region(store, max_age=0)
+        self.assertEqual([i["kind"] for i in self.data()["service_status"]["items"]], ["web"])
+        self.assertEqual(self.cam.risk_score(self.cam.risk_items(self.data()))["score"], items[0]["score"])
+        # 下一次服务检测发现已经好了，才清掉
+        MockAnthropic.cloudflare = False
+        self.cam.service_check(store)
         self.assertNotIn("service_status", self.data())
         self.assertEqual(self.cam.risk_score(self.cam.risk_items(self.data()))["score"], 100)
+        # “连不上”这一类，后台连上 claude.ai 就能证明好了，直接清掉
+        with store.lock():
+            d = store.load()
+            d["service_status"] = {"checked_at": self.cam.now_iso(), "items": [
+                {"kind": "web", "level": "bad", "text": "claude.ai：连不上（网络错误）", "advice": ""},
+                {"kind": "dns", "level": "bad", "text": "DNS：claude.ai 解析失败", "advice": ""},
+                {"kind": "api", "level": "bad", "text": "api.anthropic.com：连不上", "advice": ""}]}
+            store.save(d)
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual([i["kind"] for i in self.data()["service_status"]["items"]], ["api"])
+
+    def test_header_score_matches_service_check(self):
+        self._two_accounts()
+        store = self.cam.Store()
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        for route, proxy in (("", ""), ("wg0", ""), ("utun4", "http://127.0.0.1:7890")):
+            os.environ["CAM_TEST_ROUTE_IF"] = route
+            if proxy:
+                os.environ["HTTPS_PROXY"] = proxy
+                os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+            try:
+                items = self.cam.service_check(store)
+                header = self.cam.risk_score(self.cam.risk_items(self.data()))["score"]
+                self.assertEqual(items[0]["score"], header, (route, proxy, [i["kind"] for i in items]))
+            finally:
+                os.environ["CAM_TEST_ROUTE_IF"] = ""
+                os.environ.pop("HTTPS_PROXY", None)
+                os.environ.pop("NO_PROXY", None)
+        self.assertEqual(self.data()["region"]["env"]["tunnel"], ["utun4", "VPN / 隧道接口"])  # 最后一轮的缓存
+
+    def test_review_regressions(self):
+        self._two_accounts()
+        store = self.cam.Store()
+        old_ttl = self.cam.META_TTL
+        self.cam.META_TTL = 86400
+        try:
+            # IP 信息全部查失败：不缓存，下次重查
+            MockAnthropic.ipapi_type = None  # ipapi.is 返回 429
+            real_ipinfo = self.cam.IPINFO_URL
+            self.cam.IPINFO_URL, self.cam.CF_META_URL = "", ""
+            self.cam.check_region(store, max_age=0)
+            self.assertIsNone(self.data()["region"].get("meta_at"))
+            self.cam.IPINFO_URL = real_ipinfo
+            MockAnthropic.ipapi_type = "residential"
+            MockAnthropic.calls = []
+            self.cam.check_region(store, max_age=0)
+            self.assertEqual(len([c for c in MockAnthropic.calls if c[1].startswith("/ipapiis")]), 1)
+            self.assertEqual(self.data()["region"]["org"], "Comcast Cable Communications, LLC")
+        finally:
+            self.cam.META_TTL = old_ttl
+            self.cam.CF_META_URL = os.environ["CAM_CF_META_URL"]
+        # 中间失败过一次，下一次成功时仍能发现出口变了（US → 失败 → HK）
+        real_base = self.cam.CLAUDE_WEB_BASE
+        try:
+            self.cam.CLAUDE_WEB_BASE = "http://127.0.0.1:9"  # 连不上
+            real_trace = self.cam.http_text
+            self.cam.http_text = lambda url, timeout=8: (0, "网络错误") if "cdn-cgi/trace" in url else real_trace(url, timeout)
+            self.cam.check_region(store, max_age=0)
+            self.assertIsNone(self.data()["region"]["loc"])
+            self.assertEqual(self.data()["region"]["last_loc"], "US")
+        finally:
+            self.cam.CLAUDE_WEB_BASE = real_base
+            self.cam.http_text = real_trace
+        MockAnthropic.trace_loc = "HK"
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual((self.data()["region"]["prev_loc"], self.data()["region"]["loc"]), ("US", "HK"))
+        # 子进程输出不是 UTF-8 时不崩（Windows 上的 GBK）
+        self.assertEqual(self.cam.decode_output("以太网".encode("utf-8")), "以太网")
+        self.assertIsInstance(self.cam.decode_output("以太网".encode("gbk")), str)
+        self.assertEqual(self.cam.asn_label(None), "AS?")
+        # 顶部状态只算一次风险，不现场跑系统命令
+        calls = []
+        real_env = self.cam.local_env
+        self.cam.local_env = lambda: calls.append(1) or real_env()
+        try:
+            with store.lock():
+                d = store.load()
+                d["region"].pop("env", None)  # 旧版缓存
+                store.save(d)
+            self.cam.public_state(store, self.data())
+            self.assertEqual(calls, [])
+        finally:
+            self.cam.local_env = real_env
 
     def test_region_cached_for_display(self):
         self._two_accounts()

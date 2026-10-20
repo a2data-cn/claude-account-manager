@@ -13,7 +13,15 @@ const GROUPS: ["anthropic" | "third", string][] = [
 ];
 
 /** 隐私与数据源：外部 IP 查询三选一、每个 key 一行、会访问的服务（默认折叠）、清除地区记录。和手机面板同一套布局 */
-export function Privacy({ toast, onChanged }: { toast: (m: string, bad?: boolean) => void; onChanged: () => void }) {
+export function Privacy({
+  toast,
+  onChanged,
+  onCleared,
+}: {
+  toast: (m: string, bad?: boolean) => void;
+  onChanged: () => void;
+  onCleared?: () => void;
+}) {
   const [p, setP] = useState<PrivacyInfo | null>(null);
   const [vals, setVals] = useState<Record<KeyField, string>>({ ipapi_key: "", ipinfo_token: "" });
   const [busy, setBusy] = useState(false);
@@ -49,12 +57,30 @@ export function Privacy({ toast, onChanged }: { toast: (m: string, bad?: boolean
         <p className="pv-label">
           外部 IP 查询{p.env_override && <span> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span>}
         </p>
-        <div className="seg" role="radiogroup" aria-label="外部 IP 查询">
+        <div
+          className="pv-modes"
+          role="radiogroup"
+          aria-label="外部 IP 查询"
+          onKeyDown={(e) => {
+            // 单选组：方向键切换，只有选中的那个能 Tab 到
+            if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+            const i = p.modes.findIndex((m) => m.value === p.ip_lookup);
+            if (i < 0 || busy || p.env_override) return;
+            e.preventDefault();
+            const back = e.key === "ArrowLeft" || e.key === "ArrowUp";
+            const next = p.modes[(i + (back ? p.modes.length - 1 : 1)) % p.modes.length];
+            call("PUT", { ip_lookup: next.value }, "已保存，下次检测按新设置").then(() =>
+              (e.currentTarget.querySelector(`[data-mode="${next.value}"]`) as HTMLElement | null)?.focus(),
+            );
+          }}
+        >
           {p.modes.map((m) => (
             <button
               key={m.value}
               type="button"
               role="radio"
+              data-mode={m.value}
+              tabIndex={m.value === p.ip_lookup ? 0 : -1}
               aria-checked={m.value === p.ip_lookup}
               className={`seg-opt${m.value === p.ip_lookup ? " on" : ""}`}
               disabled={busy || p.env_override}
@@ -134,7 +160,11 @@ export function Privacy({ toast, onChanged }: { toast: (m: string, bad?: boolean
         </details>
         <div className="pv-foot">
           <span>地区记录：{p.history.accounts} 个账号记过使用地区，用来提醒"同一账号多地区使用"</span>
-          <button className="btn" disabled={busy} onClick={() => call("DELETE", undefined, "已清除出口信息和地区记录")}>
+          <button
+            className="btn"
+            disabled={busy}
+            onClick={() => call("DELETE", undefined, "已清除出口信息和地区记录").then((ok) => ok && onCleared?.())}
+          >
             清除地区记录
           </button>
         </div>

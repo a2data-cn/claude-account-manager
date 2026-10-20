@@ -140,7 +140,10 @@ def _background_work(store):
         st["last_refresh"] = now
         try:
             # 定时刷新不替不常用的账号续登录，见 cam.refresh_usage
-            cam.check_region(store)  # 菜单里常显的出口地区
+            try:
+                cam.check_region(store)  # 菜单里常显的出口地区
+            except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
+                st["last_error"] = f"环境检测：{e}"
             data = cam.refresh_usage(store, allow_token_refresh=False)
             st.pop("last_error", None)
             limit = cam.rules_view(data)["alert_threshold"]

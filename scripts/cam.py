@@ -27,6 +27,7 @@ import datetime as dt
 import getpass
 import glob
 import hashlib
+import http.client
 import http.server
 import json
 import os
@@ -819,8 +820,8 @@ def running_claude_processes():
             ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | "
                   "ForEach-Object { \"$($_.ProcessId)`t$(if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name })"
                   "`t$($_.CommandLine)\" }")
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
-                               timeout=15)
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=15)
+            r.stdout = decode_output(r.stdout)
             for line in r.stdout.splitlines():
                 parts = line.split("\t", 2)
                 if len(parts) == 3 and parts[0].isdigit() and _is_claude_cmd(parts[1], parts[2]):
@@ -997,7 +998,7 @@ def http_json(method, url, headers=None, body=None, timeout=20):
             return e.code, json.loads(txt)
         except json.JSONDecodeError:
             return e.code, {"error": {"message": txt[:200]}}
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
+    except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException, ValueError) as e:
         return 0, {"error": {"message": f"网络错误：{getattr(e, 'reason', e)}"}}
 
 
@@ -1177,7 +1178,7 @@ def web_get(path, sk, timeout=20):
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", "replace")
         code = e.code
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
+    except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException, ValueError) as e:
         return 0, None, f"网络错误：{getattr(e, 'reason', e)}"
     try:
         return code, json.loads(raw), raw
@@ -1789,7 +1790,8 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
             go = ask("[cam] 是否继续启动 claude？[y/N]：").strip().lower() == "y"
         else:
             go = ask("[cam] 不建议在当前环境使用。确认继续请输入「继续」，直接回车取消：").strip() == "继续"
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
+        print(file=err)
         go = False
     if not go:
         print(color("[cam] 已取消启动", "d"), file=err)
@@ -2003,6 +2005,7 @@ def account_health(acc, has_creds, days):
 
 
 def public_state(store, data):
+    risks = risk_items(data)
     accs = []
     active = data["active"].get("claude_code")
     for a in data["accounts"]:
@@ -2024,8 +2027,8 @@ def public_state(store, data):
     return {"version": VERSION, "backend": "python", "host": socket.gethostname(),
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
-            "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risk_items(data),
-            "risk_score": risk_score(risk_items(data)), "generated_at": now_iso()}
+            "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
+            "risk_score": risk_score(risks), "generated_at": now_iso()}
 
 
 def mask(s):
@@ -2361,7 +2364,10 @@ def serve(store, host, port, auto_refresh_min):
                     print(f"[等待切换] claude 会话已退出，已切换到 {res[0]['label']}" + ("（时间规则）" if res[2] == "rule" else ""))
                 if auto_refresh_min > 0 and time.time() - last_refresh >= auto_refresh_min * 60:
                     last_refresh = time.time()
-                    check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
+                    try:
+                        check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
+                    except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
+                        print(f"[后台] 环境检测出错：{e}")
                     data = refresh_usage(store, allow_token_refresh=False)
                     limit = rules_view(data)["alert_threshold"]
                     act = data["active"].get("claude_code")
@@ -2983,7 +2989,7 @@ def http_text(url, timeout=8):
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
+    except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException, ValueError) as e:
         return 0, f"网络错误：{getattr(e, 'reason', e)}"
 
 
@@ -3151,7 +3157,8 @@ def detect_region(timeout=6, cfg=None, prev=None):
         return out
     prev = prev or {}
     age = _age_secs(prev.get("meta_at"))
-    reuse = prev.get("ip") == out["ip"] and prev.get("lookup_mode") == cfg["mode"] and age is not None and age < META_TTL
+    reuse = (bool(out["ip"]) and prev.get("ip") == out["ip"] and prev.get("lookup_mode") == cfg["mode"]
+             and age is not None and age < META_TTL)
     jobs = {"v4": lambda: trace_only(CF_TRACE4_URL), "v6": lambda: trace_only(CF_TRACE6_URL)}
     if not reuse:
         jobs["meta"] = lambda: fetch_exit_meta(cfg)
@@ -3167,7 +3174,8 @@ def detect_region(timeout=6, cfg=None, prev=None):
             out.update(res["meta"])
         if not out["reg_loc"]:
             out["reg_loc"] = res.get("rdap") if "rdap" in res else fetch_ip_registration(out["ip"])
-        out["meta_at"] = now_iso()
+        if out["org"] or out["meta_loc"]:  # 查到了才缓存；全失败的话下次重查
+            out["meta_at"] = now_iso()
     if res["v4"]:
         out["v4_ip"], out["v4_loc"] = res["v4"]
     if res["v6"]:
@@ -3346,12 +3354,44 @@ def system_dns_servers():
     return out[:6]
 
 
+PROXY_ENV_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy")
+
+
+def proxy_parts():
+    """当前生效的代理：环境变量 + 系统设置，例如 ["HTTPS_PROXY=…", "系统设置 HTTPS 127.0.0.1:7890"]。"""
+    return ([f"{k}={os.environ[k]}" for k in PROXY_ENV_KEYS if os.environ.get(k)]
+            + [f"系统设置 {p}" for p in system_proxy()])
+
+
 def local_env():
-    """本机的区域设置快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。"""
+    """本机的区域设置、代理和 VPN 快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
+    顶部环境卡和服务检测都用这一份，两边的分数才一致。"""
     tz = system_timezone()
     lc = system_locale()
+    tun = default_route_tunnel()
     return {"tz": tz[0] if tz else None, "tz_cc": tz[1] if tz else [],
-            "locale": lc[0] if lc else None, "locale_cc": lc[1] if lc else None, "dns": system_dns_servers()}
+            "locale": lc[0] if lc else None, "locale_cc": lc[1] if lc else None, "dns": system_dns_servers(),
+            "proxy": proxy_parts(), "tunnel": list(tun) if tun else None}
+
+
+def proxy_vpn_items(env):
+    """代理、VPN 两行（服务检测和顶部环境卡共用）。env 是 local_env() 的结果。"""
+    out = []
+    parts = env.get("proxy") or []
+    out.append({"kind": "proxy", "level": "info" if parts else "ok", "text": "代理：" + ("；".join(parts) if parts else "无（直连）"),
+                "advice": "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" if parts else "直连，出口地区就是本机网络的出口"})
+    tun = env.get("tunnel")
+    if tun:
+        out.append({"kind": "vpn", "level": "info", "text": f"VPN：默认路由走 {tun[0]}（{tun[1]}）",
+                    "advice": "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。"})
+    else:
+        out.append({"kind": "vpn", "level": "ok", "text": "VPN：默认路由没有经过隧道接口",
+                    "advice": "只看本机默认路由；透明代理和路由器上的 VPN 看不出来"})
+    return out
+
+
+def asn_label(asn):
+    return f"AS{asn}" if asn else "AS?"
 
 
 def hosting_exit(org):
@@ -3435,10 +3475,21 @@ def system_timezone():
     return zone, countries
 
 
+def decode_output(b):
+    """子进程输出：先按 UTF-8，不行再按系统编码（Windows 上常是 GBK / OEM 代码页），解不了的字符用替换符，不抛异常。"""
+    if not b:
+        return ""
+    try:
+        return b.decode("utf-8")
+    except UnicodeDecodeError:
+        import locale  # noqa: PLC0415
+        return b.decode(locale.getpreferredencoding(False) or "utf-8", errors="replace")
+
+
 def _run_text(cmd, timeout=8):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
-    except (OSError, subprocess.SubprocessError):
+        return decode_output(subprocess.run(cmd, capture_output=True, timeout=timeout).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
         return ""
 
 
@@ -3573,8 +3624,10 @@ def check_region(store, max_age=300):
         old = data.get("region") or {}
         reg = {k: r.get(k) for k in ("loc", "ip", "colo", "ms", "skew") + META_FIELDS + STACK_FIELDS}
         reg.update(warp=bool(r.get("warp")), lookup_mode=cfg["mode"], env=env, checked_at=now_iso())
-        if old.get("loc") and reg["loc"] and old["loc"] != reg["loc"]:
-            reg["prev_loc"], reg["changed_at"] = old["loc"], reg["checked_at"]
+        last = old.get("loc") or old.get("last_loc")  # 中间失败过一次也和最后一次知道的出口比
+        reg["last_loc"] = reg["loc"] or last
+        if last and reg["loc"] and last != reg["loc"]:
+            reg["prev_loc"], reg["changed_at"] = last, reg["checked_at"]
         elif old.get("prev_loc"):
             reg["prev_loc"], reg["changed_at"] = old["prev_loc"], old.get("changed_at")
         data["region"] = reg
@@ -3584,12 +3637,19 @@ def check_region(store, max_age=300):
             data.pop("status_page", None)
         note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"])
         ss = data.get("service_status")
-        if reg["loc"] and isinstance(ss, dict):  # 连得上 claude.ai 了：网络、证书、claude.ai 的旧问题不再算
-            ss["items"] = [i for i in ss.get("items") or [] if i.get("kind") == "api"]
+        if reg["loc"] and isinstance(ss, dict):  # 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
+            ss["items"] = [i for i in ss.get("items") or [] if not resolved_by_trace(i)]
             if not ss["items"]:
                 data.pop("service_status", None)
         store.save(data)
     return region_view(data)
+
+
+def resolved_by_trace(item):
+    """后台连上了 claude.ai 的 trace，就能证明这条服务检测问题已经好了：DNS、证书、claude.ai 连不上。
+    人机验证、服务端错误、api.anthropic.com 的问题证明不了，留到下次服务检测或一小时后过期。"""
+    k = item.get("kind")
+    return k in ("dns", "tls") or (k == "web" and "连不上" in (item.get("text") or ""))
 
 
 def risk_items(data, include_region=True):
@@ -3609,6 +3669,10 @@ def risk_items(data, include_region=True):
         add("region", "warn", region_message(loc, "unsupported"), REGION_ADVICE["unsupported"])
     if include_region and reg.get("checked_at") and not loc:
         add("region_unknown", "warn", "出口地区查不到：上次检测连不上 claude.ai 和 Cloudflare", REGION_ADVICE["unknown"])
+    if include_region and reg.get("checked_at"):  # 代理 / VPN：和服务检测用同一份缓存，扣分一致
+        e = reg.get("env") if isinstance(reg.get("env"), dict) else {}
+        if "proxy" in e:
+            out.extend(dict(i) for i in proxy_vpn_items(e) if i["level"] != "ok")
     if include_region:  # 最近一次服务检测发现的连接问题（后台检测到网络恢复后会清掉）
         ss = data.get("service_status") or {}
         at = parse_iso(ss.get("checked_at"))
@@ -3631,10 +3695,10 @@ def risk_items(data, include_region=True):
         add("tor_exit", "warn", f"出口 IP 是 Tor 出口节点（{reg.get('org') or '?'}）",
             "Tor 出口几乎一定会被当作高风险流量，账号很容易被限制；人所在地仍按实际位置判断。")
     elif ip_type == "proxy":
-        add("proxy_ip", "warn", f"出口 IP 被数据库标记为代理 / VPN 出口（{reg.get('org') or '?'}，AS{reg.get('asn')}）",
+        add("proxy_ip", "warn", f"出口 IP 被数据库标记为代理 / VPN 出口（{reg.get('org') or '?'}，{asn_label(reg.get('asn'))}）",
             "服务端的 IP 库同样能查到这个标记，这是最常见的风控信号之一；人所在地仍按实际位置判断。")
     elif ip_type == "hosting" or (ip_type is None and hosting_exit(reg.get("org"))):
-        add("isp", "warn", f"出口 IP 属于 {reg.get('org') or '?'}（AS{reg.get('asn')}），是机房 / 云服务器，不是家庭或公司宽带",
+        add("isp", "warn", f"出口 IP 属于 {reg.get('org') or '?'}（{asn_label(reg.get('asn'))}），是机房 / 云服务器，不是家庭或公司宽带",
             "这类出口通常被当作 VPN / 代理流量看待，是常见的风控信号之一；人所在地仍按实际位置判断。")
     if reg.get("reg_loc") and loc and reg["reg_loc"] != loc:
         add("ip_origin", "info", f"出口 IP 注册在 {region_label(reg['reg_loc'])}，定位在 {region_label(loc)}（广播 IP）",
@@ -3644,9 +3708,7 @@ def risk_items(data, include_region=True):
             f"IPv4 出口在 {region_label(reg['v4_loc'])}，IPv6 出口在 {region_label(reg['v6_loc'])}（{reg.get('v6_ip')}），两个协议走了不同的出口",
             "VPN / 代理通常只接管 IPv4，IPv6 直接从本机网络出去，服务端通过 IPv6 看到的就是本机网络的真实出口。"
             "如果 IPv6 这边在不支持地区，政策按实际所在地判断，风险与 IPv4 出口无关。")
-    env = reg.get("env") if isinstance(reg.get("env"), dict) else None
-    if env is None and reg.get("checked_at"):
-        env = local_env()  # 旧版缓存没有这一段
+    env = reg.get("env") if isinstance(reg.get("env"), dict) else None  # 旧版缓存没有这一段，就当作不知道
     for d in (env or {}).get("dns") or []:
         if d.get("country") and loc and d["country"] != loc:
             text = f"DNS 解析器 {d['ip']}（{d.get('name') or '公共 DNS'}，{region_label(d['country'])}）与出口地区 {region_label(loc)} 不一致"
@@ -3670,7 +3732,7 @@ def risk_items(data, include_region=True):
         add("status", "bad" if ind in ("major", "critical") else "warn",
             f"Anthropic 官方状态页：{sp.get('description') or ind}（{ind}）",
             "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。")
-    tz = (env["tz"], env.get("tz_cc") or []) if env and env.get("tz") else system_timezone()
+    tz = (env["tz"], env.get("tz_cc") or []) if loc and env and env.get("tz") else None
     if tz and loc and tz[1] and loc not in tz[1]:
         zone, home = tz[0], tz[1][0]
         text = f"系统时区 {zone} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
@@ -3680,7 +3742,7 @@ def risk_items(data, include_region=True):
                 "人确实在不支持地区的话，风险与出口无关。")
         else:
             add("timezone", "info", text, "出差或经过代理都会这样；人所在地在支持名单内就没问题。")
-    lc = (env["locale"], env.get("locale_cc")) if env and env.get("locale") else system_locale()
+    lc = (env["locale"], env.get("locale_cc")) if loc and env and env.get("locale") else None
     if lc and loc and lc[1] and lc[1] != loc:
         name, home = lc
         text = f"系统语言 / 区域 {name} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
@@ -3786,10 +3848,10 @@ def service_check(store=None):
         add("isp", "info", "网络服务商 / IP 类型：外部 IP 查询已关闭",
             "出口地区照常检测；想看运营商、IP 类型、IPv6 和注册国，在设置里把“外部 IP 查询”改回自动（cam risk --ip-lookup auto）")
     elif r.get("org") and ip_type in ("residential", "mobile"):
-        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：{IP_TYPE_NAMES[ip_type]}{src_note}",
+        add("isp", "info", f"网络服务商：{r['org']}（{asn_label(r.get('asn'))}），IP 类型：{IP_TYPE_NAMES[ip_type]}{src_note}",
             "数据库判定为普通宽带或运营商网络，不是机房 / 代理出口" if ip_type == "residential" else "手机网络的出口 IP 会变，地区判定也可能跳动")
     elif r.get("org") and ip_type is None and not hosting_exit(r["org"]):
-        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：数据源没给标记{src_note}",
+        add("isp", "info", f"网络服务商：{r['org']}（{asn_label(r.get('asn'))}），IP 类型：数据源没给标记{src_note}",
             "按运营商名看不像机房。想要数据库判定：到 ipapi.is 免费注册一个 key（每天 1000 次，可商用），cam risk --ipapi-key 填进去")
     elif not r.get("org"):
         add("isp", "info", "网络服务商：查不到（IP 信息接口都连不上）", "判断不了出口是不是机房 / 代理；不影响其它检查")
@@ -3855,15 +3917,8 @@ def service_check(store=None):
     else:
         add("web", "warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
     # 代理：环境变量 + 系统设置；VPN：默认路由
-    parts = [f"{k}={v}" for k, v in proxies.items()] + [f"系统设置 {p}" for p in system_proxy()]
-    add("proxy", "info" if parts else "ok", "代理：" + ("；".join(parts) if parts else "无（直连）"),
-        "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" if parts else "直连，出口地区就是本机网络的出口")
-    tun = default_route_tunnel()
-    if tun:
-        add("vpn", "info", f"VPN：默认路由走 {tun[0]}（{tun[1]}）",
-            "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。")
-    else:
-        add("vpn", "ok", "VPN：默认路由没有经过隧道接口", "只看本机默认路由；透明代理和路由器上的 VPN 看不出来")
+    env = r.get("env") if isinstance(r.get("env"), dict) and "proxy" in r.get("env", {}) else local_env()
+    out.extend(proxy_vpn_items(env))
     out.extend(risk_items(data, include_region=False))
     if any(is_cert_error(i["text"]) for i in out):
         add("tls", "bad", "HTTPS 证书校验失败（CERTIFICATE_VERIFY_FAILED），上面连不上的几项都是这个原因", CERT_ADVICE)

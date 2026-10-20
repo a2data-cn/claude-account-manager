@@ -103,7 +103,7 @@ export function AccountTile({ a, selected, onSelect }: { a: Account; selected: b
   const sub = a.email && a.email !== a.label ? a.email : KIND[a.kind];
   const cls = ["tile", selected && "sel", a.is_active && "live", a.health?.level === "error" && "bad"].filter(Boolean).join(" ");
   return (
-    <button type="button" className={cls} aria-pressed={selected} aria-label={nameOf(a)} onClick={() => onSelect(a)}>
+    <button type="button" className={cls} aria-pressed={selected} onClick={() => onSelect(a)}>
       <span className="t-top">
         <span className="t-name">{a.label || a.email || "未命名"}</span>
         <PlanChip a={a} />

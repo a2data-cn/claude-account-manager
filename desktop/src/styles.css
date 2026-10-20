@@ -7,8 +7,9 @@
   --line: #E7E3D9;
   --shadow: 0 1px 2px rgba(60, 45, 25, .05);
   --track: #ECE8DE;
-  --accent: #C6613F;
+  --accent: #B5532F;
   --accent-ink: #FFFFFF;
+  --on-hot: #FFFFFF;
   --bar: #6E685A;
   --ok: #3E6EA8;
   --warn: #A86A12;
@@ -27,14 +28,14 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
-    --track: #3B3A36; --accent: #D97757; --accent-ink: #FFFFFF; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
+    --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --focus: #D97757;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
-    --track: #3B3A36; --accent: #D97757; --accent-ink: #FFFFFF; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
+    --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --focus: #D97757;
     color-scheme: dark;
 }
@@ -78,13 +79,14 @@ header.top .spacer { flex: 1; }
 .chip.p-team { color: var(--live); border-color: currentColor; }
 .chip.p-enterprise { color: var(--paper); background: var(--ink); border-color: var(--ink); }
 .chip.p-free, .chip.p-api, .chip.p-unknown { color: var(--muted); }
-.chip.st-error { background: var(--hot); border-color: var(--hot); color: #fff; }
+.chip.st-error { background: var(--hot); border-color: var(--hot); color: var(--on-hot); }
 .chip.st-warn { color: var(--warn); border-color: currentColor; }
 .chip.due-soon { color: var(--warn); border-color: currentColor; }
 .chip.due-now { color: var(--hot); border-color: currentColor; }
 
 /* 账号区：上面一排可横向滑动的账号卡，下面是选中账号的详情 */
-.sec-head { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 10px; }
+.sec-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 10px; }
+.sec-head h2 { white-space: nowrap; }
 .sec-head h2 { font-family: var(--serif); font-size: 15px; font-weight: 500; margin: 0; }
 .sec-head .hint { margin: 0; }
 .strip { display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x proximity; padding: 3px 3px 12px; margin: 0 -3px 4px;
@@ -191,7 +193,7 @@ section.block h2 { font-family: var(--serif); font-size: 15px; font-weight: 500;
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* 隐私与数据源 */
 .pv-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
-.seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.pv-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
 .seg-opt { display: grid; gap: 2px; align-content: start; text-align: left; cursor: pointer; color: var(--ink);
   border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 8px 10px 8px 28px; position: relative;
   transition: border-color .12s, box-shadow .12s; }
@@ -224,11 +226,12 @@ details.src[open] summary::before { content: "▾"; }
 .pv-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-top: 12px; padding-top: 10px;
   border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 @media (max-width: 680px) {
-  .seg { grid-template-columns: 1fr; }
+  .pv-modes { grid-template-columns: 1fr; }
   .key-row { grid-template-columns: 1fr; }
   .sources li { grid-template-columns: 1fr; gap: 0; }
 }
-.checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.check-groups .checks { margin: 0; }
+.check-groups h4, .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }
 /* 环境状态卡：分数、出口、网络类型、上次检测、风险提醒。只提示，不拦 */
@@ -298,7 +301,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
 .dlg-acts .danger { margin-right: auto; color: var(--hot); }
 .dlg-acts.wrap { flex-wrap: wrap; }
 .dlg-text { margin: 0 0 14px; font-size: 14px; line-height: 1.5; }
-.btn.danger-fill { background: var(--hot); border-color: var(--hot); color: #fff; }
+.btn.danger-fill { background: var(--hot); border-color: var(--hot); color: var(--on-hot); }
 .btn.danger-fill:hover { opacity: .9; }
 .rm-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
 .rm-list li { padding-left: 1.5em; text-indent: -1.5em; }

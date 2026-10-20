@@ -53,16 +53,23 @@ function CheckList({ items }: { items: ServiceCheckItem[] }) {
     return [name, rows] as [string, ServiceCheckItem[]];
   }).filter(([, rows]) => rows.length);
   const other = rest.filter((i) => !used.has(i));
+  const summary = items.filter((i) => i.kind === "summary");
   return (
-    <ul className="checks">
-      {items.filter((i) => i.kind === "summary").map((it, i) => <CheckRow key={`s${i}`} it={it} cls="summary" />)}
+    <div className="check-groups">
+      {summary.length > 0 && (
+        <ul className="checks">
+          {summary.map((it, i) => <CheckRow key={`s${i}`} it={it} cls="summary" />)}
+        </ul>
+      )}
       {[...groups, ...(other.length ? [["其它", other] as [string, ServiceCheckItem[]]] : [])].map(([name, rows]) => (
         <Fragment key={name}>
           <h4>{name}</h4>
-          {rows.map((it, i) => <CheckRow key={`${name}${i}`} it={it} />)}
+          <ul className="checks">
+            {rows.map((it, i) => <CheckRow key={`${name}${i}`} it={it} />)}
+          </ul>
         </Fragment>
       ))}
-    </ul>
+    </div>
   );
 }
 
@@ -80,15 +87,16 @@ function useServiceCheck(toast: (m: string, bad?: boolean) => void, after?: () =
       setChecking(false);
     }
   };
-  return { items, checking, check };
+  return { items, checking, check, reset: () => setItems(null) };
 }
 
+type ServiceCheckState = ReturnType<typeof useServiceCheck>;
+
 /** 环境状态卡：分数、出口、网络类型、上次检测时间、风险提醒，点"重新检测"在卡下展开完整结果。只提醒，不拦 */
-function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, bad?: boolean) => void; reload: () => void }) {
-  const { items, checking, check } = useServiceCheck(toast, reload);
+function EnvCard({ state, sc: { items, checking, check } }: { state: State; sc: ServiceCheckState }) {
   const reg = state.region;
-  const sc = state.risk_score;
-  if (!reg?.status || !sc) {
+  const score = state.risk_score;
+  if (!reg?.status || !score) {
     return (
       <section className="env" aria-label="环境状态">
         <div className="env-score">
@@ -111,13 +119,13 @@ function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, ba
   }
   const risks = (state.risks ?? []).filter((r) => r.level === "warn" || r.level === "bad");
   return (
-    <section className={`env ${sc.grade}`} aria-label="环境状态">
+    <section className={`env ${score.grade}`} aria-label="环境状态">
       <div className="env-score">
         <div className="env-num">
-          {sc.score}
+          {score.score}
           <small>/100</small>
         </div>
-        <div className="env-lab">{sc.label.split("，")[0]}</div>
+        <div className="env-lab">{score.label.split("，")[0]}</div>
       </div>
       <div className="env-facts">
         <div>
@@ -152,8 +160,8 @@ function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, ba
       ) : (
         risks.length > 0 && (
           <ul className="env-risks">
-            {risks.map((r) => (
-              <li key={r.kind ?? r.text} className={r.level}>
+            {risks.map((r, i) => (
+              <li key={`${r.kind}-${i}`} className={r.level}>
                 {r.text}
                 {r.advice && <span className="advice">{r.advice}</span>}
               </li>
@@ -255,6 +263,8 @@ export default function App() {
 
   const selected = sorted.find((a) => a.id === selectedId) || sorted.find((a) => a.is_active) || sorted[0] || null;
   const badCount = sorted.filter((a) => a.health?.level === "error").length;
+  // 环境卡的检测结果放在这里：卡片在顶部和底部之间移动时结果不丢
+  const envSc = useServiceCheck(toast, load);
   // 环境有风险时把环境状态卡放到最上面，没风险时放到账号详情下面
   const risky = !!(state?.risk_score && state.region?.status && state.risk_score.grade !== "low");
   // 选中的卡不在可见范围时，把账号条滑到它
@@ -264,7 +274,7 @@ export default function App() {
     if (!strip || !cur) return;
     const l = cur.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft;
     if (l < strip.scrollLeft || l + cur.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = Math.max(0, l - 3);
-  }, [selected?.id]);
+  }, [selected?.id, tab, sorted.map((a) => a.id).join(",")]); // 回到账号页、列表重新排序后也要滑到选中的卡
 
   const run = async (key: string, fn: () => Promise<void>) => {
     setBusy(key);
@@ -401,7 +411,7 @@ export default function App() {
             </div>
           </section>
           <ServiceCheck toast={toast} reload={load} />
-          <Privacy toast={toast} onChanged={load} />
+          <Privacy toast={toast} onChanged={load} onCleared={envSc.reset} />
         </>
       ) : (
         <main aria-live="polite">
@@ -424,7 +434,7 @@ export default function App() {
               <p className="hint">{error}</p>
             </div>
           )}
-          {state && risky && <EnvCard state={state} toast={toast} reload={load} />}
+          {state && risky && <EnvCard state={state} sc={envSc} />}
           {state && !state.accounts.length && (
             <div className="panel empty">
               <h2>还没有账号</h2>
@@ -463,7 +473,7 @@ export default function App() {
                   ＋ 添加账号
                 </button>
               </div>
-              <div className="strip" role="list">
+              <div className="strip">
                 {sorted.map((a) => (
                   <AccountTile key={a.id} a={a} selected={a.id === selected.id} onSelect={select} />
                 ))}
@@ -482,7 +492,7 @@ export default function App() {
               />
             </>
           )}
-          {state && !risky && <EnvCard state={state} toast={toast} reload={load} />}
+          {state && !risky && <EnvCard state={state} sc={envSc} />}
           {state && <LocalUsage accounts={state.accounts} stamp={state.generated_at} />}
           {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
           {state && (

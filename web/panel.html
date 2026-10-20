@@ -17,8 +17,9 @@
   --line: #E7E3D9;
   --shadow: 0 1px 2px rgba(60, 45, 25, .05);
   --track: #ECE8DE;
-  --accent: #C6613F;
+  --accent: #B5532F;
   --accent-ink: #FFFFFF;
+  --on-hot: #FFFFFF;
   --bar: #6E685A;
   --ok: #3E6EA8;
   --warn: #A86A12;
@@ -37,14 +38,14 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
-    --track: #3B3A36; --accent: #D97757; --accent-ink: #FFFFFF; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
+    --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --focus: #D97757;
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
-    --track: #3B3A36; --accent: #D97757; --accent-ink: #FFFFFF; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
+    --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --focus: #D97757;
     color-scheme: dark;
 }
@@ -88,13 +89,14 @@ header.top .spacer { flex: 1; }
 .chip.p-team { color: var(--live); border-color: currentColor; }
 .chip.p-enterprise { color: var(--paper); background: var(--ink); border-color: var(--ink); }
 .chip.p-free, .chip.p-api, .chip.p-unknown { color: var(--muted); }
-.chip.st-error { background: var(--hot); border-color: var(--hot); color: #fff; }
+.chip.st-error { background: var(--hot); border-color: var(--hot); color: var(--on-hot); }
 .chip.st-warn { color: var(--warn); border-color: currentColor; }
 .chip.due-soon { color: var(--warn); border-color: currentColor; }
 .chip.due-now { color: var(--hot); border-color: currentColor; }
 
 /* 账号区：上面一排可横向滑动的账号卡，下面是选中账号的详情 */
-.sec-head { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 10px; }
+.sec-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 10px; }
+.sec-head h2 { white-space: nowrap; }
 .sec-head h2 { font-family: var(--serif); font-size: 15px; font-weight: 500; margin: 0; }
 .sec-head .hint { margin: 0; }
 .strip { display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x proximity; padding: 3px 3px 12px; margin: 0 -3px 4px;
@@ -201,7 +203,7 @@ section.block h2 { font-family: var(--serif); font-size: 15px; font-weight: 500;
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* 隐私与数据源 */
 .pv-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
-.seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.pv-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
 .seg-opt { display: grid; gap: 2px; align-content: start; text-align: left; cursor: pointer; color: var(--ink);
   border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 8px 10px 8px 28px; position: relative;
   transition: border-color .12s, box-shadow .12s; }
@@ -234,11 +236,12 @@ details.src[open] summary::before { content: "▾"; }
 .pv-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-top: 12px; padding-top: 10px;
   border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 @media (max-width: 680px) {
-  .seg { grid-template-columns: 1fr; }
+  .pv-modes { grid-template-columns: 1fr; }
   .key-row { grid-template-columns: 1fr; }
   .sources li { grid-template-columns: 1fr; gap: 0; }
 }
-.checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.check-groups .checks { margin: 0; }
+.check-groups h4, .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }
 /* 环境状态卡：分数、出口、网络类型、上次检测、风险提醒。只提示，不拦 */
@@ -308,7 +311,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
 .dlg-acts .danger { margin-right: auto; color: var(--hot); }
 .dlg-acts.wrap { flex-wrap: wrap; }
 .dlg-text { margin: 0 0 14px; font-size: 14px; line-height: 1.5; }
-.btn.danger-fill { background: var(--hot); border-color: var(--hot); color: #fff; }
+.btn.danger-fill { background: var(--hot); border-color: var(--hot); color: var(--on-hot); }
 .btn.danger-fill:hover { opacity: .9; }
 .rm-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
 .rm-list li { padding-left: 1.5em; text-indent: -1.5em; }
@@ -398,7 +401,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     <div class="panel">
       <p class="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
       <button class="btn" id="btn-check" type="button">开始检测</button>
-      <ul class="checks" id="check-list" hidden></ul>
+      <div class="check-groups" id="check-list" hidden></div>
     </div>
   </section>
 
@@ -407,7 +410,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     <div class="panel">
       <p class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。</p>
       <p class="pv-label">外部 IP 查询<span id="pv-env" hidden> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span></p>
-      <div class="seg" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
+      <div class="pv-modes" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
       <div class="keys" id="pv-keys"></div>
       <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details>
       <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div>
@@ -637,7 +640,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const h = a.health || {};
     const sub = a.email && a.email !== a.label ? a.email : KIND[a.kind];
     return `<button type="button" class="tile${sel ? " sel" : ""}${a.is_active ? " live" : ""}${h.level === "error" ? " bad" : ""}"
-      data-act="select" data-id="${esc(a.id)}" aria-pressed="${sel}" aria-label="${esc(nameOf(a))}">
+      data-act="select" data-id="${esc(a.id)}" aria-pressed="${sel}">
       <span class="t-top"><span class="t-name">${esc(a.label || a.email || "未命名")}</span>${planChip(a)}</span>
       <span class="t-sub">${esc(sub)}</span>
       <span class="t-chips">${statusChips(a)}</span>
@@ -691,15 +694,12 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const l = cur.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft;
     if (l < strip.scrollLeft || l + cur.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = Math.max(0, l - 3);
   }
-  let selectedId = null;
+  let selectedId = null, revealedId = null;
   try { selectedId = localStorage.getItem("cam-selected"); } catch (_) {}
   function select(id) {
     selectedId = id;
     try { localStorage.setItem("cam-selected", id); } catch (_) {}
-    const s = document.querySelector(".strip"), x = s ? s.scrollLeft : 0;
-    render();
-    const s2 = document.querySelector(".strip");
-    if (s2) { s2.scrollLeft = x; revealSelected($("#list")); }
+    render();  // render 里保留滚动位置，选中变了才滑过去
   }
 
   // ---- 环境状态卡 / 检测结果分组（和桌面版同样的分组）
@@ -714,19 +714,20 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   function checkItem(it, cls) {
     return `<li class="${esc(it.level)}${cls ? " " + cls : ""}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`;
   }
-  function renderChecks(items) {
+  function renderChecks(items) {  // 返回放进 .check-groups 的内容：总体结论一个列表，每组一个标题 + 列表
     const summary = items.filter((i) => i.kind === "summary");
     const rest = items.filter((i) => i.kind !== "summary");
-    let html = summary.map((i) => checkItem(i, "summary")).join("");
+    const list = (rows, cls) => `<ul class="checks">${rows.map((i) => checkItem(i, cls)).join("")}</ul>`;
+    let html = summary.length ? list(summary, "summary") : "";
     const used = new Set();
     for (const [name, kinds] of CHECK_GROUPS) {
       const rows = rest.filter((i) => kinds.includes(i.kind));
       if (!rows.length) continue;
       rows.forEach((i) => used.add(i));
-      html += `<h4>${name}</h4>` + rows.map((i) => checkItem(i)).join("");
+      html += `<h4>${name}</h4>` + list(rows);
     }
     const other = rest.filter((i) => !used.has(i));
-    if (other.length) html += `<h4>其它</h4>` + other.map((i) => checkItem(i)).join("");
+    if (other.length) html += `<h4>其它</h4>` + list(other);
     return html;
   }
   // “重新检测”的完整结果直接展开在环境状态卡里（和桌面版一样），重绘时保留
@@ -734,7 +735,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   function envButton(label) {
     return `<div class="env-acts"><button class="btn" data-act="recheck"${envChecking ? " disabled" : ""}>${envChecking ? "检测中…" : label}</button></div>`;
   }
-  const envChecksHtml = () => envChecks ? `<div class="env-checks"><ul class="checks">${renderChecks(envChecks)}</ul></div>` : "";
+  const envChecksHtml = () => envChecks ? `<div class="env-checks check-groups">${renderChecks(envChecks)}</div>` : "";
   async function runEnvCheck() {
     if (envChecking) return;
     envChecking = true; render();
@@ -802,15 +803,18 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       return ux - uy;
     });
     const sel = sorted.find((a) => a.id === selectedId) || sorted.find((a) => a.is_active) || sorted[0];
+    const oldStrip = list.querySelector(".strip"), keepX = oldStrip ? oldStrip.scrollLeft : 0;
     const bad = sorted.filter((a) => (a.health || {}).level === "error").length;
     list.innerHTML = notice
       + `<div class="sec-head"><h2>账号 · ${sorted.length} 个</h2><span class="hint">${bad ? `<span style="color:var(--hot);font-weight:600">${bad} 个异常</span> · ` : ""}左右滑动，点一下看详情</span>
           <span class="spacer" style="flex:1"></span><button class="btn quiet" data-act="detect" title="检查 Claude Code 现在登录的是不是新账号，是就保存">检测新登录</button><button class="btn quiet" data-act="add">＋ 添加账号</button></div>`
-      + `<div class="strip" role="list">${sorted.map((a) => tile(a, a.id === sel.id)).join("")}
+      + `<div class="strip">${sorted.map((a) => tile(a, a.id === sel.id)).join("")}
           <button type="button" class="tile add" data-act="add"><span class="plus">＋</span>添加账号</button></div>`
       + detailView(sel)
       + (risky ? "" : env);
-    revealSelected(list);
+    const strip = list.querySelector(".strip");
+    if (strip) strip.scrollLeft = keepX;
+    if (sel.id !== revealedId) { revealedId = sel.id; revealSelected(list); }
   }
 
   function renderLogin(msg) {
@@ -858,9 +862,12 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     ["ipinfo_token", "ipinfo.io token", "可选 · 上一家查不到时用", "has_ipinfo_token", "没配也能用"],
   ];
   function renderPrivacy(p) {
+    const typed = {};  // 重绘前记下还没保存的输入，重绘后放回去
+    document.querySelectorAll("#pv-keys input[data-key]").forEach((i) => { if (i.value) typed[i.dataset.key] = i.value; });
+    const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
     $("#pv-env").hidden = !p.env_override;
     $("#pv-modes").innerHTML = p.modes.map((m) => `<button type="button" class="seg-opt${m.value === p.ip_lookup ? " on" : ""}" role="radio"
-      aria-checked="${m.value === p.ip_lookup}" data-mode="${esc(m.value)}"${p.env_override ? " disabled" : ""}><b>${esc(m.title || m.label)}</b><span>${esc(m.desc || "")}</span></button>`).join("");
+      aria-checked="${m.value === p.ip_lookup}" tabindex="${m.value === p.ip_lookup ? 0 : -1}" data-mode="${esc(m.value)}"${p.env_override ? " disabled" : ""}><b>${esc(m.title || m.label)}</b><span>${esc(m.desc || "")}</span></button>`).join("");
     $("#pv-keys").hidden = p.ip_lookup === "off";
     $("#pv-keys").innerHTML = KEYS.map(([k, name, desc, has, empty]) => `<div class="key-row">
       <div class="key-name"><b>${name} <span class="chip${p[has] ? " c-ok" : ""}">${p[has] ? "已配置" : "未配置"}</span></b><small>${desc}</small></div>
@@ -878,6 +885,10 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
         `<li><b>${esc(s.name)}${s.warn ? ` <span class="chip st-warn">仅限非商业</span>` : ""}</b><span>${esc(s.what)}</span></li>`).join("")}</ul></div>` : "";
     }).join("");
     $("#pv-hist").textContent = `地区记录：${p.history.accounts} 个账号记过使用地区，用来提醒“同一账号多地区使用”`;
+    document.querySelectorAll("#pv-keys input[data-key]").forEach((i) => {
+      if (typed[i.dataset.key]) i.value = typed[i.dataset.key];
+      if (i.dataset.key === focused) i.focus();
+    });
     $("#privacy-block").hidden = false;
   }
   async function loadPrivacy() {
@@ -891,14 +902,23 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     if (m && !m.classList.contains("on")) return savePrivacy("PUT", "/api/privacy", { ip_lookup: m.dataset.mode }, "已保存，下次检测按新设置");
     const s = e.target.closest("[data-key-save]");
     if (s) {
-      const k = s.dataset.keySave, v = $(`#pv-keys input[data-key="${k}"]`).value.trim();
+      const input = $(`#pv-keys input[data-key="${s.dataset.keySave}"]`), v = input.value.trim();
       if (!v) return toast("先填上 key 再保存", true);
-      return savePrivacy("PUT", "/api/privacy", { [k]: v }, "已保存");
+      input.value = "";  // 只清掉刚保存的这一个
+      return savePrivacy("PUT", "/api/privacy", { [s.dataset.keySave]: v }, "已保存");
     }
     const d = e.target.closest("[data-key-del]");
     if (d) return savePrivacy("PUT", "/api/privacy", { [d.dataset.keyDel]: "" }, "已删除");
   });
-  $("#pv-clear").onclick = () => savePrivacy("DELETE", "/api/privacy/history", undefined, "已清除出口信息和地区记录");
+  $("#pv-clear").onclick = () => { envChecks = null; savePrivacy("DELETE", "/api/privacy/history", undefined, "已清除出口信息和地区记录"); };
+  $("#pv-modes").addEventListener("keydown", (e) => {  // 单选组：方向键切换
+    const opts = [...document.querySelectorAll("#pv-modes [data-mode]")];
+    const i = opts.indexOf(document.activeElement);
+    if (i < 0 || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+    e.preventDefault();
+    const next = opts[(i + (e.key === "ArrowLeft" || e.key === "ArrowUp" ? opts.length - 1 : 1)) % opts.length];
+    next.focus(); next.click();
+  });
 
   async function load() {
     try {
@@ -1089,7 +1109,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       <button class="btn quiet" data-act="rule-rm" data-id="${esc(r.id)}">删除</button></li>`).join("")
       : `<li class="hint">还没有规则。比如：工作日 9:00–18:00 自动用工作号。</li>`;
     const sel = $("#r-acc"), keep = sel.value;
-    sel.innerHTML = codeAccs.map((a) => `<option value="${a.id}">${esc(nameOf(a))}</option>`).join("");
+    sel.innerHTML = codeAccs.map((a) => `<option value="${esc(a.id)}">${esc(nameOf(a))}</option>`).join("");
     if (keep && codeAccs.some((a) => a.id === keep)) sel.value = keep;
     if (document.activeElement !== $("#alert-pct")) $("#alert-pct").value = rules.alert_threshold;
   }
@@ -1166,9 +1186,13 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
 
   // ---- 主题：跟随系统 → 明亮 → 暗黑（只记在这台设备的浏览器里）
   const THEMES = [["system", "◐", "主题：跟随系统"], ["light", "☀", "主题：明亮"], ["dark", "☾", "主题：暗黑"]];
+  const THEME_COLOR = { light: "#F4F2EC", dark: "#262624" };
   function applyTheme(t) {
     if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
     else delete document.documentElement.dataset.theme;
+    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => {
+      m.content = THEME_COLOR[t] || (m.media.includes("dark") ? THEME_COLOR.dark : THEME_COLOR.light);
+    });
     const [, icon, label] = THEMES.find((x) => x[0] === t) || THEMES[0];
     $("#btn-theme").textContent = icon; $("#btn-theme").title = label; $("#btn-theme").setAttribute("aria-label", label);
   }
