@@ -691,7 +691,8 @@ fn risk_items_and_reminders() {
     std::env::set_var("CAM_TEST_TZ", "America/New_York=US");
     // 系统语言指向不支持地区：warn；指向支持地区：info
     let lc = by_kind(&risks_with("CAM_TEST_LOCALE", "zh_CN.UTF-8"), "locale").cloned().unwrap();
-    assert_eq!(lc["level"], "warn");
+    assert_eq!(lc["level"], "info"); // 语言只代表语言习惯，只作参考
+    assert_eq!(risk_score(std::slice::from_ref(&lc))["score"], 95);
     assert!(lc["text"].as_str().unwrap().contains("zh_CN 指向 CN（中国大陆），与出口地区 SG（新加坡） 不一致"), "{}", lc);
     assert_eq!(by_kind(&risks_with("CAM_TEST_LOCALE", "ja-JP"), "locale").unwrap()["level"], "info");
     std::env::set_var("CAM_TEST_LOCALE", "en_US");

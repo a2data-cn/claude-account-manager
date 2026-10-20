@@ -3390,6 +3390,10 @@ def proxy_vpn_items(env):
     return out
 
 
+LOCALE_ADVICE = ("系统语言只代表语言习惯，不代表所在地，所以只作参考、扣 5 分。想让它和所在地一致：在系统设置的“语言与地区”里"
+                 "把“地区”改成你实际所在的国家（语言可以继续用中文）。")
+
+
 def asn_label(asn):
     return f"AS{asn}" if asn else "AS?"
 
@@ -3745,17 +3749,14 @@ def risk_items(data, include_region=True):
                 "出口在支持地区，但本机设置显示人可能在不支持地区。Anthropic 按使用者实际所在地判断，不按出口 IP；"
                 "人确实在不支持地区的话，风险与出口无关。")
         else:
-            add("timezone", "info", text, "出差或经过代理都会这样；人所在地在支持名单内就没问题。")
+            add("timezone", "info", text, "出差或经过代理都会这样；人所在地在支持名单内就没问题。"
+                "想让它和所在地一致：在系统设置的“日期与时间”里按所在城市选时区。")
     lc = (env["locale"], env.get("locale_cc")) if loc and env and env.get("locale") else None
     if lc and loc and lc[1] and lc[1] != loc:
         name, home = lc
         text = f"系统语言 / 区域 {name} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
-        if region_status(home) == "unsupported":
-            add("locale", "warn", text,
-                "系统语言属于 Anthropic 会收集的设备环境信息。出口在支持地区但系统区域指向不支持地区，"
-                "说明人可能在不支持地区；政策按实际所在地判断。")
-        else:
-            add("locale", "info", text, "用外语系统或出差都会这样；人所在地在支持名单内就没问题。")
+        # 语言设置只代表语言习惯（新加坡、美国很多人也用 zh_CN），不代表所在地：只做参考，扣 5 分
+        add("locale", "info", text, LOCALE_ADVICE)
     act = (data.get("active") or {}).get("claude_code")
     acc = next((a for a in data.get("accounts") or [] if a["id"] == act), None)
     if acc:
@@ -3776,8 +3777,8 @@ def risk_items(data, include_region=True):
 # 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
 RISK_WEIGHTS = {
     ("region", "warn"): 60, ("region_unknown", "warn"): 30, ("tls", "bad"): 0, ("account_regions", "warn"): 20, ("region_change", "warn"): 15, ("isp", "warn"): 20,
-    ("region_mismatch", "warn"): 15, ("timezone", "warn"): 25, ("timezone", "info"): 5, ("locale", "warn"): 15,
-    ("locale", "info"): 3, ("clock", "warn"): 10, ("warp", "info"): 5, ("vpn", "info"): 10, ("proxy", "info"): 5,
+    ("region_mismatch", "warn"): 15, ("timezone", "warn"): 25, ("timezone", "info"): 5,
+    ("locale", "info"): 5, ("clock", "warn"): 10, ("warp", "info"): 5, ("vpn", "info"): 10, ("proxy", "info"): 5,
     ("status", "bad"): 30, ("status", "warn"): 10, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
     ("web", "warn"): 5, ("dns", "bad"): 20, ("accounts", "info"): 0, ("device", "info"): 0, ("scope", "info"): 0,
     ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15, ("dns_resolver", "warn"): 15,
