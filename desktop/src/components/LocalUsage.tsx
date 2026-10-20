@@ -31,6 +31,7 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
     <section className="block">
       <h2>本机 Claude Code 消耗（近 14 天，输出 token）</h2>
       <div className="panel">
+        <p className="hint">按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
         <div className="bars" role="img" aria-label="每日输出 token 柱状图">
           {days.map((d) => {
             const tip = d + "\n" + (byDay[d].length ? byDay[d].map((r) => `${label(r.account_id)}：${fmtTokens(r.output)}`).join("\n") : "无");
@@ -57,7 +58,6 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
           ))}
         </div>
       </div>
-      <p className="hint">按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
     </section>
   );
 }

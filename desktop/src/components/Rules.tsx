@@ -88,6 +88,9 @@ export function Rules({
     <section className="block">
       <h2>切号规则</h2>
       <div className="panel">
+        <p className="hint">
+          时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。
+        </p>
         <ul className="rules">
           {view.rules.length ? (
             view.rules.map((r) => (
@@ -168,9 +171,6 @@ export function Rules({
           </button>
         </form>
       </div>
-      <p className="hint">
-        时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。
-      </p>
     </section>
   );
 }

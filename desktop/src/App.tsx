@@ -100,7 +100,11 @@ function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, ba
             {checking ? "检测中…" : "立即检测"}
           </button>
         </div>
-        {items && <div className="env-risks"><CheckList items={items} /></div>}
+        {items && (
+          <div className="env-checks">
+            <CheckList items={items} />
+          </div>
+        )}
       </section>
     );
   }
@@ -140,17 +144,21 @@ function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, ba
           {checking ? "检测中…" : "重新检测"}
         </button>
       </div>
-      {(risks.length > 0 || items) && (
-        <div className="env-risks">
-          {!items &&
-            risks.map((r) => (
+      {items ? (
+        <div className="env-checks">
+          <CheckList items={items} />
+        </div>
+      ) : (
+        risks.length > 0 && (
+          <ul className="env-risks">
+            {risks.map((r) => (
               <li key={r.kind ?? r.text} className={r.level}>
                 {r.text}
                 {r.advice && <span className="advice">{r.advice}</span>}
               </li>
             ))}
-          {items && <CheckList items={items} />}
-        </div>
+          </ul>
+        )
       )}
     </section>
   );
@@ -329,7 +337,7 @@ export default function App() {
         <h1>Claude 账号</h1>
         {state && (
           <span className="host">
-            {state.host}
+            {state.host}（{state.platform}）
             {state.region?.status === "supported" && <span className="reg-ok"> · 出口 {state.region.loc} ✓</span>}
             {state.region?.status === "unsupported" && (
               <span className="reg-bad"> · 出口 {state.region.loc} ⚠ 不在支持名单</span>
@@ -449,11 +457,11 @@ export default function App() {
             </>
           )}
           {state && !risky && <EnvCard state={state} toast={toast} reload={load} />}
-          {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
           {state && <LocalUsage accounts={state.accounts} stamp={state.generated_at} />}
+          {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
           {state && (
-            <p className="hint">
-              {state.backend} {state.version}，数据更新于 {new Date(state.generated_at).toLocaleString()}
+            <p className="hint foot">
+              后端：{state.backend} {state.version}，数据更新于 {new Date(state.generated_at).toLocaleString()}
             </p>
           )}
         </main>

@@ -79,7 +79,7 @@ header.top .spacer { flex: 1; }
 .sec-head .hint { margin: 0; }
 .strip { display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x proximity; padding: 3px 3px 12px; margin: 0 -3px 4px;
   scrollbar-width: thin; scrollbar-color: var(--line) transparent; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
-.strip::-webkit-scrollbar { height: 6px; }
+.strip::-webkit-scrollbar { height: 4px; }
 .strip::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .strip::-webkit-scrollbar-track { background: transparent; }
 .tile { flex: 0 0 216px; scroll-snap-align: start; position: relative; text-align: left; cursor: pointer; color: var(--ink);
@@ -148,6 +148,7 @@ header.top .spacer { flex: 1; }
   .d-body { grid-template-columns: 1fr; margin-top: 14px; }
   .d-acts { width: 100%; }
   .d-acts .btn { flex: 1 1 auto; }
+  .d-acts .btn.quiet { flex: 0 0 auto; }
   .g-pct { font-size: 22px; }
   header.top h1 { font-size: 18px; }
   header.top .host { display: none; }
@@ -158,6 +159,10 @@ section.block { margin-top: 28px; }
 section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .hint { color: var(--muted); font-size: 13px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; }
+.panel > :first-child { margin-top: 0; }
+.panel > :last-child { margin-bottom: 0; }
+.panel > p.hint:first-child { margin-bottom: 12px; }
+.foot { margin-top: 24px; }
 /* 后端给的提醒（比如凭据和 ~/.claude.json 对不上） */
 .notice { margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--warn); border-left-width: 4px; border-radius: var(--radius-sm); background: var(--surface); font-size: 14px; line-height: 1.5; }
 /* 等会话结束再切换的提示：蓝色边，带“取消等待”按钮 */
@@ -200,11 +205,13 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .env-facts .k { display: inline-block; min-width: 3em; color: var(--muted); }
 .env-facts .bad { color: var(--hot); font-weight: 600; }
 .env-acts { grid-area: acts; display: flex; gap: 8px; }
-.env-risks { grid-area: risks; list-style: none; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); font-size: 13px; display: grid; gap: 6px; }
-.env-risks li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
-.env-risks li::before { content: "! "; font-weight: 700; color: var(--warn); }
-.env-risks li.bad::before { color: var(--hot); }
+.env-risks, .env-checks { grid-area: risks; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); }
+.env-risks { list-style: none; font-size: 13px; display: grid; gap: 6px; }
+.env-risks > li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
+.env-risks > li::before { content: "! "; font-weight: 700; color: var(--warn); }
+.env-risks > li.bad::before { color: var(--hot); }
 .env-risks .advice { display: block; text-indent: 0; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.env-checks .checks { margin-top: 0; }
 .env-empty { grid-area: facts; font-size: 13px; color: var(--muted); }
 @media (max-width: 680px) {
   .env { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "score facts" "acts acts" "risks risks"; padding: 12px 14px; }
@@ -242,6 +249,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
   border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 8px 10px; width: 100%;
 }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media (max-width: 680px) { .row2 { grid-template-columns: 1fr; } .alert-row .btn { margin-left: auto; } }
 .check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 12px; }
 .dlg-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
 .dlg-acts .danger { margin-right: auto; color: var(--hot); }
