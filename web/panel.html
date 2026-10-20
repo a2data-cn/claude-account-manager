@@ -126,6 +126,11 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 /* 等会话结束再切换的提示：蓝色边，带“取消等待”按钮 */
 .notice.pending { border-color: var(--ok); display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .notice.pending .n-text { flex: 1 1 200px; }
+.notice.bad { border-color: var(--hot); }
+.notice .n-advice { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+.host .reg-ok { color: var(--live); }
+.host .reg-bad { color: var(--hot); font-weight: 600; }
+.checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 
 /* 本地消耗柱状图 */
 .bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
@@ -469,10 +474,15 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
   let state = null;
   function render() {
     const list = $("#list");
-    $("#host").textContent = `${state.host}（${state.platform}）`;
+    const reg = state.region || {};
+    const regTxt = reg.status === "supported" ? `<span class="reg-ok"> · 出口 ${esc(reg.loc)} ✓</span>`
+      : reg.status === "unsupported" ? `<span class="reg-bad"> · 出口 ${esc(reg.loc)} ⚠ 不在支持名单</span>`
+      : reg.status === "unknown" ? " · 出口地区未知" : "";
+    $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}`;
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
     const p = state.pending_switch;
     const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
+      + (reg.status === "unsupported" ? `<div class="notice bad" role="alert">⚠ ${esc(reg.message)}<span class="n-advice">${esc(reg.advice)}</span></div>` : "")
       + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "");
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
@@ -720,7 +730,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     try {
       const r = await api("GET", "/api/service-check");
       $("#check-list").innerHTML = (r.items || []).map((it) =>
-        `<li class="${esc(it.level)}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}</span></li>`).join("");
+        `<li class="${esc(it.level)}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`).join("");
       $("#check-list").hidden = false;
     } catch (err) { toast(err.message, true); }
     finally { btn.textContent = "开始检测"; }

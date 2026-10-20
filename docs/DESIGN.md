@@ -139,12 +139,12 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | Web 面板 |
-| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null` |
+| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`），只用于提示 |
 | POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
 | POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup` |
 | DELETE | `/api/pending-switch` | 取消登记中的等待切换，返回新的 state |
-| GET | `/api/service-check` | `{"items": [{"level": "ok"|"bad"|"warn"|"info", "text"}]}`：DNS、出口地区、api.anthropic.com、claude.ai、代理，同 `cam doctor` 的服务检查，要几秒钟 |
+| GET | `/api/service-check` | `{"items": [{"level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论，然后是 DNS、出口地区（对照 Anthropic 官方支持名单）、api.anthropic.com、claude.ai、代理，每项带建议；同 `cam doctor` 的服务检查，要几秒钟。只检测和提示，不干预任何操作 |
 | POST | `/api/accounts/{id}/open` | 在电脑上打开该网页账号的浏览器窗口 |
 | PATCH | `/api/accounts/{id}` | 修改 `label` 和 `manual.*` |
 | DELETE | `/api/accounts/{id}` | 删除账号（凭据移入 backups，不直接销毁） |

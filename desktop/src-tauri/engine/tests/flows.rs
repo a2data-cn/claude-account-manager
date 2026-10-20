@@ -5,7 +5,7 @@ use cam_engine::api::{public_state, route};
 use cam_engine::claude::{
     apply_pending_switch, apply_pending_switch_at, import_current, is_claude_cmd, switch_account, PENDING_ID,
 };
-use cam_engine::health::service_check;
+use cam_engine::health::{check_region, service_check};
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
 use cam_engine::usage::{ensure_fresh_token, refresh_usage};
@@ -26,6 +26,8 @@ struct Mock {
     refresh: HashMap<String, (String, String)>,
     /// (方法, 路径, 用到的 refresh token)
     calls: Vec<(String, String, String)>,
+    /// /cdn-cgi/trace 返回的地区，空表示 US
+    trace_loc: String,
 }
 
 fn mock() -> &'static Mutex<Mock> {
@@ -56,8 +58,10 @@ fn mock_base() -> &'static str {
                     .unwrap_or_default();
                 m.calls.push((req.method().to_string(), path.clone(), rt.clone()));
                 if path == "/cdn-cgi/trace" {
+                    let loc = if m.trace_loc.is_empty() { "US".to_string() } else { m.trace_loc.clone() };
                     drop(m);
-                    let _ = req.respond(tiny_http::Response::from_string("fl=1\nip=1.2.3.4\nloc=US\ncolo=SJC\n"));
+                    let body = format!("fl=1\nip=1.2.3.4\nloc={}\ncolo=SJC\n", loc);
+                    let _ = req.respond(tiny_http::Response::from_string(body));
                     continue;
                 }
                 let (code, out) = match path.as_str() {
@@ -114,6 +118,7 @@ impl Env {
         std::env::set_var("CAM_NO_KEYCHAIN", "1");
         std::env::set_var("CAM_TEST_CLAUDE_PIDS", "");
         std::env::set_var("CAM_API_BASE", base);
+        std::env::set_var("CAM_CLAUDE_WEB_BASE", base);
         std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", base));
         for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
             std::env::remove_var(k);
@@ -443,14 +448,55 @@ fn service_check_reports_region_and_services() {
     let e = Env::new();
     e.two_accounts(later()); // 当前登录 B
     mock().lock().unwrap().tokens.insert("at-B1".into(), "b@x.com".into());
-    std::env::set_var("CAM_CLAUDE_WEB_BASE", mock_base());
     let items = service_check(&Store::new());
-    std::env::remove_var("CAM_CLAUDE_WEB_BASE");
-    let all = items.iter().map(|(l, t)| format!("{} {}", l, t)).collect::<Vec<_>>().join("\n");
-    assert!(all.contains("出口地区：US"), "{}", all);
-    assert!(all.contains("服务正常，当前登录可用"), "{}", all);
-    assert!(all.contains("可达"), "{}", all);
-    assert!(!items.iter().any(|(l, _)| l == "bad"), "{}", all);
+    let text = items.iter().map(|i| i["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("\n");
+    assert_eq!(items[0]["level"], "ok", "{}", text);
+    assert!(text.contains("总体：Claude 服务正常"), "{}", text);
+    assert!(text.contains("出口地区 US（美国） 在 Anthropic 支持名单内"), "{}", text);
+    assert!(text.contains("服务正常，当前登录可用"), "{}", text);
+    assert!(text.contains("可达"), "{}", text);
+    assert!(items.iter().all(|i| i.get("advice").is_some()));
+    // 不在支持名单内：提醒并给建议，总体结论跟着变
+    mock().lock().unwrap().trace_loc = "CN".into();
+    let items = service_check(&Store::new());
+    assert_eq!(items[0]["level"], "warn");
+    assert!(items[0]["text"].as_str().unwrap().contains("有风险"));
+    let reg = items.iter().find(|i| i["text"].as_str().unwrap().starts_with("出口地区")).unwrap();
+    assert_eq!(reg["level"], "warn");
+    assert!(reg["text"].as_str().unwrap().contains("CN（中国大陆） 不在 Anthropic 支持名单内"));
+    assert!(reg["advice"].as_str().unwrap().contains("封禁"));
+    // 属地按所属国家看待
+    mock().lock().unwrap().trace_loc = "PR".into();
+    let items = service_check(&Store::new());
+    let reg = items.iter().find(|i| i["text"].as_str().unwrap().starts_with("出口地区")).unwrap();
+    assert_eq!(reg["level"], "ok");
+    mock().lock().unwrap().trace_loc = String::new();
+}
+
+#[test]
+fn region_cached_for_display() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    assert!(public_state(&store, &e.data())["region"]["status"].is_null());
+    check_region(&store, 300).unwrap();
+    let reg = public_state(&store, &e.data())["region"].clone();
+    assert_eq!(reg["loc"], "US");
+    assert_eq!(reg["status"], "supported");
+    assert!(reg["message"].as_str().unwrap().contains("在 Anthropic 支持名单内"));
+    // 缓存期内不再联网
+    mock().lock().unwrap().trace_loc = "CN".into();
+    let n = mock().lock().unwrap().calls.iter().filter(|c| c.1 == "/cdn-cgi/trace").count();
+    check_region(&store, 300).unwrap();
+    assert_eq!(mock().lock().unwrap().calls.iter().filter(|c| c.1 == "/cdn-cgi/trace").count(), n);
+    assert_eq!(public_state(&store, &e.data())["region"]["status"], "supported");
+    // 过期后重新检测：不在名单内只是提示，切换不受影响
+    check_region(&store, 0).unwrap();
+    let reg = public_state(&store, &e.data())["region"].clone();
+    assert_eq!(reg["status"], "unsupported");
+    assert!(reg["advice"].as_str().unwrap().contains("建议"));
+    assert!(switch_account(&store, "A").unwrap().changed);
+    mock().lock().unwrap().trace_loc = String::new();
 }
 
 #[test]

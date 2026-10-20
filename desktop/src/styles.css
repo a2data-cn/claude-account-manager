@@ -116,6 +116,11 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 /* 等会话结束再切换的提示：蓝色边，带“取消等待”按钮 */
 .notice.pending { border-color: var(--ok); display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .notice.pending .n-text { flex: 1 1 200px; }
+.notice.bad { border-color: var(--hot); }
+.notice .n-advice { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+.host .reg-ok { color: var(--live); }
+.host .reg-bad { color: var(--hot); font-weight: 600; }
+.checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 
 /* 本地消耗柱状图 */
 .bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }

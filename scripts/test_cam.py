@@ -791,25 +791,58 @@ class CamTest(unittest.TestCase):
         a_id, b_id = self._two_accounts()  # 当前登录 B
         MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
         items = self.cam.service_check(self.cam.Store())
-        text = "\n".join(t for _, t in items)
-        self.assertIn("出口地区：US", text)
+        text = "\n".join(i["text"] for i in items)
+        self.assertEqual(items[0]["level"], "ok")
+        self.assertIn("总体：Claude 服务正常", items[0]["text"])
+        self.assertIn("出口地区 US（美国） 在 Anthropic 支持名单内", text)
         self.assertIn("服务正常，当前登录可用", text)
         self.assertIn("可达", text)
-        self.assertEqual([lv for lv, _ in items if lv == "bad"], [])
-        # 不支持的地区只是提示，实测为准
+        self.assertTrue(all(set(i) == {"level", "text", "advice"} for i in items))
+        # 不在支持名单内：提醒并给建议，总体结论跟着变
         MockAnthropic.trace_loc = "CN"
         items = self.cam.service_check(self.cam.Store())
-        warn = [t for lv, t in items if lv == "warn"]
-        self.assertTrue(any("不支持的地区" in t for t in warn), items)
+        self.assertEqual(items[0]["level"], "warn")
+        self.assertIn("有风险", items[0]["text"])
+        reg = next(i for i in items if i["text"].startswith("出口地区"))
+        self.assertEqual(reg["level"], "warn")
+        self.assertIn("CN（中国大陆） 不在 Anthropic 支持名单内", reg["text"])
+        self.assertIn("封禁", reg["advice"])
+        # 属地按所属国家看待
+        MockAnthropic.trace_loc = "PR"
+        items = self.cam.service_check(self.cam.Store())
+        self.assertEqual(next(i for i in items if i["text"].startswith("出口地区"))["level"], "ok")
         # 没登录：只看可达性
         os.remove(self.creds_path)
         MockAnthropic.trace_loc = "US"
-        text = "\n".join(t for _, t in self.cam.service_check(self.cam.Store()))
+        text = "\n".join(i["text"] for i in self.cam.service_check(self.cam.Store()))
         self.assertIn("服务可达（未登录", text)
-        # 被人机验证拦截
+        # 被人机验证拦截：有建议说明只影响网页账号
         MockAnthropic.cloudflare = True
         items = self.cam.service_check(None)
-        self.assertTrue(any(lv == "warn" and "人机验证" in t for lv, t in items), items)
+        cf = next(i for i in items if "人机验证" in i["text"])
+        self.assertEqual(cf["level"], "warn")
+        self.assertIn("不影响 Claude Code 切换", cf["advice"])
+
+    def test_region_cached_for_display(self):
+        self._two_accounts()
+        store = self.cam.Store()
+        self.assertIsNone(self.cam.public_state(store, self.data())["region"]["status"])
+        self.cam.check_region(store)
+        reg = self.cam.public_state(store, self.data())["region"]
+        self.assertEqual((reg["loc"], reg["status"]), ("US", "supported"))
+        self.assertIn("在 Anthropic 支持名单内", reg["message"])
+        # 缓存期内不再联网
+        MockAnthropic.trace_loc = "CN"
+        MockAnthropic.calls = []
+        self.cam.check_region(store)
+        self.assertFalse([c for c in MockAnthropic.calls if c[1] == "/cdn-cgi/trace"])
+        self.assertEqual(self.cam.public_state(store, self.data())["region"]["status"], "supported")
+        # 过期后重新检测：不在名单内只是提示，账号和切换都不受影响
+        self.cam.check_region(store, max_age=0)
+        reg = self.cam.public_state(store, self.data())["region"]
+        self.assertEqual(reg["status"], "unsupported")
+        self.assertIn("建议", reg["advice"])
+        self.assertTrue(self.cam.switch_code_account(store, "A")[2])
 
     def test_new_login_before_claude_json_updated(self):
         a_id, b_id = self._two_accounts()

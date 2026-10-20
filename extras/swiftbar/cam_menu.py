@@ -140,6 +140,7 @@ def _background_work(store):
         st["last_refresh"] = now
         try:
             # 定时刷新不替不常用的账号续登录，见 cam.refresh_usage
+            cam.check_region(store)  # 菜单里常显的出口地区
             data = cam.refresh_usage(store, allow_token_refresh=False)
             st.pop("last_error", None)
             limit = cam.rules_view(data)["alert_threshold"]
@@ -300,6 +301,10 @@ def render(store, st, out=print):
     pend = cam.pending_switch_view(data)
     if pend:
         out(f"⏳ {esc(pend['message'])[:90]} | size=12 color=#5A6676,#94A0AF")
+    reg = cam.region_view(data)
+    if reg["status"] == "unsupported":
+        out(f"⚠ {esc(reg['message'])[:90]} | size=12 color=#BF3B33,#E06C66")
+        out(f"   {esc(reg['advice'])[:90]} | size=11 color=#5A6676,#94A0AF")
     if st.get("last_error"):
         out(f"⚠ {esc(st['last_error'])[:90]} | size=12 color=#B87A08,#E0A93B")
 

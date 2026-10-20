@@ -38,7 +38,10 @@ function ServiceCheck({ toast }: { toast: (m: string, bad?: boolean) => void }) 
             {items.map((it, i) => (
               <li key={i} className={it.level}>
                 <span className="mark">{CHECK_MARK[it.level] || "·"}</span>
-                <span>{it.text}</span>
+                <span>
+                  {it.text}
+                  {it.advice && <span className="advice">→ {it.advice}</span>}
+                </span>
               </li>
             ))}
           </ul>
@@ -173,7 +176,16 @@ export default function App() {
     <div className="wrap">
       <header className="top">
         <h1>Claude 账号</h1>
-        {state && <span className="host">{state.host}</span>}
+        {state && (
+          <span className="host">
+            {state.host}
+            {state.region?.status === "supported" && <span className="reg-ok"> · 出口 {state.region.loc} ✓</span>}
+            {state.region?.status === "unsupported" && (
+              <span className="reg-bad"> · 出口 {state.region.loc} ⚠ 不在支持名单</span>
+            )}
+            {state.region?.status === "unknown" && <span> · 出口地区未知</span>}
+          </span>
+        )}
         <span className="spacer" />
         {inTauri && (
           <nav className="tabs" aria-label="页面">
@@ -218,6 +230,12 @@ export default function App() {
           {state?.warning && (
             <div className="notice" role="alert">
               ⚠ {state.warning}
+            </div>
+          )}
+          {state?.region?.status === "unsupported" && (
+            <div className="notice bad" role="alert">
+              ⚠ {state.region.message}
+              <span className="n-advice">{state.region.advice}</span>
             </div>
           )}
           {state?.pending_switch && (

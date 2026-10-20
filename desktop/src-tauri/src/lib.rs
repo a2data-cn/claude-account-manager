@@ -2,7 +2,7 @@ use cam_engine as engine;
 mod server;
 
 use crate::engine::{
-    api, claude, rules,
+    api, claude, health, rules,
     store::{accounts, active_code_id, read_json, s, write_json_atomic, Store},
     usage,
 };
@@ -437,6 +437,7 @@ fn background(app: AppHandle) {
             {
                 last_refresh = Some(Instant::now());
                 // 定时刷新不替不常用的账号续登录，见 usage::refresh_usage
+                let _ = health::check_region(&store, 300); // 界面常显的出口地区，随用量刷新一起更新
                 if usage::refresh_usage(&store, None, false).is_ok() {
                     check_alert(&app, &mut warned);
                 }

@@ -54,6 +54,7 @@ export interface State {
   generated_at: string;
   warning?: string | null; // 后端提醒，比如凭据和 ~/.claude.json 对不上
   pending_switch?: PendingSwitch | null; // 已记录、等 claude 会话结束后由后台执行的切换
+  region?: RegionInfo | null; // 后台上次检测到的出口地区，只用于提示
 }
 
 export interface PendingSwitch {
@@ -79,6 +80,16 @@ export interface SwitchResult {
 export interface ServiceCheckItem {
   level: "ok" | "bad" | "warn" | "info";
   text: string;
+  advice: string; // 这意味着什么 / 建议怎么做，可能为空
+}
+
+export interface RegionInfo {
+  loc: string | null;
+  ip?: string | null;
+  status: "supported" | "unsupported" | "unknown" | null; // null = 还没检测过
+  checked_at: string | null;
+  message: string;
+  advice: string;
 }
 
 export interface LocalRow {

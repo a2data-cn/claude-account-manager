@@ -100,6 +100,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "warning": data.get("live_mismatch").or_else(|| data.get("live_unverified"))
             .and_then(|m| m.get("message")).cloned().unwrap_or(Value::Null),
         "pending_switch": pending_switch_view(data),
+        "region": super::health::region_view(data),
         "generated_at": now_iso()
     })
 }
@@ -353,12 +354,7 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
             cancel_pending_switch(store)?;
             Ok(public_state(store, &store.load()?))
         }
-        ("GET", ["service-check"]) => Ok(json!({
-            "items": super::health::service_check(store)
-                .into_iter()
-                .map(|(level, text)| json!({"level": level, "text": text}))
-                .collect::<Vec<_>>()
-        })),
+        ("GET", ["service-check"]) => Ok(json!({"items": super::health::service_check(store)})),
         ("POST", ["accounts", id, "open"]) => {
             let d = store.load()?;
             let i = find_index(&d, id)?;
