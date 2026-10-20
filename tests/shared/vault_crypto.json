@@ -1,0 +1,12 @@
+{
+  "master_password": "local vault fixture password",
+  "salt_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "derived_key_hex": "d43abad3135f372bbc9d11fb73b8a852bf562b538d3f8c7c57b125e3a5b4ebd3",
+  "check_hex": "43414d31000102030405060708090a0b61117623e24bb24711f044b11ab3ab4cb54577a5ed67fd81182fc0cd",
+  "entry_id": "fixture-entry",
+  "entry_secret": {
+    "password": "example-only-secret",
+    "refresh_token": "fake-refresh"
+  },
+  "entry_blob_hex": "43414d31000102030405060708090a0b79526b6fe759b04417b910bae22814d59630987680a6711edc86258c01d4053ac7a8ee74a6194e4ac0ed33be86e50b35a3a4b23a2da0d4f4b837cdfd94a09c74b32c590b5e9306a6597b91e9656274b315"
+}

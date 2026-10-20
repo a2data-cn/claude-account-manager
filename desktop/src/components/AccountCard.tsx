@@ -7,12 +7,21 @@ const PLAN_CLASS: Record<string, string> = {
 
 export const nameOf = (a: Account) => a.label || a.email || a.id;
 
-function Gauge({ k, w }: { k: WindowKey; w: Window5 }) {
+function desktopWindowExpired(a: Account, key: WindowKey, w?: Window5 | null) {
+  if (!w) return true;
+  if (w.resets_at) return new Date(w.resets_at).getTime() <= Date.now();
+  const sampled = new Date(a.usage?.fetched_at || "").getTime();
+  return !Number.isFinite(sampled) || Date.now() - sampled >= WINDOW_MS[key];
+}
+const desktopStale = (a: Account) => a.usage?.cache_stale || !a.usage?.fetched_at || Date.now() - new Date(a.usage.fetched_at).getTime() > 30 * 60 * 1000;
+const desktopUsage = (a: Account) => a.usage?.source === "desktop_cache" || a.usage?.source === "desktop_history";
+
+function Gauge({ k, w, snapshot = false }: { k: WindowKey; w: Window5; snapshot?: boolean }) {
   const pct = Math.max(0, Math.min(100, w.utilization));
   const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
   // 竖线：这个额度窗口已经过去的时间比例
   let elapsed: number | null = null;
-  if (w.resets_at) {
+  if (w.resets_at && !snapshot) {
     const left = new Date(w.resets_at).getTime() - Date.now();
     if (!isNaN(left)) elapsed = Math.max(0, Math.min(100, 100 - (left / WINDOW_MS[k]) * 100));
   }
@@ -25,9 +34,9 @@ function Gauge({ k, w }: { k: WindowKey; w: Window5 }) {
           {pct.toFixed(0)}
           <small>%</small>
         </span>
-        <span className="g-reset">{untilText(w.resets_at)}</span>
+        <span className="g-reset">{snapshot && !w.resets_at ? "未提供重置时间" : untilText(w.resets_at)}</span>
       </div>
-      <div className="g-bar" title="竖线表示窗口时间已过去的比例">
+      <div className="g-bar" title={snapshot ? "Claude 本地额度快照" : "竖线表示窗口时间已过去的比例"}>
         <div className={`g-fill ${cls}`} style={{ width: `${pct}%` }} />
         {elapsed !== null && <div className="g-tick" style={{ left: `calc(${elapsed}% - 1px)` }} />}
       </div>
@@ -44,7 +53,7 @@ export function PlanChip({ a }: { a: Account }) {
   const p = a.plan_display || (a.kind === "api" ? "api" : null);
   if (!p)
     return (
-      <span className="chip p-unknown" title="还没拿到套餐信息，可以在“编辑”里手动选">
+      <span className="chip p-unknown" title={a.kind === "claude_desktop" ? "可以在“编辑”里手动记录套餐" : "还没拿到套餐信息，可以在“编辑”里手动选"}>
         套餐未知
       </span>
     );
@@ -67,7 +76,7 @@ export function StatusChips({ a }: { a: Account }) {
   const expiredIssue = h?.issues.some((i) => i.kind === "expired");
   return (
     <>
-      {a.is_active && <span className="chip live">正在用</span>}
+      {a.is_active && <span className="chip live">{a.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>}
       {h?.level === "error" && <span className="chip st-error">异常</span>}
       {h?.level === "warn" && <span className="chip st-warn">注意</span>}
       {due && due.cls && !expiredIssue && <span className={`chip ${due.cls}`}>{due.short}</span>}
@@ -77,19 +86,20 @@ export function StatusChips({ a }: { a: Account }) {
 
 function TileMeter({ a }: { a: Account }) {
   const u = a.usage || {};
-  if (u.cost_month_usd !== undefined && u.cost_month_usd !== null)
+  if (a.kind !== "claude_desktop" && u.cost_month_usd !== undefined && u.cost_month_usd !== null)
     return (
       <span className="t-meter">
         本月花费 <b style={{ marginLeft: "auto" }}>${Number(u.cost_month_usd).toFixed(2)}</b>
       </span>
     );
   const w = u.five_hour;
+  if (a.kind === "claude_desktop" && (!desktopUsage(a) || desktopWindowExpired(a, "five_hour", w))) return <span className="t-meter">暂无当前窗口的本地额度</span>;
   if (!w) return <span className="t-meter">{a.kind === "claude_web" && !a.has_session_key ? "不自动读取用量" : "还没有用量"}</span>;
   const pct = Math.max(0, Math.min(100, w.utilization));
   const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
   return (
     <span className="t-meter">
-      5 小时
+      5 小时{a.kind === "claude_desktop" ? (desktopStale(a) ? " · 旧快照" : " · 本地") : ""}
       <span className="g-bar">
         <span className={`g-fill ${cls}`} style={{ width: `${pct}%` }} />
       </span>
@@ -131,10 +141,12 @@ export interface DetailProps {
 export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, onRemove }: DetailProps) {
   const u = a.usage || {};
   const m = a.manual || {};
-  const windows = WINDOW_KEYS.filter((k) => u[k]);
-  const hasCost = u.cost_month_usd !== undefined && u.cost_month_usd !== null;
+  const windows = WINDOW_KEYS.filter((k) => u[k] && (a.kind !== "claude_desktop" || (desktopUsage(a) && !desktopWindowExpired(a, k, u[k]))));
+  const hasCost = a.kind !== "claude_desktop" && u.cost_month_usd !== undefined && u.cost_month_usd !== null;
   let empty = "还没有用量数据，点“刷新”。";
-  if (a.kind === "claude_web" && !a.has_session_key)
+  if (a.kind === "claude_desktop")
+    empty = "暂无当前窗口的本地额度。请在这个配置的 Claude 中打开“设置 → 用量”，再点“读取本地额度”。";
+  else if (a.kind === "claude_web" && !a.has_session_key)
     empty = "网页版账号默认不读取用量。填写 sessionKey 后可以自动获取，或者在“编辑”里手动记录到期日。";
   else if (a.kind === "api" && !a.has_admin_key) empty = "填写 Admin Key 后可以显示本月花费。";
   const due = dueInfo(a);
@@ -157,17 +169,22 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
             </button>
           )}
           {a.kind === "claude_web" && (
-            <button className="btn primary" onClick={() => onOpen(a)}>
+            <button className="btn primary" disabled={busy} onClick={() => onOpen(a)}>
               在电脑上打开
             </button>
           )}
+          {a.kind === "claude_desktop" && (
+            <button className="btn primary" disabled={busy} onClick={() => onOpen(a)}>
+              {a.is_active ? "重新打开" : "切换桌面版"}
+            </button>
+          )}
           <button className="btn" disabled={busy} onClick={() => onRefresh(a)}>
-            {busy ? "处理中…" : "刷新"}
+            {busy ? "处理中…" : a.kind === "claude_desktop" ? "读取本地额度" : "刷新"}
           </button>
-          <button className="btn" onClick={() => onEdit(a)}>
+          <button className="btn" disabled={busy} onClick={() => onEdit(a)}>
             编辑
           </button>
-          <button className="btn quiet danger" onClick={() => onRemove(a)}>
+          <button className="btn quiet danger" disabled={busy} onClick={() => onRemove(a)}>
             移除
           </button>
         </div>
@@ -183,10 +200,18 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
           ))}
         </ul>
       )}
+      {a.kind === "claude_desktop" && (
+        <p className="hint">
+          {u.notice || "额度来自这个配置的 Claude 本地记录；打开客户端用量页后可读取更新。"}
+          {u.source === "desktop_history" && " 历史记录未提供重置时间。"}
+          {windows.length > 0 && desktopStale(a) && " 这份快照已超过 30 分钟，请结合记录时间查看。"}
+          {" 切换或重新打开会退出并重启 Claude 桌面版，请先处理好其中正在运行的任务。首次打开和会话过期后需要登录；Claude Code 命令行账号单独切换。"}
+        </p>
+      )}
       <div className="d-body">
         <div className="gauges">
           {windows.map((k) => (
-            <Gauge key={k} k={k} w={u[k] as Window5} />
+            <Gauge key={k} k={k} w={u[k] as Window5} snapshot={a.kind === "claude_desktop"} />
           ))}
           {hasCost && (
             <div className="g">
@@ -231,14 +256,27 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
               </dd>
             </>
           )}
-          {a.kind === "claude_code" && (
+          {(a.kind === "claude_code" || a.kind === "claude_desktop") && (
             <>
-              <dt>最近切换</dt>
-              <dd>{a.last_switched_at ? ago(a.last_switched_at) : "还没切换过"}</dd>
+              <dt>{a.kind === "claude_desktop" ? "最近打开" : "最近切换"}</dt>
+              <dd>{a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"}</dd>
             </>
           )}
-          <dt>用量更新</dt>
-          <dd>{ago(u.fetched_at)}</dd>
+          {a.kind === "claude_desktop" ? (
+            <>
+              <dt>额度来源</dt>
+              <dd>{u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"}</dd>
+              <dt>记录时间</dt>
+              <dd>{ago(u.fetched_at)}</dd>
+              <dt>最近读取</dt>
+              <dd>{ago(u.checked_at)}</dd>
+            </>
+          ) : (
+            <>
+              <dt>用量更新</dt>
+              <dd>{ago(u.fetched_at)}</dd>
+            </>
+          )}
           {m.note && (
             <>
               <dt>备注</dt>

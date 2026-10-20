@@ -128,6 +128,20 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, Option<String
         )?)?;
     }
 
+    let desk: Vec<&Value> = accounts(&data)
+        .iter()
+        .filter(|a| s(a, "kind") == Some("claude_desktop"))
+        .collect();
+    if !desk.is_empty() {
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        menu.append(&MenuItem::with_id(app, "hdr-desk", "Claude 桌面版", false, None::<&str>)?)?;
+        for a in desk {
+            let id = s(a, "id").unwrap_or_default();
+            let text = format!("切换 {}", s(a, "label").unwrap_or("未命名"));
+            menu.append(&MenuItem::with_id(app, format!("open:{id}"), text, true, None::<&str>)?)?;
+        }
+    }
+
     let web: Vec<&Value> = accounts(&data)
         .iter()
         .filter(|a| s(a, "kind") == Some("claude_web"))
@@ -191,6 +205,9 @@ fn on_menu(app: &AppHandle, id: &str) {
                 } else if let Some(acc) = id.strip_prefix("open:") {
                     let (code, out) = api::route(&store, "POST", &format!("/api/accounts/{acc}/open"), &json!({}));
                     if code == 200 {
+                        if let Some(msg) = out["message"].as_str() {
+                            let _ = app.emit("toast", json!({"message": msg, "bad": false}));
+                        }
                         Ok(())
                     } else {
                         Err(out["error"].as_str().unwrap_or("打开失败").to_string())

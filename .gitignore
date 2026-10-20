@@ -5,4 +5,5 @@ desktop/src-tauri/gen/
 __pycache__/
 *.pyc
 .DS_Store
+.lh/
 build.log

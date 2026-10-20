@@ -49,7 +49,17 @@ def action(*args, refresh=True, terminal=False):
 
 
 def pct(a, key):
-    w = (a.get("usage") or {}).get(key)
+    usage = a.get("usage") or {}
+    w = usage.get(key)
+    if a.get("kind") == "claude_desktop":
+        if usage.get("source") not in ("desktop_cache", "desktop_history"):
+            return None
+        now = dt.datetime.now(dt.timezone.utc)
+        reset = cam.parse_iso((w or {}).get("resets_at"))
+        sampled = cam.parse_iso(usage.get("fetched_at"))
+        lifetime = 5 * 3600 if key == "five_hour" else 7 * 86400
+        if (reset and reset <= now) or (not reset and (not sampled or (now - sampled).total_seconds() >= lifetime)):
+            return None
     return w["utilization"] if w and w.get("utilization") is not None else None
 
 
@@ -286,6 +296,37 @@ def render(store, st, out=print):
             elif not u:
                 out("--填入 sessionKey 可显示额度（见 README） | color=gray")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
+        out("---")
+
+    # ---- Claude 桌面版
+    desk = [a for a in accs if a["kind"] == "claude_desktop"]
+    if desk:
+        out("Claude 桌面版 | size=12 color=gray")
+        act = (data.get("active") or {}).get("claude_desktop")
+        for a in desk:
+            name = esc(a.get("label") or a.get("email") or "未命名")
+            mark = " · 上次打开" if a["id"] == act else ""
+            nums = [f"{label} {value:.0f}%" for key, label in (("five_hour", "5h"), ("seven_day", "7d"))
+                    if (value := pct(a, key)) is not None]
+            summary = " · 缓存 " + " / ".join(nums) if nums else ""
+            out(f"{name}{mark}{summary} | {action('open', a['id'], refresh=False)}")
+            out(f"--切换到这个账号 | {action('open', a['id'], refresh=False)}")
+            usage = a.get("usage") or {}
+            if usage.get("source") in ("desktop_cache", "desktop_history"):
+                for key, label in (("five_hour", "5 小时"), ("seven_day", "7 天")):
+                    value = pct(a, key)
+                    if value is not None:
+                        reset = cam.fmt_reset((usage.get(key) or {}).get("resets_at"))
+                        out(f"--{label}：已用 {value:.0f}%，{reset or '未提供重置时间'}")
+                sampled = cam.parse_iso(usage.get("fetched_at"))
+                if sampled:
+                    stale = (dt.datetime.now(dt.timezone.utc) - sampled).total_seconds() > 1800
+                    out(f"--记录于 {sampled.astimezone().strftime('%m-%d %H:%M')}{' · 超过 30 分钟的旧快照' if stale else ''} | color=gray")
+                if usage.get("notice"):
+                    out(f"--{esc(usage['notice'])[:120]} | color=gray")
+            else:
+                out("--在 Claude 设置中查看用量后，可读取本地额度 | color=gray")
+            out(f"--读取本地额度 | {action('usage', a['id'])}")
         out("---")
 
     # ---- API

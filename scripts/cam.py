@@ -23,20 +23,25 @@ from __future__ import annotations
 import argparse
 import base64
 import calendar
+import contextlib
 import datetime as dt
 import getpass
 import glob
 import hashlib
 import http.client
 import http.server
+import io
 import json
+import math
 import os
 import platform
+import re
 import secrets as pysecrets
 import shutil
 import socket
 import socketserver
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1285,6 +1290,240 @@ def fetch_api_usage(store, acc):
     return usage
 
 
+_DESKTOP_CACHE_LIMIT = 64 * 1024
+_DESKTOP_USAGE_LIMIT = 4 * 1024 * 1024
+_DESKTOP_USAGE_URL = re.compile(r"(?:1/0/)?https://claude\.ai/api/organizations/"
+                              r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+                              r"/usage")
+_DESKTOP_HISTORY_KEYS = {"fh": "five_hour", "sd": "seven_day", "so": "seven_day_opus", "sn": "seven_day_sonnet",
+                         "oa": "seven_day_oauth_apps", "cw": "seven_day_cowork", "om": "seven_day_omelette",
+                         "op": "omelette_promotional"}
+_DESKTOP_WINDOWS = tuple(_DESKTOP_HISTORY_KEYS.values())
+
+
+def _desktop_usage_result(source, status, notice, **fields):
+    return {"source": source, "cache_status": status, "notice": notice, "checked_at": now_iso(),
+            "fetched_at": None, "cache_org_uuid": None, "cache_stale": status != "ok",
+            **{key: None for key in _DESKTOP_WINDOWS}, **fields}
+
+
+def _desktop_percent(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and 0 <= value <= 100 and math.isfinite(value))
+
+
+def _desktop_uuid(value):
+    return (value.lower() if isinstance(value, str) and
+            re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) else None)
+
+
+def _desktop_decode_usage(payload):
+    if payload.startswith(b"\x28\xb5\x2f\xfd"):
+        try:
+            try:
+                from compression import zstd
+            except ImportError:
+                import zstandard
+                with zstandard.ZstdDecompressor().stream_reader(io.BytesIO(payload), read_across_frames=False) as reader:
+                    payload = reader.read(_DESKTOP_USAGE_LIMIT + 1)
+            else:
+                decoder = zstd.ZstdDecompressor()
+                payload = decoder.decompress(payload, max_length=_DESKTOP_USAGE_LIMIT + 1)
+                if not decoder.eof:
+                    raise ValueError("zstd 响应不完整或超过读取上限")
+        except ImportError as e:
+            raise CamError("unsupported_compression") from e
+    if len(payload) > _DESKTOP_USAGE_LIMIT:
+        raise ValueError("桌面版用量缓存超过读取上限")
+    raw = payload.decode("utf-8", "replace").lstrip()
+    # Chromium 在 body 后附加二进制 EOF 和元数据；只解析第一个 JSON 对象。
+    parsed, _ = json.JSONDecoder().raw_decode(raw)
+    if not isinstance(parsed, dict) or not any(key in parsed for key in _DESKTOP_WINDOWS):
+        raise ValueError("不是额度响应")
+    return parsed
+
+
+def _desktop_cached_usage(directory, org_hint):
+    now = dt.datetime.now(dt.timezone.utc)
+    entries = []
+    unsupported = False
+    cache = os.path.join(directory, "Cache", "Cache_Data")
+    for path in glob.glob(os.path.join(cache, "*_0")):
+        try:
+            with open(path, "rb") as f:
+                blob = f.read(_DESKTOP_CACHE_LIMIT + 1)
+            if len(blob) > _DESKTOP_CACHE_LIMIT or len(blob) < 24:
+                continue
+            if blob[:8] != bytes.fromhex("305c72a71b6dfbfc"):
+                continue
+            key_len = struct.unpack_from("<I", blob, 12)[0]
+            if not key_len or key_len > 8192 or key_len >= len(blob) - 24:
+                continue
+            key = blob[24:24 + key_len].decode("utf-8", "strict")
+            match = _DESKTOP_USAGE_URL.fullmatch(key)
+            if not match:
+                continue
+            org = match.group(1).lower()
+            if org_hint and org != org_hint:
+                continue
+            sampled = dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc)
+            if sampled.timestamp() <= 0 or sampled > now + dt.timedelta(minutes=5):
+                continue
+            try:
+                body = _desktop_decode_usage(blob[24 + key_len:])
+            except CamError as e:
+                unsupported = unsupported or str(e) == "unsupported_compression"
+                continue
+            if not any(isinstance(body.get(k), dict) and _desktop_percent(body[k].get("utilization")) and
+                       (body[k].get("resets_at") is None or parse_iso(body[k].get("resets_at"))) for k in _DESKTOP_WINDOWS):
+                continue
+            entries.append((sampled, org, body))
+        except (OSError, UnicodeError, ValueError, OverflowError, struct.error):
+            continue
+        except Exception:
+            # 损坏的单个 Chromium cache entry 不应中断其它条目或其它账号。
+            continue
+    if not entries:
+        return _desktop_usage_result("desktop_cache", "unsupported_compression" if unsupported else "missing",
+                                     "未能解压桌面版用量缓存，请安装 scripts/requirements-desktop.txt。" if unsupported else
+                                     "还没有桌面版额度缓存，请打开对应账号的 Claude，在设置中查看用量后刷新。")
+    if len({org for _, org, _ in entries}) > 1 and not org_hint:
+        return _desktop_usage_result("desktop_cache", "ambiguous", "发现多个组织的额度缓存，无法确认当前组织；请在 Claude 中查看目标组织的用量。")
+    sampled, org, body = max(entries, key=lambda row: row[0])
+    windows = {}
+    for key in _DESKTOP_WINDOWS:
+        window = body.get(key)
+        if not isinstance(window, dict) or not _desktop_percent(window.get("utilization")):
+            windows[key] = None
+            continue
+        resets = parse_iso(window.get("resets_at"))
+        without_reset = (window.get("resets_at") is None and
+                         (now - sampled).total_seconds() < (5 * 3600 if key == "five_hour" else 7 * 86400))
+        windows[key] = ({"utilization": window["utilization"], "resets_at": window.get("resets_at")}
+                        if (resets and resets > now) or without_reset else None)
+    available = any(windows.values())
+    return _desktop_usage_result("desktop_cache", "ok" if available else "expired",
+                                 "来自 Claude 桌面版的本地额度缓存；在客户端查看用量后可更新。" if available else
+                                 "桌面版额度缓存已过重置时间，请在 Claude 设置中查看用量后刷新。",
+                                 fetched_at=sampled.isoformat(), cache_org_uuid=org,
+                                 cache_stale=(now - sampled).total_seconds() > 1800, **windows)
+
+
+def _desktop_history_usage(directory, org_hint):
+    path = os.path.join(directory, "plan-usage-history.json")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(_DESKTOP_USAGE_LIMIT + 1)
+        if len(raw) > _DESKTOP_USAGE_LIMIT:
+            return None
+        history = json.loads(raw)
+        version = history.get("version")
+        if isinstance(version, bool) or version not in (1, 2) or not isinstance(history.get("samples"), list):
+            return None
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        return None
+    now = dt.datetime.now(dt.timezone.utc)
+    samples = []
+    for sample in history["samples"]:
+        if not isinstance(sample, dict):
+            continue
+        timestamp = sample.get("t")
+        if (not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool)
+                or not 0 < timestamp <= (now.timestamp() + 300) * 1000 or not math.isfinite(timestamp)):
+            continue
+        try:
+            sampled = dt.datetime.fromtimestamp(timestamp / 1000, dt.timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            continue
+        if timestamp <= 0 or sampled > now + dt.timedelta(minutes=5):
+            continue
+        raw_org = sample.get("org") if version == 2 else None
+        org = _desktop_uuid(raw_org)
+        if raw_org is not None and org is None:
+            continue
+        if org_hint and org != org_hint:
+            continue
+        values = sample.get("u") if version == 2 else sample
+        if not isinstance(values, dict):
+            continue
+        windows = {}
+        for short, key in _DESKTOP_HISTORY_KEYS.items():
+            age_limit = 5 * 3600 if short == "fh" else 7 * 86400
+            value = values.get(short)
+            windows[key] = ({"utilization": value, "resets_at": None}
+                            if _desktop_percent(value) and (now - sampled).total_seconds() < age_limit else None)
+        if any(_desktop_percent(values.get(short)) for short in _DESKTOP_HISTORY_KEYS):
+            samples.append((sampled, org, windows))
+    if not samples:
+        return None
+    if len({org for _, org, _ in samples if org}) > 1 and not org_hint:
+        return _desktop_usage_result("desktop_history", "ambiguous", "用量历史包含多个组织，无法确认当前组织；请打开 Claude 查看用量。")
+    sampled, org, windows = max(samples, key=lambda row: row[0])
+    available = any(windows.values())
+    return _desktop_usage_result("desktop_history", "ok" if available else "expired",
+                                 "来自 Claude 桌面版的历史采样，未提供重置时间；请以客户端当前用量为准。" if available else
+                                 "本地额度历史已过期，请在 Claude 设置中查看用量后刷新。",
+                                 fetched_at=sampled.isoformat(), cache_org_uuid=org,
+                                 cache_stale=(now - sampled).total_seconds() > 1800, **windows)
+
+
+def fetch_desktop_usage(store, acc):
+    directory = desktop_profile_dir(store, acc)
+    try:
+        config = read_json(os.path.join(directory, "config.json"), {}) or {}
+    except (CamError, OSError, UnicodeError):
+        return _desktop_usage_result("desktop_cache", "missing", "桌面配置暂时无法读取，请打开 Claude 确认登录后刷新。")
+    if not isinstance(config, dict):
+        return _desktop_usage_result("desktop_cache", "missing", "桌面配置格式无法识别，请打开 Claude 确认登录后刷新。")
+    actual = config.get("lastKnownAccountUuid") if isinstance(config, dict) else None
+    expected = acc.get("desktop_account_uuid")
+    if expected and actual and actual != expected:
+        return _desktop_usage_result("desktop_cache", "missing", "这个桌面配置已登录为另一个账号，未读取旧额度缓存；请确认账号对应关系。")
+    if actual and isinstance(actual, str):
+        acc["desktop_account_uuid"] = actual
+    # lastActiveOrg 是加密 Cookie，不猜不存在的 config org 字段。
+    org_hint = _desktop_uuid(acc.get("org_uuid"))
+    cached = _desktop_cached_usage(directory, org_hint)
+    if cached["cache_status"] == "ambiguous":
+        return cached
+    history = _desktop_history_usage(directory, org_hint)
+    if history and history["cache_status"] == "ambiguous":
+        return history
+    if (not org_hint and history and cached.get("cache_org_uuid") and history.get("cache_org_uuid") and
+            cached["cache_org_uuid"] != history["cache_org_uuid"]):
+        return _desktop_usage_result("desktop_cache", "ambiguous", "本地缓存和历史记录属于不同组织，无法确认当前组织；请在 Claude 中确认目标组织。")
+    if cached["cache_status"] in ("ok", "expired"):
+        # 已过重置时间的较新响应不能被旧历史重新显示为可用额度。
+        if (history and history["cache_status"] in ("ok", "expired") and
+                parse_iso(history.get("fetched_at")) > parse_iso(cached.get("fetched_at"))):
+            return history
+        return cached
+    return history or cached
+
+
+def _desktop_usage_view(usage):
+    """只过滤对外显示，保留存档的原采样时间；跨过重置时间后不能继续展示旧百分比。"""
+    shown = dict(usage)
+    now = dt.datetime.now(dt.timezone.utc)
+    sampled = parse_iso(usage.get("fetched_at"))
+    age = (now - sampled).total_seconds() if sampled else float("inf")
+    shown["cache_stale"] = age > 1800
+    had_windows = any(usage.get(k) for k in _DESKTOP_WINDOWS)
+    for key in _DESKTOP_WINDOWS:
+        window = usage.get(key)
+        if not isinstance(window, dict) or not _desktop_percent(window.get("utilization")):
+            shown[key] = None
+            continue
+        resets = parse_iso(window.get("resets_at"))
+        lifetime = 5 * 3600 if key == "five_hour" else 7 * 86400
+        valid = resets > now if resets else window.get("resets_at") is None and age < lifetime
+        shown[key] = window if valid else None
+    if had_windows and not any(shown.get(k) for k in _DESKTOP_WINDOWS):
+        shown["cache_status"] = "expired"
+        shown["notice"] = "本地额度快照已过期，请在 Claude 设置中查看用量后刷新。"
+    return shown
+
+
 def refresh_usage(store, only_id=None, allow_token_refresh=True):
     """拉取用量。网络请求在锁外进行，最后合并写回；只有换 token 那一步在锁内（见 ensure_fresh_token）。
 
@@ -1305,6 +1544,8 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
                 u = fetch_code_usage(store, acc, allow_token_refresh)
             elif acc["kind"] == "claude_web":
                 u = fetch_web_usage(store, acc)
+            elif acc["kind"] == "claude_desktop":
+                u = fetch_desktop_usage(store, acc)
             else:
                 u = fetch_api_usage(store, acc)
             u["error"] = None
@@ -1314,8 +1555,9 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
         except Exception as e:  # 不让单个账号拖垮整体
             u = dict(acc.get("usage") or {})
             u["error"] = f"{type(e).__name__}: {e}"
-        u["fetched_at"] = now_iso()
-        meta = {k: acc.get(k) for k in ("email", "plan", "org_name", "rate_limit_tier", "auto", "account_uuid")
+        if acc["kind"] != "claude_desktop":
+            u["fetched_at"] = now_iso()
+        meta = {k: acc.get(k) for k in ("email", "plan", "org_name", "rate_limit_tier", "auto", "account_uuid", "desktop_account_uuid")
                 if acc.get(k)}
         results[acc["id"]] = (u, meta)
 
@@ -1327,6 +1569,9 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
     with store.lock():
         fresh = store.load()
         for a in fresh["accounts"]:
+            if a.get("kind") == "claude_desktop" and (a.get("usage") or {}).get("source") not in ("desktop_cache", "desktop_history"):
+                # 旧版本误把桌面账号交给 API 用量读取器；桌面登录目录不提供此接口。
+                a["usage"] = None
             if a["id"] in results:
                 u, meta = results[a["id"]]
                 a["usage"] = u
@@ -1924,10 +2169,353 @@ def open_web_account(store, acc, url=None):
     return prof
 
 
+# --------------------------------------------------------------------------- Claude 桌面版
+# 登录不在 Claude Code 的钥匙串里，而在桌面版自己的用户数据目录（加密的 oauth 缓存和 Cookie）。
+# 每个账号一份目录。第一次打开时在窗口里点一次邮箱；之后切换会退出当前的 Claude，再用那份目录打开。
+
+def default_desktop_user_data():
+    env = os.environ.get("CAM_CLAUDE_DESKTOP_DATA")
+    if env:
+        return env
+    if IS_MAC:
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Claude")
+    if IS_WIN:
+        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Claude")
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "Claude")
+
+
+def desktop_profile_dir(store, acc):
+    if acc.get("desktop_profile") == "default":
+        return default_desktop_user_data()
+    return os.path.join(store.root, "desktop-profiles", acc["id"])
+
+
+@contextlib.contextmanager
+def desktop_operation_lock(store):
+    """与 Rust 共用，覆盖退出、备份、启动和移除；始终先于 accounts.lock 获取。"""
+    lock = FileLock(os.path.join(store.root, "desktop-switch.lock"), timeout=0)
+    if not lock.try_acquire():
+        raise CamError("Claude 桌面版正在切换或移除账号，请稍后重试")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _desktop_has_login(path):
+    cfg = os.path.join(path, "config.json")
+    if os.path.isfile(cfg):
+        try:
+            with open(cfg, encoding="utf-8") as f:
+                data = json.load(f)
+            if any(data.get(k) for k in ("oauth:tokenCache", "oauth:tokenCacheV2", "lastKnownAccountUuid")):
+                return True
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+    return any(os.path.isfile(os.path.join(path, name)) and os.path.getsize(os.path.join(path, name)) > 0
+               for name in ("Cookies", os.path.join("Network", "Cookies")))
+
+
+def _desktop_candidates():
+    if IS_MAC:
+        return ["/Applications/Claude.app", os.path.expanduser("~/Applications/Claude.app")]
+    if IS_WIN:
+        local = os.environ.get("LOCALAPPDATA") or ""
+        cands = [os.path.join(local, "Programs", "Claude", "Claude.exe")]
+        for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
+            if base:
+                cands.append(os.path.join(base, "Claude", "Claude.exe"))
+        cands += sorted(glob.glob(os.path.join(local, "AnthropicClaude", "app-*", "claude.exe")), reverse=True)
+        cands.append(os.path.join(local, "AnthropicClaude", "claude.exe"))
+        return cands
+    return ["/usr/bin/claude-desktop", "/opt/Claude/claude", "/usr/lib/claude-desktop/claude"]
+
+
+def _desktop_executable(app):
+    return os.path.join(app, "Contents", "MacOS", "Claude") if app.endswith(".app") else app
+
+
+def _is_desktop_cmd(cmd):
+    c = (cmd or "").strip().replace("\\", "/")
+    if re.search(r"(?:^|\s)--type(?:=|\s)", c):
+        return False  # Electron helper，不把它当成可切换的主进程
+    candidates = _desktop_candidates()
+    if os.environ.get("CAM_CLAUDE_DESKTOP"):
+        candidates.append(os.environ["CAM_CLAUDE_DESKTOP"])
+    for app in candidates:
+        for executable in (_desktop_executable(app), os.path.realpath(_desktop_executable(app))):
+            exe = executable.replace("\\", "/")
+            flags = re.IGNORECASE if IS_WIN else 0
+            if re.match(r'^"?' + re.escape(exe) + r'"?(?:\s|$)', c, flags):
+                return True
+    if IS_WIN:
+        # 安装版本号不固定；只匹配明确的 Claude 安装目录，不能按 claude.exe 的名字杀进程。
+        return bool(re.match(r'^"?[a-z]:/(?:[^"\n]*/)?(?:anthropicclaude/app-[^/]+|'
+                             r'program files/windowsapps/anthropicpbc\.claude[^/]+)/claude\.exe"?(?:\s|$)',
+                             c, re.IGNORECASE))
+    return bool(re.match(r'^"?/[^\n]*?/Claude\.app/Contents/MacOS/Claude"?(?:\s|$)', c)) if IS_MAC else False
+
+
+def _desktop_profile_from_command(command):
+    match = re.search(r'(?:^|\s)--user-data-dir(?:=|\s+)("[^"]+"|\x27[^\x27]+\x27|.*?)(?=\s+--[A-Za-z-]|$)',
+                      command or "")
+    if not match:
+        return None
+    path = match.group(1).strip().strip('"\x27')
+    return os.path.normcase(os.path.realpath(path)) if path else None
+
+
+def _desktop_profile_from_files(pid):
+    """macOS ps 可能不保留启动参数，用主进程已打开的登录文件核对目录。"""
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    profiles = set()
+    for line in out.stdout.splitlines():
+        if not line.startswith("n/"):
+            continue
+        path = line[1:]
+        markers = _LOGIN_FILES + (os.path.join("Local Storage", "leveldb", "LOCK"), os.path.join("Session Storage", "LOCK"))
+        for name in sorted(markers, key=len, reverse=True):
+            suffix = os.sep + name
+            if path.endswith(suffix):
+                profiles.add(os.path.normcase(os.path.realpath(path[:-len(suffix)])))
+                break
+    return next(iter(profiles)) if len(profiles) == 1 else None
+
+
+def _desktop_processes():
+    """返回 [(pid, profile 或 None)]。查不到进程列表时必须报错，不能当作已退出。"""
+    if os.environ.get("CAM_DESKTOP_DRY_RUN") == "1":
+        return []
+    found = []
+    try:
+        if IS_WIN:
+            ps = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process "
+                  "| ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath) $($_.CommandLine)\" }")
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                 capture_output=True, text=True, timeout=15)
+            lines = out.stdout.splitlines()
+        else:
+            out = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True, timeout=10)
+            lines = out.stdout.splitlines()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise CamError(f"无法检测 Claude 桌面版进程，未执行切换或删除：{e}") from e
+    if out.returncode != 0:
+        raise CamError("无法检测 Claude 桌面版进程，未执行切换或删除；请先确认进程查询权限")
+    for line in lines:
+        parts = line.strip().split("\t", 1) if IS_WIN else line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, cmd = parts
+        if _is_desktop_cmd(cmd):
+            try:
+                pid = int(pid.strip())
+            except ValueError:
+                continue
+            profile = _desktop_profile_from_command(cmd)
+            if profile is None and IS_MAC:
+                profile = _desktop_profile_from_files(pid)
+            found.append((pid, profile))
+    return found
+
+
+def _desktop_pids():
+    return [pid for pid, _ in _desktop_processes()]
+
+
+def _find_claude_desktop():
+    env = os.environ.get("CAM_CLAUDE_DESKTOP")
+    if env:
+        if os.path.exists(env):
+            return env
+        raise CamError(f"CAM_CLAUDE_DESKTOP 指向的文件不存在：{env}")
+    for c in _desktop_candidates():
+        if c and os.path.exists(c):
+            return c
+    raise CamError("没找到 Claude 桌面版。请先安装 Claude，再切换。")
+
+
+def _quit_claude_desktop():
+    if not _desktop_pids():
+        return
+    try:
+        if IS_MAC:
+            subprocess.run(["osascript", "-e", 'tell application "Claude" to quit'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True)
+        else:
+            for pid in _desktop_pids():
+                cmd = ["taskkill", "/PID", str(pid)] if IS_WIN else ["kill", str(pid)]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise CamError(f"无法正常退出 Claude 桌面版，请手动退出后重试：{e}") from e
+    deadline = time.time() + 8
+    while _desktop_pids():
+        if time.time() > deadline:
+            raise CamError("Claude 桌面版还在运行。请先手动退出它，再切换，否则会继续用原来的登录。")
+        time.sleep(0.25)
+
+
+def _launch_claude_desktop(app, directory):
+    arg = f"--user-data-dir={directory}"
+    if IS_MAC and app.endswith(".app"):
+        cmd = ["open", "-n", "-a", app, "--args", arg]
+    else:
+        cmd = [app, arg]
+    kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
+    if IS_WIN:
+        kw["creationflags"] = 0x00000008 | 0x00000200
+    else:
+        kw["start_new_session"] = True
+    try:
+        launcher = subprocess.Popen(cmd, **kw)
+        is_open = IS_MAC and app.endswith(".app")
+        if is_open and launcher.wait(timeout=15) != 0:
+            raise CamError("macOS 没能启动 Claude 桌面版")
+        expected = os.path.normcase(os.path.realpath(directory))
+        deadline = time.monotonic() + 10
+        verified_since = None
+        while True:
+            status = launcher.poll()
+            if status is not None and (status != 0 or not is_open):
+                raise CamError(f"Claude 桌面版启动后退出（状态 {status}）")
+            processes = _desktop_processes()
+            now = time.monotonic()
+            if processes and all(profile == expected for _, profile in processes):
+                if verified_since is None:
+                    verified_since = now
+                elif now - verified_since >= 0.5:
+                    return
+            else:
+                verified_since = None
+            if now >= deadline:
+                raise CamError("未能确认 Claude 桌面版使用了目标登录目录，请手动检查后重试")
+            time.sleep(0.2)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise CamError(f"无法启动 Claude 桌面版：{e}") from e
+
+
+def _remember_desktop(store, acc_id):
+    with store.lock():
+        data = store.load()
+        acc = find_account(data, acc_id)
+        data.setdefault("active", {})["claude_desktop"] = acc["id"]
+        acc["last_switched_at"] = now_iso()
+        store.save(data)
+
+
+_LOGIN_FILES = ("config.json", "config.json.journal", "config.json-wal", "config.json-shm",
+                "Cookies", "Cookies-journal", "Cookies-wal", "Cookies-shm",
+                "Local State", "Preferences", os.path.join("Network", "Cookies"), os.path.join("Network", "Cookies-journal"),
+                os.path.join("Network", "Cookies-wal"), os.path.join("Network", "Cookies-shm"))
+
+
+def _backup_desktop_login(store, directory):
+    """只备份登录文件。对话和虚拟机留在原目录，不整份拷走，也不写进别的号。"""
+    if not os.path.isdir(directory):
+        return
+    dest = store.new_backup_dir("before-desktop")
+    for name in _LOGIN_FILES:
+        src = os.path.join(directory, name)
+        if os.path.isfile(src):
+            dst = os.path.join(dest, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o600)
+    store.prune_backups()
+
+
+def _leaving_desktop_profile(store, data, processes):
+    profiles = {profile for _, profile in processes}
+    if None in profiles or len(profiles) > 1:
+        raise CamError("无法确认正在运行的 Claude 桌面版登录目录，请先手动退出 Claude 再切换")
+    if profiles:
+        return next(iter(profiles))
+    cur = (data.get("active") or {}).get("claude_desktop")
+    if cur:
+        try:
+            acc = find_account(data, cur)
+            if acc.get("kind") == "claude_desktop":
+                return desktop_profile_dir(store, acc)
+        except CamError:
+            pass
+    return default_desktop_user_data()
+
+
+def _restore_desktop_active(store, profile):
+    """回退后只标记已验证的目录；无法恢复或未绑定的目录不假装仍是旧账号。"""
+    with store.lock():
+        data = store.load()
+        expected = os.path.normcase(os.path.realpath(profile)) if profile else None
+        current = next((a for a in data["accounts"] if a.get("kind") == "claude_desktop" and expected is not None
+                        and os.path.normcase(os.path.realpath(desktop_profile_dir(store, a))) == expected), None)
+        data["active"]["claude_desktop"] = current["id"] if current else None
+        store.save(data)
+
+
+def open_desktop_account(store, acc):
+    with desktop_operation_lock(store):
+        return _open_desktop_account_locked(store, acc)
+
+
+def _open_desktop_account_locked(store, acc):
+    """正常退出、备份，再启动并核验目标目录；成功后才更新 active。"""
+    # 获取桌面锁后重读，防止排队期间账号已被另一个进程删除或更改。
+    acc = find_account(store.load(), acc["id"])
+    if acc.get("kind") != "claude_desktop":
+        raise CamError("只有 Claude 桌面版账号可以这样切换")
+    directory = desktop_profile_dir(store, acc)
+    dry = os.environ.get("CAM_DESKTOP_DRY_RUN") == "1"
+    data = store.load()
+    processes = [] if dry else _desktop_processes()
+    previous = _leaving_desktop_profile(store, data, processes)
+    existed = os.path.isdir(directory)
+    os.makedirs(directory, exist_ok=True)
+    # 只收紧我们自己建的目录。绑定“当前已登录”时目录是 Claude 自己的，不改权限。
+    if not existed or directory.startswith(store.root + os.sep):
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
+    label = acc.get("label") or "未命名"
+    fresh = not _desktop_has_login(directory)
+    msg = f"已切换到 {label}。每个号的登录和对话都留在自己的目录里，不会覆盖别的号，也不会动 Claude Code 的项目和会话。"
+    if fresh:
+        msg += "这个配置还没登录过，请在窗口里点一次邮箱。登录有效期间可直接切换；失效后需要重新登录。"
+    if dry:
+        _backup_desktop_login(store, previous)
+        _remember_desktop(store, acc["id"])
+        return msg
+    app = _find_claude_desktop()
+    _quit_claude_desktop()
+    try:
+        _backup_desktop_login(store, previous)
+        _launch_claude_desktop(app, directory)
+        _remember_desktop(store, acc["id"])
+    except Exception as e:
+        recovered = False
+        try:
+            _quit_claude_desktop()
+            _launch_claude_desktop(app, previous)
+            recovered = True
+            recovery = "已重新打开原来的登录目录。"
+        except Exception as rollback_error:
+            recovery = f"也没能重新打开原来的登录目录，请手动打开 Claude。恢复失败：{rollback_error}。"
+        try:
+            _restore_desktop_active(store, previous if recovered else None)
+        except Exception as state_error:
+            recovery += f"当前账号记录无法保存：{state_error}。"
+        raise CamError(f"没能打开 {label}。{recovery}原来的登录和对话都还在。{e}") from e
+    return msg
+
+
 # --------------------------------------------------------------------------- 对外视图
 
 PUBLIC_FIELDS = ("id", "kind", "label", "email", "plan", "org_name", "rate_limit_tier", "manual", "usage",
-                 "created_at", "last_switched_at", "auto")
+                 "created_at", "last_switched_at", "auto", "desktop_profile")
 
 
 def days_left(acc, today=None):
@@ -2008,15 +2596,23 @@ def public_state(store, data):
     risks = risk_items(data)
     accs = []
     active = data["active"].get("claude_code")
+    active_desktop = data["active"].get("claude_desktop")
     for a in data["accounts"]:
         p = {k: a.get(k) for k in PUBLIC_FIELDS}
-        p["is_active"] = a["id"] == active
+        legacy_desktop = (a.get("kind") == "claude_desktop" and
+                          (a.get("usage") or {}).get("source") not in ("desktop_cache", "desktop_history"))
+        if legacy_desktop:
+            p["usage"] = None
+        elif a.get("kind") == "claude_desktop":
+            p["usage"] = _desktop_usage_view(a["usage"])
+        p["is_active"] = a["id"] == (active_desktop if a.get("kind") == "claude_desktop" else active)
         p["days_left"] = days_left(a)
         p["plan_display"] = a.get("plan") or (a.get("manual") or {}).get("plan")
         has_creds = False
         if a["kind"] == "claude_code":
             has_creds = bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
-        p["health"] = account_health(a, has_creds, p["days_left"])
+        p["health"] = account_health(dict(a, usage=None) if legacy_desktop else a,
+                                     has_creds, p["days_left"])
         if a["kind"] == "api":
             sec = store.load_secret(a["id"])
             p["api_key_hint"] = mask(sec.get("api_key"))
@@ -2100,12 +2696,31 @@ def update_manual(store, key, fields):
         return acc
 
 
+def ensure_desktop_removable(store, acc, data):
+    """调用方持有 desktop-switch.lock 和 accounts.lock；绝不搬走活跃的登录目录。"""
+    if acc.get("kind") != "claude_desktop":
+        return
+    if data.get("active", {}).get("claude_desktop") == acc["id"]:
+        raise CamError("这是 Claude 桌面版当前使用的账号，请先切换到其它桌面版账号再移除")
+    if acc.get("desktop_profile") == "default":
+        return  # 仅解除绑定，不搬动 Claude 自己的默认目录
+    expected = os.path.normcase(os.path.realpath(desktop_profile_dir(store, acc)))
+    if any(profile is None or profile == expected for _, profile in _desktop_processes()):
+        raise CamError("这个桌面版登录目录可能仍在使用，请先手动退出 Claude 再移除")
+
+
 def remove_account(store, key):
+    with desktop_operation_lock(store):
+        return _remove_account_locked(store, key)
+
+
+def _remove_account_locked(store, key):
     with store.lock():
         data = store.load()
         acc = find_account(data, key)
         if data["active"].get("claude_code") == acc["id"]:
             raise CamError("这是 Claude Code 当前正在用的账号，请先切换到其它账号再删除")
+        ensure_desktop_removable(store, acc, data)
         d = store.new_backup_dir(f"removed-{acc['id']}")
         rules = [r for r in data.get("rules", []) if r.get("account") == acc["id"]]
         write_json_atomic(os.path.join(d, "account.json"), dict(acc, rules=rules), private=True)
@@ -2115,6 +2730,13 @@ def remove_account(store, key):
         prof = os.path.join(store.profiles_dir, acc["id"])
         if os.path.isdir(prof):  # 网页账号的浏览器 Profile（含登录 Cookie）也一起移走
             shutil.move(prof, os.path.join(d, "browser-profile"))
+        # 绑定“当前已登录”的桌面版目录就是 Claude 自己的数据，只解除记录，不搬走
+        if acc.get("kind") == "claude_desktop" and acc.get("desktop_profile") != "default":
+            desk = os.path.join(store.root, "desktop-profiles", acc["id"])
+            if os.path.isdir(desk):
+                shutil.move(desk, os.path.join(d, "desktop-profile"))
+        if data["active"].get("claude_desktop") == acc["id"]:
+            data["active"]["claude_desktop"] = None
         data["accounts"] = [a for a in data["accounts"] if a["id"] != acc["id"]]
         data["rules"] = [r for r in data.get("rules", []) if r.get("account") != acc["id"]]
         store.save(data)
@@ -2147,6 +2769,113 @@ def server_token(store):
     if not IS_WIN:
         os.chmod(p, 0o600)
     return t
+
+
+def identify_account(store, key):
+    import cam_identity
+    account = find_account(store.load(), key)
+    if account.get("kind") == "claude_desktop":
+        try:
+            found = cam_identity.read_desktop_identity(desktop_profile_dir(store, account), account.get("desktop_account_uuid"))
+            with store.lock():
+                fresh = store.load()
+                current = find_account(fresh, account["id"])
+                verified = cam_identity.read_desktop_identity(desktop_profile_dir(store, current), current.get("desktop_account_uuid"))
+                if found != verified:
+                    raise CamError("识别期间客户端登录发生变化，请重试")
+                current.update(found)
+                store.save(fresh)
+        except cam_identity.IdentityError as error:
+            raise CamError(str(error)) from error
+    elif account.get("kind") in ("claude_code", "claude_web"):
+        refresh_usage(store, account["id"], allow_token_refresh=False)
+    else:
+        raise CamError("这个账号类型的邮箱请手动填写")
+    data = store.load()
+    if not find_account(data, account["id"]).get("email"):
+        raise CamError("暂时无法识别邮箱，请确认对应账号已登录，或手动填写")
+    result = public_state(store, data)
+    result["identity_message"] = "已从对应账号的登录资料补全邮箱"
+    return result
+
+
+def vault_route(store, method, parts, body=None):
+    """可选账号库模块按需加载，未安装加密依赖时不影响其它功能。"""
+    try:
+        import cam_vault
+        import cam_mailbox
+    except ImportError as error:
+        raise CamError("账号库需要安装依赖：python3 -m pip install -r scripts/requirements-vault.txt") from error
+    body = body or {}
+    try:
+        if method == "GET" and parts == ["vault"]:
+            return cam_vault.status(store)
+        if method == "POST" and parts in (["vault", "setup"], ["vault", "unlock"]):
+            return getattr(cam_vault, parts[1])(store, body)
+        if method == "POST" and parts == ["vault", "lock"]:
+            return cam_vault.lock(store)
+        if method == "POST" and parts == ["vault", "entries"]:
+            return cam_vault.save_entry(store, body)
+        if len(parts) == 3 and parts[:2] == ["vault", "oauth"] and method == "GET":
+            return cam_mailbox.oauth_status(store, parts[2])
+        if len(parts) >= 3 and parts[:2] == ["vault", "entries"]:
+            if len(parts) == 3 and method == "DELETE":
+                return cam_vault.delete_entry(store, parts[2])
+            if len(parts) == 4 and method == "POST":
+                if parts[3] == "reveal":
+                    return cam_vault.reveal_entry(store, parts[2])
+                if parts[3] == "connect":
+                    return cam_mailbox.connect(store, parts[2])
+                if parts[3] == "messages":
+                    return cam_mailbox.messages(store, parts[2], body)
+                if parts[3] == "open-verification":
+                    return open_verification_url(store, parts[2], body.get("url"))
+        raise CamError("未找到账号库接口")
+    except (cam_vault.VaultError, cam_mailbox.MailboxError) as error:
+        raise CamError(str(error)) from error
+
+
+def open_external_url(url):
+    import cam_identity
+    if not cam_identity.allowed_external_url(url):
+        raise CamError("只允许打开 Google / Microsoft 授权页或 Claude / Anthropic 的 HTTPS 验证地址")
+    if IS_MAC:
+        command = ["open", url]
+    elif IS_WIN:
+        command = ["rundll32.exe", "url.dll,FileProtocolHandler", url]
+    else:
+        command = ["xdg-open", url]
+    try:
+        subprocess.run(command, check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CamError("系统浏览器未打开，请复制地址重试") from error
+    return {"ok": True}
+
+
+def open_verification_url(store, entry_id, url):
+    import cam_identity
+    import cam_vault
+    if not cam_identity.allowed_external_url(url):
+        raise CamError("验证链接必须是 Claude / Anthropic 官方 HTTPS 地址")
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if not any(host == domain or host.endswith("." + domain) for domain in ("claude.ai", "claude.com", "anthropic.com")):
+        raise CamError("验证链接必须是 Claude / Anthropic 官方 HTTPS 地址")
+    with desktop_operation_lock(store):
+        entry = cam_vault.get_entry(store, entry_id)
+        if entry.get("account_id"):
+            account = find_account(store.load(), entry["account_id"])
+            if account.get("email") and entry.get("email") and account["email"].casefold() != entry["email"].casefold():
+                raise CamError("绑定的 Claude 账号与邮箱条目不一致，请先核对绑定关系")
+            if account.get("kind") == "claude_web":
+                open_web_account(store, account, url=url)
+                return {"ok": True, "message": "已在绑定账号的独立浏览器窗口打开验证链接"}
+            if account.get("kind") == "claude_desktop":
+                expected = os.path.normcase(os.path.realpath(desktop_profile_dir(store, account)))
+                processes = _desktop_processes()
+                if not processes or any(profile != expected for _, profile in processes):
+                    raise CamError("请先打开绑定的 Claude 桌面版账号，并在那个窗口发起邮箱登录，再打开验证链接；验证时不会重启客户端。")
+        open_external_url(url)
+        return {"ok": True, "message": "已在本机浏览器打开验证链接，客户端保持运行"}
 
 
 def make_handler(store, token):
@@ -2196,6 +2925,10 @@ def make_handler(store, token):
                 return self._send(401, {"error": "需要访问令牌"})
             parts = [p for p in path.split("/") if p][1:]
             try:
+                if parts[:1] == ["vault"]:
+                    return self._send(200, vault_route(store, method, parts, self._body() if method == "POST" else {}))
+                if method == "POST" and parts == ["open-external"]:
+                    return self._send(200, open_external_url(self._body().get("url")))
                 if method == "GET" and parts == ["state"]:
                     return self._send(200, public_state(store, store.load()))
                 if method == "POST" and parts == ["refresh"]:
@@ -2227,14 +2960,20 @@ def make_handler(store, token):
                     else:
                         add_account(store, b.get("kind"), b.get("label"), email=b.get("email"),
                                     session_key=b.get("session_key"), api_key=b.get("api_key"),
-                                    admin_key=b.get("admin_key"), app_mode=b.get("app_mode"))
+                                    admin_key=b.get("admin_key"), app_mode=b.get("app_mode"),
+                                    use_current=b.get("use_current"))
                     return self._send(200, public_state(store, store.load()))
                 if len(parts) >= 2 and parts[0] == "accounts":
                     aid = parts[1]
+                    if method == "POST" and parts[2:] == ["identify"]:
+                        return self._send(200, identify_account(store, aid))
                     if method == "POST" and parts[2:] == ["switch"]:
                         return self._send(200, api_switch(store, aid, self._body().get("mode")))
                     if method == "POST" and parts[2:] == ["open"]:
-                        open_web_account(store, find_account(store.load(), aid))
+                        acc = find_account(store.load(), aid)
+                        if acc.get("kind") == "claude_desktop":
+                            return self._send(200, {"ok": True, "message": open_desktop_account(store, acc)})
+                        open_web_account(store, acc)
                         return self._send(200, {"ok": True, "message": "已在电脑上打开浏览器窗口"})
                     if method == "PATCH" and len(parts) == 2:
                         update_manual(store, aid, self._body())
@@ -2420,7 +3159,7 @@ def fmt_reset(s):
     return f"{h}小时{m}分后重置" if h else f"{m}分后重置"
 
 
-KIND_NAME = {"claude_code": "Code", "claude_web": "网页", "api": "API"}
+KIND_NAME = {"claude_code": "Code", "claude_web": "网页", "claude_desktop": "桌面版", "api": "API"}
 
 
 def print_accounts(store, data):
@@ -2439,6 +3178,8 @@ def print_accounts(store, data):
             head += f" {color(plan, 'c')}"
         if a.get("email") and a["email"] != a["label"]:
             head += color(f"  {a['email']}", "d")
+        if a["kind"] == "claude_desktop" and a["is_active"]:
+            head += color("  [上次打开]", "d")
         print(head + color(f"  id={a['id']}", "d"))
         dl = a.get("days_left")
         if dl is not None:
@@ -2448,6 +3189,14 @@ def print_accounts(store, data):
                 tag += " 自动续期"
             print("     " + color(tag, "r" if dl < 3 else "y" if dl < 7 else "d"))
         u = a.get("usage") or {}
+        if a["kind"] == "claude_desktop":
+            source = {"desktop_cache": "桌面本地缓存", "desktop_history": "桌面历史快照"}.get(u.get("source"), "尚无桌面额度快照")
+            sampled = parse_iso(u.get("fetched_at"))
+            record = sampled.astimezone().strftime("%Y-%m-%d %H:%M:%S") if sampled else "尚未采样"
+            old = " · 旧快照（超过 30 分钟）" if u.get("cache_stale") and sampled else ""
+            print("     " + color(f"{source} · 记录时间 {record}{old}", "d"))
+            if u.get("notice"):
+                print("     " + color(u["notice"], "d"))
         for k, name in (("five_hour", "5小时"), ("seven_day", "7天  "), ("seven_day_opus", "Opus "),
                         ("seven_day_sonnet", "Sonnet")):
             w = u.get(k)
@@ -2492,17 +3241,29 @@ def import_current(store, label=None):
         return acc
 
 
-def add_account(store, kind, label, email=None, session_key=None, api_key=None, admin_key=None, app_mode=False):
-    if kind not in ("claude_web", "api"):
-        raise CamError("kind 只能是 claude_web 或 api（Claude Code 账号请用导入）")
+def add_account(store, kind, label, email=None, session_key=None, api_key=None, admin_key=None, app_mode=False,
+                use_current=False):
+    if kind not in ("claude_web", "api", "claude_desktop"):
+        raise CamError("kind 只能是 claude_web、claude_desktop 或 api（Claude Code 账号请用导入）")
     if kind == "api" and not api_key and not admin_key:
         raise CamError("API 账号至少需要 API Key 或 Admin Key")
-    label = (label or "").strip()[:60] or ("API" if kind == "api" else "网页账号")
+    label = (label or "").strip()[:60] or ("API" if kind == "api" else "桌面账号" if kind == "claude_desktop" else "网页账号")
     with store.lock():
         data = store.load()
+        if kind == "claude_desktop" and use_current and any(
+                a.get("kind") == "claude_desktop" and a.get("desktop_profile") == "default" for a in data["accounts"]):
+            raise CamError("已经有一个账号绑定了当前的 Claude 桌面版登录。其它号不要勾选，第一次打开时再登录。")
         acc = {"id": new_id(), "kind": kind, "label": label, "email": email or None,
                "plan": "api" if kind == "api" else None, "manual": {"app_mode": bool(app_mode)} if kind == "claude_web" else {},
                "usage": None, "created_at": now_iso()}
+        if kind == "claude_desktop":
+            if use_current:
+                acc["desktop_profile"] = "default"
+            else:
+                acc["desktop_profile"] = acc["id"]
+                profile = os.path.join(store.root, "desktop-profiles", acc["id"])
+                os.makedirs(profile, mode=0o700, exist_ok=True)
+                os.chmod(profile, 0o700)
         sec = {k: v.strip() for k, v in (("session_key", session_key), ("api_key", api_key), ("admin_key", admin_key)) if v}
         if sec:
             store.save_secret(acc["id"], sec)
@@ -4027,11 +4788,96 @@ def cmd_doctor(store):
         print(color(f"    · 本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}（证书照常校验）", "d"))
 
 
+def cmd_vault(store, args):
+    state = vault_route(store, "GET", ["vault"])
+    if args.vault_cmd == "setup":
+        password = getpass.getpass("设置本地账号库主密码（至少 8 字符）：")
+        if password != getpass.getpass("再次输入主密码："):
+            raise CamError("两次主密码不一致")
+        vault_route(store, "POST", ["vault", "setup"], {"master_password": password})
+        print("本地账号库已创建，密码和邮箱授权将加密保存。")
+        return
+    if not state["initialized"]:
+        raise CamError("先运行 cam vault setup 创建本地账号库")
+    if not state["unlocked"]:
+        state = vault_route(store, "POST", ["vault", "unlock"], {"master_password": getpass.getpass("账号库主密码：")})
+    if args.cmd == "mail":
+        if args.mail_cmd == "read":
+            result = vault_route(store, "POST", ["vault", "entries", args.entry, "messages"], {"since": args.since} if args.since else {})
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            result = vault_route(store, "POST", ["vault", "entries", args.entry, "connect"])
+            print("请在本机系统浏览器打开此地址完成邮箱授权：\n" + result["authorization_url"])
+            if args.open_browser:
+                open_external_url(result["authorization_url"])
+            while True:
+                status = vault_route(store, "GET", ["vault", "oauth", result["job_id"]])
+                if status["status"] != "pending":
+                    if status["status"] == "error":
+                        raise CamError(status.get("message") or "邮箱授权未完成")
+                    print(status.get("message") or "邮箱已连接")
+                    break
+                time.sleep(0.5)
+        return
+    if args.vault_cmd in (None, "ls"):
+        for entry in state["entries"]:
+            print(f"{entry['id']}  {entry['label']}  {entry['email']}  [{entry['provider']}]" + (" 已连接" if entry["connected"] else ""))
+        if not state["entries"]:
+            print("账号库还没有条目，可在管理界面的“账号库与邮箱”里添加。")
+    elif args.vault_cmd == "add":
+        body = {"label": args.label or args.email, "email": args.email, "provider": args.provider,
+                "account_id": find_account(store.load(), args.account)["id"] if args.account else None,
+                "config": {"client_id": args.client_id or "", "tenant": args.tenant,
+                           "imap_host": args.imap_host or "", "imap_port": args.imap_port,
+                           "imap_username": args.username or args.email}}
+        if args.provider in ("credential", "imap"):
+            body["password"] = getpass.getpass("账号密码 / 邮箱应用专用密码（可留空）：")
+        if args.provider == "gmail":
+            body["client_secret"] = getpass.getpass("Google 桌面应用 client secret（可留空）：")
+        result = vault_route(store, "POST", ["vault", "entries"], body)
+        print("已加密保存。")
+        for entry in result["entries"]:
+            print(f"{entry['id']}  {entry['email']}  [{entry['provider']}]")
+    elif args.vault_cmd == "rm":
+        vault_route(store, "DELETE", ["vault", "entries", args.entry])
+        print("已移除账号库条目，Claude 账号配置保持原样。")
+    elif args.vault_cmd == "reveal":
+        print(vault_route(store, "POST", ["vault", "entries", args.entry, "reveal"])["password"])
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cam", description="Claude 多账号管理（脚本版）",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     p.add_argument("--version", action="version", version=VERSION)
     sub = p.add_subparsers(dest="cmd")
+
+    s = sub.add_parser("identify", help="从已登录的 Claude 配置补全账号邮箱")
+    s.add_argument("account")
+    s = sub.add_parser("vault", help="本地加密账号库，密码通过隐藏输入读取")
+    vsub = s.add_subparsers(dest="vault_cmd")
+    vsub.add_parser("setup", help="创建账号库并设置主密码")
+    vsub.add_parser("ls", help="解锁并列出账号库条目")
+    v = vsub.add_parser("add", help="添加账号资料或邮箱连接")
+    v.add_argument("--email", required=True)
+    v.add_argument("--provider", choices=("credential", "gmail", "outlook", "imap"), default="credential")
+    v.add_argument("--label")
+    v.add_argument("--account", help="绑定已有的 Claude 账号")
+    v.add_argument("--client-id")
+    v.add_argument("--tenant", default="common")
+    v.add_argument("--imap-host")
+    v.add_argument("--imap-port", type=int, default=993)
+    v.add_argument("--username")
+    for name in ("rm", "reveal"):
+        v = vsub.add_parser(name, help="移除条目" if name == "rm" else "明确显示已保存的账号密码")
+        v.add_argument("entry")
+    s = sub.add_parser("mail", help="授权邮箱或读取 Claude 登录验证码")
+    msub = s.add_subparsers(dest="mail_cmd", required=True)
+    m = msub.add_parser("connect", help="等待本机浏览器完成 Gmail / Outlook 授权")
+    m.add_argument("entry")
+    m.add_argument("--open-browser", action="store_true")
+    m = msub.add_parser("read", help="只读获取近期 Claude 登录邮件摘要")
+    m.add_argument("entry")
+    m.add_argument("--since")
 
     s = sub.add_parser("import", help="保存当前 Claude Code 登录的账号")
     s.add_argument("--label")
@@ -4049,7 +4895,11 @@ def main(argv=None):
     s.add_argument("--email")
     s.add_argument("--session-key", help="可选，claude.ai 的 sessionKey Cookie，用于自动获取用量")
     s.add_argument("--app", action="store_true", help="以独立应用窗口打开")
-    s = sub.add_parser("open", help="打开网页版账号的浏览器窗口")
+    s = sub.add_parser("add-desktop", help="添加 Claude 桌面版账号（每个号一份登录，第一次点一次邮箱）")
+    s.add_argument("--label", required=True)
+    s.add_argument("--email")
+    s.add_argument("--current", action="store_true", help="绑定这台电脑上已经登录的 Claude 桌面版（只适合第一个号）")
+    s = sub.add_parser("open", help="打开网页版窗口，或切换 Claude 桌面版账号")
     s.add_argument("account")
     s = sub.add_parser("add-api", help="添加 API Key 账号")
     s.add_argument("--label", required=True)
@@ -4133,11 +4983,18 @@ def main(argv=None):
     store = Store()
     try:
         c = args.cmd
+        if c == "mail":
+            args.vault_cmd = None
         if c in (None, "ls", "list", "json"):
             acc = auto_import(store)
             if acc and c != "json":
                 print(color(f"发现新登录的账号，已自动保存：{acc['label']}\n", "g"))
-        if c is None:
+        if c in ("vault", "mail"):
+            cmd_vault(store, args)
+        elif c == "identify":
+            result = identify_account(store, args.account)
+            print(result["identity_message"])
+        elif c is None:
             print_accounts(store, store.load())
             print(color("\n提示：cam usage 刷新用量，cam switch <账号> 切换，cam -h 查看全部命令", "d"))
         elif c == "import":
@@ -4161,10 +5018,17 @@ def main(argv=None):
                 print("当前登录的账号还没保存，运行 cam import" if oa else "Claude Code 当前未登录")
         elif c == "add-web":
             cmd_add_web(store, args)
+        elif c == "add-desktop":
+            acc = add_account(store, "claude_desktop", args.label, email=args.email, use_current=args.current)
+            print(f"已添加桌面版账号 {acc['label']}，id={acc['id']}")
+            print(f"运行 cam open {acc['label']} 切换。第一次会在窗口里点一次邮箱，之后不用再点。")
         elif c == "open":
             acc = find_account(store.load(), args.account)
-            open_web_account(store, acc)
-            print(f"已打开 {acc['label']} 的浏览器窗口")
+            if acc.get("kind") == "claude_desktop":
+                print(open_desktop_account(store, acc))
+            else:
+                open_web_account(store, acc)
+                print(f"已打开 {acc['label']} 的浏览器窗口")
         elif c == "add-api":
             cmd_add_api(store, args)
         elif c == "set":

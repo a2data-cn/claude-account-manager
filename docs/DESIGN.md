@@ -8,11 +8,14 @@
 
 默认 `~/.claude-accounts/`，可用环境变量 `CAM_HOME` 覆盖。
 
+账号资料、密码与邮箱授权集中存放在额外的 `vault.sqlite3`，不迁移或覆盖下面的 `accounts.json`。SQLite 元数据包含名称、邮箱、连接配置和可选的 Claude `account_id` 绑定；密码、Client Secret 和 OAuth token 单独加密。具体数据库格式、密钥派生、AES-GCM AAD、接口和邮箱协议统一见 [VAULT_API.md](VAULT_API.md)。
+
 ```
 ~/.claude-accounts/
 ├── accounts.json          # 账号元数据（不含任何密钥）
 ├── secrets/<id>.json      # 每个账号的凭据，权限 600
-├── browser-profiles/<id>/ # 网页版账号各自独立的浏览器 Profile（Cookie 永久保留）
+├── browser-profiles/<id>/ # 网页版账号各自独立的浏览器 Profile（Cookie 随会话有效期保留）
+├── desktop-profiles/<id>/ # Claude 桌面版账号各自的用户数据目录（登录 Cookie 和 oauth 缓存）
 ├── backups/<时间戳>/      # 每次切换前的现场备份，保留最近 30 份
 ├── env-backups/<时间戳>/  # cam env clean --purge 移走的整个 Claude Code 配置
 ├── accounts.lock          # 数据锁，见“并发与锁”
@@ -25,11 +28,11 @@
 ```jsonc
 {
   "version": 1,
-  "active": { "claude_code": "a1b2c3" },      // 当前 Claude Code 正在用的账号
+  "active": { "claude_code": "a1b2c3", "claude_desktop": "d4e5f6" }, // Desktop 是工具最后成功启动的配置
   "accounts": [
     {
       "id": "a1b2c3",
-      "kind": "claude_code",                  // claude_code | claude_web | api
+      "kind": "claude_code",                  // claude_code | claude_desktop | claude_web | api
       "label": "工作号",
       "email": "me@example.com",
       "plan": "max",                          // 自动获取，失败时用 manual.plan
@@ -60,6 +63,20 @@
 }
 ```
 
+## 账号资料与邮箱界面
+
+React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同名按钮展开，即使没有任何 Claude 账号也能初始化账号库。界面先读取库状态，未创建时设置主密码，锁定时要求解锁。主密码和输入的秘密只留在当前页面内存，不写入 localStorage；普通条目响应只有 `has_password`、`has_client_secret`、`connected` 等标记，`connected` 只表示有保存授权，不宣称实时连通。
+
+保存表单后才能连接邮箱。Gmail / Workspace、Outlook / Hotmail / Microsoft 365 使用用户自己的桌面 OAuth 应用，连接接口返回授权 URL 和任务 ID；用户触发后通过 `/api/open-external` 在电脑系统浏览器打开，另显示可自行打开的官方授权链接，不使用内嵌 WebView 登录。界面每 2 秒读取任务状态，最多 5 分钟。Google 需要启用 Gmail API、配置桌面 OAuth 客户端和必要测试用户；Microsoft 使用公用客户端、本机 localhost 回调和对应个人 / 组织账户类型。企业批准要求交由正常的提供商授权流程处理。
+
+“读取已登录邮箱”调用账号的 `identify` 接口，保留返回的 `identity_message` 提示，不能猜邮箱。Desktop 的资料来源限定在对应用户数据目录和 URL 经过验证的本地 `/api/account` 缓存；Code / Web 可使用已有的只读身份查询。绑定库条目只是关联，不把不同产品的认证互相转换。
+
+“等待新验证码”携带 `since = 当前时间 - 30 秒`，每 5 秒读取一次，最多 2 分钟，`found` 后停止；“读取最近登录邮件”使用接口默认的近期范围。可选的普通自动读取每 30 秒一次，仅在解锁且账号库界面打开期间运行。每个等待绑定固定 `entry_id`，切换条目、保存、锁库、收起或组件卸载时取消等待、OAuth 轮询，并清除旧验证码与显式密码。异步响应更新页面前校验选择代次、条目 ID 和解锁状态，避免旧邮箱响应落到另一条目；接口报错后复查锁定状态，外部已锁定时清理敏感显示。
+
+密码只在显式 reveal 后显示，30 秒自动隐藏，复制需另一次用户点击。验证邮件只展示经过服务端发件域、时间和链接校验的摘要、验证码与链接；界面再限制 HTTPS 官方域。链接不会被自动请求或预览，只有用户点击才按绑定的 Claude 账号打开。自动读信不等于自动执行 Claude 登录、回跳或多因素验证。
+
+验证链接通过 `POST /api/vault/entries/<id>/open-verification` 打开，独立于邮箱 OAuth 的 `/api/open-external`。后端按条目绑定的 Claude 账号选择目标：网页版使用独立浏览器 profile；Desktop 必须已运行正确的配置，用户应先在该配置中发起登录，验证时不退出或重启客户端，以保留待完成的认证流程。前端每次点击均传当前条目 ID，不直接让默认浏览器决定验证目标。
+
 ## 切号规则
 
 `accounts.json` 里另有三个字段：
@@ -79,17 +96,46 @@
 - 启动前风险提醒（只在 `cam claude`）：缓存超过一小时时，`spawn_background_check` 另起 `cam.py _check-region` 后台进程做完整检测（同一时间只跑一个），前台只用 `quick_trace` 花最多 3 秒问一次 claude.ai，套到数据副本上算提醒（`with_quick_region`，出口 IP 变了时丢掉旧运营商信息）。`launch_tier(score, region_status, prefs)` 给出 ok / remind / confirm / strong 四档——≥90 一行带过；< 90 打印提醒；< `risk_confirm_below`（默认 60）问 y/N；< `risk_strong_below`（默认 30）或出口不在支持名单内要输入"继续"。非交互环境只打印。`risk_prompt: false` 或 `CAM_NO_RISK_PROMPT=1` 关掉。**不是拦截**：每一档都是用户自己选择继续或取消。
 - 自动发现：后台检测凭据文件变化（macOS 每 30 秒查一次钥匙串），发现没见过的账号就自动导入。
 
-## 三类账号
+## 四类账号
 
 | 类型 | 切换方式 | 用量来源 | 到期来源 |
 |---|---|---|---|
 | `claude_code` | 替换 Claude Code 的登录凭据，聊天记录/项目/设置共用不动 | `api.anthropic.com/api/oauth/usage`（5 小时、7 天额度）+ 本地 JSONL 日志统计 token | 手动填写（官方无接口），可设"每月自动续期" |
+| `claude_desktop` | 每个账号一份用户数据目录，每次打开均退出并重启 Claude Desktop，见下节。首次打开需要登录，会话过期后也可能需要重新登录 | Claude 本地 HTTP 缓存，缺失时读取本地用量历史；保留真实记录时间 | 手动填写 |
 | `claude_web` | 每个账号一个独立浏览器 Profile，"切换"就是打开对应窗口 | 可选填 `sessionKey`，走 claude.ai 内部接口；失败则只显示手动信息 | 手动填写 |
 | `api` | 不需要切换，只做展示（可复制 Key） | Admin Key → Cost/Usage Report；普通 Key → 仅校验有效 | 无 |
 
+## Claude Desktop 切换
+
+Desktop 登录与 Claude Code 凭据分开管理。`desktop_profile: "default"` 使用 Claude 的原有数据目录（macOS 为 `~/Library/Application Support/Claude`，可用 `CAM_CLAUDE_DESKTOP_DATA` 覆盖），不会收紧原目录权限或在移除记录时搬走它；其它配置使用 `desktop-profiles/<id>`。新配置首次启动后由用户在 Claude 内登录。每个配置保存各自的会话数据，默认不向 Desktop 注入 `CLAUDE_CONFIG_DIR`，也不切换命令行的账号。
+
+生命周期操作串行执行：定位客户端并检查进程 → 正常退出并等待 → 备份已关闭配置的登录文件 → 以目标 `--user-data-dir` 启动 → 确认启动结果后记录。即使目标与上次记录一致，也重新执行退出和启动，避免用户从 Dock 或快捷方式打开了其它配置后，缓存记录导致打开错误账号。进程枚举失败与“没有进程”区分处理；退出超时停止操作。启动失败时尝试重新打开原配置，恢复结果如实报告。备份只包含登录相关文件，对话、Claude Code 会话和 Cowork 虚拟机仍留在原目录。
+
+`active.claude_desktop` 和公开的 `is_active` 只表示工具最后成功启动的配置，前端显示“上次打开”。它不是持续在线状态，也没有验证邮箱是否与用户填写的一致；用户手动从 Dock 或其它入口启动后不会自动更新。删除这条最后打开的配置时要求先用工具打开其它 Desktop 账号。React 和 Web 面板使用全局操作状态，切换过程中即使选择另一张卡片也不能再发起一次切换。
+
+同机系统钥匙串中的 Desktop safeStorage 加密密钥可能被多个配置共用，目录隔离的是会话数据，不代表每个账号有独立钥匙串。本工具不读写 Desktop 钥匙串。配置和备份仍是敏感数据，只供同一电脑上的当前系统用户使用，不保证跨设备、重装后或会话被撤销后仍能恢复。文件存在只用于提示是否已有登录数据，不能证明服务端登录仍然有效。
+
+macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows 独立安装版可以尝试；Microsoft Store / MSIX 版仅覆盖部分进程识别，尚未完整支持自动发现与启动。`CAM_CLAUDE_DESKTOP` 可指定客户端可执行文件（macOS 为 `.app`），`CAM_CLAUDE_DESKTOP_DATA` 可指定原有数据目录，自定义路径需要实际验证。Linux 没有官方 Desktop，仅适配部分第三方封装路径。测试以临时配置、模拟进程和启动器验证流程，不声明所有真实客户端版本均已实测支持。
+
+参考项目均为 MIT，仅借鉴设计方法，没有复制源码：
+
+- [matsumotory/claude-desktop-switcher 的 macOS 适配](https://github.com/matsumotory/claude-desktop-switcher/blob/main/crates/core/src/platform/macos.rs)：`open -n`、目录隔离、严格区分进程检测失败和未运行。
+- [jspanji/Swivel 的 ProfileManager](https://github.com/jspanji/Swivel/blob/main/Sources/SwivelCore/ProfileManager.swift)：等待退出后再保存，切换不改 Desktop 钥匙串。该项目还实现了快照校验；本项目沿用独立目录方式，没有照搬全目录恢复。
+- [nyxon-tech/claude-switcher](https://github.com/nyxon-tech/claude-switcher)：区分登录文件、账号侧栏与共享会话历史，处理 Windows 安装类型差异。普通切换不迁移聊天记录。
+
+### Desktop 本地额度
+
+读取各账号 `profile_dir` 中的本地记录，独立于客户端切换，不退出 Claude、不访问网络、不读取或解密 Cookie / OAuth / Keychain，也不要求用户额外登录。优先解析 `Cache/Cache_Data` 内 Chromium simple-cache 保存的 `https://claude.ai/api/organizations/<uuid>/usage` 响应：支持明文 JSON 与 Zstandard 压缩；窗口结构沿用 `five_hour` / `seven_day` / 模型分窗口的 `{utilization, resets_at}`，百分比为 0–100。缓存缺失时尝试本地用量历史；历史仅提供百分比时保留 `resets_at: null`，不推算重置时间。对应窗口的历史超过 5 小时 / 7 天后不再显示。
+
+公开的 `usage` 保留以下来源与时间信息：`source: desktop_cache | desktop_history`，`fetched_at` 为真实快照时间或缓存文件 mtime，`checked_at` 为本次读取时间，`cache_stale` 在快照超过 30 分钟时为 true，`cache_status` 为 `ok | missing | expired | ambiguous | unsupported_compression`，`cache_org_uuid` 为对应组织，`notice` 用于解释来源和引导。无记录是 `error: null` 加说明，不等于账号异常，也不生成 0% 额度。前端仅读取这两种 Desktop 来源展示百分比，隐藏已到 `resets_at` 的窗口，同时区分“记录时间”和“最近读取”；本地快照不推算消耗速度。
+
+读取限制输入和解压大小，对损坏、组织歧义、未知格式软失败，保留明确状态。Python 3.14+ 使用标准库解压；旧版可安装 `scripts/requirements-desktop.txt` 中的 `zstandard`，无依赖仍可读明文缓存及本地历史。Rust 使用内置 `ruzstd` 解压。客户端缓存格式属于内部实现，升级可能导致读取失败，不能把缓存的存在或新近 mtime 当成实时服务器验证。
+
+格式研究参考 [ajipurn/claude-profiles UsageReader.swift](https://github.com/ajipurn/claude-profiles/blob/main/Sources/ClaudeProfilesCore/UsageReader.swift) 及其测试，本项目独立实现，未复制源码；该归档仓库未声明开源许可，因此不列入上述 MIT 项目。另研究了 [l2succes/claude-switcher](https://github.com/l2succes/claude-switcher/blob/main/main.swift)（MIT）的 OAuth 解密查询和 [Swivel LiveUsageClient](https://github.com/jspanji/Swivel/blob/main/Sources/SwivelCore/LiveUsageClient.swift)（MIT）的 Cookie 查询方案；当前实现采用本地记录方案。
+
 ## 切换流程（保证数据不丢）
 
-整个流程在数据锁（`accounts.lock`）里完成。
+本节描述 Claude Code；整个流程在数据锁（`accounts.lock`）里完成。
 
 1. **先快照**：读取当前正在生效的凭据（Linux/Windows 读 `~/.claude/.credentials.json`；macOS 读钥匙串 `Claude Code-credentials`，没有再读文件）以及 `~/.claude.json` 里的 `oauthAccount`。
 2. **回写**：认出它属于哪个已保存账号（见下一节），把最新 token 写回该账号（Claude Code 运行时会刷新 token，不回写的话旧 token 会失效）。如果是没见过的账号，自动导入为新账号，绝不丢弃。认不出是谁的（见下一节的“暂存”）就不写，切换到候选账号前会先核对一次。
@@ -152,7 +198,7 @@
 |---|---|---|
 | GET | `/` | Web 面板 |
 | GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；每个账号带 `health`（`level`: ok / info / warn / error，`label`: 正常 / 注意 / 异常，`issues`: [{`kind`, `level`, `text`, `advice`, `detail`}]，由 `account_health` 根据有没有保存凭据、用量报错和到期日算出，两边规则见 `tests/shared/health.json`）；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
-| POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"api","label",…}` 新增 |
+| POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"claude_desktop"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
 | POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup`。每种返回都带 `risks`（warn / bad 的风险提示），只提醒不拦 |
 | DELETE | `/api/pending-switch` | 取消登记中的等待切换，返回新的 state |
@@ -160,7 +206,9 @@
 | PUT | `/api/privacy` | body 可带 `ip_lookup`、`ipapi_key`、`ipinfo_token`（空字符串删除），返回同 GET |
 | DELETE | `/api/privacy/history` | 清除缓存的出口信息和各账号的使用地区记录，返回同 GET |
 | GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`，带 `score`、`grade`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。只检测和提示，不干预任何操作 |
-| POST | `/api/accounts/{id}/open` | 在电脑上打开该网页账号的浏览器窗口 |
+| POST | `/api/accounts/{id}/open` | 打开该网页账号的独立浏览器，或退出并重新打开目标 Claude Desktop 配置 |
+| POST | `/api/accounts/{id}/identify` | 尝试从对应登录资料补全邮箱，Desktop 会核对当前账号 UUID |
+| GET / POST | `/api/vault`、`/api/vault/*` | 本地加密账号库、邮箱授权和验证码；完整接口见 [账号库与邮箱设计](VAULT_API.md) |
 | PATCH | `/api/accounts/{id}` | 修改 `label` 和 `manual.*` |
 | DELETE | `/api/accounts/{id}` | 删除账号（凭据移入 backups，不直接销毁） |
 | GET | `/api/local-usage?days=30` | 按天、按账号汇总本地 token 消耗 |

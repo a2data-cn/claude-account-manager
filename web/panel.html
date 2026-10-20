@@ -175,6 +175,7 @@ header.top .spacer { flex: 1; }
   .btn { min-height: 36px; }
   header.top h1 { font-size: 18px; }
   header.top .host { display: none; }
+  header.top { flex-wrap: wrap; }
 }
 
 /* 区块 */
@@ -348,6 +349,25 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
 .checks .bad .mark { color: var(--hot); }
 .checks .warn .mark { color: var(--warn); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+/* 本地账号库与邮箱 */
+.vault .panel + .panel { margin-top: 14px; }
+.vault h3 { margin: 0 0 12px; font: 500 16px var(--serif); }
+.vault-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin: 12px 0; }
+.vault-entry { display: grid; gap: 3px; text-align: left; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface); cursor: pointer; min-width: 0; }
+.vault-entry.sel { border-color: var(--accent); }
+.vault-entry span, .vault-entry small { color: var(--muted); overflow-wrap: anywhere; }
+.vault-actions, .vault-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vault-inline select { flex: 1 1 220px; }
+.vault-actions .check { margin: 0; font-size: 12px; }
+.vault-form, .vault-unlock { margin-top: 12px; }
+.vault-revealed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0 0; }
+.vault-revealed code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.vault-revealed small { width: 100%; color: var(--muted); }
+.vault-messages { display: grid; gap: 8px; }
+.vault-message { border: 1px solid var(--line); padding: 10px 12px; border-radius: var(--radius-sm); display: grid; gap: 6px; overflow-wrap: anywhere; }
+.vault-message small { color: var(--muted); }
+.vault-code { font: 600 16px ui-monospace, monospace; letter-spacing: .08em; }
+.vault .notice { flex-wrap: wrap; gap: 8px; }
 </style>
 </head>
 <body>
@@ -357,10 +377,18 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     <span class="host" id="host"></span>
     <span class="spacer"></span>
     <button class="btn quiet theme-btn" id="btn-theme" type="button" title="主题：跟随系统">◐</button>
+    <button class="btn" id="btn-vault" type="button">账号资料与邮箱</button>
     <button class="btn" id="btn-refresh" type="button">刷新用量</button>
   </header>
 
   <main id="list" aria-live="polite"></main>
+
+  <section class="block vault" id="vault-block" hidden aria-label="账号资料与邮箱">
+    <div class="sec-head"><h2>账号资料与邮箱</h2><span class="spacer"></span><button class="btn" type="button" id="v-reload">重新读取</button><button class="btn" type="button" id="v-close">收起</button></div>
+    <p class="hint">账号资料保存在本机 SQLite 账号库，密码和邮箱授权加密保存。首次授权后，可自动读取 Claude 登录邮件；Claude 登录、回跳和多因素验证仍由你完成。手机发起邮箱授权时，请在运行服务的电脑浏览器完成授权。</p>
+    <div id="v-error" class="notice" role="alert" hidden></div>
+    <div id="v-content"></div>
+  </section>
 
   <section class="block" id="local-block" hidden>
     <h2>本机 Claude Code 消耗（近 14 天，输出 token）</h2>
@@ -453,6 +481,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     <div class="field"><label for="a-kind">类型</label>
       <select id="a-kind" name="kind">
         <option value="claude_code">Claude Code（命令行）</option>
+        <option value="claude_desktop">Claude 桌面版</option>
         <option value="claude_web">claude.ai 网页版</option>
         <option value="api">API Key</option>
       </select></div>
@@ -467,6 +496,10 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     <div id="add-other" hidden>
       <div class="field"><label for="a-label">名称</label><input id="a-label" name="label" maxlength="60"></div>
       <div class="field" id="aw-email"><label for="a-email">邮箱（可选）</label><input id="a-email" name="email" type="email"></div>
+      <div id="add-desktop" class="hint" hidden>
+        <p>只用 Claude 客户端时，每个账号首次登录一次即可；读取本地额度无需登录 Code 或网页版。每个账号使用独立的本机配置，会话过期后可能需要重新登录。切换和重新打开都会退出并重启电脑上的 Claude 桌面版，请先处理好其中正在运行的任务。打开 Claude 的“设置 → 用量”后可读取额度缓存更新；Claude Code 命令行账号单独切换。</p>
+        <label class="check"><input type="checkbox" id="a-desktop-current"> 使用这台电脑上已经登录的 Claude（只适合第一个号）</label>
+      </div>
       <div class="field" id="aw-key"><label for="a-key">API Key</label><input id="a-key" name="api_key" type="password" autocomplete="off"></div>
       <div class="field" id="aw-admin"><label for="a-admin">Admin Key（可选）</label><input id="a-admin" name="admin_key" type="password" autocomplete="off"></div>
     </div>
@@ -543,8 +576,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
 
   // ---- 格式化
-  const KIND = { claude_code: "Claude Code", claude_web: "网页版", api: "API" };
-  const KIND_ORDER = ["claude_code", "claude_web", "api"];
+  const KIND = { claude_code: "Claude Code", claude_desktop: "桌面版", claude_web: "网页版", api: "API" };
+  const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
   const PLAN = { pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free", api: "API" };
   const nameOf = (a) => a.label || a.email || a.id;
   function untilText(iso) {
@@ -568,12 +601,20 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   const WINDOW_MS = { five_hour: 5 * 3600e3, seven_day: 7 * 86400e3, seven_day_opus: 7 * 86400e3, seven_day_sonnet: 7 * 86400e3 };
   const WINDOW_NAME = { five_hour: "5 小时", seven_day: "7 天", seven_day_opus: "7 天 Opus", seven_day_sonnet: "7 天 Sonnet" };
 
-  function gauge(key, w) {
+  function desktopWindowExpired(a, key, w) {
+    if (!w) return true;
+    if (w.resets_at) return new Date(w.resets_at).getTime() <= Date.now();
+    const sampled = new Date((a.usage || {}).fetched_at || "").getTime();
+    return !Number.isFinite(sampled) || Date.now() - sampled >= WINDOW_MS[key];
+  }
+  const desktopStale = (a) => (a.usage || {}).cache_stale || !(a.usage || {}).fetched_at || Date.now() - new Date(a.usage.fetched_at).getTime() > 30 * 60 * 1000;
+  const desktopUsage = (a) => ["desktop_cache", "desktop_history"].includes((a.usage || {}).source);
+  function gauge(key, w, snapshot = false) {
     const pct = Math.max(0, Math.min(100, w.utilization));
     const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
     // 时间刻度：这个窗口已经过去了多少
     let elapsed = null;
-    if (w.resets_at) {
+    if (w.resets_at && !snapshot) {
       const left = new Date(w.resets_at) - Date.now();
       if (!isNaN(left)) elapsed = Math.max(0, Math.min(100, 100 - (left / WINDOW_MS[key]) * 100));
     }
@@ -587,8 +628,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     return `<div class="g">
       <div class="g-head"><span class="g-name">${WINDOW_NAME[key]}</span>
         <span class="g-pct">${pct.toFixed(0)}<small>%</small></span>
-        <span class="g-reset">${esc(untilText(w.resets_at))}</span></div>
-      <div class="g-bar" title="竖线表示窗口时间已过去的比例"><div class="g-fill ${cls}" style="width:${pct}%"></div>
+        <span class="g-reset">${esc(snapshot && !w.resets_at ? "未提供重置时间" : untilText(w.resets_at))}</span></div>
+      <div class="g-bar" title="${snapshot ? "Claude 本地额度快照" : "竖线表示窗口时间已过去的比例"}"><div class="g-fill ${cls}" style="width:${pct}%"></div>
         ${elapsed !== null ? `<div class="g-tick" style="left:calc(${elapsed}% - 1px)"></div>` : ""}</div>
       ${pace}</div>`;
   }
@@ -608,7 +649,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   const PLAN_CLASS = { free: "p-free", pro: "p-pro", max: "p-max", team: "p-team", enterprise: "p-enterprise", api: "p-api" };
   function planChip(a) {
     const p = a.plan_display || (a.kind === "api" ? "api" : null);
-    if (!p) return `<span class="chip p-unknown" title="还没拿到套餐信息，可以在“编辑”里手动选">套餐未知</span>`;
+    if (!p) return `<span class="chip p-unknown" title="${a.kind === "claude_desktop" ? "可以在“编辑”里手动记录套餐" : "还没拿到套餐信息，可以在“编辑”里手动选"}">套餐未知</span>`;
     return `<span class="chip ${PLAN_CLASS[p] || "plan"}">${esc(PLAN[p] || p)}</span>`;
   }
   function dueInfo(a) {
@@ -620,7 +661,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   function statusChips(a) {
     const h = a.health || {};
     const out = [];
-    if (a.is_active) out.push(`<span class="chip live">正在用</span>`);
+    if (a.is_active) out.push(`<span class="chip live">${a.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>`);
     if (h.level === "error") out.push(`<span class="chip st-error">异常</span>`);
     else if (h.level === "warn") out.push(`<span class="chip st-warn">注意</span>`);
     const due = dueInfo(a);
@@ -629,12 +670,13 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
   function tileMeter(a) {
     const u = a.usage || {};
-    if (u.cost_month_usd !== undefined && u.cost_month_usd !== null) return `<span class="t-meter">本月花费 <b style="margin-left:auto">$${Number(u.cost_month_usd).toFixed(2)}</b></span>`;
+    if (a.kind !== "claude_desktop" && u.cost_month_usd !== undefined && u.cost_month_usd !== null) return `<span class="t-meter">本月花费 <b style="margin-left:auto">$${Number(u.cost_month_usd).toFixed(2)}</b></span>`;
     const w = u.five_hour;
+    if (a.kind === "claude_desktop" && (!desktopUsage(a) || desktopWindowExpired(a, "five_hour", w))) return `<span class="t-meter">暂无当前窗口的本地额度</span>`;
     if (!w) return `<span class="t-meter">${a.kind === "claude_web" && !a.has_session_key ? "不自动读取用量" : "还没有用量"}</span>`;
     const pct = Math.max(0, Math.min(100, w.utilization));
     const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
-    return `<span class="t-meter">5 小时<span class="g-bar"><span class="g-fill ${cls}" style="width:${pct}%"></span></span><b>${pct.toFixed(0)}%</b></span>`;
+    return `<span class="t-meter">5 小时${a.kind === "claude_desktop" ? (desktopStale(a) ? " · 旧快照" : " · 本地") : ""}<span class="g-bar"><span class="g-fill ${cls}" style="width:${pct}%"></span></span><b>${pct.toFixed(0)}%</b></span>`;
   }
   function tile(a, sel) {
     const h = a.health || {};
@@ -651,12 +693,14 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const u = a.usage || {};
     const m = a.manual || {};
     const h = a.health || { issues: [] };
-    let gauges = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"].filter((k) => u[k]).map((k) => gauge(k, u[k])).join("");
-    if (u.cost_month_usd !== undefined && u.cost_month_usd !== null) {
+    let gauges = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"].filter((k) => u[k] && (a.kind !== "claude_desktop" || (desktopUsage(a) && !desktopWindowExpired(a, k, u[k])))).map((k) => gauge(k, u[k], a.kind === "claude_desktop")).join("");
+    if (a.kind !== "claude_desktop" && u.cost_month_usd !== undefined && u.cost_month_usd !== null) {
       gauges += `<div class="g"><div class="g-head"><span class="g-name">本月花费</span><span class="g-pct">$${Number(u.cost_month_usd).toFixed(2)}</span></div></div>`;
     }
     if (!gauges) {
-      gauges = `<div class="g-empty">${a.kind === "claude_web" && !a.has_session_key
+      gauges = `<div class="g-empty">${a.kind === "claude_desktop"
+        ? "暂无当前窗口的本地额度。请在这个配置的 Claude 中打开“设置 → 用量”，再点“读取本地额度”。"
+        : a.kind === "claude_web" && !a.has_session_key
         ? "网页版账号默认不读取用量。填写 sessionKey 后可以自动获取，或者在“编辑”里手动记录到期日。"
         : a.kind === "api" && !a.has_admin_key ? "填写 Admin Key 后可以显示本月花费。" : "还没有用量数据，点“刷新”。"}</div>`;
     }
@@ -666,15 +710,18 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       due ? ["到期", `<span class="${due.cls}">${due.short}${m.expires_at ? "（" + esc(m.expires_at) + "）" : ""}</span>${m.auto_renew ? " · 自动续期" : ""}`] : null,
       m.price ? ["价格", esc(m.price)] : null,
       a.kind === "api" && a.api_key_hint ? ["Key", esc(a.api_key_hint) + (u.key_valid === true ? " · 有效" : u.key_valid === false ? " · 无效" : "")] : null,
-      a.kind === "claude_code" ? ["最近切换", a.last_switched_at ? ago(a.last_switched_at) : "还没切换过"] : null,
-      ["用量更新", ago(u.fetched_at)],
+      a.kind === "claude_code" || a.kind === "claude_desktop" ? [a.kind === "claude_desktop" ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"] : null,
+      a.kind === "claude_desktop" ? ["额度来源", u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"] : ["用量更新", ago(u.fetched_at)],
+      a.kind === "claude_desktop" ? ["记录时间", ago(u.fetched_at)] : null,
+      a.kind === "claude_desktop" ? ["最近读取", ago(u.checked_at)] : null,
       m.note ? ["备注", esc(m.note)] : null,
     ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
     const issues = (h.issues || []).map((i) => `<li class="issue ${esc(i.level)}"><b>${esc(i.text)}</b><span class="advice">${esc(i.advice)}</span>${i.detail ? `<span class="raw">${esc(i.detail)}</span>` : ""}</li>`).join("");
     const acts = [];
     if (a.kind === "claude_code" && !a.is_active) acts.push(`<button class="btn primary" data-act="switch" data-id="${esc(a.id)}">切换到这个账号</button>`);
     if (a.kind === "claude_web") acts.push(`<button class="btn primary" data-act="open" data-id="${esc(a.id)}">在电脑上打开</button>`);
-    acts.push(`<button class="btn" data-act="refresh" data-id="${esc(a.id)}">刷新</button>`);
+    if (a.kind === "claude_desktop") acts.push(`<button class="btn primary" data-act="open" data-id="${esc(a.id)}">${a.is_active ? "重新打开" : "切换桌面版"}</button>`);
+    acts.push(`<button class="btn" data-act="refresh" data-id="${esc(a.id)}">${a.kind === "claude_desktop" ? "读取本地额度" : "刷新"}</button>`);
     acts.push(`<button class="btn" data-act="edit" data-id="${esc(a.id)}">编辑</button>`);
     acts.push(`<button class="btn quiet danger" data-act="remove" data-id="${esc(a.id)}">移除</button>`);
     return `<section class="detail" aria-label="${esc(nameOf(a))} 的详情">
@@ -684,6 +731,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
         <div class="d-acts">${acts.join("")}</div>
       </div>
       ${issues ? `<ul class="issues">${issues}</ul>` : ""}
+      ${a.kind === "claude_desktop" ? `<p class="hint">${esc(u.notice || "额度来自这个配置的 Claude 本地记录；打开客户端用量页后可读取更新。")}${u.source === "desktop_history" ? " 历史记录未提供重置时间。" : ""}${u.fetched_at && desktopStale(a) ? " 这份快照已超过 30 分钟，请结合记录时间查看。" : ""} 切换或重新打开会退出并重启电脑上的 Claude 桌面版，请先处理好其中正在运行的任务。首次打开和会话过期后需要登录；Claude Code 命令行账号单独切换。</p>` : ""}
       <div class="d-body"><div class="gauges">${gauges}</div><dl class="d-info">${info}</dl></div>
     </section>`;
   }
@@ -770,7 +818,11 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
 
   // ---- 渲染
-  let state = null;
+  let state = null, accountBusy = false;
+  function syncAccountBusy() {
+    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
+      .forEach((button) => { button.disabled = accountBusy; });
+  }
   function render() {
     const list = $("#list");
     const reg = state.region || {};
@@ -791,7 +843,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
         <p class="hint"><b>用 Claude Code（命令行）</b>：确认终端里 <code>claude</code> 已登录，点下面的按钮导入。以后 <code>/login</code> 换号会自动保存。</p>
         <p><button class="btn primary" data-act="import">导入当前登录</button></p>
-        <p class="hint" style="margin-top:14px"><b>用网页版 claude.ai 或 API Key</b>：<button class="btn" data-act="add">添加账号</button> 选对应类型。网页版每个号一个独立浏览器窗口，登录状态长期保留。</p></div>` + (risky ? "" : env);
+        <p class="hint" style="margin-top:14px"><b>用 Claude 桌面版、网页版 claude.ai 或 API Key</b>：<button class="btn" data-act="add">添加账号</button> 选对应类型。网页版每个号一个独立浏览器窗口。</p></div>` + (risky ? "" : env);
+      syncAccountBusy();
       return;
     }
     // Claude Code 当前账号排最前，其余按 5 小时余量从多到少
@@ -815,6 +868,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const strip = list.querySelector(".strip");
     if (strip) strip.scrollLeft = keepX;
     if (sel.id !== revealedId) { revealedId = sel.id; revealSelected(list); }
+    syncAccountBusy();
   }
 
   function renderLogin(msg) {
@@ -932,9 +986,16 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
 
   async function busy(btn, fn) {
-    const all = btn ? [btn] : [];
-    all.forEach((b) => (b.disabled = true));
-    try { return await fn(); } finally { all.forEach((b) => (b.disabled = false)); }
+    if (accountBusy) return;
+    accountBusy = true;
+    if (btn) btn.disabled = true;
+    syncAccountBusy();
+    try { return await fn(); }
+    finally {
+      accountBusy = false;
+      if (btn) btn.disabled = false;
+      syncAccountBusy();
+    }
   }
 
   async function refresh(id, btn) {
@@ -943,7 +1004,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
         state = await api("POST", "/api/refresh", id ? { id } : {});
         render(); loadLocal();
         const errs = state.accounts.filter((a) => (!id || a.id === id) && a.usage && a.usage.error).length;
-        toast(errs ? `已刷新，${errs} 个账号没拿到用量` : "用量已更新");
+        toast(errs ? `已刷新，${errs} 个账号没拿到用量` : id && state.accounts.find((a) => a.id === id)?.kind === "claude_desktop" ? "已重新读取本地额度记录" : "用量已更新");
       } catch (e) { toast(e.message, true); }
     });
   }
@@ -981,6 +1042,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     $("#edit-title").textContent = `编辑：${a.label || a.email || ""}`;
     $("#f-label").value = a.label || "";
     $("#f-plan").value = m.plan || "";
+    document.querySelector('label[for="f-plan"]').textContent = a.kind === "claude_desktop" ? "套餐（手动记录）" : "套餐（自动获取失败时填）";
+    $("#f-plan").options[0].textContent = a.kind === "claude_desktop" ? "未填写" : "自动";
     $("#f-price").value = m.price || "";
     $("#f-exp").value = m.expires_at || "";
     $("#f-cycle").value = m.cycle || "monthly";
@@ -1002,8 +1065,11 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     for (const [k, s] of [["session_key", "#f-session"], ["api_key", "#f-api"], ["admin_key", "#f-admin"]]) {
       if ($(s).value.trim()) body[k] = $(s).value.trim();
     }
-    try { state = await api("PATCH", "/api/accounts/" + editing.id, body); render(); toast("已保存"); }
-    catch (e) { toast(e.message, true); }
+    const id = editing.id;
+    await busy(null, async () => {
+      try { state = await api("PATCH", "/api/accounts/" + id, body); render(); toast("已保存"); }
+      catch (e) { toast(e.message, true); }
+    });
   });
   $("#btn-delete").onclick = () => { if (!editing) return; const a = editing; $("#dlg-edit").close("cancel"); openRemove(a); };
 
@@ -1011,14 +1077,14 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   let removing = null;
   function openRemove(a) {
     removing = a;
-    const blocked = a.kind === "claude_code" && a.is_active;
+    const blocked = (a.kind === "claude_code" || a.kind === "claude_desktop") && a.is_active;
     $("#rm-title").textContent = `移除“${nameOf(a)}”？`;
     $("#rm-body").innerHTML = `只从这个工具里移除，不会动 Claude 本身：
       <ul class="rm-list">
         <li class="keep">保留：Claude Code 的项目、会话记录、设置和 MCP 配置（~/.claude 里的都不动）</li>
         <li class="keep">保留：这个账号在 Anthropic 那边的订阅、对话和数据</li>
-        <li class="drop">移除：这里保存的${a.kind === "api" ? " API Key" : a.kind === "claude_web" ? " sessionKey 和独立浏览器窗口的登录状态" : "登录凭据"}、它的切号规则（都移到备份目录，可以找回）</li>
-      </ul>${blocked ? `<div class="rm-block">这是 Claude Code 正在用的账号，先切换到其它账号再移除。</div>` : ""}`;
+        <li class="drop">移除：这里保存的${a.kind === "api" ? " API Key" : a.kind === "claude_web" ? " sessionKey 和独立浏览器窗口的登录状态" : a.kind === "claude_desktop" ? (a.desktop_profile === "default" ? " 和桌面版的对应关系（不会删掉 Claude 自己的登录数据）" : " 这个号单独的桌面版登录配置") : "登录凭据"}、它的切号规则（都移到备份目录，可以找回）</li>
+      </ul>${blocked ? `<div class="rm-block">${a.kind === "claude_desktop" ? "这是工具上次打开的桌面版配置，请先用工具打开其它桌面版账号再移除。" : "这是 Claude Code 正在用的账号，先切换到其它账号再移除。"}</div>` : ""}`;
     $("#rm-ok").disabled = blocked;
     $("#dlg-remove").returnValue = "";
     $("#dlg-remove").showModal();
@@ -1027,11 +1093,13 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const a = removing;
     removing = null;
     if (!a || $("#dlg-remove").returnValue !== "ok") return;
-    try {
-      state = await api("DELETE", "/api/accounts/" + a.id);
-      if (selectedId === a.id) selectedId = null;
-      render(); toast("已移除。Claude Code 的项目和会话都还在，凭据在备份目录里");
-    } catch (e) { toast(e.message, true); }
+    await busy(null, async () => {
+      try {
+        state = await api("DELETE", "/api/accounts/" + a.id);
+        if (selectedId === a.id) selectedId = null;
+        render(); toast("已移除。Claude Code 的项目和会话都还在，凭据在备份目录里");
+      } catch (e) { toast(e.message, true); }
+    });
   });
 
   // ---- 添加
@@ -1039,7 +1107,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const k = $("#a-kind").value;
     $("#add-code").hidden = k !== "claude_code";
     $("#add-other").hidden = k === "claude_code";
-    $("#aw-email").hidden = k !== "claude_web";
+    $("#aw-email").hidden = k !== "claude_web" && k !== "claude_desktop";
+    $("#add-desktop").hidden = k !== "claude_desktop";
     $("#aw-key").hidden = k !== "api";
     $("#aw-admin").hidden = k !== "api";
     $("#btn-add-ok").textContent = k === "claude_code" ? "导入当前登录" : "添加";
@@ -1051,8 +1120,9 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const kind = $("#a-kind").value;
     const body = { kind };
     if (kind !== "claude_code") {
-      body.label = $("#a-label").value.trim() || (kind === "api" ? "API" : "网页账号");
-      if (kind === "claude_web") body.email = $("#a-email").value.trim();
+      body.label = $("#a-label").value.trim() || (kind === "api" ? "API" : kind === "claude_desktop" ? "桌面账号" : "网页账号");
+      if (kind === "claude_web" || kind === "claude_desktop") body.email = $("#a-email").value.trim();
+      if (kind === "claude_desktop") body.use_current = $("#a-desktop-current").checked;
       if (kind === "api") { body.api_key = $("#a-key").value.trim(); body.admin_key = $("#a-admin").value.trim(); }
     }
     await doAdd(body);
@@ -1064,7 +1134,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       try {
         state = await api("POST", "/api/accounts", { kind: "claude_code" });
         const added = state.accounts.find((a) => !before.has(a.id));
-        const cur = state.accounts.find((a) => a.is_active);
+        const cur = state.accounts.find((a) => a.kind === "claude_code" && a.is_active);
         if (added) { selectedId = added.id; toast(`发现新账号，已保存：${nameOf(added)}`); }
         else toast(cur ? `Claude Code 现在登录的是“${nameOf(cur)}”，已经保存过了` : "没有发现新登录");
         render();
@@ -1073,10 +1143,12 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
 
   async function doAdd(body) {
-    try {
-      state = await api("POST", "/api/accounts", body); render();
-      toast(body.kind === "claude_code" ? "已导入当前登录的账号" : "已添加");
-    } catch (e) { toast(e.message, true); }
+    await busy(null, async () => {
+      try {
+        state = await api("POST", "/api/accounts", body); render();
+        toast(body.kind === "claude_code" ? "已导入当前登录的账号" : body.kind === "claude_desktop" ? "已添加。切换会退出并重启电脑上的 Claude 桌面版，首次打开需要登录" : "已添加");
+      } catch (e) { toast(e.message, true); }
+    });
   }
 
   // ---- 切号规则
@@ -1157,7 +1229,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const re = e.target.closest("[data-act=recheck]");
     if (re) { runEnvCheck(); return; }
     const b = e.target.closest("button[data-act]");
-    if (!b) return;
+    if (!b || b.disabled) return;
+    if (accountBusy && b.dataset.act !== "select") return;
     const id = b.dataset.id;
     const a = state && state.accounts.find((x) => x.id === id);
     switch (b.dataset.act) {
@@ -1168,8 +1241,15 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
           catch (err) { toast(err.message, true); }
         }); break;
       case "open":
-        try { const r = await api("POST", `/api/accounts/${id}/open`); toast(r.message || "已打开"); }
-        catch (err) { toast(err.message, true); } break;
+        await busy(b, async () => {
+          try {
+            const r = await api("POST", `/api/accounts/${id}/open`);
+            toast(r.message || "已打开");
+            state = await api("GET", "/api/state");
+            render();
+          }
+          catch (err) { toast(err.message, true); }
+        }); break;
       case "refresh": refresh(id, b); break;
       case "edit": if (a) openEdit(a); break;
       case "select": select(id); break;
@@ -1183,6 +1263,245 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     }
   });
   $("#btn-refresh").onclick = (e) => refresh(null, e.currentTarget);
+
+  // ---- 本地加密账号库；秘密仅在显式输入/显示期间留在页面内存，不写 localStorage。
+  const V_PROVIDERS = { credential: "仅保存账号资料", gmail: "Gmail / Google Workspace", outlook: "Outlook / Hotmail / Microsoft 365", imap: "其它企业邮箱（IMAP）" };
+  let vaultState = null, vaultSelected = "", vaultBusy = false, vaultMessages = null, vaultRevealed = null;
+  let vaultJob = null, vaultJobTimer = null, vaultJobPolling = false, vaultJobUntil = 0;
+  let vaultWatch = null, vaultAuto = true, vaultLastCheck = 0, vaultMailEpoch = 0, vaultRevealTimer = null;
+  const vaultActive = () => vaultState && vaultState.entries.find((entry) => entry.id === vaultSelected);
+  function vaultError(error, secrets = []) {
+    let message = error && error.message || "操作失败，请重试";
+    for (const secret of secrets.filter(Boolean)) message = message.split(secret).join("••••");
+    return message.replace(/(access_token|refresh_token|client_secret|password|authorization_code)\s*[=:]\s*["']?[^\s,"'&}]+/gi, "$1=••••").slice(0, 400);
+  }
+  function vaultUrl(value, authorization = false) {
+    try {
+      const url = new URL(value), host = url.hostname.toLowerCase();
+      if (url.protocol !== "https:" || url.username || url.password) return null;
+      const allowed = authorization ? ["accounts.google.com", "login.microsoftonline.com"].includes(host)
+        : ["claude.ai", "claude.com", "anthropic.com"].some((domain) => host === domain || host.endsWith("." + domain));
+      return allowed ? url.href : null;
+    } catch (_) { return null; }
+  }
+  async function vaultOpen(value, authorization = false, entryId) {
+    const url = vaultUrl(value, authorization);
+    if (!url) throw Error("这个链接不是受支持的官方 HTTPS 地址");
+    await api("POST", !authorization && entryId ? `/api/vault/entries/${encodeURIComponent(entryId)}/open-verification` : "/api/open-external", { url });
+  }
+  function syncVaultBusy() {
+    document.querySelectorAll("#vault-block [data-vbusy]").forEach((button) => { button.disabled = vaultBusy || button.dataset.vblocked === "1"; });
+  }
+  async function vaultRun(action, quiet = false) {
+    if (vaultBusy) return;
+    const secrets = ["#v-master", "#v-password", "#v-client-secret"].map((selector) => $(selector)?.value || "").concat(vaultRevealed || "");
+    vaultBusy = true; syncVaultBusy();
+    try { await action(); $("#v-error").hidden = true; }
+    catch (error) {
+      const message = vaultError(error, secrets);
+      $("#v-error").textContent = message; $("#v-error").hidden = false;
+      if (!quiet) toast(message, true);
+      try { const latest = await api("GET", "/api/vault"); if (!latest.unlocked) applyVault(latest); } catch (_) {}
+    } finally { vaultBusy = false; syncVaultBusy(); }
+  }
+  function stopVaultJob() { clearInterval(vaultJobTimer); vaultJobTimer = null; vaultJob = null; }
+  function hideVaultPassword() {
+    clearTimeout(vaultRevealTimer); vaultRevealed = null;
+    if ($("#v-revealed")) $("#v-revealed").textContent = "";
+  }
+  function clearVaultPrivate() {
+    vaultMailEpoch += 1; vaultWatch = null; vaultMessages = null; vaultSelected = ""; stopVaultJob(); hideVaultPassword();
+  }
+  function applyVault(next) {
+    vaultState = next;
+    if (!next.unlocked) clearVaultPrivate();
+    renderVault();
+  }
+  const vField = (id, label, value = "", options = "") => `<div class="field"><label for="${id}">${esc(label)}</label><input id="${id}" value="${esc(value)}" ${options}></div>`;
+  function renderVault() {
+    const root = $("#v-content");
+    if (!vaultState) { root.innerHTML = `<div class="panel"><p class="hint">正在读取本地账号库…</p></div>`; return; }
+    if (!vaultState.unlocked) {
+      root.innerHTML = `<form class="panel vault-unlock" id="v-auth-form"><h3>${vaultState.initialized ? "解锁本地账号库" : "设置账号库主密码"}</h3>
+        <p class="hint">主密码用于本地加密，至少 8 个字符。忘记后无法解密已存的密码与授权；每个后端进程需单独解锁。</p>
+        ${vField("v-master", "主密码", "", 'type="password" minlength="8" required autocomplete="' + (vaultState.initialized ? "current-password" : "new-password") + '"')}
+        ${vaultState.initialized ? "" : vField("v-confirm", "再次输入主密码", "", 'type="password" minlength="8" required autocomplete="new-password"')}
+        <button class="btn primary" type="submit" data-vbusy>${vaultState.initialized ? "解锁" : "创建加密账号库"}</button></form>`;
+      syncVaultBusy(); return;
+    }
+    const entry = vaultActive(), config = entry && entry.config || {};
+    const accountOptions = (state && state.accounts || []).filter((account) => account.kind !== "api").map((account) => `<option value="${esc(account.id)}"${entry && entry.account_id === account.id ? " selected" : ""}>${esc(account.label || account.email || account.id)}</option>`).join("");
+    root.innerHTML = `<div class="vault-actions"><button class="btn" type="button" data-vact="lock" data-vbusy>锁定账号库</button></div>
+      <div class="vault-list">${vaultState.entries.map((item) => `<button type="button" class="vault-entry${item.id === vaultSelected ? " sel" : ""}" data-vact="select" data-vid="${esc(item.id)}" data-vbusy aria-pressed="${item.id === vaultSelected}"><b>${esc(item.label || item.email)}</b><span>${esc(item.email)}</span><small>${esc(V_PROVIDERS[item.provider] || item.provider)}${item.connected ? " · 已保存邮箱授权" : ""}</small></button>`).join("")}
+        <button class="btn" type="button" data-vact="new" data-vbusy>＋ 新增账号资料</button></div>
+      <form class="panel vault-form" id="v-entry-form"><h3>${entry ? "编辑账号资料" : "新增账号资料"}</h3>
+        <div class="row2">${vField("v-label", "名称", entry && entry.label || "", 'maxlength="60"')}${vField("v-email", "邮箱", entry && entry.email || "", 'type="email" required')}</div>
+        <div class="field"><label for="v-account">绑定 Claude 账号（可选）</label><div class="vault-inline"><select id="v-account"><option value="">不绑定</option>${accountOptions}</select><button class="btn" type="button" data-vact="identify" data-vbusy>读取已登录邮箱</button></div></div>
+        <div class="field"><label for="v-provider">邮箱接入方式</label><select id="v-provider">${Object.entries(V_PROVIDERS).map(([provider, label]) => `<option value="${provider}"${provider === (entry && entry.provider || "credential") ? " selected" : ""}>${label}</option>`).join("")}</select></div>
+        ${vField("v-password", "账号密码（可选）" + (entry && entry.has_password ? " · 已保存，留空保留" : ""), "", 'type="password" autocomplete="new-password"')}
+        ${entry && entry.has_password ? `<label class="check"><input type="checkbox" id="v-clear-password">清除已保存的密码</label>` : ""}
+        <div id="v-oauth-fields" hidden><p class="hint">使用你自己注册的桌面 OAuth 应用。Gmail 包含 Google Workspace；Outlook 包含 Hotmail / Microsoft 365。修改后先保存，再连接邮箱；企业账号可能需要管理员批准。</p>
+          ${vField("v-client", "OAuth Client ID / 应用程序 ID", config.client_id || "", 'autocomplete="off"')}
+          ${vField("v-client-secret", "Client Secret（可选）" + (entry && entry.has_client_secret ? " · 已保存，留空保留" : ""), "", 'type="password" autocomplete="new-password"')}
+          <div id="v-tenant-field">${vField("v-tenant", "租户（默认 common，可填租户 ID 或域名）", config.tenant || "common")}</div>
+          <details class="src"><summary>首次配置 OAuth 应用</summary><p class="hint">Google Cloud：启用 Gmail API，创建“桌面应用”OAuth 客户端，填写客户端 ID 和提供的 Client Secret；应用处于测试状态时加入自己的测试邮箱。Microsoft Entra：选择所需个人 / 组织账号类型，在“移动和桌面应用”添加 <code>http://localhost/oauth/callback</code>，启用公用客户端，填写应用程序 ID；租户默认 common。授权在电脑系统浏览器完成；邮箱授权会申请只读邮件权限，不会自动完成 Claude 登录。</p></details></div>
+        <div id="v-imap-fields" hidden><div class="row2">${vField("v-imap-host", "IMAP 服务器", config.imap_host || "", 'placeholder="imap.example.com"')}${vField("v-imap-port", "TLS 端口", config.imap_port || 993, 'type="number" min="1" max="65535"')}</div>${vField("v-imap-user", "IMAP 用户名", config.imap_username || "", 'placeholder="通常为完整邮箱地址"')}<p class="hint">使用服务器提供的 TLS 端口（通常 993）和应用专用密码。只读收件箱，不标记已读，不内置其它邮箱服务商适配。</p></div>
+        <div class="field"><label for="v-notes">备注</label><textarea id="v-notes" rows="2">${esc(config.notes || "")}</textarea></div>
+        <div class="vault-actions"><button class="btn primary" type="submit" data-vbusy>保存资料</button>${entry && entry.has_password ? `<button class="btn" type="button" data-vact="reveal" data-vbusy>显示已保存密码</button>` : ""}${entry ? `<button class="btn quiet danger" type="button" data-vact="delete" data-vbusy>移除资料</button>` : ""}</div><div class="vault-revealed" id="v-revealed"></div>
+      </form>
+      ${entry && entry.provider !== "credential" ? `<div class="panel vault-mail"><div class="sec-head"><h3>Claude 验证邮件</h3><span class="chip">${entry.connected ? "已保存授权" : "尚未连接"}</span></div><p class="hint">只提取最近的 Claude / Anthropic 登录邮件，最多回溯一小时。验证码和链接不会自动提交；点击验证链接才会按绑定的 Claude 账号打开。</p>
+        <div class="vault-actions">${["gmail", "outlook"].includes(entry.provider) ? `<button class="btn" type="button" data-vact="connect" data-vbusy>${entry.connected ? "重新授权邮箱" : "连接邮箱并授权"}</button>` : ""}<button class="btn" type="button" data-vact="messages" data-vbusy data-vblocked="${entry.connected ? "0" : "1"}">读取最近登录邮件</button><button class="btn primary" type="button" data-vact="wait" data-vbusy data-vblocked="${entry.connected ? "0" : "1"}">等待新验证码</button><button class="btn" type="button" data-vact="cancel-wait" id="v-cancel-wait" hidden>取消等待</button><label class="check"><input type="checkbox" id="v-auto"${vaultAuto ? " checked" : ""}>本页打开时每 30 秒自动读取</label></div>
+        <p class="hint" id="v-wait-status" role="status" hidden>正在等待新验证码，每 5 秒检查一次，最多等待 2 分钟。你可继续在 Claude 中请求登录邮件。</p><div id="v-job" role="status"></div><div id="v-messages"></div></div>` : ""}`;
+    syncVaultProvider(); renderVaultMessages(); syncVaultBusy();
+  }
+  function syncVaultProvider() {
+    const provider = $("#v-provider")?.value;
+    if (!provider) return;
+    $("#v-oauth-fields").hidden = !["gmail", "outlook"].includes(provider);
+    $("#v-tenant-field").hidden = provider !== "outlook";
+    $("#v-imap-fields").hidden = provider !== "imap";
+    $("#v-imap-host").required = provider === "imap";
+    $("#v-imap-port").required = provider === "imap";
+    document.querySelector('label[for="v-password"]').textContent = (provider === "imap" ? "邮箱密码 / 应用专用密码" : "账号密码（可选）") + (vaultActive()?.has_password ? " · 已保存，留空保留" : "");
+  }
+  function renderVaultMessages() {
+    const root = $("#v-messages");
+    if (!root) return;
+    root.innerHTML = vaultMessages ? `<p class="hint">最近检查：${ago(vaultMessages.checked_at)}${vaultMessages.status === "empty" ? " · 暂无匹配的验证邮件" : ""}</p><div class="vault-messages">${vaultMessages.messages.map((message, index) => `<article class="vault-message"><b>${esc(message.subject)}</b><small>${esc(message.sender)} · ${ago(message.received_at)}</small><div class="vault-actions">${message.codes.map((code) => `<button class="btn vault-code" type="button" data-vact="copy-code" data-vcode="${esc(code)}" title="点击复制验证码">${esc(code)}</button>`).join("")}${message.verification_links.map((link, linkIndex) => vaultUrl(link) ? `<button class="btn" type="button" data-vact="verification" data-vmessage="${index}" data-vlink="${linkIndex}">打开验证链接 ${linkIndex + 1}</button>` : "").join("")}</div></article>`).join("")}</div>` : "";
+  }
+  async function loadVault() { await vaultRun(async () => applyVault(await api("GET", "/api/vault"))); }
+  async function vaultReadMail(since, quiet = false) {
+    await vaultRun(async () => {
+      const entry = vaultActive();
+      if (!entry || !entry.connected || entry.provider === "credential") return;
+      const epoch = vaultMailEpoch;
+      vaultLastCheck = Date.now();
+      const result = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/messages`, since ? { since } : {});
+      if (epoch !== vaultMailEpoch || entry.id !== vaultSelected || !vaultState?.unlocked) return;
+      vaultMessages = result; renderVaultMessages();
+      if (since && result.status === "found") { vaultWatch = null; syncVaultWaiting(); }
+    }, quiet);
+  }
+  function syncVaultWaiting() {
+    if ($("#v-cancel-wait")) $("#v-cancel-wait").hidden = !vaultWatch;
+    if ($("#v-wait-status")) $("#v-wait-status").hidden = !vaultWatch;
+  }
+  function startVaultJob(job) {
+    stopVaultJob(); vaultJob = job; vaultJobUntil = Date.now() + 300000;
+    const url = vaultUrl(job.authorization_url, true);
+    if (!url) throw Error("授权地址无法识别，请检查邮箱配置");
+    if ($("#v-job")) $("#v-job").innerHTML = `<div class="notice"><span id="v-job-status">请在电脑浏览器中完成邮箱授权…</span><button class="btn" type="button" data-vact="oauth-open">在电脑上打开授权页</button><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">自行打开（需在同一台电脑）</a></div>`;
+    vaultJobTimer = setInterval(async () => {
+      if (!vaultJob || vaultJobPolling) return;
+      if (Date.now() >= vaultJobUntil) { stopVaultJob(); if ($("#v-job")) $("#v-job").textContent = "授权等待已结束，请重新连接邮箱"; return; }
+      vaultJobPolling = true;
+      const id = vaultJob.job_id;
+      try {
+        const result = await api("GET", `/api/vault/oauth/${encodeURIComponent(id)}`);
+        if (!vaultJob || vaultJob.job_id !== id) return;
+        if ($("#v-job-status")) $("#v-job-status").textContent = vaultError({ message: result.message || "等待在电脑浏览器完成授权…" });
+        if (result.status !== "pending") {
+          stopVaultJob();
+          if (result.status === "connected") { applyVault(await api("GET", "/api/vault")); toast("邮箱已连接，可以读取 Claude 验证邮件"); }
+        }
+      } catch (error) { stopVaultJob(); if ($("#v-job")) $("#v-job").textContent = vaultError(error); try { const latest = await api("GET", "/api/vault"); if (!latest.unlocked) applyVault(latest); } catch (_) {} }
+      finally { vaultJobPolling = false; }
+    }, 2000);
+  }
+  $("#btn-vault").onclick = async () => { $("#vault-block").hidden = false; $("#vault-block").scrollIntoView({ block: "start" }); await loadVault(); };
+  $("#v-reload").onclick = loadVault;
+  $("#v-close").onclick = () => { $("#vault-block").hidden = true; clearVaultPrivate(); renderVault(); };
+  document.addEventListener("change", (event) => {
+    if (event.target.id === "v-provider") syncVaultProvider();
+    if (event.target.id === "v-auto") vaultAuto = event.target.checked;
+    if (event.target.id === "v-clear-password" && event.target.checked) $("#v-password").value = "";
+    if (event.target.id === "v-account") {
+      const account = state?.accounts.find((item) => item.id === event.target.value);
+      if (account?.email) $("#v-email").value = account.email;
+      if (!$("#v-label").value && account?.label) $("#v-label").value = account.label;
+    }
+  });
+  document.addEventListener("input", (event) => { if (event.target.id === "v-password" && $("#v-clear-password")) $("#v-clear-password").checked = false; });
+  document.addEventListener("submit", async (event) => {
+    if (!["v-auth-form", "v-entry-form"].includes(event.target.id)) return;
+    event.preventDefault();
+    if (event.target.id === "v-auth-form") {
+      if (!vaultState.initialized && $("#v-master").value !== $("#v-confirm").value) { $("#v-error").textContent = "两次输入的主密码不一致"; $("#v-error").hidden = false; return; }
+      await vaultRun(async () => { applyVault(await api("POST", vaultState.initialized ? "/api/vault/unlock" : "/api/vault/setup", { master_password: $("#v-master").value })); toast("账号库已解锁"); });
+      return;
+    }
+    const body = { id: vaultSelected || undefined, label: $("#v-label").value.trim(), email: $("#v-email").value.trim(), provider: $("#v-provider").value, account_id: $("#v-account").value || null,
+      config: { client_id: $("#v-client").value.trim(), tenant: $("#v-tenant").value.trim() || "common", imap_host: $("#v-imap-host").value.trim(), imap_port: Number($("#v-imap-port").value) || 993, imap_username: $("#v-imap-user").value.trim(), notes: $("#v-notes").value.trim() }, clear_password: !!$("#v-clear-password")?.checked };
+    if ($("#v-password").value) body.password = $("#v-password").value;
+    if ($("#v-client-secret").value) body.client_secret = $("#v-client-secret").value;
+    await vaultRun(async () => {
+      const next = await api("POST", "/api/vault/entries", body);
+      const selected = next.entries.find((entry) => entry.id === body.id)?.id || next.entries.find((entry) => entry.email.toLowerCase() === body.email.toLowerCase() && entry.provider === body.provider)?.id || "";
+      clearVaultPrivate(); vaultSelected = selected; applyVault(next); toast("账号资料已保存");
+    });
+  });
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-vact]");
+    if (!button || button.disabled) return;
+    const action = button.dataset.vact, entry = vaultActive();
+    if (action === "hide") { hideVaultPassword(); return; }
+    if (action === "cancel-wait") { vaultWatch = null; vaultMailEpoch += 1; syncVaultWaiting(); return; }
+    if (vaultBusy) return;
+    if (action === "select" || action === "new") {
+      vaultMailEpoch += 1; vaultWatch = null; vaultMessages = null; hideVaultPassword(); stopVaultJob();
+      vaultSelected = action === "select" ? button.dataset.vid : ""; vaultLastCheck = 0; renderVault(); return;
+    }
+    if (action === "messages") { await vaultReadMail(); return; }
+    if (action === "wait") { vaultMailEpoch += 1; vaultMessages = null; renderVaultMessages(); vaultWatch = { entry_id: entry.id, since: new Date(Date.now() - 30000).toISOString(), until: Date.now() + 120000 }; syncVaultWaiting(); await vaultReadMail(vaultWatch.since, true); return; }
+    await vaultRun(async () => {
+      if (action === "lock") { applyVault(await api("POST", "/api/vault/lock")); toast("账号库已锁定"); }
+      else if (action === "identify") {
+        const id = $("#v-account").value;
+        if (!id) throw Error("先选择要绑定的 Claude 账号");
+        const next = await api("POST", `/api/accounts/${encodeURIComponent(id)}/identify`);
+        state = next; render();
+        const account = next.accounts.find((item) => item.id === id);
+        if (!account?.email) throw Error(next.identity_message || "未识别到已登录邮箱，请先在对应的 Claude 配置中登录");
+        $("#v-email").value = account.email; if (!$("#v-label").value) $("#v-label").value = account.label || account.email;
+        toast(next.identity_message || "已读取登录邮箱");
+      } else if (action === "reveal" && entry) {
+        const epoch = vaultMailEpoch;
+        const result = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/reveal`);
+        if (epoch !== vaultMailEpoch || entry.id !== vaultSelected || !vaultState?.unlocked) return;
+        vaultRevealed = result.password || "";
+        $("#v-revealed").innerHTML = `<code>${esc(vaultRevealed || "未保存密码")}</code><button class="btn" type="button" data-vact="copy-password">复制密码</button><button class="btn" type="button" data-vact="hide">隐藏</button><small>30 秒后自动隐藏；剪贴板由系统管理。</small>`;
+        clearTimeout(vaultRevealTimer); vaultRevealTimer = setTimeout(hideVaultPassword, 30000);
+      } else if (action === "delete" && entry) {
+        if (!confirm(`移除“${entry.label || entry.email}”的账号库资料和邮箱授权？Claude 账号记录会保留。`)) return;
+        const next = await api("DELETE", `/api/vault/entries/${encodeURIComponent(entry.id)}`); clearVaultPrivate(); applyVault(next); toast("账号库条目已移除");
+      } else if (action === "connect" && entry) {
+        const epoch = vaultMailEpoch;
+        const job = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/connect`);
+        if (epoch !== vaultMailEpoch || entry.id !== vaultSelected || !vaultState?.unlocked) return;
+        startVaultJob(job);
+        try { await vaultOpen(job.authorization_url, true); } catch (_) { toast("授权已准备好，请点击“在电脑上打开授权页”继续", true); }
+      } else if (action === "oauth-open" && vaultJob) await vaultOpen(vaultJob.authorization_url, true);
+      else if (action === "verification") {
+        const link = vaultMessages?.messages[Number(button.dataset.vmessage)]?.verification_links[Number(button.dataset.vlink)];
+        if (!entry) throw Error("请先选择验证邮件对应的账号资料");
+        await vaultOpen(link, false, entry.id);
+      } else if (action === "copy-code" || action === "copy-password") {
+        if (!navigator.clipboard) throw Error("当前浏览器无法直接复制，请显式显示后手动复制");
+        await navigator.clipboard.writeText(action === "copy-code" ? button.dataset.vcode : vaultRevealed || ""); toast("已复制");
+      }
+    });
+  });
+  setInterval(() => {
+    if ($("#vault-block").hidden || !vaultState?.unlocked || vaultBusy) return;
+    const entry = vaultActive();
+    if (!entry?.connected || entry.provider === "credential") return;
+    if (vaultWatch) {
+      if (vaultWatch.entry_id !== entry.id) { vaultWatch = null; syncVaultWaiting(); return; }
+      if (Date.now() >= vaultWatch.until) { vaultWatch = null; syncVaultWaiting(); toast("等待已结束，暂未收到新的 Claude 验证邮件"); }
+      else void vaultReadMail(vaultWatch.since, true);
+    } else if (vaultAuto && Date.now() - vaultLastCheck >= 30000) void vaultReadMail(undefined, true);
+  }, 5000);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) hideVaultPassword(); });
 
   // ---- 主题：跟随系统 → 明亮 → 暗黑（只记在这台设备的浏览器里）
   const THEMES = [["system", "◐", "主题：跟随系统"], ["light", "☀", "主题：明亮"], ["dark", "☾", "主题：暗黑"]];

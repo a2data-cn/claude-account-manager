@@ -4,6 +4,8 @@
 """
 import http.server
 import importlib
+import base64
+import io
 import json
 import os
 import shutil
@@ -1686,6 +1688,468 @@ class CamTest(unittest.TestCase):
             self.assertEqual(call("PUT", "/api/rules", {"rules": [{"type": "dir", "path": "", "account": a_id}]})[0], 400)
         finally:
             srv.shutdown()
+
+
+    def test_desktop_profile_switch(self):
+        os.environ["CAM_DESKTOP_DRY_RUN"] = "1"
+        data_dir = os.path.join(self.tmp, "claude-desktop")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"lastKnownAccountUuid": "abc"}, f)
+        os.environ["CAM_CLAUDE_DESKTOP_DATA"] = data_dir
+        try:
+            store = self.cam.Store()
+            cur = self.cam.add_account(store, "claude_desktop", "当前", use_current=True)
+            self.assertEqual(cur["desktop_profile"], "default")
+            msg = self.cam.open_desktop_account(store, cur)
+            self.assertNotIn("点一次邮箱", msg)
+            with self.assertRaises(self.cam.CamError):
+                self.cam.add_account(store, "claude_desktop", "重复", use_current=True)
+            other = self.cam.add_account(store, "claude_desktop", "第二个")
+            self.assertNotEqual(other["desktop_profile"], "default")
+            self.assertTrue(os.path.isdir(os.path.join(store.root, "desktop-profiles", other["id"])))
+            msg = self.cam.open_desktop_account(store, other)
+            self.assertIn("点一次邮箱", msg)
+            self.assertIn("不会覆盖", msg)
+            backups = [n for n in os.listdir(store.backups_dir) if "before-desktop" in n]
+            self.assertTrue(backups)
+            with open(os.path.join(store.backups_dir, backups[-1], "config.json"), encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertEqual(saved["lastKnownAccountUuid"], "abc")
+            # 原来的登录文件还在，备份不是把内容搬走
+            self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.json")))
+            data = store.load()
+            self.assertEqual(data["active"]["claude_desktop"], other["id"])
+            view = self.cam.public_state(store, data)
+            marked = next(a for a in view["accounts"] if a["id"] == other["id"])
+            self.assertTrue(marked["is_active"])
+            current = next(a for a in view["accounts"] if a["id"] == cur["id"])
+            self.assertFalse(current["is_active"])
+        finally:
+            os.environ.pop("CAM_DESKTOP_DRY_RUN", None)
+            os.environ.pop("CAM_CLAUDE_DESKTOP_DATA", None)
+
+
+    def test_desktop_refresh_skips_api_and_hides_old_errors(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "桌面")
+        data = store.load()
+        data["accounts"][0]["usage"] = {"error": "没有填写 API Key", "key_valid": False}
+        store.save(data)
+        view = self.cam.public_state(store, data)["accounts"][0]
+        self.assertIsNone(view["usage"])
+        self.assertEqual(view["health"]["level"], "ok")
+        with mock.patch.object(self.cam, "snapshot_live"), mock.patch.object(self.cam, "fetch_api_usage") as fetch:
+            data = self.cam.refresh_usage(store, acc["id"])
+        fetch.assert_not_called()
+        self.assertEqual(data["accounts"][0]["usage"]["cache_status"], "missing")
+        self.assertIsNone(data["accounts"][0]["usage"]["error"])
+
+    def test_desktop_main_process_matching_and_profile_parsing(self):
+        with mock.patch.dict(os.environ, {"CAM_CLAUDE_DESKTOP": "/custom/desktop-app"}):
+            with mock.patch.object(self.cam, "IS_MAC", False), mock.patch.object(self.cam, "IS_WIN", False):
+                for cmd in ("/usr/bin/claude-desktop", "/opt/Claude/claude --user-data-dir=/tmp/a",
+                            "/custom/desktop-app --user-data-dir=/tmp/a"):
+                    self.assertTrue(self.cam._is_desktop_cmd(cmd), cmd)
+                for cmd in ("/usr/local/bin/claude", "node /tmp/@anthropic-ai/claude-code/cli.js",
+                            "/opt/Claude/claude --type=renderer", "sh -c /usr/bin/claude-desktop"):
+                    self.assertFalse(self.cam._is_desktop_cmd(cmd), cmd)
+            with mock.patch.object(self.cam, "IS_MAC", True), mock.patch.object(self.cam, "IS_WIN", False):
+                self.assertTrue(self.cam._is_desktop_cmd("/Applications/Claude.app/Contents/MacOS/Claude"))
+                self.assertFalse(self.cam._is_desktop_cmd("/Applications/Claude.app/Contents/Frameworks/Claude Helper"))
+            with mock.patch.object(self.cam, "IS_MAC", False), mock.patch.object(self.cam, "IS_WIN", True):
+                self.assertTrue(self.cam._is_desktop_cmd(r'C:\Users\me\AppData\Local\AnthropicClaude\app-1.2\claude.exe'))
+                self.assertTrue(self.cam._is_desktop_cmd(r'"C:\Program Files\WindowsApps\AnthropicPBC.Claude_1.2\Claude.exe"'))
+                self.assertFalse(self.cam._is_desktop_cmd(r'C:\Users\me\.local\bin\claude.exe'))
+        expected = os.path.realpath(os.path.join(self.tmp, "with spaces"))
+        for flag in (f'--user-data-dir="{expected}"', f'--user-data-dir "{expected}" --other-flag',
+                     f'--user-data-dir={expected}'):
+            self.assertEqual(self.cam._desktop_profile_from_command("Claude " + flag), expected)
+        self.assertIsNone(self.cam._desktop_profile_from_command("Claude"))
+
+    def test_desktop_process_query_failures_and_macos_file_evidence(self):
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr="permission denied")
+        with mock.patch.object(self.cam.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(self.cam.CamError, "无法检测"):
+                self.cam._desktop_processes()
+        with mock.patch.object(self.cam.subprocess, "run", side_effect=OSError("no ps")):
+            with self.assertRaisesRegex(self.cam.CamError, "无法检测"):
+                self.cam._desktop_processes()
+        root = os.path.realpath(os.path.join(self.tmp, "profile"))
+        ps = subprocess.CompletedProcess([], 0, stdout=" 101 /Applications/Claude.app/Contents/MacOS/Claude\n")
+        files = subprocess.CompletedProcess([], 0, stdout=f"p101\nn{root}/Network/Cookies\nn{root}/config.json\n")
+        with mock.patch.object(self.cam, "IS_MAC", True), mock.patch.object(self.cam, "IS_WIN", False), \
+                mock.patch.object(self.cam.subprocess, "run", side_effect=[ps, files]):
+            self.assertEqual(self.cam._desktop_processes(), [(101, root)])
+
+    def test_desktop_same_account_restarts_and_backs_up_after_quit(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "A")
+        directory = self.cam.desktop_profile_dir(store, acc)
+        data = store.load()
+        data["active"]["claude_desktop"] = acc["id"]
+        store.save(data)
+        events = []
+        def quit_app():
+            events.append("quit")
+            with open(os.path.join(directory, "config.json"), "w") as f:
+                json.dump({"oauth:tokenCacheV2": "after-quit"}, f)
+        real_backup = self.cam._backup_desktop_login
+        def backup(s, path):
+            events.append("backup")
+            return real_backup(s, path)
+        with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, directory)]), \
+                mock.patch.object(self.cam, "_find_claude_desktop", return_value="/fake/Claude"), \
+                mock.patch.object(self.cam, "_quit_claude_desktop", side_effect=quit_app), \
+                mock.patch.object(self.cam, "_backup_desktop_login", side_effect=backup), \
+                mock.patch.object(self.cam, "_launch_claude_desktop", side_effect=lambda *a: events.append("launch")):
+            self.cam.open_desktop_account(store, acc)
+        self.assertEqual(events, ["quit", "backup", "launch"])
+        backups = os.listdir(store.backups_dir)
+        with open(os.path.join(store.backups_dir, backups[0], "config.json")) as f:
+            self.assertEqual(json.load(f)["oauth:tokenCacheV2"], "after-quit")
+
+    def test_desktop_unknown_profile_blocks_switch_before_exit(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "A")
+        with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, None)]), \
+                mock.patch.object(self.cam, "_quit_claude_desktop") as quit_app:
+            with self.assertRaisesRegex(self.cam.CamError, "无法确认"):
+                self.cam.open_desktop_account(store, acc)
+        quit_app.assert_not_called()
+        self.assertIsNone(store.load()["active"].get("claude_desktop"))
+
+    def test_desktop_operation_lock_blocks_switch_and_removal(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "A")
+        lock = self.cam.FileLock(os.path.join(store.root, "desktop-switch.lock"))
+        self.assertTrue(lock.try_acquire())
+        try:
+            with self.assertRaisesRegex(self.cam.CamError, "正在切换或移除"):
+                self.cam.open_desktop_account(store, acc)
+            with self.assertRaisesRegex(self.cam.CamError, "正在切换或移除"):
+                self.cam.remove_account(store, acc["id"])
+        finally:
+            lock.release()
+
+    def test_desktop_failed_launch_recovers_actual_profile_and_reports_failure(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "A")
+        previous = os.path.join(self.tmp, "actually-running")
+        with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, previous)]), \
+                mock.patch.object(self.cam, "_find_claude_desktop", return_value="/fake/Claude"), \
+                mock.patch.object(self.cam, "_quit_claude_desktop") as quit_app, \
+                mock.patch.object(self.cam, "_launch_claude_desktop", side_effect=[self.cam.CamError("target failed"), None]) as launch:
+            with self.assertRaisesRegex(self.cam.CamError, "已重新打开原来的登录目录"):
+                self.cam.open_desktop_account(store, acc)
+        self.assertEqual(quit_app.call_count, 2)
+        self.assertEqual(launch.call_args_list[-1].args, ("/fake/Claude", previous))
+        self.assertIsNone(store.load()["active"].get("claude_desktop"))
+        with mock.patch.object(self.cam, "_desktop_processes", return_value=[]), \
+                mock.patch.object(self.cam, "_find_claude_desktop", return_value="/fake/Claude"), \
+                mock.patch.object(self.cam, "_quit_claude_desktop"), \
+                mock.patch.object(self.cam, "_launch_claude_desktop", side_effect=self.cam.CamError("failed")) as launch:
+            with self.assertRaisesRegex(self.cam.CamError, "也没能重新打开"):
+                self.cam.open_desktop_account(store, acc)
+        self.assertEqual(launch.call_args_list[-1].args[1], self.cam.default_desktop_user_data())
+
+    def test_desktop_backup_and_state_failures_also_restore_previous_profile(self):
+        store = self.cam.Store()
+        previous = self.cam.add_account(store, "claude_desktop", "old")
+        target = self.cam.add_account(store, "claude_desktop", "new")
+        previous_dir = self.cam.desktop_profile_dir(store, previous)
+        for failure in ("_backup_desktop_login", "_remember_desktop"):
+            with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, previous_dir)]), \
+                    mock.patch.object(self.cam, "_find_claude_desktop", return_value="/fake/Claude"), \
+                    mock.patch.object(self.cam, "_quit_claude_desktop") as quit_app, \
+                    mock.patch.object(self.cam, "_launch_claude_desktop") as launch, \
+                    mock.patch.object(self.cam, failure, side_effect=OSError("disk error")):
+                with self.assertRaisesRegex(self.cam.CamError, "已重新打开原来的登录目录"):
+                    self.cam.open_desktop_account(store, target)
+            self.assertEqual(quit_app.call_count, 2)
+            self.assertEqual(launch.call_args_list[-1].args, ("/fake/Claude", previous_dir))
+            self.assertEqual(store.load()["active"]["claude_desktop"], previous["id"])
+
+    def test_desktop_launcher_checks_exit_and_real_profile(self):
+        directory = os.path.realpath(os.path.join(self.tmp, "profile"))
+        launcher = mock.Mock()
+        launcher.wait.return_value = 1
+        with mock.patch.object(self.cam, "IS_MAC", True), mock.patch.object(self.cam.subprocess, "Popen", return_value=launcher) as popen:
+            with self.assertRaisesRegex(self.cam.CamError, "macOS 没能启动"):
+                self.cam._launch_claude_desktop("/fake/Claude.app", directory)
+            self.assertEqual(popen.call_args.args[0][:2], ["open", "-n"])
+        launcher.wait.return_value = 0
+        launcher.poll.return_value = 0
+        with mock.patch.object(self.cam, "IS_MAC", True), \
+                mock.patch.object(self.cam.subprocess, "Popen", return_value=launcher), \
+                mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, None)]), \
+                mock.patch.object(self.cam.time, "monotonic", side_effect=[0, 11]):
+            with self.assertRaisesRegex(self.cam.CamError, "未能确认"):
+                self.cam._launch_claude_desktop("/fake/Claude.app", directory)
+        with mock.patch.object(self.cam, "IS_MAC", False), mock.patch.object(self.cam, "IS_WIN", False), \
+                mock.patch.object(self.cam.subprocess, "Popen", return_value=launcher):
+            with self.assertRaisesRegex(self.cam.CamError, "启动后退出"):
+                self.cam._launch_claude_desktop("/fake/Claude", directory)
+        launcher.poll.return_value = None
+        with mock.patch.object(self.cam, "IS_MAC", False), mock.patch.object(self.cam, "IS_WIN", False), \
+                mock.patch.object(self.cam.subprocess, "Popen", return_value=launcher), \
+                mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, directory)]):
+            self.cam._launch_claude_desktop("/fake/Claude", directory)
+
+    def test_desktop_removal_preserves_active_and_running_profiles(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "A")
+        directory = os.path.realpath(self.cam.desktop_profile_dir(store, acc))
+        self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
+        data = store.load()
+        data["active"]["claude_desktop"] = acc["id"]
+        store.save(data)
+        with self.assertRaisesRegex(self.cam.CamError, "当前使用"):
+            self.cam.remove_account(store, acc["id"])
+        data["active"].pop("claude_desktop")
+        store.save(data)
+        for profile in (directory, None):
+            with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, profile)]):
+                with self.assertRaisesRegex(self.cam.CamError, "可能仍在使用"):
+                    self.cam.remove_account(store, acc["id"])
+            self.assertTrue(os.path.isdir(directory))
+            self.assertTrue(self.cam.find_account(store.load(), acc["id"]))
+        with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, os.path.join(self.tmp, "other"))]):
+            _, backup = self.cam.remove_account(store, acc["id"])
+        self.assertFalse(os.path.exists(directory))
+        self.assertTrue(os.path.isdir(os.path.join(backup, "desktop-profile")))
+
+    def test_desktop_network_cookie_login_and_backup(self):
+        store = self.cam.Store()
+        directory = os.path.join(self.tmp, "desktop-data")
+        os.makedirs(os.path.join(directory, "Network"))
+        for name in ("Cookies", "Cookies-wal", "Cookies-shm"):
+            with open(os.path.join(directory, "Network", name), "w") as f:
+                f.write("login cache")
+        self.assertTrue(self.cam._desktop_has_login(directory))
+        self.cam._backup_desktop_login(store, directory)
+        backup = os.path.join(store.backups_dir, os.listdir(store.backups_dir)[0], "Network")
+        self.assertEqual(sorted(os.listdir(backup)), ["Cookies", "Cookies-shm", "Cookies-wal"])
+
+    def _desktop_quota_setup(self):
+        store = self.cam.Store()
+        acc = self.cam.add_account(store, "claude_desktop", "quota")
+        directory = self.cam.desktop_profile_dir(store, acc)
+        fixture = shared("desktop_usage.json")
+        return store, acc, directory, fixture
+
+    def _desktop_cache_entry(self, directory, fixture, body=None, org=None, name="sample_0", age=0, raw=None, url=None):
+        key = ("1/0/" + (url or f"https://claude.ai/api/organizations/{org or fixture['org_uuid']}/usage")).encode()
+        header = bytes.fromhex("305c72a71b6dfbfc") + (5).to_bytes(4, "little") + len(key).to_bytes(4, "little") + bytes(8)
+        payload = raw if raw is not None else json.dumps(body or fixture["body"]).encode() + bytes([171]) * 32
+        path = os.path.join(directory, "Cache", "Cache_Data", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(header + key + payload)
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def _desktop_history(self, directory, samples, version=2):
+        with open(os.path.join(directory, "plan-usage-history.json"), "w") as f:
+            json.dump({"version": version, "samples": samples}, f)
+
+    def test_desktop_quota_reads_plain_and_zstd_cache_with_eof(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        path = os.path.join(directory, "Cache", "Cache_Data", "sample_0")
+        os.makedirs(os.path.dirname(path))
+        for field in ("plain_entry_base64", "zstd_entry_base64"):
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(fixture[field]))
+            result = self.cam.fetch_desktop_usage(store, acc)
+            self.assertEqual(result["source"], "desktop_cache")
+            self.assertEqual(result["cache_status"], "ok")
+            self.assertEqual(result["five_hour"], fixture["body"]["five_hour"])
+            self.assertEqual(result["seven_day_sonnet"], fixture["body"]["seven_day_sonnet"])
+            self.assertEqual(result["cache_org_uuid"], fixture["org_uuid"])
+
+    def test_desktop_quota_refresh_preserves_sample_time_and_account_binding(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        path = self._desktop_cache_entry(directory, fixture, age=120)
+        with open(os.path.join(directory, "config.json"), "w") as f:
+            json.dump({"lastKnownAccountUuid": "owner-A"}, f)
+        self._desktop_history(directory, [{"t": (time.time() - 300) * 1000, "org": fixture["org_uuid"], "u": {"fh": 90}}])
+        with mock.patch.object(self.cam, "snapshot_live"), mock.patch.object(self.cam, "web_get") as web:
+            data = self.cam.refresh_usage(store, acc["id"])
+        web.assert_not_called()
+        saved = data["accounts"][0]
+        self.assertEqual(saved["desktop_account_uuid"], "owner-A")
+        self.assertEqual(saved["usage"]["five_hour"]["utilization"], 37.5)
+        self.assertAlmostEqual(self.cam.parse_iso(saved["usage"]["fetched_at"]).timestamp(), os.path.getmtime(path), places=3)
+        self.assertGreater(self.cam.parse_iso(saved["usage"]["checked_at"]), self.cam.parse_iso(saved["usage"]["fetched_at"]))
+        self.assertEqual(self.cam.public_state(store, data)["accounts"][0]["usage"]["source"], "desktop_cache")
+
+    def test_desktop_quota_organization_ambiguity_and_explicit_hint(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        self._desktop_cache_entry(directory, fixture, name="first_0")
+        self._desktop_cache_entry(directory, fixture, org=fixture["other_org_uuid"], name="second_0")
+        self._desktop_history(directory, [{"t": time.time() * 1000, "org": fixture["org_uuid"], "u": {"fh": 90}}])
+        # 这些 config 字段并非客户端实际的组织来源，不能用来解除歧义。
+        with open(os.path.join(directory, "config.json"), "w") as f:
+            json.dump({"lastKnownOrgUuid": fixture["org_uuid"], "deploymentOrganizationUuid": fixture["org_uuid"]}, f)
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["cache_status"], "ambiguous")
+        self.assertIsNone(result["five_hour"])
+        acc["org_uuid"] = fixture["org_uuid"]
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_org_uuid"], fixture["org_uuid"])
+
+    def test_desktop_quota_rejects_expired_invalid_and_future_cache(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        body = {"five_hour": {"utilization": 10, "resets_at": "2000-01-01T00:00:00Z"},
+                "seven_day": {"utilization": float("nan"), "resets_at": "2099-01-01T00:00:00Z"},
+                "seven_day_opus": {"utilization": True, "resets_at": "2099-01-01T00:00:00Z"},
+                "seven_day_sonnet": {"utilization": 101, "resets_at": "2099-01-01T00:00:00Z"}}
+        self._desktop_cache_entry(directory, fixture, body=body)
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["cache_status"], "expired")
+        self.assertTrue(all(result[k] is None for k in self.cam._DESKTOP_WINDOWS))
+        self._desktop_cache_entry(directory, fixture, age=-600)
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing")
+
+    def test_desktop_quota_without_reset_uses_window_age_and_stale_flag(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        self._desktop_cache_entry(directory, fixture, body={"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}, age=6 * 3600)
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertTrue(result["cache_stale"])
+        self.assertIsNone(result["five_hour"])
+        self.assertEqual(result["seven_day"], {"utilization": 20, "resets_at": None})
+
+    def test_desktop_quota_strict_cache_url_and_input_limit(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        for url in (f"https://evil.test/https://claude.ai/api/organizations/{fixture['org_uuid']}/usage",
+                    f"https://claude.ai.evil.test/api/organizations/{fixture['org_uuid']}/usage",
+                    f"https://claude.ai/api/organizations/{fixture['org_uuid']}/usage-other"):
+            self._desktop_cache_entry(directory, fixture, url=url)
+            self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing", url)
+        self._desktop_cache_entry(directory, fixture, raw=b" " * (64 * 1024))
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing")
+
+    def test_desktop_quota_zstd_output_limit_and_missing_decoder(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        with self.assertRaisesRegex(ValueError, "超过读取上限"):
+            self.cam._desktop_decode_usage(base64.b64decode(fixture["oversize_zstd_base64"]))
+        path = self._desktop_cache_entry(directory, fixture)
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(fixture["zstd_entry_base64"]))
+        original_import = __import__
+        def without_zstd(name, *args, **kwargs):
+            if name in ("compression", "zstandard"):
+                raise ImportError(name)
+            return original_import(name, *args, **kwargs)
+        with mock.patch("builtins.__import__", side_effect=without_zstd):
+            result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["cache_status"], "unsupported_compression")
+        self.assertIsNone(result["five_hour"])
+
+    def test_desktop_quota_history_v1_v2_and_aging(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        sampled = (time.time() - 6 * 3600) * 1000
+        self._desktop_history(directory, [{"t": sampled, "fh": 22, "sd": 44}], version=1)
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["source"], "desktop_history")
+        self.assertIsNone(result["five_hour"])
+        self.assertEqual(result["seven_day"], {"utilization": 44, "resets_at": None})
+        self.assertIsNone(result["cache_org_uuid"])
+        self._desktop_history(directory, [{"t": time.time() * 1000, "org": fixture["org_uuid"],
+                                           "u": {"fh": 12, "sd": 23, "so": 34, "sn": 45}}])
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["five_hour"]["utilization"], 12)
+        self.assertEqual(result["seven_day_opus"]["utilization"], 34)
+        self.assertEqual(result["cache_org_uuid"], fixture["org_uuid"])
+
+    def test_desktop_quota_history_ambiguity_future_and_size_limit(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        samples = [{"t": time.time() * 1000, "org": org, "u": {"fh": 22}} for org in (fixture["org_uuid"], fixture["other_org_uuid"])]
+        self._desktop_history(directory, samples)
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "ambiguous")
+        acc["org_uuid"] = fixture["org_uuid"]
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "ok")
+        self._desktop_history(directory, [{"t": (time.time() + 600) * 1000, "u": {"fh": 22}}])
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing")
+        with open(os.path.join(directory, "plan-usage-history.json"), "wb") as f:
+            f.write(b" " * (4 * 1024 * 1024 + 1))
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing")
+
+    def test_desktop_quota_account_mismatch_never_rebinds_or_reads_cached_quota(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        acc["desktop_account_uuid"] = "saved-owner"
+        with open(os.path.join(directory, "config.json"), "w") as f:
+            json.dump({"lastKnownAccountUuid": "different-owner"}, f)
+        self._desktop_cache_entry(directory, fixture)
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["cache_status"], "missing")
+        self.assertIsNone(result["five_hour"])
+        self.assertEqual(acc["desktop_account_uuid"], "saved-owner")
+
+    def test_desktop_quota_uses_newest_sample_without_reviving_expired_cache(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        expired = {"five_hour": {"utilization": 99, "resets_at": "2000-01-01T00:00:00Z"}}
+        self._desktop_cache_entry(directory, fixture, body=expired)
+        self._desktop_history(directory, [{"t": (time.time() - 300) * 1000, "org": fixture["org_uuid"], "u": {"fh": 77}}])
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "expired")
+        self._desktop_cache_entry(directory, fixture, age=300)
+        self._desktop_history(directory, [{"t": time.time() * 1000, "org": fixture["org_uuid"], "u": {"fh": 12}}])
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["source"], "desktop_history")
+        self.assertEqual(result["five_hour"]["utilization"], 12)
+
+    def test_desktop_quota_rejects_unknown_history_org_with_hint_and_cross_source_conflicts(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        acc["org_uuid"] = fixture["org_uuid"]
+        self._desktop_history(directory, [{"t": time.time() * 1000, "fh": 20, "sd": 30}], version=1)
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing")
+        self._desktop_history(directory, [{"t": time.time() * 1000, "org": "invalid-org", "u": {"fh": 20}}])
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "missing")
+        acc.pop("org_uuid")
+        self._desktop_cache_entry(directory, fixture, age=300)
+        self._desktop_history(directory, [{"t": time.time() * 1000, "org": fixture["other_org_uuid"], "u": {"fh": 20}}])
+        self.assertEqual(self.cam.fetch_desktop_usage(store, acc)["cache_status"], "ambiguous")
+
+    def test_desktop_quota_newer_expired_history_blocks_older_cache(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        self._desktop_cache_entry(directory, fixture, age=10 * 86400)
+        self._desktop_history(directory, [{"t": (time.time() - 8 * 86400) * 1000,
+                                           "org": fixture["org_uuid"], "u": {"fh": 20, "sd": 30}}])
+        result = self.cam.fetch_desktop_usage(store, acc)
+        self.assertEqual(result["source"], "desktop_history")
+        self.assertEqual(result["cache_status"], "expired")
+        self.assertIsNone(result["five_hour"])
+
+    def test_desktop_quota_malformed_config_is_soft_missing(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        self._desktop_cache_entry(directory, fixture)
+        with open(os.path.join(directory, "config.json"), "w") as f:
+            f.write("{unfinished")
+        with mock.patch.object(self.cam, "snapshot_live"):
+            saved = self.cam.refresh_usage(store, acc["id"])["accounts"][0]
+        self.assertEqual(saved["usage"]["cache_status"], "missing")
+        self.assertIsNone(saved["usage"]["five_hour"])
+        self.assertIsNone(saved["usage"]["error"])
+
+    def test_desktop_quota_public_and_cli_hide_reset_windows_and_label_snapshots(self):
+        store, acc, directory, fixture = self._desktop_quota_setup()
+        data = store.load()
+        sample = data["accounts"][0]
+        data["active"]["claude_desktop"] = acc["id"]
+        sample["usage"] = {"source": "desktop_cache", "fetched_at": "2000-01-01T00:00:00Z", "cache_status": "ok",
+                           "five_hour": {"utilization": 99, "resets_at": "2000-01-02T00:00:00Z"}}
+        view = self.cam.public_state(store, data)["accounts"][0]
+        self.assertIsNone(view["usage"]["five_hour"])
+        self.assertEqual(view["usage"]["cache_status"], "expired")
+        self.assertEqual(sample["usage"]["five_hour"]["utilization"], 99)  # 展示不改存档
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.cam.print_accounts(store, data)
+        text = output.getvalue()
+        self.assertIn("[上次打开]", text)
+        self.assertIn("桌面本地缓存", text)
+        self.assertIn("记录时间", text)
+        self.assertIn("旧快照", text)
+        self.assertNotIn("99.0%", text)
 
 
 SHARED = os.path.join(HERE, "..", "tests", "shared")

@@ -436,12 +436,21 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
         let mut d = store.load()?;
         // 回写 Claude Code 刚刷新过的 token；新登录的账号自动导入
         snapshot_live(store, &mut d, None, true)?;
+        // 清除旧版把 Desktop 当 API 账号刷出的错误，保留真实的客户端额度快照。
+        for a in accounts_mut(&mut d) {
+            if s(a, "kind") == Some("claude_desktop")
+                && !matches!(a.get("usage").and_then(|u| s(u, "source")), Some("desktop_cache" | "desktop_history"))
+            {
+                a["usage"] = Value::Null;
+            }
+        }
         store.save(&mut d)?;
         d
     };
     let targets: Vec<Value> = accounts(&data)
         .iter()
         .filter(|a| only.map(|o| s(a, "id") == Some(o)).unwrap_or(true))
+        .filter(|a| matches!(s(a, "kind"), Some("claude_code" | "claude_web" | "claude_desktop" | "api")))
         .cloned()
         .collect();
     let results: Vec<(String, Value, Map<String, Value>)> = std::thread::scope(|sc| {
@@ -452,6 +461,7 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
                     let r = match s(acc, "kind") {
                         Some("claude_code") => fetch_code(store, acc, allow_token_refresh),
                         Some("claude_web") => fetch_web(store, acc),
+                        Some("claude_desktop") => super::desktop_usage::fetch_desktop_usage(store, acc),
                         _ => fetch_api(store, acc),
                     };
                     let (mut u, meta) = match r {
@@ -469,7 +479,10 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
                             (u, Map::new())
                         }
                     };
-                    u["fetched_at"] = json!(now_iso());
+                    // Desktop 的 fetched_at 是 Claude 缓存/采样时间，读取动作不能把旧数据伪装成实时。
+                    if s(acc, "kind") != Some("claude_desktop") {
+                        u["fetched_at"] = json!(now_iso());
+                    }
                     (s(acc, "id").unwrap_or_default().to_string(), u, meta)
                 })
             })

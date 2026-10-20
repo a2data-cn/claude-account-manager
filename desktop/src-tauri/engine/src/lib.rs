@@ -5,7 +5,12 @@
 pub mod api;
 pub mod browser;
 pub mod claude;
+pub mod desktop_app;
+pub mod desktop_usage;
 pub mod health;
+pub mod identity;
+pub mod mailbox;
 pub mod rules;
 pub mod store;
 pub mod usage;
+pub mod vault;

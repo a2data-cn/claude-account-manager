@@ -1,6 +1,11 @@
 import type { WindowKey } from "./types";
 
-export const KIND: Record<string, string> = { claude_code: "Claude Code", claude_web: "网页版", api: "API" };
+export const KIND: Record<string, string> = {
+  claude_code: "Claude Code",
+  claude_desktop: "桌面版",
+  claude_web: "网页版",
+  api: "API",
+};
 export const PLAN: Record<string, string> = {
   pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free", api: "API",
 };

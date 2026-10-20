@@ -77,9 +77,9 @@ export function EditDialog({
         </div>
         <div className="row2">
           <div className="field">
-            <label htmlFor="f-plan">套餐（自动获取失败时填）</label>
+            <label htmlFor="f-plan">{account.kind === "claude_desktop" ? "套餐（手动记录）" : "套餐（自动获取失败时填）"}</label>
             <select id="f-plan" value={v.plan} onChange={set("plan")}>
-              <option value="">自动</option>
+              <option value="">{account.kind === "claude_desktop" ? "未填写" : "自动"}</option>
               <option value="pro">Pro</option>
               <option value="max">Max</option>
               <option value="team">Team</option>
@@ -153,6 +153,7 @@ export interface AddValues {
   email?: string;
   api_key?: string;
   admin_key?: string;
+  use_current?: boolean;
 }
 
 export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: () => void; onAdd: (v: AddValues) => void }) {
@@ -162,6 +163,7 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
   const [email, setEmail] = useState("");
   const [key, setKey] = useState("");
   const [admin, setAdmin] = useState("");
+  const [useCurrent, setUseCurrent] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -170,6 +172,7 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
       setEmail("");
       setKey("");
       setAdmin("");
+      setUseCurrent(false);
     }
   }, [open]);
 
@@ -179,9 +182,10 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
     onAdd({
       kind,
       label: label.trim(),
-      email: kind === "claude_web" ? email.trim() : undefined,
+      email: kind === "claude_web" || kind === "claude_desktop" ? email.trim() : undefined,
       api_key: kind === "api" ? key.trim() : undefined,
       admin_key: kind === "api" ? admin.trim() : undefined,
+      use_current: kind === "claude_desktop" ? useCurrent : undefined,
     });
   };
 
@@ -193,6 +197,7 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
           <label htmlFor="a-kind">类型</label>
           <select id="a-kind" value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
             <option value="claude_code">Claude Code（命令行）</option>
+            <option value="claude_desktop">Claude 桌面版</option>
             <option value="claude_web">claude.ai 网页版</option>
             <option value="api">API Key</option>
           </select>
@@ -218,10 +223,19 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
               <label htmlFor="a-label">名称</label>
               <input id="a-label" value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
             </div>
-            {kind === "claude_web" && (
+            {(kind === "claude_web" || kind === "claude_desktop") && (
               <div className="field">
                 <label htmlFor="a-email">邮箱（可选，只用于显示）</label>
                 <input id="a-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+            )}
+            {kind === "claude_desktop" && (
+              <div className="hint">
+                <p>只用 Claude 客户端时，每个账号首次登录一次即可；读取本地额度无需登录 Code 或网页版。每个账号使用独立的本机配置，会话过期后可能需要重新登录。切换和重新打开都会退出并重启 Claude 桌面版，请先处理好其中正在运行的任务。打开 Claude 的“设置 → 用量”后可读取额度缓存更新；Claude Code 命令行账号单独切换。</p>
+                <label className="check">
+                  <input type="checkbox" checked={useCurrent} onChange={(e) => setUseCurrent(e.target.checked)} />
+                  使用这台电脑上已经登录的 Claude（只适合第一个号）
+                </label>
               </div>
             )}
             {kind === "api" && (
@@ -290,7 +304,7 @@ export function SwitchChoiceDialog({
   );
 }
 
-/** 移除账号：只从这个工具里移除，Claude Code 的项目、会话、设置都保留；正在用的 Claude Code 账号要先切走 */
+/** 移除账号：Claude Code 当前账号、工具上次打开的桌面版配置要先切走。 */
 export function RemoveDialog({
   account,
   onClose,
@@ -301,9 +315,17 @@ export function RemoveDialog({
   onConfirm: (a: Account) => void;
 }) {
   const ref = useModal(!!account);
-  const blocked = !!account && account.kind === "claude_code" && account.is_active;
+  const blocked = !!account && (account.kind === "claude_code" || account.kind === "claude_desktop") && account.is_active;
   const what =
-    account?.kind === "api" ? " API Key" : account?.kind === "claude_web" ? " sessionKey 和独立浏览器窗口的登录状态" : "登录凭据";
+    account?.kind === "api"
+      ? " API Key"
+      : account?.kind === "claude_web"
+        ? " sessionKey 和独立浏览器窗口的登录状态"
+        : account?.kind === "claude_desktop"
+          ? account.desktop_profile === "default"
+            ? " 和桌面版的对应关系（不会删掉 Claude 自己的登录数据）"
+            : " 这个号单独的桌面版登录配置"
+          : "登录凭据";
   return (
     <dialog ref={ref} onClose={onClose}>
       {account && (
@@ -316,7 +338,7 @@ export function RemoveDialog({
               <li className="keep">保留：这个账号在 Anthropic 那边的订阅、对话和数据</li>
               <li className="drop">移除：这里保存的{what}、它的切号规则（都移到备份目录，可以找回）</li>
             </ul>
-            {blocked && <div className="rm-block">这是 Claude Code 正在用的账号，先切换到其它账号再移除。</div>}
+            {blocked && <div className="rm-block">{account.kind === "claude_desktop" ? "这是工具上次打开的桌面版配置，请先用工具打开其它桌面版账号再移除。" : "这是 Claude Code 正在用的账号，先切换到其它账号再移除。"}</div>}
           </div>
           <div className="dlg-acts">
             <button type="button" className="btn" onClick={onClose}>

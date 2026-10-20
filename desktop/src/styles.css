@@ -165,6 +165,7 @@ header.top .spacer { flex: 1; }
   .btn { min-height: 36px; }
   header.top h1 { font-size: 18px; }
   header.top .host { display: none; }
+  header.top { flex-wrap: wrap; }
 }
 
 /* 区块 */
@@ -338,6 +339,26 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
 .checks .bad .mark { color: var(--hot); }
 .checks .warn .mark { color: var(--warn); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* 本地账号库与邮箱 */
+.vault .panel + .panel { margin-top: 14px; }
+.vault h3 { margin: 0 0 12px; font: 500 16px var(--serif); }
+.vault-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin: 12px 0; }
+.vault-entry { display: grid; gap: 3px; text-align: left; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface); cursor: pointer; min-width: 0; }
+.vault-entry.sel { border-color: var(--accent); }
+.vault-entry span, .vault-entry small { color: var(--muted); overflow-wrap: anywhere; }
+.vault-actions, .vault-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vault-inline select { flex: 1 1 220px; }
+.vault-actions .check { margin: 0; font-size: 12px; }
+.vault-form, .vault-unlock { margin-top: 12px; }
+.vault-revealed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0 0; }
+.vault-revealed code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.vault-revealed small { width: 100%; color: var(--muted); }
+.vault-messages { display: grid; gap: 8px; }
+.vault-message { border: 1px solid var(--line); padding: 10px 12px; border-radius: var(--radius-sm); display: grid; gap: 6px; overflow-wrap: anywhere; }
+.vault-message small { color: var(--muted); }
+.vault-code { font: 600 16px ui-monospace, monospace; letter-spacing: .08em; }
+.vault .notice { flex-wrap: wrap; gap: 8px; }
 
 /* ---- 桌面版额外样式 ---- */
 #root { min-height: 100vh; }

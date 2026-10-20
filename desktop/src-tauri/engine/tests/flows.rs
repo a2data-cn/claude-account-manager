@@ -1262,8 +1262,10 @@ fn lock_is_shared_with_python_and_released_when_holder_dies() {
         return;
     };
     let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts");
-    let code = "import sys,time; sys.path.insert(0, sys.argv[1]); import cam; \
-                l = cam.Store().lock(); l.__enter__(); print('locked', flush=True); time.sleep(60)";
+    let code = "import sys,time,os; sys.path.insert(0, sys.argv[1]); import cam; \
+                l = cam.Store().lock(); l.__enter__(); \
+                d = cam.FileLock(os.path.join(cam.Store().root, 'desktop-switch.lock'), timeout=0); \
+                d.__enter__(); print('locked', flush=True); time.sleep(60)";
     let mut child = std::process::Command::new(py)
         .args(["-c", code, scripts.to_str().unwrap()])
         .stdout(std::process::Stdio::piped())
@@ -1275,11 +1277,14 @@ fn lock_is_shared_with_python_and_released_when_holder_dies() {
     assert_eq!(&buf, b"locked");
     let path = Store::new().root.join("accounts.lock");
     assert!(try_lock_file(&path).unwrap().is_none());
+    let desktop_path = Store::new().root.join("desktop-switch.lock");
+    assert!(try_lock_file(&desktop_path).unwrap().is_none());
     child.kill().unwrap();
     child.wait().unwrap();
     let t0 = Instant::now();
     drop(Store::new().lock().unwrap());
     assert!(t0.elapsed() < Duration::from_secs(2));
+    assert!(try_lock_file(&desktop_path).unwrap().is_some());
 }
 
 // ---------------------------------------------------------------- 进程识别
@@ -1306,4 +1311,177 @@ fn claude_process_detection_rules() {
     for (a, c) in no {
         assert!(!is_claude_cmd(a, c), "不应识别为 claude：{}", a);
     }
+}
+
+#[test]
+fn desktop_account_keeps_a_separate_profile() {
+    let e = Env::new();
+    let data_dir = e.root.join("claude-desktop");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join("config.json"), r#"{"lastKnownAccountUuid":"abc"}"#).unwrap();
+    std::env::set_var("CAM_DESKTOP_DRY_RUN", "1");
+    std::env::set_var("CAM_CLAUDE_DESKTOP_DATA", &data_dir);
+    let store = Store::new();
+    let (code, st) = route(
+        &store,
+        "POST",
+        "/api/accounts",
+        &json!({"kind": "claude_desktop", "label": "当前", "use_current": true}),
+    );
+    assert_eq!(code, 200, "{}", st);
+    let cur = st["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["label"] == "当前")
+        .unwrap();
+    assert_eq!(cur["desktop_profile"], json!("default"));
+    let id = cur["id"].as_str().unwrap();
+    let (code, r) = route(&store, "POST", &format!("/api/accounts/{id}/open"), &json!({}));
+    assert_eq!(code, 200, "{}", r);
+    assert!(!r["message"].as_str().unwrap().contains("点一次邮箱"), "{}", r);
+    let (code, err) = route(
+        &store,
+        "POST",
+        "/api/accounts",
+        &json!({"kind": "claude_desktop", "label": "重复", "use_current": true}),
+    );
+    assert_eq!(code, 400, "{}", err);
+    let (code, st) = route(
+        &store,
+        "POST",
+        "/api/accounts",
+        &json!({"kind": "claude_desktop", "label": "第二个"}),
+    );
+    assert_eq!(code, 200, "{}", st);
+    let other = st["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["label"] == "第二个")
+        .unwrap();
+    let oid = other["id"].as_str().unwrap().to_string();
+    assert_ne!(other["desktop_profile"], json!("default"));
+    assert!(store.root.join("desktop-profiles").join(&oid).is_dir());
+    let (code, r) = route(&store, "POST", &format!("/api/accounts/{oid}/open"), &json!({}));
+    assert_eq!(code, 200, "{}", r);
+    assert!(r["message"].as_str().unwrap().contains("点一次邮箱"), "{}", r);
+    assert!(r["message"].as_str().unwrap().contains("不会覆盖"), "{}", r);
+    let backups: Vec<_> = std::fs::read_dir(store.backups_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("before-desktop"))
+        .collect();
+    assert!(!backups.is_empty());
+    let saved = std::fs::read_to_string(backups[0].path().join("config.json")).unwrap();
+    assert!(saved.contains("abc"));
+    assert!(data_dir.join("config.json").is_file());
+    let d = store.load().unwrap();
+    assert_eq!(d["active"]["claude_desktop"], json!(oid));
+    let st = public_state(&store, &d);
+    let marked = st["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == oid)
+        .unwrap();
+    assert_eq!(marked["is_active"], json!(true));
+
+    // 旧版的全量刷新曾把 Desktop 误当 API 账号；状态视图立即隐藏旧错误，刷新也不再请求 API。
+    let mut d = d;
+    d["accounts"][1]["usage"] = json!({"error": "没有填写 API Key", "five_hour": {"utilization": 99}});
+    store.save(&mut d).unwrap();
+    let st = public_state(&store, &d);
+    assert!(st["accounts"][1]["usage"].is_null());
+    assert_eq!(st["accounts"][1]["health"]["level"], "ok");
+    mock().lock().unwrap().calls.clear();
+    for only in [None, Some(oid.as_str())] {
+        let refreshed = refresh_usage(&store, only, true).unwrap();
+        let refreshed = refreshed["accounts"].as_array().unwrap();
+        assert!(refreshed.iter().all(|a| a["usage"]["error"].is_null()));
+        assert!(refreshed.iter().all(|a| a["usage"]["cache_status"] == "missing"));
+    }
+    assert!(mock().lock().unwrap().calls.is_empty());
+
+    // 刷新链路确实读目标账号自己的 zstd 缓存，且保留缓存时间而不是写成本次刷新时间。
+    let fixture: Value = serde_json::from_str(include_str!("../../../../tests/shared/desktop_usage.json")).unwrap();
+    let cache = store.root.join("desktop-profiles").join(&oid).join("Cache/Cache_Data");
+    std::fs::create_dir_all(&cache).unwrap();
+    let entry = cache.join("usage_0");
+    std::fs::write(&entry, hex::decode(fixture["zstd_entry_hex"].as_str().unwrap()).unwrap()).unwrap();
+    let mtime = SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&entry).unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(mtime)).unwrap();
+    let (code, view) = route(&store, "POST", "/api/refresh", &json!({"id": oid}));
+    assert_eq!(code, 200, "{view}");
+    let usage = &view["accounts"][1]["usage"];
+    assert_eq!(usage["source"], "desktop_cache");
+    assert_eq!(usage["five_hour"]["utilization"], 37.5);
+    assert_eq!(usage["seven_day"]["utilization"], 68.25);
+    assert_eq!(usage["cache_stale"], true);
+    assert_eq!(view["accounts"][1]["health"]["level"], "ok");
+    assert!(view["accounts"][0]["usage"]["five_hour"].is_null());
+    let sampled = cam_engine::store::parse_time(usage["fetched_at"].as_str().unwrap()).unwrap();
+    let checked = cam_engine::store::parse_time(usage["checked_at"].as_str().unwrap()).unwrap();
+    assert!((checked - sampled).num_seconds() >= 3590);
+    assert!(mock().lock().unwrap().calls.is_empty());
+
+    // 当前 Desktop 不能移除，独立目录仍在。移除也和其它进程的切换共用互斥锁。
+    let (code, err) = route(&store, "DELETE", &format!("/api/accounts/{oid}"), &json!({}));
+    assert_eq!(code, 400, "{}", err);
+    assert!(store.root.join("desktop-profiles").join(&oid).is_dir());
+    let guard = try_lock_file(&store.root.join("desktop-switch.lock")).unwrap().unwrap();
+    let (code, err) = route(&store, "DELETE", &format!("/api/accounts/{id}"), &json!({}));
+    assert_eq!(code, 400, "{}", err);
+    assert!(err["error"].as_str().unwrap().contains("稍后"));
+    drop(guard);
+    let (code, result) = route(&store, "DELETE", &format!("/api/accounts/{id}"), &json!({}));
+    assert_eq!(code, 200, "{}", result);
+    assert!(data_dir.join("config.json").is_file());
+    assert_eq!(store.load().unwrap()["active"]["claude_desktop"], oid);
+    std::env::remove_var("CAM_DESKTOP_DRY_RUN");
+    std::env::remove_var("CAM_CLAUDE_DESKTOP_DATA");
+}
+
+#[test]
+fn vault_routes_encrypt_passwords_and_require_unlock_and_mail_configuration() {
+    let _e = Env::new();
+    let store = Store::new();
+    let (code, initial) = route(&store, "GET", "/api/vault", &json!({}));
+    assert_eq!(code, 200);
+    assert_eq!(initial["initialized"], false);
+    assert!(!store.root.join("vault.sqlite3").exists());
+    let (code, state) = route(&store, "POST", "/api/vault/setup", &json!({"master_password":"synthetic vault master"}));
+    assert_eq!(code, 200, "{state}");
+    let (code, state) = route(&store, "POST", "/api/vault/entries", &json!({"email":"work@example.com","provider":"outlook","password":"synthetic vault password"}));
+    assert_eq!(code, 200, "{state}");
+    let entry = &state["entries"][0];
+    assert!(entry.get("secret").is_none());
+    assert!(entry.get("password").is_none());
+    assert_eq!(entry["connected"], false);
+    let id = entry["id"].as_str().unwrap();
+    let (_, revealed) = route(&store, "POST", &format!("/api/vault/entries/{id}/reveal"), &json!({}));
+    assert_eq!(revealed["password"], "synthetic vault password");
+    let bytes = std::fs::read(store.root.join("vault.sqlite3")).unwrap();
+    assert!(!bytes.windows(b"synthetic vault password".len()).any(|w| w == b"synthetic vault password"));
+    let (code, error) = route(&store, "POST", &format!("/api/vault/entries/{id}/connect"), &json!({}));
+    assert_eq!(code, 400, "{error}");
+    assert!(error["error"].as_str().unwrap().contains("Client ID"));
+    // 验证地址按邮箱绑定寻找目标账号，非官方地址和错误邮箱不能被打开。
+    let (_, web) = route(&store, "POST", "/api/accounts", &json!({"kind":"claude_web","label":"Web","email":"work@example.com"}));
+    let account = web["accounts"][0]["id"].as_str().unwrap();
+    let (code, updated) = route(&store, "POST", "/api/vault/entries", &json!({"id":id,"account_id":account}));
+    assert_eq!(code, 200, "{updated}");
+    let target = cam_engine::identity::verification_target(&store, id, "https://claude.ai/magic-link?ticket=example-only").unwrap().unwrap();
+    assert_eq!(target["id"], account);
+    assert!(cam_engine::identity::verification_target(&store,id,"https://evil.example/magic-link").is_err());
+    assert!(cam_engine::identity::verification_target(&store,id,"https://accounts.google.com/o/oauth2/v2/auth").is_err());
+    route(&store,"POST","/api/vault/entries",&json!({"id":id,"email":"other@example.com"}));
+    assert!(cam_engine::identity::verification_target(&store,id,"https://claude.ai/magic-link?ticket=example-only").is_err());
+    let (code, locked) = route(&store, "POST", "/api/vault/lock", &json!({}));
+    assert_eq!(code, 200);
+    assert_eq!(locked["entries"], json!([]));
+    let (code, _) = route(&store, "POST", &format!("/api/vault/entries/{id}/reveal"), &json!({}));
+    assert_eq!(code, 400);
+    assert!(mock().lock().unwrap().calls.is_empty());
 }

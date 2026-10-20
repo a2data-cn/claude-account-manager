@@ -1,4 +1,4 @@
-export type Kind = "claude_code" | "claude_web" | "api";
+export type Kind = "claude_code" | "claude_desktop" | "claude_web" | "api";
 
 export interface Window5 {
   utilization: number;
@@ -8,6 +8,11 @@ export interface Window5 {
 export interface Usage {
   source?: string;
   fetched_at?: string;
+  checked_at?: string;
+  cache_stale?: boolean;
+  cache_status?: "ok" | "missing" | "expired" | "ambiguous" | "unsupported_compression";
+  cache_org_uuid?: string;
+  notice?: string;
   error?: string | null;
   five_hour?: Window5 | null;
   seven_day?: Window5 | null;
@@ -39,6 +44,8 @@ export interface Account {
   manual: Manual | null;
   usage: Usage | null;
   is_active: boolean;
+  /** claude_desktop：default 表示绑定本机已有的 Claude 登录，否则是独立配置目录 */
+  desktop_profile?: string | null;
   days_left: number | null;
   api_key_hint?: string | null;
   has_admin_key?: boolean;

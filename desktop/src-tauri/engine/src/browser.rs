@@ -52,13 +52,16 @@ pub fn find_browser() -> Option<PathBuf> {
 }
 
 pub fn open_web_account(store: &Store, acc: &Value) -> R<()> {
+    open_web_url(store, acc, "https://claude.ai")
+}
+
+pub fn open_web_url(store: &Store, acc: &Value, url: &str) -> R<()> {
     if s(acc, "kind") != Some("claude_web") {
         return Err("只有网页版账号可以打开浏览器窗口".into());
     }
     let browser = find_browser().ok_or("没找到 Chrome / Edge / Brave，可用环境变量 CAM_BROWSER 指定浏览器路径")?;
     let prof = store.profiles_dir().join(s(acc, "id").unwrap_or("unknown"));
     std::fs::create_dir_all(&prof).map_err(|e| e.to_string())?;
-    let url = "https://claude.ai";
     let app_mode = acc
         .get("manual")
         .and_then(|m| m.get("app_mode"))

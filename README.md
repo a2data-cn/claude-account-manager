@@ -1,16 +1,20 @@
 # Claude 账号管理
 
-管理多个 Claude 账号：一键切换，查看每个号的 5 小时和 7 天额度、重置时间、到期日。支持桌面（macOS / Windows / Linux）、手机浏览器和命令行，三端共用同一份数据。
+管理多个 Claude 账号：切换 Claude Code 登录、打开各自独立的 Claude Desktop 配置，查看额度、记录套餐和到期日。Claude Code 和已配置 sessionKey 的网页账号可查询 5 小时、7 天额度；Claude Desktop 读取各配置的本地额度快照。管理工具提供桌面应用（macOS / Windows / Linux）、手机浏览器和命令行，三端共用同一份数据；Claude Desktop 客户端切换的兼容范围见下文。
 
-支持两类账号：
+支持四类账号：
+
 - **Claude Code（命令行）**：走 `api.anthropic.com`，能一键切换登录、自动读取额度。
-- **网页版 claude.ai**：走 `claude.ai`，每个号一个独立浏览器窗口长期保持登录；填入一次 sessionKey 后也能自动显示额度。适合只能访问网页、无法使用命令行接口的环境（例如公司网络屏蔽了 `api.anthropic.com`）。
+- **Claude Desktop（官方 Claude 客户端）**：每个号使用独立的本机配置，切换时退出并重启客户端。读取客户端自己的本地额度缓存与历史记录，显示记录时间；首次需要登录，会话过期后也可能需要重新登录。
+- **网页版 claude.ai**：每个号一个独立浏览器窗口；填入 sessionKey 后可自动显示额度，会话过期后需要更新。适合只能访问网页、无法使用命令行接口的环境（例如公司网络屏蔽了 `api.anthropic.com`）。
+- **API Key**：管理 Key 和备注，填写 Admin Key 后可读取本月花费。
 
 | | 脚本版 `cam` | 桌面版 | 手机 / 其它电脑 |
 |---|---|---|---|
-| 需要什么 | Python 3.8+，无第三方依赖 | 安装包 | 浏览器 |
+| 需要什么 | Python 3.8+；旧版 Python 读取 Desktop 压缩缓存需可选依赖，见下文 | 安装包 | 浏览器 |
 | 切换 Claude Code 账号 | ✓ | ✓（托盘菜单一键切换） | ✓（切的是电脑上的账号） |
-| 查看用量 / 到期 | ✓ | ✓（macOS 菜单栏直接显示 %） | ✓ |
+| 打开 / 切换 Claude Desktop 配置 | `cam open` | ✓ | ✓（重启的是电脑上的客户端） |
+| 查看额度 / 到期 | 按账号类型 | 按账号类型（Desktop 为本地快照） | 按账号类型 |
 | 自动发现新登录的账号 | `cam` / `cam serve` 运行时 | 后台常驻 | — |
 | 时间规则自动切号 | `cam serve` 运行时 | 后台常驻 | 可设置 |
 | 目录规则自动切号 | `cam claude` | 可设置（通过 `cam claude` 生效） | 可设置 |
@@ -22,13 +26,13 @@
 
 ![账号卡横向滑动，下面是选中账号的详情](docs/images/ui-accounts.png)
 
-- **账号条**：每个账号一张卡，横向滑动（手机上用手指滑）。卡上有名称、套餐标签（Free / Pro / Max / Team / Enterprise 不同颜色，拿不到时显示"套餐未知"，可在"编辑"里手动选）、状态（正在用 / 异常 / 注意 / 快到期）和 5 小时用量。Claude Code 当前账号排最前，最后一张是"+ 添加账号"。点哪张，下面就显示哪个。
+- **账号条**：每个账号一张卡，横向滑动（手机上用手指滑）。卡上有名称、套餐标签（Free / Pro / Max / Team / Enterprise 不同颜色，拿不到时显示"套餐未知"，可在"编辑"里手动选）、状态（正在用 / 异常 / 注意 / 快到期）和支持的用量。Desktop 显示“上次打开”与本地额度，超过 30 分钟的记录标为“旧快照”。最后一张是"+ 添加账号"，点哪张，下面就显示哪个。
 - **详情**：大号额度条（数字是已用百分比，竖线是窗口已过去的时间，用得比时间快会提示）、到期 / 价格 / 最近切换 / 备注，右上角是操作：切换到这个账号（网页号是"在电脑上打开"）、刷新、编辑、移除。
 - **异常账号**：卡片标红"异常"，详情最上面写清楚出了什么问题、怎么修，并附原始报错。会判断的情况：没有保存凭据、登录已失效（refresh token 被吊销）、保存的登录属于别的账号、sessionKey 失效、API Key 无效、订阅已过期；网络或服务暂时出错标"注意"，不算异常。
 
 ![异常账号的详情](docs/images/ui-abnormal.png)
 
-- **移除**：只从这个工具里移除。Claude Code 的项目、会话记录、设置和 MCP 配置都保留，账号在 Anthropic 那边的订阅和数据也不受影响；这里保存的凭据和它的切号规则移到备份目录，可以找回。Claude Code 正在用的账号要先切走才能移除。
+- **移除**：只从这个工具里移除。Claude Code 的项目、会话记录、设置和 MCP 配置都保留，账号在 Anthropic 那边的订阅和数据也不受影响；这里保存的凭据和它的切号规则移到备份目录，可以找回。Claude Code 当前账号、工具上次打开的 Desktop 配置都需要先切到其它同类账号才能移除。
 
 ![移除确认](docs/images/ui-remove.png)
 
@@ -241,11 +245,14 @@ cam risk                          # 查看当前设置和会访问哪些服务
 
 额度满了自动换下一个号的功能**没有做**。官方条款没有明确禁止一个人拥有多个账号，但明确禁止：把账号给别人用或分享登录信息（消费者条款第 2 条）、转售或代理给别人用、被封后换号继续用、为躲避检测开多个号（使用政策 Do Not Abuse Our Platform）。“一个号额度用完马上换下一个”条款没有直接点名，但可能被认定为绕过系统或防护措施（消费者条款第 3 条），由 Anthropic 判定。所以工具只负责提醒，换不换由你一键决定。需要更多额度，官方方式是升级 Max、开额外用量，或用 API 按量计费。
 
-### 网页版和 API 账号
+### 网页版、Claude Desktop 和 API 账号
 
 ```bash
 cam add-web --label 家里网页号     # 每个网页号一个独立的浏览器 Profile
-cam open 家里网页号                # 打开它专属的窗口，第一次在里面登录，以后一直保持登录
+cam open 家里网页号                # 打开它专属的窗口，首次或会话过期后登录
+cam add-desktop --label 工作桌面 --current   # 绑定这台电脑上已经登录的 Claude 桌面版
+cam add-desktop --label 家里桌面             # 另一个号：第一次打开时在窗口里登录
+cam open 家里桌面                            # 退出当前的 Claude 桌面版，用这个号重新打开
 cam add-api --label 项目A --key sk-ant-api03-... --admin-key sk-ant-admin01-...
 ```
 
@@ -261,6 +268,59 @@ cam add-api --label 项目A --key sk-ant-api03-... --admin-key sk-ant-admin01-..
 若 claude.ai 返回人机验证页，通常是网络被拦截（公司管控），和账号无关，工具会明确提示；这种情况下只能手动记录到期日。不填 sessionKey 也能用：每个号一键打开独立窗口，手动记录到期日并到期提醒。
 
 API 账号填了 Admin Key 后会显示本月花费。
+
+### Claude Desktop 客户端切换
+
+在“添加账号”中选择“Claude 桌面版”。第一个号可勾选“使用这台电脑上已经登录的 Claude”；其它号创建独立配置，打开后在 Claude 窗口内登录。每次点击“切换桌面版”或“重新打开”，工具都会正常退出当前 Claude Desktop，等待退出后备份登录文件，再用目标目录启动。请先处理好 Desktop 中正在运行的任务；无法确认已经退出时会停止切换。
+
+只使用 Claude 客户端时，每个账号首次在客户端登录一次即可；读取本地额度无需再登录 Claude Code 或网页版。管理工具的桌面界面、手机面板和命令行共用同一份账号记录，不必分别添加。官方 Desktop、Claude Code 和网页的登录认证各自独立，工具不会把其中一次登录转换成另两个产品的登录；会话过期或被撤销后仍可能需要重新验证。
+
+独立配置存放在 `~/.claude-accounts/desktop-profiles/<id>/`，原来已登录的配置仍使用 Claude 自己的数据目录。配置包含敏感会话数据，只供同一台电脑上的当前系统用户使用，不适合作为跨设备登录备份。会话可能过期、被撤销或要求再次验证。Desktop 切换默认不与 Claude Code 命令行联动；套餐和到期日可以手动记录。
+
+**读取 Desktop 额度**：在账号详情点“读取本地额度”。工具仅读取该配置的 Claude 本地缓存，不需要额外登录、填写 sessionKey 或授权读取钥匙串，也不会为额度查询发送网络请求。优先读取 Claude 用量页保存的 5 小时 / 7 天百分比与重置时间，缺失时尝试本地用量历史。界面同时显示“记录时间”和“最近读取”：前者是 Claude 实际写入这份数据的时间，超过 30 分钟会提示旧快照；后者只是本工具扫描的时间。已过重置时间的窗口不再显示，本地历史没有提供重置时间时会明确注明。
+
+没有记录时，先打开对应配置，在 Claude 的“设置 → 用量”查看一次，再回工具读取。未打开的账号会保留之前的本地记录；客户端尚未写入、缓存失效或格式变化时会说明原因，工具不会把缺失额度显示成 0%。Python 3.14+ 可直接解压压缩缓存；更早版本可安装可选依赖：`python3 -m pip install -r scripts/requirements-desktop.txt`。本地历史读取无需额外依赖，Rust 桌面版内置解压支持。
+
+卡片的“上次打开”只表示工具最后成功启动的配置，不表示持续在线或已验证登录身份。从 Dock、快捷方式或其它程序手动启动 Claude 后，这条记录不会自动更新；使用工具重新打开目标配置可再次执行完整切换。移除这个配置前，需要先用工具打开其它 Desktop 账号。
+
+兼容性：macOS 使用 Claude.app 和 `--user-data-dir` 启动参数。Windows 独立安装版可以尝试；Microsoft Store / MSIX 版尚未完整支持自动发现与启动。未找到客户端时，可用 `CAM_CLAUDE_DESKTOP` 指定可执行文件（macOS 指向 `.app`），用 `CAM_CLAUDE_DESKTOP_DATA` 指定原有用户数据目录；自定义路径仍需实际验证对应版本是否支持启动参数。Linux 没有官方 Claude Desktop，本项目仅保留对部分第三方封装路径的适配。自动化测试使用模拟进程和临时目录，尚不代表各平台真实客户端版本均已实测兼容。
+
+实现参考了 [matsumotory/claude-desktop-switcher](https://github.com/matsumotory/claude-desktop-switcher) 的目录隔离与进程检查、[jspanji/Swivel](https://github.com/jspanji/Swivel) 的退出后保存与会话保护、[nyxon-tech/claude-switcher](https://github.com/nyxon-tech/claude-switcher) 的登录文件范围与 Windows 路径处理。这些项目均采用 MIT 许可；这里借鉴方法，没有复制它们的源码。更多设计与限制见 [设计说明](docs/DESIGN.md)。
+
+本地额度缓存格式参考了 [ajipurn/claude-profiles 的 UsageReader](https://github.com/ajipurn/claude-profiles/blob/main/Sources/ClaudeProfilesCore/UsageReader.swift)，本项目独立实现解析。该仓库未声明开源许可，未复制其源码；它已归档，后续维护迁往 `agent-profiles`。
+
+## 本地账号库与邮箱
+
+打开“账号资料与邮箱”，设置至少 8 个字符的主密码，即可集中保存账号邮箱、密码和邮箱连接。数据位于 `~/.claude-accounts/vault.sqlite3`；名称、邮箱和连接配置是元数据，密码、Client Secret、OAuth 授权通过主密码加密。主密码不落盘，忘记后无法解密已存秘密；桌面版、Python 服务或新的 CLI 进程需要各自解锁。Python 版需要 `python3 -m pip install -r scripts/requirements-vault.txt`，Rust 安装包内置支持。
+
+新增资料时可以绑定已有 Claude 账号，点“读取已登录邮箱”从对应登录资料补全邮箱，识别不到会说明原因。仅保存资料可选“仅保存账号资料”；要自动收验证码，再选择以下邮箱方式并保存：
+
+- **Gmail / Google Workspace**：在自己的 Google Cloud 项目启用 Gmail API，创建“桌面应用”OAuth 客户端，填写 Client ID 和提供的 Client Secret；应用处于测试状态时加入自己的测试邮箱。参见 [Google 桌面应用授权说明](https://developers.google.com/identity/protocols/oauth2/native-app) 和 [Gmail 配置说明](https://developers.google.com/workspace/gmail/api/quickstart/python)。
+- **Outlook / Hotmail / Microsoft 365**：在 Microsoft Entra 注册自己的应用，选择需要的个人或组织账号类型，在“移动和桌面应用”添加 `http://localhost/oauth/callback` 并启用公用客户端；填写应用程序 ID，租户默认 `common`，也可指定企业租户。授权申请 `User.Read`、`Mail.Read` 和 `offline_access`，企业管理员可能需要批准。参见 [Microsoft 桌面应用配置](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-configuration)。
+- **其它企业 IMAP**：填写服务器、TLS 端口（通常 993）、用户名和应用专用密码。只读收件箱并正常验证 TLS 证书，不内置中国邮箱服务商的专门适配。
+
+Gmail / Outlook 点击“连接邮箱并授权”，在系统浏览器完成首次授权，界面等待授权结果。这里使用你自己的 OAuth 应用 ID，需要先完成上述配置；没有配置时无法完成真实邮箱授权。手机面板可让电脑打开授权页，回调必须在运行服务的同一台电脑完成。
+
+已保存授权后，“读取最近登录邮件”检查近期邮件；“等待新验证码”从点击前 30 秒开始，每 5 秒检查一次，最多等待 2 分钟，找到后停止，也可随时取消。账号库页打开且解锁时，还可以每 30 秒自动读取。切换条目、锁库或关闭这块界面会停止等待并清除页面中的验证码和已显示密码；普通列表始终不包含密码，显式显示后 30 秒自动隐藏，复制仅由用户点击触发。
+
+邮箱授权申请只读邮件权限，界面只显示可信 Claude / Anthropic 登录邮件的验证码和验证链接，不展示完整正文、不发送或删除邮件、不标记已读。验证链接只在你点击后打开，工具不会自动访问或预览一次性链接。**自动取信不代表自动完成 Claude 登录、回跳或多因素验证**；首次邮箱授权与首次 Claude 登录也各自独立。
+
+绑定网页版账号时，验证链接在该账号的独立浏览器窗口打开。绑定 Desktop 时，应先在对应的 Claude 配置中发起登录，并保持该配置运行；打开验证链接会核对目标配置，验证时不退出或重启 Claude，避免破坏正在等待的登录流程。
+
+Claude 当前没有独立账号密码；官方支持 Google 登录或邮箱安全链接。邮箱登录邮件主题为“Secure link to log in to Claude.ai”，发件域包括 `@mail.anthropic.com`。在请求登录的同一设备打开链接可继续登录；换设备打开可能生成验证码，需要回到原设备输入。密码字段用于集中保存你提供的账号或邮箱资料，不会改变 Claude 的认证方式。见 [Claude 官方登录说明](https://support.claude.com/en/articles/13189465-log-in-to-your-claude-account)。
+
+命令行同样可用，主密码和账号密码通过隐藏输入读取：
+
+```bash
+cam identify 工作桌面
+cam vault setup
+cam vault add --email you@example.com --provider gmail --client-id YOUR_CLIENT_ID
+cam vault ls
+cam mail connect <条目ID> --open-browser
+cam mail read <条目ID>
+```
+
+账号库补充现有账号记录，不迁移或覆盖 `accounts.json`。移除库中资料只移除保存的密码和邮箱授权，不删除 Claude 账号配置。接口和加密格式见 [账号库与邮箱设计](docs/VAULT_API.md)。
 
 ## 桌面版
 
@@ -317,7 +377,7 @@ docs/DESIGN.md        数据格式、切换流程、锁、HTTP API
 ## 测试
 
 ```bash
-python3 scripts/test_cam.py                         # 脚本版
+python3 -m unittest discover -s scripts -p 'test_*.py' # 脚本、账号库、邮箱和身份识别
 cd desktop/src-tauri && cargo test -p cam-engine    # Rust 核心逻辑，不需要 Tauri 的系统依赖
 ```
 

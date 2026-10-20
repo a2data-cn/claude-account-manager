@@ -15,11 +15,12 @@ import { LocalUsage } from "./components/LocalUsage";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Privacy } from "./components/Privacy";
 import { ThemeToggle } from "./components/ThemeToggle";
+import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
 import type { Account, ServiceCheckItem, State, SwitchResult } from "./types";
 
-type Tab = "accounts" | "settings";
-const KIND_ORDER = ["claude_code", "claude_web", "api"];
+type Tab = "accounts" | "vault" | "settings";
+const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "✓", bad: "✗", warn: "!", info: "·" };
 /** 检测结果分组（和手机面板同样的分组） */
 const CHECK_GROUPS: [string, string[]][] = [
@@ -194,6 +195,7 @@ export default function App() {
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const busyRef = useRef(false);
   const [editing, setEditing] = useState<Account | null>(null);
   const [adding, setAdding] = useState(false);
   const [choice, setChoice] = useState<SwitchChoice | null>(null); // 有会话在跑时的三选一
@@ -277,12 +279,15 @@ export default function App() {
   }, [selected?.id, tab, sorted.map((a) => a.id).join(",")]); // 回到账号页、列表重新排序后也要滑到选中的卡
 
   const run = async (key: string, fn: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(key);
     try {
       await fn();
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
+      busyRef.current = false;
       setBusy(null);
     }
   };
@@ -292,7 +297,7 @@ export default function App() {
       const s = await api<State>("POST", "/api/refresh", id ? { id } : {});
       setState(s);
       const errs = s.accounts.filter((a) => (!id || a.id === id) && a.usage?.error).length;
-      toast(errs ? `已刷新，${errs} 个账号没拿到用量` : "用量已更新");
+      toast(errs ? `已刷新，${errs} 个账号没拿到用量` : id && s.accounts.find((a) => a.id === id)?.kind === "claude_desktop" ? "已重新读取本地额度记录" : "用量已更新");
     });
 
   const switchTo = (a: Account, mode?: "wait" | "now") =>
@@ -317,6 +322,7 @@ export default function App() {
     run(a.id, async () => {
       const r = await api<{ message: string }>("POST", `/api/accounts/${a.id}/open`);
       toast(r.message);
+      await load();
     });
 
   const saveEdit = (a: Account, v: EditValues) =>
@@ -342,7 +348,7 @@ export default function App() {
       const s = await api<State>("POST", "/api/accounts", { kind: "claude_code" });
       setState(s);
       const added = s.accounts.find((a) => !before.has(a.id));
-      const cur = s.accounts.find((a) => a.is_active);
+      const cur = s.accounts.find((a) => a.kind === "claude_code" && a.is_active);
       if (added) {
         select(added);
         toast(`发现新账号，已保存：${added.label || added.email}`);
@@ -355,7 +361,15 @@ export default function App() {
     run("add", async () => {
       setState(await api<State>("POST", "/api/accounts", v));
       setAdding(false);
-      toast(v.kind === "claude_code" ? "已导入当前登录的账号" : "已添加");
+      toast(
+        v.kind === "claude_code"
+          ? "已导入当前登录的账号"
+          : v.kind === "claude_desktop"
+            ? v.use_current
+              ? "已绑定原有 Claude 桌面版配置。打开时会退出并重启客户端"
+              : "已添加。点「切换桌面版」，首次在 Claude 窗口里登录"
+            : "已添加",
+      );
     });
 
   return (
@@ -378,25 +392,26 @@ export default function App() {
           </span>
         )}
         <span className="spacer" />
-        {inTauri && (
           <nav className="tabs" aria-label="页面">
             <button className={`tab${tab === "accounts" ? " on" : ""}`} onClick={() => setTab("accounts")}>
               账号
             </button>
-            <button className={`tab${tab === "settings" ? " on" : ""}`} onClick={() => setTab("settings")}>
-              手机与设置
+            <button className={`tab${tab === "vault" ? " on" : ""}`} onClick={() => setTab("vault")}>
+              账号资料与邮箱
             </button>
+            {inTauri && <button className={`tab${tab === "settings" ? " on" : ""}`} onClick={() => setTab("settings")}>
+              手机与设置
+            </button>}
           </nav>
-        )}
         <ThemeToggle toast={toast} />
         {tab === "accounts" && (
-          <button className="btn" disabled={busy === "all"} onClick={() => refresh()}>
+          <button className="btn" disabled={!!busy} onClick={() => refresh()}>
             {busy === "all" ? "刷新中…" : "刷新用量"}
           </button>
         )}
       </header>
 
-      {tab === "settings" ? (
+      {tab === "vault" ? <AccountVault accounts={state?.accounts || []} onAccountsChanged={setState} toast={toast} /> : tab === "settings" ? (
         <>
           <PhoneAccess toast={toast} />
           <section className="block">
@@ -423,7 +438,7 @@ export default function App() {
           {state?.pending_switch && (
             <div className="notice pending" role="status">
               <span className="n-text">{state.pending_switch.message}</span>
-              <button className="btn" disabled={busy === "pending"} onClick={cancelPending}>
+              <button className="btn" disabled={!!busy} onClick={cancelPending}>
                 取消等待
               </button>
             </div>
@@ -440,13 +455,13 @@ export default function App() {
               <h2>还没有账号</h2>
               <p className="hint">先把这台电脑上当前登录的 Claude Code 账号存进来。以后你在 Claude Code 里登录新账号，这里会自动发现并保存。</p>
               <p>
-                <button className="btn primary" onClick={() => add({ kind: "claude_code" })}>
+                <button className="btn primary" disabled={!!busy} onClick={() => add({ kind: "claude_code" })}>
                   导入当前登录
                 </button>
               </p>
               <p className="hint">
-                用网页版 claude.ai 或 API Key：
-                <button className="btn" onClick={() => setAdding(true)}>
+                用 Claude 桌面版、网页版 claude.ai 或 API Key：
+                <button className="btn" disabled={!!busy} onClick={() => setAdding(true)}>
                   添加账号
                 </button>
               </p>
@@ -463,13 +478,13 @@ export default function App() {
                 <span className="spacer" style={{ flex: 1 }} />
                 <button
                   className="btn quiet"
-                  disabled={busy === "detect"}
+                  disabled={!!busy}
                   title="检查 Claude Code 现在登录的是不是新账号，是就保存"
                   onClick={detectLogin}
                 >
                   {busy === "detect" ? "检测中…" : "检测新登录"}
                 </button>
-                <button className="btn quiet" onClick={() => setAdding(true)}>
+                <button className="btn quiet" disabled={!!busy} onClick={() => setAdding(true)}>
                   ＋ 添加账号
                 </button>
               </div>
@@ -477,13 +492,13 @@ export default function App() {
                 {sorted.map((a) => (
                   <AccountTile key={a.id} a={a} selected={a.id === selected.id} onSelect={select} />
                 ))}
-                <button type="button" className="tile add" onClick={() => setAdding(true)}>
+                <button type="button" className="tile add" disabled={!!busy} onClick={() => setAdding(true)}>
                   <span className="plus">＋</span>添加账号
                 </button>
               </div>
               <AccountDetail
                 a={selected}
-                busy={busy === selected.id}
+                busy={!!busy}
                 onSwitch={switchTo}
                 onOpen={openWeb}
                 onRefresh={(x) => refresh(x.id)}

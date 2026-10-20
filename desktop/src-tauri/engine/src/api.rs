@@ -124,7 +124,7 @@ pub fn account_health(acc: &Value, has_creds: bool, days: Option<i64>) -> Value 
     json!({"level": level, "label": label, "issues": issues})
 }
 
-const PUBLIC_FIELDS: [&str; 12] = [
+const PUBLIC_FIELDS: [&str; 13] = [
     "id",
     "kind",
     "label",
@@ -137,12 +137,17 @@ const PUBLIC_FIELDS: [&str; 12] = [
     "created_at",
     "last_switched_at",
     "auto",
+    "desktop_profile",
 ];
 
 pub fn public_state(store: &Store, data: &Value) -> Value {
     let risks = super::health::risk_items(data, true);
     let risk_score = super::health::risk_score(&risks);
     let active = active_code_id(data);
+    let active_desktop = data
+        .get("active")
+        .and_then(|a| s(a, "claude_desktop"))
+        .map(String::from);
     let accs: Vec<Value> = accounts(data)
         .iter()
         .map(|a| {
@@ -150,12 +155,25 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             for k in PUBLIC_FIELDS {
                 p.insert(k.into(), a.get(k).cloned().unwrap_or(Value::Null));
             }
+            // 桌面版的登录独立保存，不能把旧版本误写的 API Key 错误当成账号异常。
+            let mut health_account = a.clone();
+            if s(a, "kind") == Some("claude_desktop")
+                && !matches!(a.get("usage").and_then(|u| s(u, "source")), Some("desktop_cache" | "desktop_history"))
+            {
+                p.insert("usage".into(), Value::Null);
+                health_account["usage"] = Value::Null;
+            }
             let id = s(a, "id").unwrap_or_default();
-            p.insert("is_active".into(), json!(active.as_deref() == Some(id)));
+            let is_active = if s(a, "kind") == Some("claude_desktop") {
+                active_desktop.as_deref() == Some(id)
+            } else {
+                active.as_deref() == Some(id)
+            };
+            p.insert("is_active".into(), json!(is_active));
             let dl = days_left(a);
             let has_creds = s(a, "kind") == Some("claude_code")
                 && store.load_secret(id).get("claudeAiOauth").and_then(|o| s(o, "refreshToken")).is_some();
-            p.insert("health".into(), account_health(a, has_creds, dl.as_i64()));
+            p.insert("health".into(), account_health(&health_account, has_creds, dl.as_i64()));
             p.insert("days_left".into(), dl);
             let plan = s(a, "plan").or_else(|| a.get("manual").and_then(|m| s(m, "plan")));
             p.insert("plan_display".into(), json!(plan));
@@ -198,8 +216,8 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
 
 pub fn add_account(store: &Store, b: &Value) -> R<()> {
     let kind = s(b, "kind").unwrap_or("");
-    if kind != "claude_web" && kind != "api" {
-        return Err("kind 只能是 claude_web 或 api（Claude Code 账号请用导入）".into());
+    if kind != "claude_web" && kind != "api" && kind != "claude_desktop" {
+        return Err("kind 只能是 claude_web、claude_desktop 或 api（Claude Code 账号请用导入）".into());
     }
     let api_key = s(b, "api_key").map(str::trim).filter(|x| !x.is_empty());
     let admin_key = s(b, "admin_key").map(str::trim).filter(|x| !x.is_empty());
@@ -211,13 +229,33 @@ pub fn add_account(store: &Store, b: &Value) -> R<()> {
     if label.is_empty() {
         label = if kind == "api" {
             "API".into()
+        } else if kind == "claude_desktop" {
+            "桌面账号".into()
         } else {
             "网页账号".into()
         };
     }
     let _g = store.lock()?;
     let mut data = store.load()?;
+    let use_current = kind == "claude_desktop" && b.get("use_current").and_then(|v| v.as_bool()) == Some(true);
+    if use_current
+        && accounts(&data).iter().any(|a| {
+            s(a, "kind") == Some("claude_desktop") && s(a, "desktop_profile") == Some("default")
+        })
+    {
+        return Err("已经有一个账号绑定了当前的 Claude 桌面版登录。其它号不要勾选，第一次打开时再登录。".into());
+    }
     let id = new_id();
+    let desktop_profile = if kind != "claude_desktop" {
+        Value::Null
+    } else if use_current {
+        json!("default")
+    } else {
+        let dir = store.root.join("desktop-profiles").join(&id);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        set_private(&dir, true);
+        json!(id)
+    };
     let manual = if kind == "claude_web" {
         json!({"app_mode": b.get("app_mode").and_then(|v| v.as_bool()).unwrap_or(false)})
     } else {
@@ -236,11 +274,15 @@ pub fn add_account(store: &Store, b: &Value) -> R<()> {
     if !sec.is_empty() {
         store.save_secret(&id, &Value::Object(sec))?;
     }
-    accounts_mut(&mut data).push(json!({
+    let mut acc = json!({
         "id": id, "kind": kind, "label": label, "email": s(b, "email"),
         "plan": if kind == "api" { json!("api") } else { Value::Null },
         "manual": manual, "usage": null, "created_at": now_iso()
-    }));
+    });
+    if kind == "claude_desktop" {
+        acc["desktop_profile"] = desktop_profile;
+    }
+    accounts_mut(&mut data).push(acc);
     store.save(&mut data)
 }
 
@@ -326,6 +368,9 @@ pub fn update_manual(store: &Store, key: &str, f: &Value) -> R<()> {
 }
 
 pub fn remove_account(store: &Store, key: &str) -> R<()> {
+    // 与 Python / 桌面切换共用操作锁；固定先操作锁、后数据锁，避免搬走启动中的目录。
+    let _desktop = try_lock_file(&store.root.join("desktop-switch.lock"))?
+        .ok_or("Claude 桌面版正在切换或移除账号，请稍后再试")?;
     let _g = store.lock()?;
     let mut data = store.load()?;
     let i = find_index(&data, key)?;
@@ -334,6 +379,7 @@ pub fn remove_account(store: &Store, key: &str) -> R<()> {
     if active_code_id(&data).as_deref() == Some(id.as_str()) {
         return Err("这是 Claude Code 当前正在用的账号，请先切换到其它账号再删除".into());
     }
+    super::desktop_app::ensure_removable(store, &acc)?;
     let d = store.new_backup_dir(&format!("removed-{}", id))?;
     let mine = |r: &Value| s(r, "account") == Some(id.as_str());
     let rules: Vec<Value> = data
@@ -352,6 +398,16 @@ pub fn remove_account(store: &Store, key: &str) -> R<()> {
     if prof.is_dir() {
         // 网页账号的浏览器 Profile（含登录 Cookie）也一起移走
         std::fs::rename(&prof, d.join("browser-profile")).map_err(|e| e.to_string())?;
+    }
+    // 绑定“当前已登录”的桌面版目录就是 Claude 自己的数据，只解除记录，不搬走
+    if s(&acc, "kind") == Some("claude_desktop") && s(&acc, "desktop_profile") != Some("default") {
+        let desk = store.root.join("desktop-profiles").join(&id);
+        if desk.is_dir() {
+            std::fs::rename(&desk, d.join("desktop-profile")).map_err(|e| e.to_string())?;
+        }
+    }
+    if data.get("active").and_then(|a| s(a, "claude_desktop")) == Some(id.as_str()) {
+        data["active"]["claude_desktop"] = Value::Null;
     }
     accounts_mut(&mut data).remove(i);
     if let Some(a) = data.get_mut("rules").and_then(|v| v.as_array_mut()) {
@@ -412,6 +468,34 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
     }))
 }
 
+pub fn identify_account(store: &Store, key: &str) -> R<Value> {
+    let data = store.load()?;
+    let account = accounts(&data)[find_index(&data, key)?].clone();
+    let id = s(&account, "id").unwrap_or_default();
+    if s(&account, "kind") == Some("claude_desktop") {
+        let found = super::identity::desktop_identity(store, &account)?;
+        let _guard = store.lock()?;
+        let mut fresh = store.load()?;
+        let i = find_index(&fresh, id)?;
+        // 核对读取期间登录没有被其它程序换掉。
+        let verified = super::identity::desktop_identity(store, &accounts(&fresh)[i])?;
+        if found != verified { return Err("识别期间客户端登录发生变化，请重试".into()); }
+        accounts_mut(&mut fresh)[i]["email"] = found["email"].clone();
+        accounts_mut(&mut fresh)[i]["desktop_account_uuid"] = found["desktop_account_uuid"].clone();
+        store.save(&mut fresh)?;
+    } else if matches!(s(&account, "kind"), Some("claude_code" | "claude_web")) {
+        refresh_usage(store, Some(id), false)?;
+    } else { return Err("这个账号类型的邮箱请手动填写".into()); }
+    let data = store.load()?;
+    let account = &accounts(&data)[find_index(&data, id)?];
+    if s(account, "email").is_none_or(|email| email.is_empty()) {
+        return Err("暂时无法识别邮箱，请确认对应账号已登录，或手动填写".into());
+    }
+    let mut view = public_state(store, &data);
+    view["identity_message"] = json!("已从对应账号的登录资料补全邮箱");
+    Ok(view)
+}
+
 /// 统一路由：返回 (HTTP 状态码, JSON)。
 pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
@@ -423,6 +507,21 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
     };
     let res: R<Value> = (|| match (method, parts) {
         ("GET", ["state"]) => Ok(public_state(store, &store.load()?)),
+        ("GET", ["vault"]) => super::vault::status(store),
+        ("POST", ["vault", "setup"]) => super::vault::setup(store, body),
+        ("POST", ["vault", "unlock"]) => super::vault::unlock(store, body),
+        ("POST", ["vault", "lock"]) => super::vault::lock(store),
+        ("POST", ["vault", "entries"]) => super::vault::save_entry(store, body),
+        ("DELETE", ["vault", "entries", id]) => super::vault::delete_entry(store, id),
+        ("POST", ["vault", "entries", id, "reveal"]) => super::vault::reveal_entry(store, id),
+        ("POST", ["vault", "entries", id, "connect"]) => super::mailbox::connect(store, id),
+        ("GET", ["vault", "oauth", job]) => super::mailbox::oauth_status(store, job),
+        ("POST", ["vault", "entries", id, "messages"]) => super::mailbox::messages(store, id, body),
+        ("POST", ["vault", "entries", id, "open-verification"]) => super::identity::open_verification(store, id, s(body, "url").ok_or("缺少验证地址")?),
+        ("POST", ["open-external"]) => {
+            super::identity::open_external(s(body, "url").ok_or("缺少地址")?)?;
+            Ok(json!({"ok": true}))
+        }
         ("POST", ["refresh"]) => {
             // 来自用户点击“刷新”，允许替过期的账号续登录
             let d = refresh_usage(store, s(body, "id"), true)?;
@@ -448,6 +547,7 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
             Ok(public_state(store, &store.load()?))
         }
         ("POST", ["accounts", id, "switch"]) => api_switch(store, id, s(body, "mode")),
+        ("POST", ["accounts", id, "identify"]) => identify_account(store, id),
         ("GET", ["privacy"]) => super::health::privacy_view(store),
         ("PUT", ["privacy"]) => super::health::save_privacy(store, body),
         ("DELETE", ["privacy", "history"]) => super::health::clear_region_history(store),
@@ -459,8 +559,14 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
         ("POST", ["accounts", id, "open"]) => {
             let d = store.load()?;
             let i = find_index(&d, id)?;
-            browser::open_web_account(store, &accounts(&d)[i])?;
-            Ok(json!({"ok": true, "message": "已在电脑上打开浏览器窗口"}))
+            let acc = accounts(&d)[i].clone();
+            if s(&acc, "kind") == Some("claude_desktop") {
+                let message = super::desktop_app::open_desktop_account(store, &acc)?;
+                Ok(json!({"ok": true, "message": message}))
+            } else {
+                browser::open_web_account(store, &acc)?;
+                Ok(json!({"ok": true, "message": "已在电脑上打开浏览器窗口"}))
+            }
         }
         ("PATCH", ["accounts", id]) => {
             update_manual(store, id, body)?;
