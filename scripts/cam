@@ -1,3 +1,9 @@
 #!/bin/sh
-# cam 启动器：把 scripts 目录加入 PATH 后可直接运行 cam
-exec python3 "$(dirname "$0")/cam.py" "$@"
+# cam 启动器：把 scripts 目录加入 PATH 后可直接运行 cam（也可以把本文件软链到 PATH 里的目录）
+self="$0"
+while [ -L "$self" ]; do
+  dir="$(cd "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  case "$self" in /*) ;; *) self="$dir/$self" ;; esac
+done
+exec python3 "$(dirname "$self")/cam.py" "$@"

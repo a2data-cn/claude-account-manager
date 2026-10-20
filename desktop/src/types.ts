@@ -52,6 +52,33 @@ export interface State {
   platform: string;
   accounts: Account[];
   generated_at: string;
+  warning?: string | null; // 后端提醒，比如凭据和 ~/.claude.json 对不上
+  pending_switch?: PendingSwitch | null; // 已记录、等 claude 会话结束后由后台执行的切换
+}
+
+export interface PendingSwitch {
+  account: string;
+  label: string;
+  reason: "manual" | "rule";
+  at: string;
+  message: string;
+}
+
+/** POST /api/accounts/{id}/switch 的返回；有会话在跑且没给 mode 时 choice_required 为 true */
+export interface SwitchResult {
+  ok: boolean;
+  message: string;
+  changed?: boolean;
+  deferred?: boolean;
+  choice_required?: boolean;
+  running_claude?: number;
+  account?: string;
+  label?: string;
+}
+
+export interface ServiceCheckItem {
+  level: "ok" | "bad" | "warn" | "info";
+  text: string;
 }
 
 export interface LocalRow {

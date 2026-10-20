@@ -5,6 +5,7 @@
 pub mod api;
 pub mod browser;
 pub mod claude;
+pub mod health;
 pub mod rules;
 pub mod store;
 pub mod usage;

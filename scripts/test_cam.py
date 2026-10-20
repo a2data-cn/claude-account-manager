@@ -27,6 +27,7 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     # sessionKey -> 网页账号资料；cloudflare=True 时所有网页请求返回挑战页
     web_keys = {}
     cloudflare = False
+    trace_loc = "US"
 
     def log_message(self, *a):
         pass
@@ -87,6 +88,8 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
             if self._web():
                 return
         auth = (self.headers.get("Authorization") or "")[7:]
+        if self.path == "/cdn-cgi/trace":
+            return self._send_html(200, f"fl=1\nip=1.2.3.4\nloc={self.trace_loc}\ncolo=SJC\n")
         if self.path == "/api/oauth/usage":
             who = self.tokens.get(auth)
             if not who:
@@ -173,6 +176,7 @@ class CamTest(unittest.TestCase):
         MockAnthropic.refresh_map = {}
         MockAnthropic.web_keys = {}
         MockAnthropic.cloudflare = False
+        MockAnthropic.trace_loc = "US"
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
@@ -517,7 +521,6 @@ class CamTest(unittest.TestCase):
     # ---- 锁
 
     def test_lock_excludes_threads_and_is_released_when_process_dies(self):
-        import subprocess
         store = self.cam.Store()
         with store.lock():
             other = self.cam.FileLock(os.path.join(store.root, "accounts.lock"))
@@ -599,6 +602,214 @@ class CamTest(unittest.TestCase):
         self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
         self.assertEqual(d["active"]["claude_code"], a_id)
         self.assertIn("live_mismatch", d)
+
+    @staticmethod
+    def _expired_ms():
+        return int((time.time() - 60) * 1000)
+
+    def test_unverifiable_login_is_parked_not_filed(self):
+        a_id, b_id = self._switched_to_b()
+        # 旧会话刷新了 A 的 token 后写回，等到 cam 运行时 access token 已过期：核对不了，不能信 ~/.claude.json 里的 B
+        self.write_creds("at-A2", "rt-A2", expires_ms=self._expired_ms())
+        MockAnthropic.calls = []
+        self.run_cam("ls")
+        self.assertFalse([c for c in MockAnthropic.calls if c[1] == "/api/oauth/profile"])  # 过期了不用白问
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A1")
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")  # 没被 A 的 token 覆盖
+        pend = store.load_secret(self.cam.PENDING_ID)
+        self.assertEqual(pend["claudeAiOauth"]["refreshToken"], "rt-A2")
+        self.assertEqual(pend["candidate"], b_id)
+        self.assertEqual(d["active"]["claude_code"], b_id)  # 显示上先按 ~/.claude.json 猜
+        self.assertIn("无法确认", self.cam.public_state(store, d)["warning"])
+        with self.assertRaises(self.cam.CamError):
+            self.cam.import_current(store, label="X")  # 认不出是谁的，不能导入
+        # 旧会话又续了一次 access token（refresh token 没换）：现在能核对，归到 A 名下，B 不动，暂存清掉
+        MockAnthropic.tokens = {"at-A3": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}}
+        self.write_creds("at-A3", "rt-A2")
+        self.run_cam("ls")
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+        self.assertEqual(d["active"]["claude_code"], a_id)
+        self.assertIn("live_mismatch", d)
+        self.assertNotIn("live_unverified", d)
+
+    def test_offline_login_is_parked_until_online(self):
+        a_id, b_id = self._switched_to_b()
+        # B 自己换了 token（正常轮换），但这会儿没网
+        self.write_creds("at-B2", "rt-B2")
+        base = self.cam.API_BASE
+        self.cam.API_BASE = "http://127.0.0.1:1"
+        try:
+            self.run_cam("ls")
+        finally:
+            self.cam.API_BASE = base
+        store = self.cam.Store()
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID)["candidate"], b_id)
+        self.assertIn("live_unverified", self.data())
+        # 网络恢复后自动归档到 B，提醒消失
+        MockAnthropic.tokens = {"at-B2": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        self.run_cam("ls")
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B2")
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+        self.assertNotIn("live_unverified", d)
+        self.assertNotIn("live_mismatch", d)
+
+    def test_switch_adopts_parked_login_after_refresh(self):
+        a_id, b_id = self._switched_to_b()
+        # B 换过 token，但 cam 运行时 access token 已过期：先暂存；随后切走，B 换过的 token 只剩暂存这一份
+        self.write_creds("at-B2", "rt-B2", expires_ms=self._expired_ms())
+        self.run_cam("switch", "A")
+        store = self.cam.Store()
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A1")
+        # 切回 B：用暂存的 refresh token 换新并核对，确认是 B 的才存进 B，切换就用上最新的
+        MockAnthropic.refresh_map = {"rt-B2": ("at-B3", "rt-B3")}
+        MockAnthropic.tokens = {"at-B3": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        self.run_cam("switch", "B")
+        store, d = self.cam.Store(), self.data()
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B3")
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B3")
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+        self.assertNotIn("live_unverified", d)
+
+    def test_switch_files_parked_login_under_its_real_owner(self):
+        a_id, b_id = self._switched_to_b()
+        # 暂存的其实是旧会话写回的 A 的 token，但 ~/.claude.json 说是 B
+        self.write_creds("at-A2", "rt-A2", expires_ms=self._expired_ms())
+        self.run_cam("switch", "A")
+        MockAnthropic.refresh_map = {"rt-A2": ("at-A3", "rt-A3")}
+        MockAnthropic.tokens = {"at-A3": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}}
+        self.run_cam("switch", "B")
+        store = self.cam.Store()
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")  # B 用的是自己保存的
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A3")  # 换新后归到 A
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+
+    # ---- 等会话结束再切换
+
+    def test_switch_waits_for_running_sessions(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        calls = {"n": 0}
+
+        def procs():
+            calls["n"] += 1
+            return [(4242, "claude")] if calls["n"] <= 2 else []
+
+        self.cam.running_claude_processes = procs
+        self.cam.WAIT_POLL_SECS = 0
+        self.addCleanup(setattr, self.cam, "WAIT_POLL_SECS", 5)
+        self.run_cam("switch", "A", "--wait")
+        d = self.data()
+        self.assertEqual(d["active"]["claude_code"], a_id)
+        self.assertNotIn("pending_switch", d)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A1")
+
+    def test_api_switch_choice_wait_and_background_apply(self):
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        r = self.cam.api_switch(store, a_id)
+        self.assertTrue(r["choice_required"])
+        self.assertEqual(r["running_claude"], 1)
+        self.assertNotIn("pending_switch", self.data())
+        r = self.cam.api_switch(store, a_id, "wait")
+        self.assertTrue(r["deferred"])
+        st = self.cam.public_state(store, self.data())
+        self.assertEqual(st["pending_switch"]["account"], a_id)
+        self.assertIn("“A”", st["pending_switch"]["message"])
+        self.assertIsNone(self.cam.apply_pending_switch(store))  # 会话还在，不切
+        self.assertEqual(self.data()["active"]["claude_code"], b_id)
+        self.cam.running_claude_processes = lambda: []
+        res = self.cam.apply_pending_switch(store)
+        self.assertEqual((res[0]["id"], res[2]), (a_id, "manual"))
+        d = self.data()
+        self.assertEqual(d["active"]["claude_code"], a_id)
+        self.assertNotIn("pending_switch", d)
+        self.assertIsNone(self.cam.public_state(store, d)["pending_switch"])
+        # mode=now 直接切；取消登记
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        r = self.cam.api_switch(store, b_id, "now")
+        self.assertTrue(r["changed"])
+        self.assertEqual(self.data()["active"]["claude_code"], b_id)
+        self.cam.api_switch(store, a_id, "wait")
+        self.assertTrue(self.cam.cancel_pending_switch(store))
+        self.assertNotIn("pending_switch", self.data())
+        self.assertFalse(self.cam.cancel_pending_switch(store))
+
+    def test_manual_switch_clears_pending_switch(self):
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.cam.api_switch(store, a_id, "wait")
+        self.assertIn("pending_switch", self.data())
+        self.run_cam("switch", "A", "-y")  # 现在就切
+        d = self.data()
+        self.assertEqual(d["active"]["claude_code"], a_id)
+        self.assertNotIn("pending_switch", d)
+        self.run_cam("switch", "--cancel-wait")  # 没有等待中的也不报错
+
+    def test_time_rule_waits_for_session_and_expires_with_window(self):
+        import datetime as dt
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        store = self.cam.Store()
+        self.cam.save_rules(store, {"rules": [
+            {"type": "time", "days": "1-5", "start": "09:00", "end": "18:00", "account": a_id}]})
+        mon10 = dt.datetime(2026, 10, 19, 10, 0)  # 周一
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.assertIsNone(self.cam.apply_time_rules(store, mon10))  # 有会话在跑：先登记
+        d = self.data()
+        self.assertEqual((d["pending_switch"]["account"], d["pending_switch"]["reason"]), (a_id, "rule"))
+        self.assertEqual(d["active"]["claude_code"], b_id)
+        self.assertIsNone(self.cam.apply_time_rules(store, mon10.replace(hour=11)))  # 同一时间段不重复
+        self.assertIsNone(self.cam.apply_pending_switch(store, mon10.replace(hour=11)))  # 会话还在
+        # 时间段过了还没切成：作废
+        self.cam.running_claude_processes = lambda: []
+        self.assertIsNone(self.cam.apply_pending_switch(store, mon10.replace(hour=19)))
+        d = self.data()
+        self.assertNotIn("pending_switch", d)
+        self.assertEqual(d["active"]["claude_code"], b_id)
+        # 第二天再进入时间段：会话退出后切过去
+        self.cam.apply_time_rules(store, mon10.replace(hour=20))  # 离开时间段
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        tue10 = mon10 + dt.timedelta(days=1)
+        self.assertIsNone(self.cam.apply_time_rules(store, tue10))
+        self.assertIn("pending_switch", self.data())
+        self.cam.running_claude_processes = lambda: []
+        res = self.cam.apply_pending_switch(store, tue10)
+        self.assertEqual((res[0]["id"], res[2]), (a_id, "rule"))
+        self.assertEqual(self.data()["active"]["claude_code"], a_id)
+
+    # ---- 服务检查
+
+    def test_service_check(self):
+        a_id, b_id = self._two_accounts()  # 当前登录 B
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        items = self.cam.service_check(self.cam.Store())
+        text = "\n".join(t for _, t in items)
+        self.assertIn("出口地区：US", text)
+        self.assertIn("服务正常，当前登录可用", text)
+        self.assertIn("可达", text)
+        self.assertEqual([lv for lv, _ in items if lv == "bad"], [])
+        # 不支持的地区只是提示，实测为准
+        MockAnthropic.trace_loc = "CN"
+        items = self.cam.service_check(self.cam.Store())
+        warn = [t for lv, t in items if lv == "warn"]
+        self.assertTrue(any("不支持的地区" in t for t in warn), items)
+        # 没登录：只看可达性
+        os.remove(self.creds_path)
+        MockAnthropic.trace_loc = "US"
+        text = "\n".join(t for _, t in self.cam.service_check(self.cam.Store()))
+        self.assertIn("服务可达（未登录", text)
+        # 被人机验证拦截
+        MockAnthropic.cloudflare = True
+        items = self.cam.service_check(None)
+        self.assertTrue(any(lv == "warn" and "人机验证" in t for lv, t in items), items)
 
     def test_new_login_before_claude_json_updated(self):
         a_id, b_id = self._two_accounts()

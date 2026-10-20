@@ -73,7 +73,7 @@
 "prefs": { "alert_threshold": 90 }
 ```
 
-- 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。
+- 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。进入时有 `claude` 会话在跑就登记成 `pending_switch`（见“切换流程”），会话退出后再切；时间段过了还没切成就作废。
 - 目录规则：`cam claude` 启动时按当前目录做最长前缀匹配，切换后再执行 `claude`。
 - 额度提醒：当前账号 5 小时额度 ≥ 阈值时提醒一次（同一个额度窗口只提醒一次），附上多久后重置。**不会自动切换，也不推荐换哪个号。**
 - 自动发现：后台检测凭据文件变化（macOS 每 30 秒查一次钥匙串），发现没见过的账号就自动导入。
@@ -91,14 +91,16 @@
 整个流程在数据锁（`accounts.lock`）里完成。
 
 1. **先快照**：读取当前正在生效的凭据（Linux/Windows 读 `~/.claude/.credentials.json`；macOS 读钥匙串 `Claude Code-credentials`，没有再读文件）以及 `~/.claude.json` 里的 `oauthAccount`。
-2. **回写**：认出它属于哪个已保存账号（见下一节），把最新 token 写回该账号（Claude Code 运行时会刷新 token，不回写的话旧 token 会失效）。如果是没见过的账号，自动导入为新账号，绝不丢弃。
+2. **回写**：认出它属于哪个已保存账号（见下一节），把最新 token 写回该账号（Claude Code 运行时会刷新 token，不回写的话旧 token 会失效）。如果是没见过的账号，自动导入为新账号，绝不丢弃。认不出是谁的（见下一节的“暂存”）就不写，切换到候选账号前会先核对一次。
 3. **备份**：把凭据文件和 `~/.claude.json` 复制到 `backups/<时间戳>/`。
 4. **写入**：原子写入目标账号的凭据，`~/.claude.json` 只替换 `oauthAccount` 字段，其它字段原样保留（合并方式见“并发与锁”）。
-5. **记录**：更新 `active` 和 `switch_log`，清掉 `live_mismatch`。
+5. **记录**：更新 `active` 和 `switch_log`，清掉 `live_mismatch`、`live_unverified` 和 `pending_switch`。
 
 不动的东西：`~/.claude/projects/`（会话记录）、`settings.json`、`CLAUDE.md`、MCP 配置、插件。所以切换后 `claude --continue` / `--resume` 照常可用。
 
 正在运行的 `claude` 进程内存里还是旧 token，切换后需要重启这些会话；不重启的话，它刷新 token 后还会把旧账号写回凭据文件。所以切换后会扫一遍进程（Linux 读 `/proc`，macOS 用 `ps`，Windows 用 `Win32_Process`），认得出原生安装版和 npm 版的 Claude Code，不算 Claude 桌面 App。有的话在返回消息、系统通知、终端输出里提示进程数和 pid；`cam switch` 在交互终端里会在切换前先问一句。
+
+**等会话结束再切**：切换前发现有会话在跑时，可以不打断它——把目标记在 `accounts.json` 的 `pending_switch`（`{"account", "reason": "manual"|"rule", "rule", "at"}`）里，由持有后台租约的那个进程（桌面版、`cam serve`、菜单栏插件）每轮检查：没有 `claude` 进程了就执行切换并清掉登记。目标账号被删、已经是当前账号、或时间规则的时间段已经过了，登记作废。手动切换会覆盖登记。`cam switch --wait` 自己也会轮询等待。面板 / 桌面版的切换接口在没指定 `mode` 且有会话在跑时返回 `choice_required`，由前端弹三选一。
 
 ## 认出当前登录
 
@@ -109,6 +111,8 @@
 3. 都对不上就导入为新账号。
 
 如果最后认定的主人和 `oauthAccount` 不一致：token 存进真正主人的名下，不用这份 `oauthAccount` 改任何账号的资料，在 `accounts.json` 里写一条 `live_mismatch`。`cam`、`cam doctor`、菜单栏插件和 `/api/state` 的 `warning` 会显示这条说明。凭据和 `oauthAccount` 重新一致后（比如下次切换成功）自动清掉。
+
+**暂存认不出主人的登录**：认人靠两样——refresh token 指纹和某个账号保存的一致（`by_token`），或联网用 `/api/oauth/profile` 问出主人。两样都做不到（离线，或 access token 已过期而 refresh token 又换过）时，不能信 `~/.claude.json` 里的 `oauthAccount`：它可能是旧会话写回时留下的别人的名字，信了就会把 A 的 token 存进 B。这时原样暂存到 `secrets/_pending-live.json`（含候选账号和首次看到的时间），`accounts.json` 里记 `live_unverified` 给界面提示，`active` 只按候选显示。之后每次快照先处理暂存：已有账号存着同一个 token 或放了 7 天就丢掉；access token 还有效就联网核对，核对出主人且比它保存的新（`saved_at` 记的是这个 refresh token 拿到的时间，token 没换不更新）就归档。切换到候选账号前再核对一次，access token 过期就用暂存的 refresh token 换新再问——这时没有会话在用它。归到谁名下由核对结果决定，所以即使其实是别的账号的，也不会写进候选账号。服务端明确说 token 无效（而不是连不上）时，仍按 `oauthAccount` 处理，和以前一样。
 
 ## Token 刷新策略
 
@@ -135,10 +139,12 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | Web 面板 |
-| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` 的说明，没有时为 `null` |
+| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null` |
 | POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
-| POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。返回 `changed`、`account`、`running_claude`（还在运行的 claude 进程数）、`message`（含进程提示）；桌面版另带 `backup` |
+| POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup` |
+| DELETE | `/api/pending-switch` | 取消登记中的等待切换，返回新的 state |
+| GET | `/api/service-check` | `{"items": [{"level": "ok"|"bad"|"warn"|"info", "text"}]}`：DNS、出口地区、api.anthropic.com、claude.ai、代理，同 `cam doctor` 的服务检查，要几秒钟 |
 | POST | `/api/accounts/{id}/open` | 在电脑上打开该网页账号的浏览器窗口 |
 | PATCH | `/api/accounts/{id}` | 修改 `label` 和 `manual.*` |
 | DELETE | `/api/accounts/{id}` | 删除账号（凭据移入 backups，不直接销毁） |

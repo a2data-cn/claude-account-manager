@@ -293,6 +293,10 @@ impl Store {
         write_json_atomic(&self.secret_path(id), v, true)
     }
 
+    pub fn delete_secret(&self, id: &str) {
+        let _ = fs::remove_file(self.secret_path(id));
+    }
+
     pub fn new_backup_dir(&self, tag: &str) -> R<PathBuf> {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let base = self.backups_dir();

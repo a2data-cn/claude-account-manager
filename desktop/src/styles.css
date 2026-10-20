@@ -111,6 +111,11 @@ section.block { margin-top: 28px; }
 section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .hint { color: var(--muted); font-size: 13px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; }
+/* 后端给的提醒（比如凭据和 ~/.claude.json 对不上） */
+.notice { margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--warn); border-left-width: 4px; border-radius: var(--radius-sm); background: var(--surface); font-size: 14px; line-height: 1.5; }
+/* 等会话结束再切换的提示：蓝色边，带“取消等待”按钮 */
+.notice.pending { border-color: var(--ok); display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.notice.pending .n-text { flex: 1 1 200px; }
 
 /* 本地消耗柱状图 */
 .bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
@@ -144,6 +149,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 12px; }
 .dlg-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
 .dlg-acts .danger { margin-right: auto; color: var(--hot); }
+.dlg-acts.wrap { flex-wrap: wrap; }
+.dlg-text { margin: 0 0 14px; font-size: 14px; line-height: 1.5; }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
@@ -166,6 +173,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
 .rule-form input, .rule-form select { min-height: 36px; }
 .alert-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; }
 .alert-row input { width: 72px; border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 6px 8px; }
+/* Claude 服务检测结果 */
+.checks { list-style: none; margin: 12px 0 0; padding: 0; font-size: 14px; }
+.checks li { display: flex; gap: 8px; padding: 3px 0; overflow-wrap: anywhere; }
+.checks .mark { flex: none; width: 1.2em; text-align: center; font-weight: 700; color: var(--muted); }
+.checks .ok .mark { color: var(--live); }
+.checks .bad .mark { color: var(--hot); }
+.checks .warn .mark { color: var(--warn); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
 /* ---- 桌面版额外样式 ---- */

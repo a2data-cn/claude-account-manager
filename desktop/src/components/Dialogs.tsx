@@ -252,3 +252,42 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
     </dialog>
   );
 }
+
+export interface SwitchChoice {
+  account: Account;
+  message: string;
+}
+
+/** 有 claude 会话在跑时让用户选：等它们结束再切，还是现在就切 */
+export function SwitchChoiceDialog({
+  choice,
+  onClose,
+  onPick,
+}: {
+  choice: SwitchChoice | null;
+  onClose: () => void;
+  onPick: (a: Account, mode: "wait" | "now") => void;
+}) {
+  const ref = useModal(!!choice);
+  return (
+    <dialog ref={ref} onClose={onClose}>
+      {choice && (
+        <form method="dialog">
+          <h3>切换账号</h3>
+          <p className="dlg-text">{choice.message}</p>
+          <div className="dlg-acts wrap">
+            <button type="button" className="btn" onClick={onClose}>
+              取消
+            </button>
+            <button type="button" className="btn" onClick={() => onPick(choice.account, "now")}>
+              现在就切换
+            </button>
+            <button type="button" className="btn primary" onClick={() => onPick(choice.account, "wait")}>
+              等会话结束后自动切换
+            </button>
+          </div>
+        </form>
+      )}
+    </dialog>
+  );
+}

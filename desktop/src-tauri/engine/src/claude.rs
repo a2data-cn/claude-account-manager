@@ -201,19 +201,30 @@ pub fn identify(data: &Value, oa: &Value, creds: &Value) -> Option<usize> {
     match_identity(data, s(oa, "accountUuid"), s(oa, "emailAddress"))
 }
 
-/// 用 /api/oauth/profile 问出这个 access token 真正属于谁，返回 (uuid, email)；问不到返回 None。
-pub fn token_owner(access_token: &str) -> Option<(Option<String>, Option<String>)> {
+/// 用 /api/oauth/profile 问出这个 access token 真正属于谁。返回 (HTTP 状态, (uuid, email))。
+/// 状态 0 表示根本没连上（离线），和服务端明确说“不认识这个 token”不是一回事：
+/// 前者只是暂时核对不了，后者是答案。
+/// 一份登录的主人：(uuid, email)，两样至少有一样。
+pub type Owner = (Option<String>, Option<String>);
+
+pub fn probe_token_owner(access_token: &str) -> (u16, Option<Owner>) {
     let (code, prof) = super::usage::get_oauth(access_token, "/api/oauth/profile", 6);
     if code != 200 {
-        return None;
+        return (code, None);
     }
-    let a = prof.get("account")?;
+    let Some(a) = prof.get("account") else {
+        return (code, None);
+    };
     let uuid = s(a, "uuid").map(String::from);
     let email = s(a, "email").map(String::from);
     if uuid.is_none() && email.is_none() {
-        return None;
+        return (code, None);
     }
-    Some((uuid, email))
+    (code, Some((uuid, email)))
+}
+
+pub fn token_owner(access_token: &str) -> Option<Owner> {
+    probe_token_owner(access_token).1
 }
 
 fn apply_meta(acc: &mut Value, oa: &Value, creds: &Value) {
@@ -235,7 +246,228 @@ fn apply_meta(acc: &mut Value, oa: &Value, creds: &Value) {
     }
 }
 
+/// secrets 目录里暂存“还没认出主人”的那份登录；账号 id 是 8 位十六进制，不会撞名。与 cam.py 一致。
+pub const PENDING_ID: &str = "_pending-live";
+const PENDING_MAX_DAYS: i64 = 7;
+
+/// access token 本地看还没过期。过期了 /api/oauth/profile 必然 401，不必白跑一趟。
+fn access_token_fresh(ob: &Value) -> bool {
+    ob.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0) > chrono::Utc::now().timestamp_millis()
+}
+
+/// 时间戳 a 晚于 b（两边后端写的格式可能略有差异，解析后再比）。
+fn newer(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a.and_then(parse_time), b.and_then(parse_time)) {
+        (Some(x), Some(y)) => x > y,
+        _ => false,
+    }
+}
+
+fn is_empty_obj(v: &Value) -> bool {
+    v.as_object().map(|o| o.is_empty()).unwrap_or(true)
+}
+
+/// 把一份已确认属于 accounts[idx] 的登录存进它名下。oauth_account 只在它描述的就是这个账号时传入。
+/// saved_at 记的是这个 refresh token 是什么时候拿到的：token 没换就沿用原来的时间，
+/// 这样才能和暂存的登录比谁更新（见 file_pending）。
+fn file_credentials(
+    store: &Store,
+    data: &mut Value,
+    idx: usize,
+    ob: &Value,
+    creds: &Value,
+    where_: Option<&str>,
+    oauth_account: Option<&Value>,
+) -> R<()> {
+    let id = s(&accounts(data)[idx], "id").unwrap_or_default().to_string();
+    let prev = store.load_secret(&id);
+    let same_rt = prev.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")) == s(ob, "refreshToken");
+    let saved_oa = match oauth_account {
+        Some(oa) => oa.clone(),
+        None => prev.get("oauthAccount").cloned().unwrap_or(Value::Null),
+    };
+    let saved_at = match s(&prev, "saved_at") {
+        Some(t) if same_rt => t.to_string(),
+        _ => now_iso(),
+    };
+    apply_meta(&mut accounts_mut(data)[idx], oauth_account.unwrap_or(&Value::Null), creds);
+    store.save_secret(
+        &id,
+        &json!({"claudeAiOauth": ob, "oauthAccount": saved_oa, "raw": creds, "store": where_, "saved_at": saved_at}),
+    )
+}
+
+/// 认不出这份登录是谁的（离线，或 access token 已过期而 refresh token 又换过）时调用：
+/// 原样暂存，不往任何账号里写。~/.claude.json 里的名字可能是旧会话写回时留下的别人的名字，
+/// 信了就会把 A 的 token 存进 B。能核对时再归档（resolve_pending / adopt_pending_for）。
+fn park_unverified(
+    store: &Store,
+    data: &mut Value,
+    candidate: Option<usize>,
+    ob: &Value,
+    creds: &Value,
+    where_: Option<&str>,
+    oa: &Value,
+) -> R<()> {
+    let prev = store.load_secret(PENDING_ID);
+    let same_rt = prev.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")) == s(ob, "refreshToken");
+    let at = match s(&prev, "at") {
+        Some(t) if same_rt => t.to_string(),
+        _ => now_iso(),
+    };
+    let (cid, label) = match candidate {
+        Some(i) => (
+            s(&accounts(data)[i], "id").map(String::from),
+            s(&accounts(data)[i], "label").map(String::from),
+        ),
+        None => (None, None),
+    };
+    store.save_secret(
+        PENDING_ID,
+        &json!({
+            "claudeAiOauth": ob, "oauthAccount": if is_empty_obj(oa) { Value::Null } else { oa.clone() },
+            "raw": creds, "store": where_, "candidate": cid, "at": at
+        }),
+    )?;
+    let who = label.map(|l| format!("可能是“{}”，", l)).unwrap_or_default();
+    data["live_unverified"] = json!({
+        "at": at, "candidate": cid,
+        "message": format!(
+            "Claude Code 当前的登录暂时无法确认属于哪个账号（{}离线或登录已过期，核对不了），这次没有保存。启动一次 claude 或联网后会自动处理。",
+            who
+        )
+    });
+    Ok(())
+}
+
+fn pending_is_stale(p: &Value) -> bool {
+    match s(p, "at").and_then(parse_time) {
+        Some(at) => chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(PENDING_MAX_DAYS),
+        None => true,
+    }
+}
+
+/// 暂存的登录已核对出主人：归到它名下；账号里已有更新的就不覆盖；没有这个账号就新建。
+fn file_pending(
+    store: &Store,
+    data: &mut Value,
+    p: &Value,
+    ob: &Value,
+    owner: &Owner,
+) -> R<usize> {
+    let (ou, oe) = (owner.0.as_deref(), owner.1.as_deref());
+    let idx = match match_identity(data, ou, oe) {
+        Some(i) => {
+            let id = s(&accounts(data)[i], "id").unwrap_or_default().to_string();
+            let sec = store.load_secret(&id);
+            if newer(s(&sec, "saved_at"), s(p, "at")) {
+                return Ok(i);
+            }
+            i
+        }
+        None => {
+            accounts_mut(data).push(json!({
+                "id": new_id(), "kind": "claude_code", "label": oe.unwrap_or("未命名账号"), "email": oe,
+                "plan": null, "org_name": null, "account_uuid": ou, "manual": {}, "usage": null,
+                "created_at": now_iso(), "last_switched_at": now_iso()
+            }));
+            accounts(data).len() - 1
+        }
+    };
+    let oa = p.get("oauthAccount").cloned().unwrap_or(Value::Null);
+    let oa_ok = !is_empty_obj(&oa)
+        && identity_agrees(&accounts(data)[idx], s(&oa, "accountUuid"), s(&oa, "emailAddress"));
+    let creds = p.get("raw").cloned().unwrap_or(Value::Null);
+    file_credentials(store, data, idx, ob, &creds, s(p, "store"), if oa_ok { Some(&oa) } else { None })?;
+    Ok(idx)
+}
+
+/// 处理之前暂存的登录：已有账号存着同一个 token、或放了太久就丢掉；能联网核对了就归档。
+fn resolve_pending(store: &Store, data: &mut Value, live_fp: Option<&str>) -> R<()> {
+    let p = store.load_secret(PENDING_ID);
+    if is_empty_obj(&p) {
+        return Ok(());
+    }
+    let ob = p.get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
+    let fp = token_fp(s(&ob, "refreshToken").unwrap_or(""));
+    if live_fp == Some(fp.as_str()) {
+        return Ok(()); // 就是当前生效的这份登录，走 snapshot_live 的正常流程
+    }
+    let filed = code_indices(data)
+        .into_iter()
+        .any(|i| s(&accounts(data)[i], "token_fp") == Some(fp.as_str()));
+    if pending_is_stale(&p) || filed {
+        store.delete_secret(PENDING_ID);
+        return Ok(());
+    }
+    if !access_token_fresh(&ob) {
+        return Ok(()); // 核对要 access token 还有效；切换到候选账号时会用 refresh token 换一个再核对
+    }
+    let (code, owner) = probe_token_owner(s(&ob, "accessToken").unwrap_or(""));
+    if let Some(o) = owner {
+        file_pending(store, data, &p, &ob, &o)?;
+        store.delete_secret(PENDING_ID);
+    } else if code != 0 {
+        store.delete_secret(PENDING_ID); // 服务端明确不认这个 token 了，留着也没用
+    }
+    Ok(())
+}
+
+/// 切换到 target 之前：暂存的登录可能是它的、又比它保存的新，现在核对一下。
+/// access token 过期就用 refresh token 换一个再问（这时没有 claude 会话在用它，不会互相抢）。
+/// 核对出来是谁的就归到谁名下：真是 target 的，切换就用上最新的 token；其实是别人的，也不会写进 target。
+fn adopt_pending_for(store: &Store, data: &mut Value, target_id: &str) -> R<()> {
+    let mut p = store.load_secret(PENDING_ID);
+    if s(&p, "candidate") != Some(target_id) {
+        return Ok(());
+    }
+    let tsec = store.load_secret(target_id);
+    if newer(s(&tsec, "saved_at"), s(&p, "at")) {
+        return Ok(()); // target 后来又拿到过更新的 token，暂存的这份对它没用了
+    }
+    let mut ob = p.get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
+    let mut owner = match s(&ob, "accessToken") {
+        Some(at) if access_token_fresh(&ob) => token_owner(at),
+        _ => None,
+    };
+    if owner.is_none() {
+        if let Some(rt) = s(&ob, "refreshToken").map(String::from) {
+            if running_claude_processes().is_empty() {
+                match super::usage::refresh_oauth(&rt) {
+                    Ok(tok) => {
+                        ob["accessToken"] = tok["access_token"].clone();
+                        if let Some(r) = s(&tok, "refresh_token") {
+                            ob["refreshToken"] = json!(r);
+                        }
+                        let secs = tok.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(28800);
+                        ob["expiresAt"] = json!(chrono::Utc::now().timestamp_millis() + secs * 1000);
+                        if !p.get("raw").map(|r| r.is_object()).unwrap_or(false) {
+                            p["raw"] = json!({});
+                        }
+                        p["raw"]["claudeAiOauth"] = ob.clone();
+                        owner = token_owner(s(&ob, "accessToken").unwrap_or(""));
+                    }
+                    Err(e) => {
+                        if e.contains("登录已失效") {
+                            store.delete_secret(PENDING_ID); // refresh token 本身已作废，这份登录没用了
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+    let Some(o) = owner else {
+        return Ok(()); // 还是核对不了：暂存留着，这次用 target 已保存的登录
+    };
+    file_pending(store, data, &p, &ob, &o)?;
+    store.delete_secret(PENDING_ID);
+    Ok(())
+}
+
 /// 把当前生效的登录保存回对应账号；未知账号按需自动导入。返回账号下标。
+/// 只有确认了这份登录是谁的才会存进账号：refresh token 指纹和某个账号保存的一致，或者联网用
+/// /api/oauth/profile 问出了主人。两样都做不到（离线、access token 过期）时暂存起来，不碰任何账号。
 /// 凭据和 ~/.claude.json 里的 oauthAccount 对不上时，以凭据为准：token 存进它真正的主人名下，
 /// 不会覆盖别的账号，并在 data["live_mismatch"] 里留下说明。逻辑与 cam.py 的 snapshot_live 一致。
 pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, create: bool) -> R<Option<usize>> {
@@ -246,17 +478,26 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
     };
     let ob = oauth_block(&creds);
     let oa = read_oauth_account()?;
-    let has_oa = oa.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+    let has_oa = !is_empty_obj(&oa);
     let (oa_uuid, oa_email) = (s(&oa, "accountUuid"), s(&oa, "emailAddress"));
-    let mut idx = identify(data, &oa, &creds);
     let live_fp = token_fp(s(&ob, "refreshToken").unwrap_or(""));
+    resolve_pending(store, data, Some(&live_fp))?;
+    let has_code_accs = !code_indices(data).is_empty();
+    let mut idx = identify(data, &oa, &creds);
     let by_token = idx
         .map(|i| s(&accounts(data)[i], "token_fp") == Some(live_fp.as_str()))
         .unwrap_or(false);
-    let mut owner: Option<(Option<String>, Option<String>)> = None;
+    let mut owner: Option<Owner> = None;
+    let mut unreachable = false;
     if !by_token {
         // token 换过了，只能靠 oauthAccount 认人；先联网核对一下这份凭据到底是谁的
-        owner = token_owner(s(&ob, "accessToken").unwrap_or(""));
+        if access_token_fresh(&ob) {
+            let (code, o) = probe_token_owner(s(&ob, "accessToken").unwrap_or(""));
+            owner = o;
+            unreachable = code == 0;
+        } else {
+            unreachable = true; // 过期了，问也是 401
+        }
         if let Some((ou, oe)) = &owner {
             let agrees = idx
                 .map(|i| identity_agrees(&accounts(data)[i], ou.as_deref(), oe.as_deref()))
@@ -265,6 +506,21 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
                 idx = match_identity(data, ou.as_deref(), oe.as_deref());
             }
         }
+    }
+    if !(by_token || owner.is_some()) && unreachable && has_code_accs {
+        park_unverified(store, data, idx, &ob, &creds, where_, &oa)?;
+        if let Some(i) = idx {
+            let id = s(&accounts(data)[i], "id").unwrap_or_default().to_string();
+            set_active_code(data, Some(&id)); // 只是显示用的最佳猜测
+        }
+        return Ok(idx);
+    }
+    if let Some(o) = data.as_object_mut() {
+        o.remove("live_unverified");
+    }
+    let pend = store.load_secret(PENDING_ID);
+    if pend.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")).map(token_fp) == Some(live_fp.clone()) {
+        store.delete_secret(PENDING_ID); // 暂存的就是这份，现在认出来了
     }
     // oauthAccount 是否描述的就是这份凭据的主人
     let oa_ok = has_oa
@@ -307,37 +563,24 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
         }
     };
     let id = s(&accounts(data)[idx], "id").unwrap_or_default().to_string();
-    let saved_oa = if oa_ok {
+    if oa_ok {
         if let Some(o) = data.as_object_mut() {
             o.remove("live_mismatch");
         }
-        oa.clone()
-    } else {
+    } else if has_oa {
         // oauthAccount 是别人的：不用它改这个账号的资料，也不把它存进这个账号
-        let prev = store.load_secret(&id).get("oauthAccount").cloned().unwrap_or(Value::Null);
-        if has_oa {
-            let label = s(&accounts(data)[idx], "label").unwrap_or("").to_string();
-            data["live_mismatch"] = json!({
-                "at": now_iso(), "account": id, "claude_json_email": oa_email,
-                "message": format!(
-                    "Claude Code 实际在用的登录属于“{}”，但 ~/.claude.json 里写的是 {}。通常是切换前打开的 claude 会话刷新 token 后写回了旧账号。退出所有 claude 会话后重新切换一次即可。",
-                    label, oa_email.unwrap_or("-")
-                )
-            });
-        }
-        prev
-    };
-    {
-        let acc = &mut accounts_mut(data)[idx];
-        apply_meta(acc, if oa_ok { &saved_oa } else { &Value::Null }, &creds);
+        let label = s(&accounts(data)[idx], "label").unwrap_or("").to_string();
+        data["live_mismatch"] = json!({
+            "at": now_iso(), "account": id, "claude_json_email": oa_email,
+            "message": format!(
+                "Claude Code 实际在用的登录属于“{}”，但 ~/.claude.json 里写的是 {}。通常是切换前打开的 claude 会话刷新 token 后写回了旧账号。退出所有 claude 会话后重新切换一次即可。",
+                label, oa_email.unwrap_or("-")
+            )
+        });
+    } else if let Some(o) = data.as_object_mut() {
+        o.remove("live_mismatch"); // ~/.claude.json 里根本没有 oauthAccount，谈不上对不上
     }
-    store.save_secret(
-        &id,
-        &json!({
-            "claudeAiOauth": ob, "oauthAccount": saved_oa, "raw": creds,
-            "store": where_, "saved_at": now_iso()
-        }),
-    )?;
+    file_credentials(store, data, idx, &ob, &creds, where_, if oa_ok { Some(&oa) } else { None })?;
     set_active_code(data, Some(&id));
     Ok(Some(idx))
 }
@@ -402,6 +645,9 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     if let Some(ci) = cur {
         if s(&accounts(&data)[ci], "id") == Some(tid.as_str()) {
             repair_oauth_account(store, &mut data, &tid)?;
+            if let Some(o) = data.as_object_mut() {
+                o.remove("pending_switch");
+            }
             store.save(&mut data)?;
             return Ok(SwitchResult {
                 id: tid,
@@ -411,6 +657,7 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
             });
         }
     }
+    adopt_pending_for(store, &mut data, &tid)?; // 暂存的登录要是 target 的，先核对并存进去，下面就能用上
     let secret = store.load_secret(&tid);
     let ob = secret.get("claudeAiOauth").cloned().unwrap_or(Value::Null);
     if s(&ob, "refreshToken").is_none() {
@@ -437,6 +684,8 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     }
     if let Some(o) = data.as_object_mut() {
         o.remove("live_mismatch"); // 凭据和 oauthAccount 现在是同一个账号的
+        o.remove("live_unverified"); // 现在生效的登录是我们刚写的，当然认识
+        o.remove("pending_switch"); // 这次切换优先于之前登记的等待切换
     }
     // 5：记录
     set_active_code(&mut data, Some(&tid));
@@ -454,8 +703,12 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
 pub fn import_current(store: &Store, label: Option<&str>) -> R<Value> {
     let _g = store.lock()?;
     let mut data = store.load()?;
-    let idx = snapshot_live(store, &mut data, label, true)?
-        .ok_or("当前没有登录 Claude Code。请先运行 claude 并登录，再导入")?;
+    let idx = snapshot_live(store, &mut data, label, true)?;
+    if let Some(m) = data.get("live_unverified").and_then(|u| s(u, "message")).map(String::from) {
+        store.save(&mut data)?; // 暂存的记录要留着
+        return Err(m);
+    }
+    let idx = idx.ok_or("当前没有登录 Claude Code。请先运行 claude 并登录，再导入")?;
     let acc = accounts(&data)[idx].clone();
     store.save(&mut data)?;
     Ok(acc)
@@ -527,11 +780,30 @@ pub fn is_claude_cmd(argv0: &str, cmdline: &str) -> bool {
 /// 正在运行的 Claude Code 进程 (pid, 命令行)，不含本进程。查不到时返回空列表。
 /// 切换账号后，这些进程内存里还是旧账号的 token，刷新后还可能把旧账号写回凭据文件。
 pub fn running_claude_processes() -> Vec<(u32, String)> {
+    if let Some(v) = std::env::var_os("CAM_TEST_CLAUDE_PIDS") {
+        // 测试用：跑测试的机器上可能真有 claude 在运行，由测试指定“有哪些”
+        return v
+            .to_string_lossy()
+            .split(',')
+            .filter_map(|p| p.trim().parse::<u32>().ok())
+            .map(|p| (p, "claude".to_string()))
+            .collect();
+    }
     let me = std::process::id();
     let mut found = Vec::new();
     if cfg!(target_os = "windows") {
-        let ps = "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }";
-        if let Ok(out) = Command::new("powershell").args(["-NoProfile", "-Command", ps]).output() {
+        // 用完整路径而不是 Name：桌面 App 的判断看的是路径，只给文件名的话
+        // Claude 桌面 App（AnthropicClaude\…\claude.exe）会被当成 Claude Code
+        let ps = "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$(if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name })`t$($_.CommandLine)\" }";
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-Command", ps]);
+        #[cfg(windows)]
+        {
+            // 桌面版是 GUI 程序（windows_subsystem = "windows"），不加这个会闪一下控制台窗口
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        if let Ok(out) = c.output() {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 let parts: Vec<&str> = line.splitn(3, '\t').collect();
                 if let [pid, name, cmd] = parts[..] {
@@ -590,17 +862,100 @@ pub fn running_claude_processes() -> Vec<(u32, String)> {
     found
 }
 
-pub fn running_warning(procs: &[(u32, String)]) -> Option<String> {
-    if procs.is_empty() {
-        return None;
-    }
+pub fn running_summary(procs: &[(u32, String)]) -> String {
     let mut pids: Vec<String> = procs.iter().take(5).map(|(p, _)| p.to_string()).collect();
     if procs.len() > 5 {
         pids.push("…".into());
     }
+    format!("有 {} 个 claude 进程正在运行（pid {}）", procs.len(), pids.join("、"))
+}
+
+pub fn running_warning(procs: &[(u32, String)]) -> Option<String> {
+    if procs.is_empty() {
+        return None;
+    }
     Some(format!(
-        "有 {} 个 claude 进程正在运行（pid {}），它们还在用切换前的账号，并可能在刷新 token 后把旧账号写回。请退出这些会话后重开（可用 claude --continue 接着聊）。",
-        procs.len(),
-        pids.join("、")
+        "{}，它们还在用切换前的账号，并可能在刷新 token 后把旧账号写回。请退出这些会话后重开（可用 claude --continue 接着聊）。",
+        running_summary(procs)
     ))
+}
+
+// ---------------------------------------------------------------- 等会话结束再切换
+
+/// 登记中的“等会话结束再切换”，给界面显示用；没有或目标账号已删除则 Null。与 cam.py 一致。
+pub fn pending_switch_view(data: &Value) -> Value {
+    let Some(p) = data.get("pending_switch").filter(|p| p.is_object()) else {
+        return Value::Null;
+    };
+    let Some(acc) = accounts(data).iter().find(|a| s(a, "id") == s(p, "account")) else {
+        return Value::Null;
+    };
+    let label = s(acc, "label").unwrap_or("");
+    let reason = s(p, "reason").unwrap_or("manual");
+    json!({
+        "account": s(acc, "id"), "label": label, "reason": reason,
+        "at": p.get("at").cloned().unwrap_or(Value::Null),
+        "message": format!(
+            "等当前 claude 会话结束后自动切换到“{}”{}",
+            label,
+            if reason == "rule" { "（时间规则）" } else { "" }
+        )
+    })
+}
+
+/// 记下“等 claude 会话都退出后切到 acc_id”。调用方持有锁并负责保存。
+pub fn defer_switch(data: &mut Value, acc_id: &str, reason: &str, rule_id: Option<&str>) {
+    data["pending_switch"] = json!({"account": acc_id, "reason": reason, "rule": rule_id, "at": now_iso()});
+}
+
+pub fn cancel_pending_switch(store: &Store) -> R<bool> {
+    let _g = store.lock()?;
+    let mut data = store.load()?;
+    let had = data
+        .as_object_mut()
+        .map(|o| o.remove("pending_switch").is_some())
+        .unwrap_or(false);
+    store.save(&mut data)?;
+    Ok(had)
+}
+
+pub fn apply_pending_switch(store: &Store) -> R<Option<(SwitchResult, String)>> {
+    apply_pending_switch_at(store, chrono::Local::now().naive_local())
+}
+
+/// 后台每轮调用：登记过的等待切换，在没有 claude 会话运行时执行。返回 (切换结果, reason)。
+/// 目标账号没了、已经是当前账号、或时间规则的时间段已经过了，就作废。切换本身走 switch_account，
+/// 它会清掉登记。与 cam.py 的 apply_pending_switch 一致。
+pub fn apply_pending_switch_at(store: &Store, now: chrono::NaiveDateTime) -> R<Option<(SwitchResult, String)>> {
+    let data = store.load()?;
+    if !data.get("pending_switch").map(|p| p.is_object()).unwrap_or(false) {
+        return Ok(None);
+    }
+    if !running_claude_processes().is_empty() {
+        return Ok(None);
+    }
+    let (target, reason) = {
+        let _g = store.lock()?;
+        let mut data = store.load()?;
+        let Some(p) = data.get("pending_switch").filter(|p| p.is_object()).cloned() else {
+            return Ok(None);
+        };
+        let target = s(&p, "account").unwrap_or_default().to_string();
+        let known = accounts(&data).iter().any(|a| s(a, "id") == Some(target.as_str()));
+        let mut drop = !known || active_code_id(&data).as_deref() == Some(target.as_str());
+        if !drop && s(&p, "reason") == Some("rule") {
+            let r = super::rules::match_time_rule(&data, now);
+            drop = r.as_ref().and_then(|r| s(r, "id")) != s(&p, "rule"); // 时间段已经过了，或规则变了
+        }
+        if drop {
+            if let Some(o) = data.as_object_mut() {
+                o.remove("pending_switch");
+            }
+            store.save(&mut data)?;
+            return Ok(None);
+        }
+        (target, s(&p, "reason").unwrap_or("manual").to_string())
+    };
+    let r = switch_account(store, &target)?;
+    Ok(if r.changed { Some((r, reason)) } else { None })
 }

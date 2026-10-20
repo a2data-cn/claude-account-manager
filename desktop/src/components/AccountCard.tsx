@@ -38,7 +38,9 @@ function DueLine({ a }: { a: Account }) {
   if (a.days_left === null || a.days_left === undefined) return null;
   const m = a.manual || {};
   const d = a.days_left;
-  const txt = d > 0 ? `${d} 天后到期（${m.expires_at}）` : d === 0 ? "今天到期" : `已过期 ${-d} 天`;
+  // 到期日可能来自接口返回的订阅信息而不是手动填写，没填时不显示括号
+  const when = m.expires_at ? `（${m.expires_at}）` : "";
+  const txt = d > 0 ? `${d} 天后到期${when}` : d === 0 ? "今天到期" : `已过期 ${-d} 天`;
   const cls = d <= 2 ? "due-now" : d <= 7 ? "due-soon" : "";
   return (
     <li className={cls}>

@@ -102,6 +102,7 @@ def background_work(store):
     if not lease.try_acquire():
         st = load_state(store)
         st["bg_owner"] = "other"
+        st.pop("last_error", None)  # 上次自己做后台任务留下的错误，现在归别人做了，不再显示
         return st
     try:
         st = _background_work(store)
@@ -127,6 +128,13 @@ def _background_work(store):
             notify("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}。{warn}")
     except Exception as e:  # noqa: BLE001
         st["last_error"] = f"时间规则：{e}"
+    try:
+        res = cam.apply_pending_switch(store)
+        if res:
+            notify("已切换账号", f"claude 会话已退出，Claude Code 已切换到 {res[0]['label']}"
+                   + ("（时间规则）" if res[2] == "rule" else ""))
+    except Exception as e:  # noqa: BLE001
+        st["last_error"] = f"等待切换：{e}"
     now = dt.datetime.now().timestamp()
     if REFRESH_MIN > 0 and now - float(st.get("last_refresh") or 0) >= REFRESH_MIN * 60:
         st["last_refresh"] = now
@@ -286,8 +294,12 @@ def render(store, st, out=print):
     elif st.get("last_refresh"):
         t = dt.datetime.fromtimestamp(float(st["last_refresh"])).strftime("%H:%M")
         out(f"用量更新于 {t} | size=12 color=gray")
-    if (data.get("live_mismatch") or {}).get("message"):
-        out(f"⚠ {esc(data['live_mismatch']['message'])[:90]} | size=12 color=#B87A08,#E0A93B")
+    notice = (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message")
+    if notice:
+        out(f"⚠ {esc(notice)[:90]} | size=12 color=#B87A08,#E0A93B")
+    pend = cam.pending_switch_view(data)
+    if pend:
+        out(f"⏳ {esc(pend['message'])[:90]} | size=12 color=#5A6676,#94A0AF")
     if st.get("last_error"):
         out(f"⚠ {esc(st['last_error'])[:90]} | size=12 color=#B87A08,#E0A93B")
 

@@ -180,12 +180,12 @@ fn on_menu(app: &AppHandle, id: &str) {
             std::thread::spawn(move || {
                 let store = Store::new();
                 let res: Result<(), String> = if let Some(acc) = id.strip_prefix("switch:") {
-                    claude::switch_account(&store, acc).map(|r| {
-                        if r.changed {
-                            if let Some(w) = claude::running_warning(&claude::running_claude_processes()) {
-                                let _ = app.emit("toast", json!({"message": w, "bad": true}));
-                                notify(&app, &format!("已切换到 {}", r.label), &w);
-                            }
+                    // 托盘菜单没法弹选择框：有会话在跑就登记等待，退出后自动切（主窗口 / 面板里可以取消）
+                    api::api_switch(&store, acc, Some("wait")).map(|r| {
+                        if r["deferred"].as_bool() == Some(true) {
+                            let msg = r["message"].as_str().unwrap_or("").to_string();
+                            let _ = app.emit("toast", json!({"message": msg, "bad": false}));
+                            notify(&app, "等会话结束后切换", &msg);
                         }
                     })
                 } else if let Some(acc) = id.strip_prefix("open:") {
@@ -406,6 +406,20 @@ fn background(app: AppHandle) {
                     );
                 }
                 Err(e) => eprintln!("时间规则执行失败：{e}"),
+                _ => {}
+            }
+            // 2b. 登记过“等会话结束再切”的：会话都退出了就执行
+            match claude::apply_pending_switch(&store) {
+                Ok(Some((r, reason))) => notify(
+                    &app,
+                    "已切换账号",
+                    &format!(
+                        "claude 会话已退出，Claude Code 已切换到 {}{}",
+                        r.label,
+                        if reason == "rule" { "（时间规则）" } else { "" }
+                    ),
+                ),
+                Err(e) => eprintln!("等待切换执行失败：{e}"),
                 _ => {}
             }
 

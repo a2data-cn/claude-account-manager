@@ -127,15 +127,19 @@ pub fn start(lan: bool, port: u16, on_change: OnChange) -> R<ServerHandle> {
 }
 
 pub fn lan_ips() -> Vec<String> {
-    let mut ips: Vec<String> = local_ip_address::list_afinet_netifas()
+    // 第一个地址会用来生成二维码。家庭 / 公司网段（10.x、172.16–31.x、192.168.x）排前面，
+    // 否则按字符串排序时 Tailscale（100.x）等虚拟网卡会排到真正的局域网地址前面
+    let mut ips: Vec<(bool, String)> = local_ip_address::list_afinet_netifas()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(_, ip)| match ip {
-            std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => Some(v4.to_string()),
+            std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => {
+                Some((!v4.is_private(), v4.to_string()))
+            }
             _ => None,
         })
         .collect();
     ips.sort();
     ips.dedup();
-    ips
+    ips.into_iter().map(|(_, ip)| ip).collect()
 }

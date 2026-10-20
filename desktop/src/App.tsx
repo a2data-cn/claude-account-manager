@@ -1,14 +1,52 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, command, inTauri, onEvent } from "./api";
 import { AccountCard } from "./components/AccountCard";
-import { AddDialog, EditDialog, type AddValues, type EditValues } from "./components/Dialogs";
+import { AddDialog, EditDialog, SwitchChoiceDialog, type AddValues, type EditValues, type SwitchChoice } from "./components/Dialogs";
 import { LocalUsage } from "./components/LocalUsage";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Rules } from "./components/Rules";
-import type { Account, State } from "./types";
+import type { Account, ServiceCheckItem, State, SwitchResult } from "./types";
 
 type Tab = "accounts" | "settings";
 const KIND_ORDER = ["claude_code", "claude_web", "api"];
+const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "✓", bad: "✗", warn: "!", info: "·" };
+
+/** Claude 服务检测：后端做 DNS、出口地区和两个域名的探测，要等几秒 */
+function ServiceCheck({ toast }: { toast: (m: string, bad?: boolean) => void }) {
+  const [items, setItems] = useState<ServiceCheckItem[] | null>(null);
+  const [checking, setChecking] = useState(false);
+  const check = async () => {
+    setChecking(true);
+    try {
+      setItems((await api<{ items: ServiceCheckItem[] }>("GET", "/api/service-check")).items);
+    } catch (e) {
+      toast((e as Error).message, true);
+    } finally {
+      setChecking(false);
+    }
+  };
+  return (
+    <section className="block">
+      <h2>Claude 服务检测</h2>
+      <div className="panel">
+        <p className="hint">检查 DNS 解析、出口地区、api.anthropic.com 和 claude.ai 是否正常，要等几秒钟。</p>
+        <button className="btn" disabled={checking} onClick={check}>
+          {checking ? "检测中…" : "开始检测"}
+        </button>
+        {items && (
+          <ul className="checks">
+            {items.map((it, i) => (
+              <li key={i} className={it.level}>
+                <span className="mark">{CHECK_MARK[it.level] || "·"}</span>
+                <span>{it.text}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
@@ -16,6 +54,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<Account | null>(null);
   const [adding, setAdding] = useState(false);
+  const [choice, setChoice] = useState<SwitchChoice | null>(null); // 有会话在跑时的三选一
   const [tab, setTab] = useState<Tab>("accounts");
   const [toastMsg, setToastMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const toastTimer = useRef<number>();
@@ -83,11 +122,22 @@ export default function App() {
       toast(errs ? `已刷新，${errs} 个账号没拿到用量` : "用量已更新");
     });
 
-  const switchTo = (a: Account) =>
+  const switchTo = (a: Account, mode?: "wait" | "now") =>
     run(a.id, async () => {
-      const r = await api<{ message: string }>("POST", `/api/accounts/${a.id}/switch`);
+      const r = await api<SwitchResult>("POST", `/api/accounts/${a.id}/switch`, mode ? { mode } : undefined);
+      // 有 claude 会话在跑：让用户选等会话结束再切，还是现在就切
+      if (r.choice_required) {
+        setChoice({ account: a, message: r.message });
+        return;
+      }
       toast(r.message);
       await load();
+    });
+
+  const cancelPending = () =>
+    run("pending", async () => {
+      setState(await api<State>("DELETE", "/api/pending-switch"));
+      toast("已取消等待");
     });
 
   const openWeb = (a: Account) =>
@@ -161,9 +211,23 @@ export default function App() {
               </button>
             </div>
           </section>
+          <ServiceCheck toast={toast} />
         </>
       ) : (
         <main aria-live="polite">
+          {state?.warning && (
+            <div className="notice" role="alert">
+              ⚠ {state.warning}
+            </div>
+          )}
+          {state?.pending_switch && (
+            <div className="notice pending" role="status">
+              <span className="n-text">{state.pending_switch.message}</span>
+              <button className="btn" disabled={busy === "pending"} onClick={cancelPending}>
+                取消等待
+              </button>
+            </div>
+          )}
           {error && (
             <div className="panel empty">
               <h2>读取账号失败</h2>
@@ -204,6 +268,14 @@ export default function App() {
 
       <EditDialog account={editing} onClose={() => setEditing(null)} onSave={saveEdit} onDelete={remove} />
       <AddDialog open={adding} onClose={() => setAdding(false)} onAdd={add} />
+      <SwitchChoiceDialog
+        choice={choice}
+        onClose={() => setChoice(null)}
+        onPick={(a, mode) => {
+          setChoice(null);
+          switchTo(a, mode);
+        }}
+      />
       <div className={`toast${toastMsg ? " show" : ""}${toastMsg?.bad ? " bad" : ""}`} role="status">
         {toastMsg?.text}
       </div>

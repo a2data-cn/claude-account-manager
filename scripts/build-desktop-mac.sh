@@ -42,12 +42,15 @@ step "安装前端依赖（npm install）"
 npm install >>"$LOG" 2>&1 || fail "npm install 失败（国内网络可先运行：npm config set registry https://registry.npmmirror.com）"
 
 step "编译（第一次较慢，请耐心等待）"
+rm -rf src-tauri/target/release/bundle/macos   # 清掉上次的产物，否则编译失败时会把旧 App 当成功装上
 npm run tauri build -- --bundles app 2>&1 | tee -a "$LOG" | grep -E "^(error|warning: unused|    Finished|\s+Compiling claude-accounts)" || true
 APP="$(ls -d src-tauri/target/release/bundle/macos/*.app 2>/dev/null | head -1)"
 [[ -n "$APP" ]] || fail "编译没有成功，请把 build.log 发给我"
 
 step "安装到“应用程序”"
 NAME="$(basename "$APP")"
+# 关掉窗口后 App 还在菜单栏里跑着，先退出旧的，否则替换后打开的仍是旧版本
+if pkill -f "/Applications/$NAME/Contents/MacOS/" 2>/dev/null; then sleep 1; fi
 rm -rf "/Applications/$NAME"
 cp -R "$APP" /Applications/ || fail "复制到 /Applications 失败"
 xattr -dr com.apple.quarantine "/Applications/$NAME" 2>/dev/null || true

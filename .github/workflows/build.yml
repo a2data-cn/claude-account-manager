@@ -61,6 +61,10 @@ jobs:
         with:
           workspaces: desktop/src-tauri -> target
 
+      - name: 引擎测试（含 tests/shared 与脚本版的一致性）
+        working-directory: desktop/src-tauri
+        run: cargo test -p cam-engine
+
       - name: 安装前端依赖
         run: npm install
 

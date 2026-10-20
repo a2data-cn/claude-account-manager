@@ -1,8 +1,12 @@
 //! 端到端测试：临时目录当 Claude Code 配置目录和数据目录，本地起一个假的 Anthropic 接口，不碰真实账号。
 //! 对应 scripts/test_cam.py 里的同名场景。
 
-use cam_engine::api::public_state;
-use cam_engine::claude::{import_current, is_claude_cmd, switch_account};
+use cam_engine::api::{public_state, route};
+use cam_engine::claude::{
+    apply_pending_switch, apply_pending_switch_at, import_current, is_claude_cmd, switch_account, PENDING_ID,
+};
+use cam_engine::health::service_check;
+use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
 use cam_engine::usage::{ensure_fresh_token, refresh_usage};
 use serde_json::{json, Value};
@@ -51,7 +55,13 @@ fn mock_base() -> &'static str {
                     .and_then(|b| b["refresh_token"].as_str().map(String::from))
                     .unwrap_or_default();
                 m.calls.push((req.method().to_string(), path.clone(), rt.clone()));
+                if path == "/cdn-cgi/trace" {
+                    drop(m);
+                    let _ = req.respond(tiny_http::Response::from_string("fl=1\nip=1.2.3.4\nloc=US\ncolo=SJC\n"));
+                    continue;
+                }
                 let (code, out) = match path.as_str() {
+                    "/api/organizations" => (403, json!({"error": {"message": "unauthorized"}})),
                     "/api/oauth/usage" => match m.tokens.get(&auth) {
                         Some(_) => (200, json!({"five_hour": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"}})),
                         None => (401, json!({"error": {"message": "invalid token"}})),
@@ -102,6 +112,7 @@ impl Env {
         std::env::set_var("CLAUDE_CONFIG_DIR", root.join("claude"));
         std::env::set_var("CAM_HOME", root.join("cam"));
         std::env::set_var("CAM_NO_KEYCHAIN", "1");
+        std::env::set_var("CAM_TEST_CLAUDE_PIDS", "");
         std::env::set_var("CAM_API_BASE", base);
         std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", base));
         for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
@@ -237,6 +248,209 @@ fn old_session_writing_back_refreshed_token_is_verified_by_profile() {
     assert_eq!(e.secret_rt(&a), "rt-A2");
     assert_eq!(e.secret_rt(&b), "rt-B1");
     assert_eq!(e.data()["active"]["claude_code"], json!(a));
+}
+
+fn pending_empty(store: &Store) -> bool {
+    store.load_secret(PENDING_ID).as_object().map(|o| o.is_empty()).unwrap_or(true)
+}
+
+#[test]
+fn unverifiable_login_is_parked_not_filed() {
+    let e = Env::new();
+    let (a, b) = e.two_accounts(later());
+    let store = Store::new();
+    switch_account(&store, "A").unwrap();
+    switch_account(&store, "B").unwrap();
+    // 旧会话刷新了 A 的 token 后写回，等到这里运行时 access token 已过期：核对不了，不能信 ~/.claude.json 里的 B
+    e.write_creds("at-A2", "rt-A2", past());
+    let n = mock().lock().unwrap().calls.len();
+    let err = import_current(&store, Some("X")).unwrap_err();
+    assert!(err.contains("无法确认"), "{}", err);
+    assert_eq!(mock().lock().unwrap().calls.len(), n); // 过期了不用白问
+    assert_eq!(e.secret_rt(&a), "rt-A1");
+    assert_eq!(e.secret_rt(&b), "rt-B1"); // 没被 A 的 token 覆盖
+    let p = store.load_secret(PENDING_ID);
+    assert_eq!(p["claudeAiOauth"]["refreshToken"], "rt-A2");
+    assert_eq!(p["candidate"], json!(b));
+    let d = e.data();
+    assert_eq!(d["active"]["claude_code"], json!(b)); // 显示上先按 ~/.claude.json 猜
+    assert!(public_state(&store, &d)["warning"].as_str().unwrap().contains("无法确认"));
+    // 旧会话又续了一次 access token（refresh token 没换）：现在能核对，归到 A 名下，B 不动，暂存清掉
+    mock().lock().unwrap().tokens.insert("at-A3".into(), "a@x.com".into());
+    e.write_creds("at-A3", "rt-A2", later());
+    import_current(&store, None).unwrap();
+    assert_eq!(e.secret_rt(&a), "rt-A2");
+    assert_eq!(e.secret_rt(&b), "rt-B1");
+    assert!(pending_empty(&store));
+    let d = e.data();
+    assert_eq!(d["active"]["claude_code"], json!(a));
+    assert!(d.get("live_mismatch").is_some() && d.get("live_unverified").is_none());
+}
+
+#[test]
+fn offline_login_is_parked_until_online() {
+    let e = Env::new();
+    let (_a, b) = e.two_accounts(later());
+    let store = Store::new();
+    switch_account(&store, "A").unwrap();
+    switch_account(&store, "B").unwrap();
+    // B 自己换了 token（正常轮换），但这会儿没网
+    e.write_creds("at-B2", "rt-B2", later());
+    std::env::set_var("CAM_API_BASE", "http://127.0.0.1:1");
+    let r = import_current(&store, None);
+    std::env::set_var("CAM_API_BASE", mock_base());
+    assert!(r.unwrap_err().contains("无法确认"));
+    assert_eq!(e.secret_rt(&b), "rt-B1");
+    assert_eq!(store.load_secret(PENDING_ID)["candidate"], json!(b));
+    assert!(e.data().get("live_unverified").is_some());
+    // 网络恢复后自动归档到 B，提醒消失
+    mock().lock().unwrap().tokens.insert("at-B2".into(), "b@x.com".into());
+    import_current(&store, None).unwrap();
+    assert_eq!(e.secret_rt(&b), "rt-B2");
+    assert!(pending_empty(&store));
+    let d = e.data();
+    assert!(d.get("live_unverified").is_none() && d.get("live_mismatch").is_none());
+}
+
+#[test]
+fn switch_adopts_parked_login_after_refresh() {
+    let e = Env::new();
+    let (_a, b) = e.two_accounts(later());
+    let store = Store::new();
+    switch_account(&store, "A").unwrap();
+    switch_account(&store, "B").unwrap();
+    // B 换过 token，但这里运行时 access token 已过期：先暂存；随后切走，B 换过的 token 只剩暂存这一份
+    e.write_creds("at-B2", "rt-B2", past());
+    switch_account(&store, "A").unwrap();
+    assert_eq!(e.secret_rt(&b), "rt-B1");
+    assert_eq!(e.live().0["refreshToken"], "rt-A1");
+    // 切回 B：用暂存的 refresh token 换新并核对，确认是 B 的才存进 B，切换就用上最新的
+    {
+        let mut m = mock().lock().unwrap();
+        m.refresh.insert("rt-B2".into(), ("at-B3".into(), "rt-B3".into()));
+        m.tokens.insert("at-B3".into(), "b@x.com".into());
+    }
+    switch_account(&store, "B").unwrap();
+    assert_eq!(e.live().0["refreshToken"], "rt-B3");
+    assert_eq!(e.secret_rt(&b), "rt-B3");
+    assert!(pending_empty(&store));
+    assert!(e.data().get("live_unverified").is_none());
+}
+
+#[test]
+fn switch_files_parked_login_under_its_real_owner() {
+    let e = Env::new();
+    let (a, b) = e.two_accounts(later());
+    let store = Store::new();
+    switch_account(&store, "A").unwrap();
+    switch_account(&store, "B").unwrap();
+    // 暂存的其实是旧会话写回的 A 的 token，但 ~/.claude.json 说是 B
+    e.write_creds("at-A2", "rt-A2", past());
+    switch_account(&store, "A").unwrap();
+    {
+        let mut m = mock().lock().unwrap();
+        m.refresh.insert("rt-A2".into(), ("at-A3".into(), "rt-A3".into()));
+        m.tokens.insert("at-A3".into(), "a@x.com".into());
+    }
+    switch_account(&store, "B").unwrap();
+    assert_eq!(e.live().0["refreshToken"], "rt-B1"); // B 用的是自己保存的
+    assert_eq!(e.secret_rt(&b), "rt-B1");
+    assert_eq!(e.secret_rt(&a), "rt-A3"); // 换新后归到 A
+    assert!(pending_empty(&store));
+}
+
+fn fake_claude(running: bool) {
+    std::env::set_var("CAM_TEST_CLAUDE_PIDS", if running { "4242" } else { "" });
+}
+
+#[test]
+fn api_switch_waits_for_sessions_then_background_applies() {
+    let e = Env::new();
+    let (a, b) = e.two_accounts(later());
+    let store = Store::new();
+    fake_claude(true);
+    let (code, r) = route(&store, "POST", &format!("/api/accounts/{a}/switch"), &json!({}));
+    assert_eq!(code, 200);
+    assert_eq!(r["choice_required"], json!(true));
+    assert!(e.data().get("pending_switch").is_none());
+    let (_, r) = route(&store, "POST", &format!("/api/accounts/{a}/switch"), &json!({"mode": "wait"}));
+    assert_eq!(r["deferred"], json!(true));
+    let st = public_state(&store, &e.data());
+    assert_eq!(st["pending_switch"]["account"], json!(a));
+    assert!(st["pending_switch"]["message"].as_str().unwrap().contains("“A”"));
+    assert!(apply_pending_switch(&store).unwrap().is_none()); // 会话还在，不切
+    assert_eq!(e.data()["active"]["claude_code"], json!(b));
+    fake_claude(false);
+    let (r, reason) = apply_pending_switch(&store).unwrap().unwrap();
+    assert!(r.changed && r.id == a && reason == "manual");
+    let d = e.data();
+    assert_eq!(d["active"]["claude_code"], json!(a));
+    assert!(d.get("pending_switch").is_none());
+    assert!(public_state(&store, &d)["pending_switch"].is_null());
+    // mode=now 直接切；DELETE 取消登记；手动切换清掉登记
+    fake_claude(true);
+    let (_, r) = route(&store, "POST", &format!("/api/accounts/{b}/switch"), &json!({"mode": "now"}));
+    assert_eq!(r["changed"], json!(true));
+    route(&store, "POST", &format!("/api/accounts/{a}/switch"), &json!({"mode": "wait"}));
+    let (code, st) = route(&store, "DELETE", "/api/pending-switch", &json!({}));
+    assert_eq!(code, 200);
+    assert!(st["pending_switch"].is_null());
+    route(&store, "POST", &format!("/api/accounts/{a}/switch"), &json!({"mode": "wait"}));
+    switch_account(&store, "A").unwrap();
+    assert!(e.data().get("pending_switch").is_none());
+    fake_claude(false);
+}
+
+#[test]
+fn time_rule_waits_for_session_and_expires_with_window() {
+    let e = Env::new();
+    let (a, b) = e.two_accounts(later());
+    let store = Store::new();
+    save_rules(
+        &store,
+        &json!({"rules": [{"type": "time", "days": "1-5", "start": "09:00", "end": "18:00", "account": a}]}),
+    )
+    .unwrap();
+    let mon10 = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap().and_hms_opt(10, 0, 0).unwrap(); // 周一
+    fake_claude(true);
+    assert!(apply_time_rules_at(&store, mon10).unwrap().is_none()); // 有会话在跑：先登记
+    let d = e.data();
+    assert_eq!(d["pending_switch"]["account"], json!(a));
+    assert_eq!(d["pending_switch"]["reason"], json!("rule"));
+    assert_eq!(d["active"]["claude_code"], json!(b));
+    assert!(apply_time_rules_at(&store, mon10 + chrono::Duration::hours(1)).unwrap().is_none()); // 同一时间段不重复
+    assert!(apply_pending_switch_at(&store, mon10 + chrono::Duration::hours(1)).unwrap().is_none()); // 会话还在
+    fake_claude(false);
+    // 时间段过了还没切成：作废
+    assert!(apply_pending_switch_at(&store, mon10 + chrono::Duration::hours(9)).unwrap().is_none());
+    let d = e.data();
+    assert!(d.get("pending_switch").is_none());
+    assert_eq!(d["active"]["claude_code"], json!(b));
+    // 第二天再进入时间段：会话退出后切过去
+    apply_time_rules_at(&store, mon10 + chrono::Duration::hours(10)).unwrap(); // 离开时间段
+    fake_claude(true);
+    let tue10 = mon10 + chrono::Duration::days(1);
+    assert!(apply_time_rules_at(&store, tue10).unwrap().is_none());
+    assert!(e.data().get("pending_switch").is_some());
+    fake_claude(false);
+    let (r, reason) = apply_pending_switch_at(&store, tue10).unwrap().unwrap();
+    assert!(r.id == a && reason == "rule");
+    assert_eq!(e.data()["active"]["claude_code"], json!(a));
+}
+
+#[test]
+fn service_check_reports_region_and_services() {
+    let e = Env::new();
+    e.two_accounts(later()); // 当前登录 B
+    mock().lock().unwrap().tokens.insert("at-B1".into(), "b@x.com".into());
+    std::env::set_var("CAM_CLAUDE_WEB_BASE", mock_base());
+    let items = service_check(&Store::new());
+    std::env::remove_var("CAM_CLAUDE_WEB_BASE");
+    let all = items.iter().map(|(l, t)| format!("{} {}", l, t)).collect::<Vec<_>>().join("\n");
+    assert!(all.contains("出口地区：US"), "{}", all);
+    assert!(all.contains("服务正常，当前登录可用"), "{}", all);
+    assert!(all.contains("可达"), "{}", all);
+    assert!(!items.iter().any(|(l, _)| l == "bad"), "{}", all);
 }
 
 #[test]

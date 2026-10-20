@@ -121,6 +121,11 @@ section.block { margin-top: 28px; }
 section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .hint { color: var(--muted); font-size: 13px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; }
+/* 后端给的提醒（比如凭据和 ~/.claude.json 对不上） */
+.notice { margin-bottom: 12px; padding: 10px 14px; border: 1px solid var(--warn); border-left-width: 4px; border-radius: var(--radius-sm); background: var(--surface); font-size: 14px; line-height: 1.5; }
+/* 等会话结束再切换的提示：蓝色边，带“取消等待”按钮 */
+.notice.pending { border-color: var(--ok); display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.notice.pending .n-text { flex: 1 1 200px; }
 
 /* 本地消耗柱状图 */
 .bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
@@ -154,6 +159,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
 .check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 12px; }
 .dlg-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
 .dlg-acts .danger { margin-right: auto; color: var(--hot); }
+.dlg-acts.wrap { flex-wrap: wrap; }
+.dlg-text { margin: 0 0 14px; font-size: 14px; line-height: 1.5; }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
@@ -176,6 +183,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
 .rule-form input, .rule-form select { min-height: 36px; }
 .alert-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 14px; }
 .alert-row input { width: 72px; border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 6px 8px; }
+/* Claude 服务检测结果 */
+.checks { list-style: none; margin: 12px 0 0; padding: 0; font-size: 14px; }
+.checks li { display: flex; gap: 8px; padding: 3px 0; overflow-wrap: anywhere; }
+.checks .mark { flex: none; width: 1.2em; text-align: center; font-weight: 700; color: var(--muted); }
+.checks .ok .mark { color: var(--live); }
+.checks .bad .mark { color: var(--hot); }
+.checks .warn .mark { color: var(--warn); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 </style>
 </head>
@@ -223,6 +237,15 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
       </form>
     </div>
     <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p>
+  </section>
+
+  <section class="block" id="check-block" hidden>
+    <h2>Claude 服务检测</h2>
+    <div class="panel">
+      <p class="hint">检查 DNS 解析、出口地区、api.anthropic.com 和 claude.ai 是否正常，要等几秒钟。</p>
+      <button class="btn" id="btn-check" type="button">开始检测</button>
+      <ul class="checks" id="check-list" hidden></ul>
+    </div>
   </section>
 
   <p class="hint" id="footer"></p>
@@ -285,6 +308,18 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
   </form>
 </dialog>
 
+<dialog id="dlg-switch">
+  <form method="dialog">
+    <h3>切换账号</h3>
+    <p class="dlg-text" id="switch-msg"></p>
+    <div class="dlg-acts wrap">
+      <button class="btn" value="cancel">取消</button>
+      <button class="btn" value="now">现在就切换</button>
+      <button class="btn primary" value="wait">等会话结束后自动切换</button>
+    </div>
+  </form>
+</dialog>
+
 <div class="toast" id="toast" role="status"></div>
 
 <script>
@@ -293,18 +328,20 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  // ---- 后端适配：桌面版注入 window.__CAM_BRIDGE__（Tauri），否则走 HTTP
-  const bridge = window.__CAM_BRIDGE__ || null;
+  // ---- 后端：脚本版 cam serve 和桌面版内置服务提供同一套 HTTP API
   let token = "";
   try {
     const u = new URL(location.href);
     const t = u.searchParams.get("t");
-    if (t) { localStorage.setItem("cam-token", t); u.searchParams.delete("t"); history.replaceState(null, "", u.pathname + u.search + u.hash); }
-    token = localStorage.getItem("cam-token") || "";
+    if (t) { token = t; u.searchParams.delete("t"); history.replaceState(null, "", u.pathname + u.search + u.hash); }
+  } catch (_) {}
+  try {
+    // 链接里带的令牌先记在内存里，存不进 localStorage（无痕模式等）这一次也能用
+    if (token) localStorage.setItem("cam-token", token);
+    else token = localStorage.getItem("cam-token") || "";
   } catch (_) { /* 无痕模式等情况下 localStorage 不可用 */ }
 
   async function api(method, path, body) {
-    if (bridge) return bridge(method, path, body);
     const res = await fetch(path, {
       method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -327,7 +364,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
 
   // ---- 格式化
   const KIND = { claude_code: "Claude Code", claude_web: "网页版", api: "API" };
+  const KIND_ORDER = ["claude_code", "claude_web", "api"];
   const PLAN = { pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free", api: "API" };
+  const nameOf = (a) => a.label || a.email || a.id;
   function untilText(iso) {
     if (!iso) return "";
     const ms = new Date(iso) - Date.now();
@@ -378,7 +417,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     if (a.days_left === null || a.days_left === undefined) return "";
     const m = a.manual || {};
     const d = a.days_left;
-    const txt = d > 0 ? `${d} 天后到期（${esc(m.expires_at)}）` : d === 0 ? `今天到期` : `已过期 ${-d} 天`;
+    // 到期日可能来自接口返回的订阅信息而不是手动填写，没填时不显示括号
+    const when = m.expires_at ? `（${esc(m.expires_at)}）` : "";
+    const txt = d > 0 ? `${d} 天后到期${when}` : d === 0 ? `今天到期` : `已过期 ${-d} 天`;
     const cls = d <= 2 ? "due-now" : d <= 7 ? "due-soon" : "";
     return `<li class="${cls}">${txt}${m.auto_renew ? "，自动续期" : ""}${m.price ? "，" + esc(m.price) : ""}</li>`;
   }
@@ -413,7 +454,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     acts.push(`<button class="btn" data-act="refresh" data-id="${a.id}">刷新</button>`);
     acts.push(`<button class="btn quiet" data-act="edit" data-id="${a.id}">编辑</button>`);
 
-    return `<article class="acc${a.is_active ? " is-live" : ""}" aria-label="${esc(a.label)}">
+    return `<article class="acc${a.is_active ? " is-live" : ""}" aria-label="${esc(nameOf(a))}">
       <div class="who">
         <div class="name">${esc(a.label || a.email || "未命名")} ${plan} ${live}</div>
         ${a.email && a.email !== a.label ? `<div class="mail">${esc(a.email)}</div>` : ""}
@@ -428,9 +469,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
   let state = null;
   function render() {
     const list = $("#list");
-    $("#host").textContent = state ? `${state.host}（${state.platform}）` : "";
+    $("#host").textContent = `${state.host}（${state.platform}）`;
+    $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
+    const p = state.pending_switch;
+    const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
+      + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "");
     if (!state.accounts.length) {
-      list.innerHTML = `<div class="panel empty"><h2>还没有账号</h2>
+      list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
         <p class="hint"><b>用 Claude Code（命令行）</b>：确认终端里 <code>claude</code> 已登录，点下面的按钮导入。以后 <code>/login</code> 换号会自动保存。</p>
         <p><button class="btn primary" data-act="import">导入当前登录</button></p>
         <p class="hint" style="margin-top:14px"><b>用网页版 claude.ai</b>：点“添加账号”选网页版，每个号一个独立浏览器窗口，登录状态长期保留。填入 sessionKey 后可自动显示额度。</p></div>`;
@@ -439,13 +484,12 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     // Claude Code 当前账号排最前，其余按 5 小时余量从多到少
     const sorted = [...state.accounts].sort((x, y) => {
       if (x.is_active !== y.is_active) return x.is_active ? -1 : 1;
-      if (x.kind !== y.kind) return ["claude_code", "claude_web", "api"].indexOf(x.kind) - ["claude_code", "claude_web", "api"].indexOf(y.kind);
+      if (x.kind !== y.kind) return KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind);
       const ux = x.usage && x.usage.five_hour ? x.usage.five_hour.utilization : 999;
       const uy = y.usage && y.usage.five_hour ? y.usage.five_hour.utilization : 999;
       return ux - uy;
     });
-    list.innerHTML = sorted.map(accountRow).join("");
-    $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
+    list.innerHTML = notice + sorted.map(accountRow).join("");
   }
 
   function renderLogin(msg) {
@@ -466,7 +510,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     try {
       const rep = await api("GET", "/api/local-usage?days=14");
       if (!rep.rows.length) { $("#local-block").hidden = true; return; }
-      const names = Object.fromEntries(state.accounts.map((a) => [a.id, a.label]));
+      const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
       const ids = [...new Set(rep.rows.map((r) => r.account_id))];
       const color = Object.fromEntries(ids.map((id, i) => [id, id === "unattributed" ? "var(--muted)" : COLORS[i % (COLORS.length - 1)]]));
       const days = [];
@@ -491,6 +535,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     try {
       state = await api("GET", "/api/state");
       render(); loadLocal(); loadRules();
+      $("#check-block").hidden = false;
     } catch (e) {
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
       else $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`;
@@ -514,6 +559,31 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     });
   }
 
+  // ---- 切换：有 claude 会话在跑时后端不直接切，让用户选等它们结束再切还是现在就切
+  let switching = null;
+  async function doSwitch(id, btn, mode) {
+    await busy(btn, async () => {
+      try {
+        const r = await api("POST", `/api/accounts/${id}/switch`, mode ? { mode } : undefined);
+        if (r.choice_required) {
+          switching = id;
+          $("#switch-msg").textContent = r.message || "有 claude 会话正在运行，现在切换会打断它们。";
+          $("#dlg-switch").returnValue = "";
+          $("#dlg-switch").showModal();
+          return;
+        }
+        toast(r.message || "已切换"); await load();
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+  $("#dlg-switch").addEventListener("close", () => {
+    const mode = $("#dlg-switch").returnValue, id = switching;
+    switching = null;
+    if (!id || (mode !== "wait" && mode !== "now")) return;
+    const btn = [...document.querySelectorAll('button[data-act="switch"]')].find((x) => x.dataset.id === id) || null;
+    doSwitch(id, btn, mode);
+  });
+
   // ---- 编辑
   let editing = null;
   function openEdit(a) {
@@ -532,6 +602,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#fw-api").hidden = a.kind !== "api";
     $("#fw-admin").hidden = a.kind !== "api";
     $("#btn-delete").hidden = a.is_active;
+    $("#dlg-edit").returnValue = ""; // 上次关闭留下的返回值不清掉，按 Esc 关闭会被当成“保存”
     $("#dlg-edit").showModal();
   }
   $("#dlg-edit").addEventListener("close", async () => {
@@ -547,7 +618,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     catch (e) { toast(e.message, true); }
   });
   $("#btn-delete").onclick = async () => {
-    if (!editing || !confirm(`删除“${editing.label}”？凭据会移到备份目录，不会直接销毁。`)) return;
+    if (!editing || !confirm(`删除“${nameOf(editing)}”？凭据会移到备份目录，不会直接销毁。`)) return;
     try { state = await api("DELETE", "/api/accounts/" + editing.id); $("#dlg-edit").close("cancel"); render(); toast("已删除"); }
     catch (e) { toast(e.message, true); }
   };
@@ -563,7 +634,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#btn-add-ok").textContent = k === "claude_code" ? "导入当前登录" : "添加";
   }
   $("#a-kind").onchange = syncAddKind;
-  $("#btn-add").onclick = () => { $("#form-add").reset(); syncAddKind(); $("#dlg-add").showModal(); };
+  $("#btn-add").onclick = () => { $("#form-add").reset(); syncAddKind(); $("#dlg-add").returnValue = ""; $("#dlg-add").showModal(); };
   $("#dlg-add").addEventListener("close", async () => {
     if ($("#dlg-add").returnValue !== "ok") return;
     const kind = $("#a-kind").value;
@@ -603,7 +674,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     const block = $("#rules-block");
     if (!rules || !codeAccs.length) { block.hidden = true; return; }
     block.hidden = false;
-    const names = Object.fromEntries(state.accounts.map((a) => [a.id, a.label || a.email]));
+    const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
     const firstLive = rules.rules.find((r) => r.type === "time" && inWindow(r));
     $("#rules-list").innerHTML = rules.rules.length ? rules.rules.map((r) => `<li>
       <span class="r-kind">${r.type === "dir" ? "目录" : "时间"}</span>
@@ -612,7 +683,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
       <button class="btn quiet" data-act="rule-rm" data-id="${esc(r.id)}">删除</button></li>`).join("")
       : `<li class="hint">还没有规则。比如：工作日 9:00–18:00 自动用工作号。</li>`;
     const sel = $("#r-acc"), keep = sel.value;
-    sel.innerHTML = codeAccs.map((a) => `<option value="${a.id}">${esc(a.label || a.email)}</option>`).join("");
+    sel.innerHTML = codeAccs.map((a) => `<option value="${a.id}">${esc(nameOf(a))}</option>`).join("");
     if (keep && codeAccs.some((a) => a.id === keep)) sel.value = keep;
     if (document.activeElement !== $("#alert-pct")) $("#alert-pct").value = rules.alert_threshold;
   }
@@ -641,6 +712,20 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     saveRules({ alert_threshold: Number($("#alert-pct").value) }, "提醒阈值已保存");
   };
 
+  // ---- Claude 服务检测（后端要做网络探测，得等几秒）
+  const CHECK_MARK = { ok: "✓", bad: "✗", warn: "!", info: "·" };
+  $("#btn-check").onclick = () => busy($("#btn-check"), async () => {
+    const btn = $("#btn-check");
+    btn.textContent = "检测中…";
+    try {
+      const r = await api("GET", "/api/service-check");
+      $("#check-list").innerHTML = (r.items || []).map((it) =>
+        `<li class="${esc(it.level)}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}</span></li>`).join("");
+      $("#check-list").hidden = false;
+    } catch (err) { toast(err.message, true); }
+    finally { btn.textContent = "开始检测"; }
+  });
+
   // ---- 事件委托
   document.addEventListener("click", async (e) => {
     const b = e.target.closest("button[data-act]");
@@ -648,9 +733,10 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     const id = b.dataset.id;
     const a = state && state.accounts.find((x) => x.id === id);
     switch (b.dataset.act) {
-      case "switch":
+      case "switch": await doSwitch(id, b); break;
+      case "pending-rm":
         await busy(b, async () => {
-          try { const r = await api("POST", `/api/accounts/${id}/switch`); toast(r.message || "已切换"); await load(); }
+          try { state = await api("DELETE", "/api/pending-switch"); render(); toast("已取消等待"); }
           catch (err) { toast(err.message, true); }
         }); break;
       case "open":

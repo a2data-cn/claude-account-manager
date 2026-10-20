@@ -12,10 +12,10 @@ use std::time::Duration;
 
 pub const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
-fn api_base() -> String {
+pub(crate) fn api_base() -> String {
     std::env::var("CAM_API_BASE").unwrap_or_else(|_| "https://api.anthropic.com".into())
 }
-fn web_base() -> String {
+pub(crate) fn web_base() -> String {
     std::env::var("CAM_CLAUDE_WEB_BASE").unwrap_or_else(|_| "https://claude.ai".into())
 }
 fn token_urls() -> Vec<String> {
@@ -75,6 +75,18 @@ pub fn http_json_timeout(
     }
 }
 
+/// GET 纯文本。返回 (状态, 文本)；状态 0 表示没连上。
+pub fn http_text(url: &str, timeout_secs: u64) -> (u16, String) {
+    match agent(timeout_secs).get(url).call() {
+        Ok(r) => {
+            let code = r.status();
+            (code, r.into_string().unwrap_or_default())
+        }
+        Err(ureq::Error::Status(code, r)) => (code, r.into_string().unwrap_or_default()),
+        Err(e) => (0, format!("网络错误：{}", e)),
+    }
+}
+
 pub fn err_msg(code: u16, body: &Value) -> String {
     if let Some(e) = body.get("error") {
         if let Some(m) = e.get("message").and_then(|m| m.as_str()) {
@@ -95,7 +107,7 @@ fn oauth_headers(token: &str) -> Vec<(String, String)> {
     ]
 }
 
-fn get_with(url: &str, h: &[(String, String)]) -> (u16, Value) {
+pub(crate) fn get_with(url: &str, h: &[(String, String)]) -> (u16, Value) {
     let refs: Vec<(&str, &str)> = h.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
     http_json("GET", url, &refs, None)
 }
@@ -107,7 +119,7 @@ pub fn get_oauth(token: &str, path: &str, timeout_secs: u64) -> (u16, Value) {
     http_json_timeout("GET", &format!("{}{}", api_base(), path), &refs, None, timeout_secs)
 }
 
-fn refresh_oauth(refresh_token: &str) -> R<Value> {
+pub(crate) fn refresh_oauth(refresh_token: &str) -> R<Value> {
     let mut last = String::new();
     for url in token_urls() {
         // 在数据锁里调用，超时设短一些，别让其它操作等太久

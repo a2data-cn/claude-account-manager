@@ -42,6 +42,13 @@ export function PhoneAccess({ toast }: { toast: (m: string, bad?: boolean) => vo
     }
   };
 
+  // 没有剪贴板权限（或根本没有 navigator.clipboard）时给个提示，而不是悄悄失败
+  const copy = (u: string) =>
+    Promise.resolve()
+      .then(() => navigator.clipboard.writeText(u))
+      .then(() => toast("链接已复制"))
+      .catch(() => toast("复制失败，请手动选中链接复制", true));
+
   const resetToken = async () => {
     if (!confirm("重置后，之前在手机上打开过的链接都会失效，需要重新扫码。继续？")) return;
     try {
@@ -99,7 +106,7 @@ export function PhoneAccess({ toast }: { toast: (m: string, bad?: boolean) => vo
                 {info.urls.map((u) => (
                   <li key={u} className="url">
                     <code>{u}</code>{" "}
-                    <button className="btn quiet" onClick={() => navigator.clipboard.writeText(u).then(() => toast("链接已复制"))}>
+                    <button className="btn quiet" onClick={() => copy(u)}>
                       复制
                     </button>
                   </li>

@@ -97,7 +97,9 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
     json!({
         "version": VERSION, "backend": "desktop", "host": host, "platform": platform,
         "active": data.get("active").cloned().unwrap_or(json!({})), "accounts": accs,
-        "warning": data.get("live_mismatch").and_then(|m| m.get("message")).cloned().unwrap_or(Value::Null),
+        "warning": data.get("live_mismatch").or_else(|| data.get("live_unverified"))
+            .and_then(|m| m.get("message")).cloned().unwrap_or(Value::Null),
+        "pending_switch": pending_switch_view(data),
         "generated_at": now_iso()
     })
 }
@@ -266,6 +268,51 @@ pub fn remove_account(store: &Store, key: &str) -> R<()> {
     store.save(&mut data)
 }
 
+/// 面板 / 桌面版的切换。有会话在跑且没指定 mode：让前端先问用户；mode=wait：登记等待；mode=now：直接切。
+/// 与 cam.py 的 api_switch 一致。
+pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
+    let data = store.load()?;
+    let target = accounts(&data)[find_index(&data, key)?].clone();
+    let tid = s(&target, "id").unwrap_or_default().to_string();
+    let label = s(&target, "label").unwrap_or("").to_string();
+    let procs = if active_code_id(&data).as_deref() != Some(tid.as_str()) {
+        running_claude_processes()
+    } else {
+        Vec::new()
+    };
+    if !procs.is_empty() && mode != Some("now") {
+        if mode != Some("wait") {
+            return Ok(json!({
+                "ok": false, "choice_required": true, "running_claude": procs.len(), "account": tid, "label": label,
+                "message": format!("{}。等它们结束后再切换不会打断正在跑的任务；现在就切的话它们需要重开。", running_summary(&procs))
+            }));
+        }
+        let _g = store.lock()?;
+        let mut data = store.load()?;
+        defer_switch(&mut data, &tid, "manual", None);
+        store.save(&mut data)?;
+        return Ok(json!({
+            "ok": true, "changed": false, "deferred": true, "running_claude": procs.len(), "account": tid,
+            "message": format!("有 {} 个 claude 会话在运行，等它们退出后会自动切换到 {}", procs.len(), label)
+        }));
+    }
+    let r = switch_account(store, key)?;
+    let procs = if r.changed { running_claude_processes() } else { Vec::new() };
+    let message = if r.changed {
+        format!(
+            "已切换到 {}。{}",
+            r.label,
+            running_warning(&procs).unwrap_or_else(|| "正在运行的 claude 会话需要重启".into())
+        )
+    } else {
+        "已经是当前账号".into()
+    };
+    Ok(json!({
+        "ok": true, "changed": r.changed, "account": r.id, "running_claude": procs.len(),
+        "message": message, "backup": r.backup.map(|p| p.display().to_string())
+    }))
+}
+
 /// 统一路由：返回 (HTTP 状态码, JSON)。
 pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
@@ -301,23 +348,17 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
             }
             Ok(public_state(store, &store.load()?))
         }
-        ("POST", ["accounts", id, "switch"]) => {
-            let r = switch_account(store, id)?;
-            let procs = if r.changed { running_claude_processes() } else { Vec::new() };
-            let message = if r.changed {
-                format!(
-                    "已切换到 {}。{}",
-                    r.label,
-                    running_warning(&procs).unwrap_or_else(|| "正在运行的 claude 会话需要重启".into())
-                )
-            } else {
-                "已经是当前账号".into()
-            };
-            Ok(json!({
-                "ok": true, "changed": r.changed, "account": r.id, "running_claude": procs.len(),
-                "message": message, "backup": r.backup.map(|p| p.display().to_string())
-            }))
+        ("POST", ["accounts", id, "switch"]) => api_switch(store, id, s(body, "mode")),
+        ("DELETE", ["pending-switch"]) => {
+            cancel_pending_switch(store)?;
+            Ok(public_state(store, &store.load()?))
         }
+        ("GET", ["service-check"]) => Ok(json!({
+            "items": super::health::service_check(store)
+                .into_iter()
+                .map(|(level, text)| json!({"level": level, "text": text}))
+                .collect::<Vec<_>>()
+        })),
         ("POST", ["accounts", id, "open"]) => {
             let d = store.load()?;
             let i = find_index(&d, id)?;

@@ -289,6 +289,12 @@ class Store:
                 pass
         write_json_atomic(self.secret_path(acc_id), secret, private=True)
 
+    def delete_secret(self, acc_id):
+        try:
+            os.remove(self.secret_path(acc_id))
+        except FileNotFoundError:
+            pass
+
     def new_backup_dir(self, tag):
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         d = os.path.join(self.backups_dir, f"{stamp}-{tag}")
@@ -500,16 +506,24 @@ def identify_code_account(data, oauth_account, creds):
     return match_identity(code_accs, oa.get("accountUuid"), oa.get("emailAddress"))
 
 
-def token_owner(access_token, timeout=6):
-    """用 /api/oauth/profile 问出这个 access token 真正属于谁，返回 {"uuid","email"}；问不到返回 None。"""
+def probe_token_owner(access_token, timeout=6):
+    """用 /api/oauth/profile 问出这个 access token 真正属于谁。
+
+    返回 (HTTP 状态, {"uuid","email"} 或 None)。状态 0 表示根本没连上（离线），和服务端明确说
+    “不认识这个 token”不是一回事：前者只是暂时核对不了，后者是答案。
+    """
     st, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(access_token),
                          timeout=timeout)
     if st != 200 or not isinstance(prof, dict):
-        return None
+        return st, None
     a = prof.get("account") or {}
     if not (a.get("uuid") or a.get("email")):
-        return None
-    return {"uuid": a.get("uuid"), "email": a.get("email")}
+        return st, None
+    return st, {"uuid": a.get("uuid"), "email": a.get("email")}
+
+
+def token_owner(access_token, timeout=6):
+    return probe_token_owner(access_token, timeout)[1]
 
 
 def apply_oauth_account_meta(acc, oauth_account, creds):
@@ -527,9 +541,141 @@ def apply_oauth_account_meta(acc, oauth_account, creds):
         acc["token_fp"] = token_fp(ob["refreshToken"])
 
 
+PENDING_ID = "_pending-live"  # secrets 目录里暂存“还没认出主人”的那份登录；账号 id 是 8 位十六进制，不会撞名
+PENDING_MAX_DAYS = 7
+
+
+def access_token_fresh(ob):
+    """access token 本地看还没过期。过期了 /api/oauth/profile 必然 401，不必白跑一趟。"""
+    return (ob.get("expiresAt") or 0) > time.time() * 1000
+
+
+def file_credentials(store, acc, ob, creds, where, oauth_account=None):
+    """把一份已确认属于 acc 的登录存进它名下。oauth_account 只在它描述的就是 acc 时传入。
+
+    saved_at 记的是这个 refresh token 是什么时候拿到的：token 没换就沿用原来的时间，
+    这样才能和暂存的登录比谁更新（见 _file_pending）。
+    """
+    prev = store.load_secret(acc["id"])
+    same_rt = (prev.get("claudeAiOauth") or {}).get("refreshToken") == ob.get("refreshToken")
+    apply_oauth_account_meta(acc, oauth_account, creds)
+    store.save_secret(acc["id"], {
+        "claudeAiOauth": ob, "oauthAccount": oauth_account if oauth_account else prev.get("oauthAccount"),
+        "raw": creds, "store": where,
+        "saved_at": prev.get("saved_at") if same_rt and prev.get("saved_at") else now_iso(),
+    })
+
+
+def park_unverified(store, data, candidate, ob, creds, where, oa):
+    """认不出这份登录是谁的（离线，或 access token 已过期而 refresh token 又换过）时调用：
+    原样暂存，不往任何账号里写。~/.claude.json 里的名字可能是旧会话写回时留下的别人的名字，
+    信了就会把 A 的 token 存进 B。能核对时再归档（resolve_pending / adopt_pending_for）。
+    """
+    prev = store.load_secret(PENDING_ID)
+    same_rt = (prev.get("claudeAiOauth") or {}).get("refreshToken") == ob.get("refreshToken")
+    at = prev.get("at") if same_rt and prev.get("at") else now_iso()
+    cid = candidate["id"] if candidate else None
+    store.save_secret(PENDING_ID, {"claudeAiOauth": ob, "oauthAccount": oa or None, "raw": creds,
+                                   "store": where, "candidate": cid, "at": at})
+    who = f"可能是“{candidate['label']}”，" if candidate else ""
+    data["live_unverified"] = {
+        "at": at, "candidate": cid,
+        "message": (f"Claude Code 当前的登录暂时无法确认属于哪个账号（{who}离线或登录已过期，核对不了），"
+                    "这次没有保存。启动一次 claude 或联网后会自动处理。"),
+    }
+
+
+def _newer(a, b):
+    """时间戳 a 晚于 b（两边后端写的格式可能略有差异，解析后再比）。"""
+    ta, tb = parse_iso(a), parse_iso(b)
+    return bool(ta and tb and ta > tb)
+
+
+def _pending_is_stale(p):
+    at = parse_iso(p.get("at"))
+    return at is None or dt.datetime.now(dt.timezone.utc) - at > dt.timedelta(days=PENDING_MAX_DAYS)
+
+
+def _file_pending(store, data, p, ob, owner):
+    """暂存的登录已核对出主人：归到它名下；账号里已有更新的就不覆盖；没有这个账号就新建。"""
+    code_accs = [a for a in data["accounts"] if a["kind"] == "claude_code"]
+    acc = match_identity(code_accs, owner["uuid"], owner["email"])
+    if acc is None:
+        acc = {
+            "id": new_id(), "kind": "claude_code", "label": owner.get("email") or "未命名账号",
+            "email": owner.get("email"), "plan": None, "org_name": None, "account_uuid": owner.get("uuid"),
+            "manual": {}, "usage": None, "created_at": now_iso(), "last_switched_at": now_iso(),
+        }
+        data["accounts"].append(acc)
+    elif _newer(store.load_secret(acc["id"]).get("saved_at"), p.get("at")):
+        return acc
+    oa = p.get("oauthAccount") or {}
+    oa_ok = bool(oa) and identity_agrees(acc, oa.get("accountUuid"), oa.get("emailAddress"))
+    file_credentials(store, acc, ob, p.get("raw"), p.get("store"), oa if oa_ok else None)
+    return acc
+
+
+def resolve_pending(store, data, live_fp=None):
+    """处理之前暂存的登录：已有账号存着同一个 token、或放了太久就丢掉；能联网核对了就归档。"""
+    p = store.load_secret(PENDING_ID)
+    if not p:
+        return
+    ob = p.get("claudeAiOauth") or {}
+    fp = token_fp(ob.get("refreshToken") or "")
+    if live_fp is not None and fp == live_fp:
+        return  # 就是当前生效的这份登录，走 snapshot_live 的正常流程
+    if _pending_is_stale(p) or any(a.get("token_fp") == fp for a in data["accounts"] if a["kind"] == "claude_code"):
+        store.delete_secret(PENDING_ID)
+        return
+    if not access_token_fresh(ob):
+        return  # 核对要 access token 还有效；切换到候选账号时会用 refresh token 换一个再核对
+    st, owner = probe_token_owner(ob.get("accessToken") or "")
+    if owner:
+        _file_pending(store, data, p, ob, owner)
+        store.delete_secret(PENDING_ID)
+    elif st != 0:
+        store.delete_secret(PENDING_ID)  # 服务端明确不认这个 token 了，留着也没用
+
+
+def adopt_pending_for(store, data, target):
+    """切换到 target 之前：暂存的登录可能是它的、又比它保存的新，现在核对一下。
+
+    access token 过期就用 refresh token 换一个再问（这时没有 claude 会话在用它，不会互相抢）。
+    核对出来是谁的就归到谁名下：真是 target 的，切换就用上最新的 token；其实是别人的，也不会写进 target。
+    """
+    p = store.load_secret(PENDING_ID)
+    if not p or p.get("candidate") != target["id"]:
+        return
+    if _newer(store.load_secret(target["id"]).get("saved_at"), p.get("at")):
+        return  # target 后来又拿到过更新的 token，暂存的这份对它没用了
+    ob = dict(p.get("claudeAiOauth") or {})
+    owner = token_owner(ob["accessToken"]) if access_token_fresh(ob) and ob.get("accessToken") else None
+    if not owner and ob.get("refreshToken") and not running_claude_processes():
+        try:
+            tok = refresh_oauth(ob["refreshToken"])
+        except CamError as e:
+            if "登录已失效" in str(e):  # refresh token 本身已作废，这份登录没用了
+                store.delete_secret(PENDING_ID)
+            return
+        ob["accessToken"] = tok["access_token"]
+        if tok.get("refresh_token"):
+            ob["refreshToken"] = tok["refresh_token"]
+        ob["expiresAt"] = int((time.time() + (tok.get("expires_in") or 28800)) * 1000)
+        raw = dict(p.get("raw") or {})
+        raw["claudeAiOauth"] = ob
+        p["raw"] = raw
+        owner = token_owner(ob["accessToken"])
+    if not owner:
+        return  # 还是核对不了：暂存留着，这次用 target 已保存的登录
+    _file_pending(store, data, p, ob, owner)
+    store.delete_secret(PENDING_ID)
+
+
 def snapshot_live(store, data, label=None, create_if_unknown=True):
     """把当前生效的 Claude Code 登录保存回对应账号；未知账号自动导入。返回账号或 None。
 
+    只有确认了这份登录是谁的才会存进账号：refresh token 指纹和某个账号保存的一致，或者联网用
+    /api/oauth/profile 问出了主人。两样都做不到（离线、access token 过期）时暂存起来，不碰任何账号。
     凭据和 ~/.claude.json 里的 oauthAccount 对不上时，以凭据为准：token 存进它真正的主人名下，
     不会覆盖别的账号，并在 data["live_mismatch"] 里留下说明。
     """
@@ -539,15 +685,30 @@ def snapshot_live(store, data, label=None, create_if_unknown=True):
         return None
     oa = read_oauth_account() or {}
     code_accs = [a for a in data["accounts"] if a["kind"] == "claude_code"]
+    live_fp = token_fp(ob.get("refreshToken") or "")
+    resolve_pending(store, data, live_fp)
     acc = identify_code_account(data, oa, creds)
-    by_token = acc is not None and acc.get("token_fp") == token_fp(ob.get("refreshToken") or "")
+    by_token = acc is not None and acc.get("token_fp") == live_fp
     oa_uuid, oa_email = oa.get("accountUuid"), oa.get("emailAddress")
-    owner = None
+    owner, unreachable = None, False
     if not by_token:
         # token 换过了，只能靠 oauthAccount 认人；先联网核对一下这份凭据到底是谁的
-        owner = token_owner(ob["accessToken"])
+        if access_token_fresh(ob):
+            st, owner = probe_token_owner(ob["accessToken"])
+            unreachable = st == 0
+        else:
+            unreachable = True  # 过期了，问也是 401
         if owner and (acc is None or not identity_agrees(acc, owner["uuid"], owner["email"])):
             acc = match_identity(code_accs, owner["uuid"], owner["email"])
+    if not (by_token or owner) and unreachable and code_accs:
+        park_unverified(store, data, acc, ob, creds, where, oa)
+        if acc is not None:
+            data["active"]["claude_code"] = acc["id"]  # 只是显示用的最佳猜测
+        return acc
+    data.pop("live_unverified", None)
+    pend = store.load_secret(PENDING_ID)
+    if pend and token_fp((pend.get("claudeAiOauth") or {}).get("refreshToken") or "") == live_fp:
+        store.delete_secret(PENDING_ID)  # 暂存的就是这份，现在认出来了
     # oauthAccount 是否描述的就是这份凭据的主人
     if acc is not None:
         oa_ok = bool(oa) and identity_agrees(acc, oa_uuid, oa_email)
@@ -572,19 +733,16 @@ def snapshot_live(store, data, label=None, create_if_unknown=True):
         acc["label"] = label
     if oa_ok:
         data.pop("live_mismatch", None)
-        saved_oa = oa
-    else:
+    elif oa:
         # oauthAccount 是别人的：不用它改这个账号的资料，也不把它存进这个账号
-        saved_oa = store.load_secret(acc["id"]).get("oauthAccount")
-        if oa:
-            data["live_mismatch"] = {
-                "at": now_iso(), "account": acc["id"], "claude_json_email": oa_email,
-                "message": (f"Claude Code 实际在用的登录属于“{acc['label']}”，但 ~/.claude.json 里写的是 {oa_email}。"
-                            "通常是切换前打开的 claude 会话刷新 token 后写回了旧账号。退出所有 claude 会话后重新切换一次即可。"),
-            }
-    apply_oauth_account_meta(acc, saved_oa if oa_ok else None, creds)
-    store.save_secret(acc["id"], {"claudeAiOauth": ob, "oauthAccount": saved_oa,
-                                  "raw": creds, "store": where, "saved_at": now_iso()})
+        data["live_mismatch"] = {
+            "at": now_iso(), "account": acc["id"], "claude_json_email": oa_email,
+            "message": (f"Claude Code 实际在用的登录属于“{acc['label']}”，但 ~/.claude.json 里写的是 {oa_email}。"
+                        "通常是切换前打开的 claude 会话刷新 token 后写回了旧账号。退出所有 claude 会话后重新切换一次即可。"),
+        }
+    else:
+        data.pop("live_mismatch", None)  # ~/.claude.json 里根本没有 oauthAccount，谈不上对不上
+    file_credentials(store, acc, ob, creds, where, oa if oa_ok else None)
     data["active"]["claude_code"] = acc["id"]
     return acc
 
@@ -654,8 +812,11 @@ def running_claude_processes():
     found = []
     try:
         if IS_WIN:
-            ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe'\" | "
-                  "ForEach-Object { \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }")
+            # 用完整路径而不是 Name：桌面 App 的判断看的是路径，只给文件名的话
+            # Claude 桌面 App（AnthropicClaude\…\claude.exe）会被当成 Claude Code
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | "
+                  "ForEach-Object { \"$($_.ProcessId)`t$(if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name })"
+                  "`t$($_.CommandLine)\" }")
             r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
                                timeout=15)
             for line in r.stdout.splitlines():
@@ -693,11 +854,15 @@ def running_claude_processes():
     return found
 
 
+def running_summary(procs):
+    pids = "、".join(str(p) for p, _ in procs[:5]) + ("…" if len(procs) > 5 else "")
+    return f"有 {len(procs)} 个 claude 进程正在运行（pid {pids}）"
+
+
 def running_warning(procs):
     if not procs:
         return ""
-    pids = "、".join(str(p) for p, _ in procs[:5]) + ("…" if len(procs) > 5 else "")
-    return (f"有 {len(procs)} 个 claude 进程正在运行（pid {pids}），它们还在用切换前的账号，"
+    return (running_summary(procs) + "，它们还在用切换前的账号，"
             "并可能在刷新 token 后把旧账号写回。请退出这些会话后重开（可用 claude --continue 接着聊）。")
 
 
@@ -724,8 +889,10 @@ def switch_code_account(store, key):
         current = snapshot_live(store, data)  # 第 1、2 步：快照并回写
         if current and current["id"] == target["id"]:
             repair_oauth_account(store, data, target)
+            data.pop("pending_switch", None)
             store.save(data)
             return target, None, False
+        adopt_pending_for(store, data, target)  # 暂存的登录要是 target 的，先核对并存进去，下面就能用上
         secret = store.load_secret(target["id"])
         ob = secret.get("claudeAiOauth")
         if not ob or not ob.get("refreshToken"):
@@ -748,6 +915,8 @@ def switch_code_account(store, key):
                 pass
             raise
         data.pop("live_mismatch", None)  # 凭据和 oauthAccount 现在是同一个账号的
+        data.pop("live_unverified", None)  # 现在生效的登录是我们刚写的，当然认识
+        data.pop("pending_switch", None)  # 这次切换优先于之前登记的等待切换
         data["active"]["claude_code"] = target["id"]  # 第 5 步
         target["last_switched_at"] = now_iso()
         data["switch_log"].append({"id": target["id"], "at": now_iso()})
@@ -1252,8 +1421,71 @@ def match_time_rule(data, when=None):
     return None
 
 
+WAIT_POLL_SECS = 5
+
+
+def pending_switch_view(data):
+    """登记中的“等会话结束再切换”，给界面显示用；没有或目标账号已删除则 None。"""
+    p = data.get("pending_switch")
+    if not p:
+        return None
+    acc = next((a for a in data["accounts"] if a["id"] == p.get("account")), None)
+    if not acc:
+        return None
+    return {"account": acc["id"], "label": acc["label"], "reason": p.get("reason"), "at": p.get("at"),
+            "message": f"等当前 claude 会话结束后自动切换到“{acc['label']}”"
+                       + ("（时间规则）" if p.get("reason") == "rule" else "")}
+
+
+def defer_switch(data, acc_id, reason="manual", rule_id=None):
+    """记下“等 claude 会话都退出后切到 acc_id”。调用方持有锁并负责保存。"""
+    data["pending_switch"] = {"account": acc_id, "reason": reason, "rule": rule_id, "at": now_iso()}
+
+
+def cancel_pending_switch(store):
+    with store.lock():
+        data = store.load()
+        had = data.pop("pending_switch", None) is not None
+        store.save(data)
+        return had
+
+
+def apply_pending_switch(store, when=None):
+    """后台每轮调用：登记过的等待切换，在没有 claude 会话运行时执行。
+
+    返回 (账号, 备份目录, reason)，没切则 None。目标账号没了、已经是当前账号、或时间规则的时间段已经过了，
+    就作废。切换本身走 switch_code_account，它会清掉登记。
+    """
+    data = store.load()
+    p = data.get("pending_switch")
+    if not p:
+        return None
+    if running_claude_processes():
+        return None
+    with store.lock():
+        data = store.load()
+        p = data.get("pending_switch")
+        if not p:
+            return None
+        known = any(a["id"] == p.get("account") for a in data["accounts"])
+        drop = not known or data["active"].get("claude_code") == p["account"]
+        if not drop and p.get("reason") == "rule":
+            r = match_time_rule(data, when)
+            drop = not r or r["id"] != p.get("rule")  # 时间段已经过了，或规则变了
+        if drop:
+            data.pop("pending_switch", None)
+            store.save(data)
+            return None
+    acc, backup, changed = switch_code_account(store, p["account"])
+    return (acc, backup, p.get("reason")) if changed else None
+
+
 def apply_time_rules(store, when=None):
-    """进入新的时间段时切到对应账号。返回切换结果或 None。"""
+    """进入新的时间段时切到对应账号。返回切换结果或 None。
+
+    有 claude 会话在跑时不打断它：登记成等待切换，由 apply_pending_switch 在会话退出后执行；
+    等到时间段过了还没切成就作废。
+    """
     with store.lock():
         data = store.load()
         r = match_time_rule(data, when)
@@ -1264,6 +1496,12 @@ def apply_time_rules(store, when=None):
         st["time_rule"] = rid
         store.save(data)
     if not r or data["active"].get("claude_code") == r["account"]:
+        return None
+    if running_claude_processes():
+        with store.lock():
+            data = store.load()
+            defer_switch(data, r["account"], "rule", r["id"])
+            store.save(data)
         return None
     return switch_code_account(store, r["account"])
 
@@ -1451,7 +1689,8 @@ def public_state(store, data):
         accs.append(p)
     return {"version": VERSION, "backend": "python", "host": socket.gethostname(),
             "platform": platform.system(), "active": data["active"], "accounts": accs,
-            "warning": (data.get("live_mismatch") or {}).get("message"), "generated_at": now_iso()}
+            "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
+            "pending_switch": pending_switch_view(data), "generated_at": now_iso()}
 
 
 def mask(s):
@@ -1632,6 +1871,11 @@ def make_handler(store, token):
                     return self._send(200, rules_view(store.load()))
                 if method == "PUT" and parts == ["rules"]:
                     return self._send(200, save_rules(store, self._body()))
+                if method == "DELETE" and parts == ["pending-switch"]:
+                    cancel_pending_switch(store)
+                    return self._send(200, public_state(store, store.load()))
+                if method == "GET" and parts == ["service-check"]:
+                    return self._send(200, {"items": [{"level": lv, "text": t} for lv, t in service_check(store)]})
                 if method == "POST" and parts == ["accounts"]:
                     b = self._body()
                     if b.get("kind") == "claude_code":
@@ -1644,12 +1888,7 @@ def make_handler(store, token):
                 if len(parts) >= 2 and parts[0] == "accounts":
                     aid = parts[1]
                     if method == "POST" and parts[2:] == ["switch"]:
-                        acc, backup, changed = switch_code_account(store, aid)
-                        procs = running_claude_processes() if changed else []
-                        msg = (f"已切换到 {acc['label']}。" + (running_warning(procs) or "正在运行的 claude 会话需要重启")
-                               if changed else "已经是当前账号")
-                        return self._send(200, {"ok": True, "changed": changed, "account": acc["id"],
-                                                "running_claude": len(procs), "message": msg})
+                        return self._send(200, api_switch(store, aid, self._body().get("mode")))
                     if method == "POST" and parts[2:] == ["open"]:
                         open_web_account(store, find_account(store.load(), aid))
                         return self._send(200, {"ok": True, "message": "已在电脑上打开浏览器窗口"})
@@ -1709,6 +1948,30 @@ class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def api_switch(store, aid, mode=None):
+    """面板 / 桌面版的切换。有会话在跑且没指定 mode：让前端先问用户；mode=wait：登记等待；mode=now：直接切。"""
+    data = store.load()
+    target = find_account(data, aid)
+    procs = running_claude_processes() if target["id"] != data["active"].get("claude_code") else []
+    if procs and mode != "now":
+        if mode != "wait":
+            return {"ok": False, "choice_required": True, "running_claude": len(procs), "account": target["id"],
+                    "label": target["label"],
+                    "message": running_summary(procs) + "。等它们结束后再切换不会打断正在跑的任务；现在就切的话它们需要重开。"}
+        with store.lock():
+            data = store.load()
+            defer_switch(data, target["id"], "manual")
+            store.save(data)
+        return {"ok": True, "changed": False, "deferred": True, "running_claude": len(procs), "account": target["id"],
+                "message": f"有 {len(procs)} 个 claude 会话在运行，等它们退出后会自动切换到 {target['label']}"}
+    acc, backup, changed = switch_code_account(store, aid)
+    procs = running_claude_processes() if changed else []
+    msg = (f"已切换到 {acc['label']}。" + (running_warning(procs) or "正在运行的 claude 会话需要重启")
+           if changed else "已经是当前账号")
+    return {"ok": True, "changed": changed, "account": acc["id"], "running_claude": len(procs), "message": msg,
+            "backup": backup}
+
+
 def serve(store, host, port, auto_refresh_min):
     token = server_token(store)
     srv = ThreadingServer((host, port), make_handler(store, token))
@@ -1730,16 +1993,16 @@ def serve(store, host, port, auto_refresh_min):
         last_refresh = 0.0
         warned = set()
         while True:
-            if lease.fd is None and not lease.try_acquire():
-                if not told:
-                    told = True
-                    print("[后台] 桌面版或另一个 cam serve 正在执行后台任务，这里只提供面板")
-                time.sleep(30)
-                continue
-            if told:
-                told = False
-                print("[后台] 已接手后台任务")
             try:
+                if lease.fd is None and not lease.try_acquire():
+                    if not told:
+                        told = True
+                        print("[后台] 桌面版或另一个 cam serve 正在执行后台任务，这里只提供面板")
+                    time.sleep(30)
+                    continue
+                if told:
+                    told = False
+                    print("[后台] 已接手后台任务")
                 fp = live_fingerprint()
                 if fp != last_fp:
                     last_fp = fp
@@ -1750,6 +2013,9 @@ def serve(store, host, port, auto_refresh_min):
                 res = apply_time_rules(store)
                 if res and res[2]:
                     print(f"[规则] 进入时间段，已切换到 {res[0]['label']}。{running_warning(running_claude_processes())}")
+                res = apply_pending_switch(store)
+                if res:
+                    print(f"[等待切换] claude 会话已退出，已切换到 {res[0]['label']}" + ("（时间规则）" if res[2] == "rule" else ""))
                 if auto_refresh_min > 0 and time.time() - last_refresh >= auto_refresh_min * 60:
                     last_refresh = time.time()
                     data = refresh_usage(store, allow_token_refresh=False)
@@ -1856,6 +2122,9 @@ def import_current(store, label=None):
     with store.lock():
         data = store.load()
         acc = snapshot_live(store, data, label=label)
+        if data.get("live_unverified"):
+            store.save(data)
+            raise CamError(data["live_unverified"]["message"])
         if not acc:
             raise CamError("当前没有登录 Claude Code。请先运行 claude 并登录，再导入")
         if label:
@@ -1910,24 +2179,89 @@ def confirm(question):
         return False
 
 
+def ask_choice(options, default):
+    """options: [(键, 说明)]。返回选中的键；直接回车或输入结束用默认值。"""
+    legend = " / ".join(f"[{k}] {t}" for k, t in options)
+    keys = {k for k, _ in options}
+    while True:
+        try:
+            ans = input(f"{legend}（默认 {default}）：").strip().lower()
+        except EOFError:
+            return default
+        if not ans:
+            return default
+        if ans in keys:
+            return ans
+
+
+def wait_and_switch(store, target, procs):
+    """登记等待切换，然后在这里等到 claude 会话都退出再切。
+    桌面版 / cam serve / 菜单栏插件也在跑的话，谁先发现会话退出谁切，这里只是报告结果。"""
+    with store.lock():
+        data = store.load()
+        defer_switch(data, target["id"], "manual")
+        store.save(data)
+    print(f"等 {len(procs)} 个 claude 会话退出后自动切换到 {target['label']}…（Ctrl-C 取消）")
+    shown = len(procs)
+    try:
+        while True:
+            res = apply_pending_switch(store)
+            if res:
+                acc, backup, _ = res
+                print(color(f"✓ 已切换到 {acc['label']}（{acc.get('email') or '-'}）", "g"))
+                print(color(f"  切换前的登录状态已备份到 {backup}", "d"))
+                return
+            data = store.load()
+            if not data.get("pending_switch"):
+                if data["active"].get("claude_code") == target["id"]:
+                    print(color(f"✓ 已切换到 {target['label']}", "g"))
+                else:
+                    print("等待已被取消，没有切换")
+                return
+            n = len(running_claude_processes())
+            if n != shown:
+                shown = n
+                print(f"  还有 {n} 个会话在运行…")
+            time.sleep(WAIT_POLL_SECS)
+    except KeyboardInterrupt:
+        cancel_pending_switch(store)
+        print("\n已取消，没有切换")
+
+
 def cmd_switch(store, args):
-    target = find_account(store.load(), args.account)
-    procs = running_claude_processes() if target["id"] != store.load()["active"].get("claude_code") else []
-    asked = procs and not args.yes and sys.stdin.isatty()
-    if asked:
-        print(color("⚠ " + running_warning(procs), "y"))
-        if not confirm("仍然切换？"):
+    if args.cancel_wait:
+        print("已取消等待中的切换" if cancel_pending_switch(store) else "没有等待中的切换")
+        return
+    if not args.account:
+        raise CamError("请指定要切换到的账号")
+    data = store.load()
+    target = find_account(data, args.account)
+    procs = running_claude_processes() if target["id"] != data["active"].get("claude_code") else []
+    wait = args.wait
+    asked = False
+    if procs and not wait and not args.yes and sys.stdin.isatty():
+        asked = True
+        print(color("⚠ " + running_summary(procs) + "。等它们结束后再切不会打断正在跑的任务；现在就切的话它们需要重开。", "y"))
+        choice = ask_choice([("w", "等它们结束后再切换"), ("y", "现在就切换"), ("n", "取消")], "w")
+        if choice == "n":
             print("已取消")
             return
+        wait = choice == "w"
+    if procs and wait:
+        wait_and_switch(store, target, procs)
+        return
     acc, backup, changed = switch_code_account(store, args.account)
     if not changed:
-        print(f"{acc['label']} 已经是当前账号")
+        print(f"已经是当前账号：{acc['label']}")
         return
     print(color(f"✓ 已切换到 {acc['label']}（{acc.get('email') or '-'}）", "g"))
     print(color(f"  切换前的登录状态已备份到 {backup}", "d"))
     print("  会话记录、项目、设置都没有动；正在运行的 claude 需要退出重开，可用 claude --continue 接着聊。")
-    if procs and not asked:
-        print(color("  ⚠ " + running_warning(procs), "y"))
+    if not asked:
+        # 记录里的 active 可能过时（切换时的快照才会修正），所以真切换了就再查一次
+        warn = running_warning(procs or running_claude_processes())
+        if warn:
+            print(color("  ⚠ " + warn, "y"))
 
 
 def cmd_set(store, args):
@@ -2248,6 +2582,105 @@ def cmd_env_clean(store, args):
         print("  运行 claude 重新登录，或 cam switch <账号> 切回已保存的账号")
 
 
+def http_text(url, timeout=8):
+    """GET 纯文本。返回 (状态, 文本)；状态 0 表示没连上。"""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except (urllib.error.URLError, socket.timeout, OSError) as e:
+        return 0, f"网络错误：{getattr(e, 'reason', e)}"
+
+
+# Anthropic 公开的“不提供服务的地区”里常见的几个（名单会变，只用来提示，实际以接口实测为准）
+UNSUPPORTED_REGIONS = {"CN": "中国大陆", "HK": "香港", "MO": "澳门", "RU": "俄罗斯", "IR": "伊朗", "KP": "朝鲜",
+                       "SY": "叙利亚", "CU": "古巴", "BY": "白俄罗斯", "VE": "委内瑞拉", "AF": "阿富汗", "MM": "缅甸",
+                       "YE": "也门"}
+
+
+def region_denied(msg):
+    low = (msg or "").lower()
+    return any(k in low for k in ("region", "country", "not available", "unsupported", "not allowed", "地区"))
+
+
+def service_check(store=None):
+    """检测 Claude 相关服务是否正常：DNS、出口地区、api.anthropic.com、claude.ai、代理。
+
+    返回 [(级别, 文字)]，级别为 ok / bad / warn / info。不打印任何密钥。
+    """
+    out = []
+    proxies = {k: os.environ[k] for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy")
+               if os.environ.get(k)}
+    api_host = urllib.parse.urlparse(API_BASE).hostname or API_BASE
+    web_host = urllib.parse.urlparse(CLAUDE_WEB_BASE).hostname or CLAUDE_WEB_BASE
+    for host in dict.fromkeys((api_host, web_host)):
+        try:
+            ips = sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+            out.append(("ok", f"DNS：{host} → {', '.join(ips[:3])}"))
+        except OSError as e:
+            out.append(("bad", f"DNS：{host} 解析失败（{e}）" + ("；设了代理的话由代理解析，可忽略" if proxies else "")))
+    # 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息
+    t0 = time.time()
+    st, txt = http_text(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace")
+    if st != 200 or "loc=" not in txt:
+        st, txt = http_text("https://www.cloudflare.com/cdn-cgi/trace")
+    if st == 200 and "loc=" in txt:
+        kv = dict(line.split("=", 1) for line in txt.splitlines() if "=" in line)
+        loc, ip, colo = kv.get("loc", "?"), kv.get("ip", "?"), kv.get("colo", "?")
+        if loc in UNSUPPORTED_REGIONS:
+            out.append(("warn", f"出口地区：{loc}（{UNSUPPORTED_REGIONS[loc]}，IP {ip}）—— Anthropic 公开名单里不支持的地区，"
+                                "以下面的实测为准"))
+        else:
+            out.append(("ok", f"出口地区：{loc}（IP {ip}，Cloudflare 节点 {colo}，{int((time.time() - t0) * 1000)} ms）"))
+    else:
+        out.append(("info", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）"))
+    # api.anthropic.com：有登录就用当前登录实测
+    creds = read_live_credentials()[0] if store is not None else None
+    at = oauth_block(creds).get("accessToken") if creds else None
+    t0 = time.time()
+    if at:
+        st, body = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(at), timeout=10)
+    else:
+        st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", timeout=10)
+    ms = int((time.time() - t0) * 1000)
+    msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    if st == 0:
+        out.append(("bad", f"{api_host}：连不上（{msg}）"))
+    elif st == 403 or region_denied(msg):
+        out.append(("bad", f"{api_host}：拒绝访问（HTTP {st}：{msg or '-'}），通常是出口地区不支持，换个出口再试"))
+    elif at and st == 200:
+        out.append(("ok", f"{api_host}：服务正常，当前登录可用（{ms} ms）"))
+    elif at and st == 401:
+        out.append(("warn", f"{api_host}：服务可达，但当前登录已过期或无效，Claude Code 下次运行时会自动续（{ms} ms）"))
+    elif st == 401:
+        out.append(("ok", f"{api_host}：服务可达（未登录，{ms} ms）"))
+    elif st >= 500:
+        out.append(("bad", f"{api_host}：服务端错误（HTTP {st}），可能是 Anthropic 故障，稍后再试"))
+    else:
+        out.append(("warn", f"{api_host}：HTTP {st}（{msg or '-'}，{ms} ms）"))
+    # claude.ai：不带登录，看可达性和有没有被网络管控拦截
+    t0 = time.time()
+    code, body, raw = web_get("/api/organizations", "", timeout=10)
+    ms = int((time.time() - t0) * 1000)
+    msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+    if code == 0:
+        out.append(("bad", f"{web_host}：连不上（{raw}）"))
+    elif is_cloudflare(raw):
+        out.append(("warn", f"{web_host}：返回人机验证页（通常是网络被公司管控拦截），网页账号的额度会拿不到（{ms} ms）"))
+    elif region_denied(msg):
+        out.append(("bad", f"{web_host}：拒绝访问（HTTP {code}：{msg}），通常是出口地区不支持"))
+    elif code in (200, 401, 403):
+        out.append(("ok", f"{web_host}：可达（{ms} ms）"))
+    elif code >= 500:
+        out.append(("bad", f"{web_host}：服务端错误（HTTP {code}），稍后再试"))
+    else:
+        out.append(("warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）"))
+    out.append(("info", "代理：" + ("；".join(f"{k}={v}" for k, v in proxies.items()) if proxies else "无（直连）")))
+    return out
+
+
 def cmd_doctor(store):
     """逐项检查，不打印任何密钥。"""
     ok, bad, info, warn = color("✓", "g"), color("✗", "r"), color("·", "d"), color("!", "y")
@@ -2301,17 +2734,17 @@ def cmd_doctor(store):
     if exp:
         left = exp / 1000 - dt.datetime.now().timestamp()
         print(f"{info} access token " + (f"{int(left // 60)} 分钟后过期（Claude Code 会自动续）" if left > 0 else "已过期（Claude Code 下次运行时会自动续）"))
-    st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", timeout=8)
-    if st:
-        print(f"{ok} 网络：能连上 {API_BASE}")
-    else:
-        why = ((body or {}).get("error") or {}).get("message", "")
-        print(f"{bad} 网络：连不上 {API_BASE}（{why}）")
-        if "CERTIFICATE_VERIFY_FAILED" in why:
-            print(f"    这是 python.org 版 Python 没装根证书，运行一次即可修好：")
-            print(f'    open "/Applications/Python {sys.version_info.major}.{sys.version_info.minor}/Install Certificates.command"')
-        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-        print(f"    当前终端代理设置：{proxy or '无'}")
+    pend = pending_switch_view(data)
+    if pend:
+        print(f"{info} {pend['message']}（cam switch --cancel-wait 可取消）")
+    print("\n服务检查")
+    marks = {"ok": ok, "bad": bad, "warn": warn, "info": info}
+    items = service_check(store)
+    for level, text in items:
+        print(f"{marks[level]} {text}")
+    if any("CERTIFICATE_VERIFY_FAILED" in t for _, t in items):
+        print("    这是 python.org 版 Python 没装根证书，运行一次即可修好：")
+        print(f'    open "/Applications/Python {sys.version_info.major}.{sys.version_info.minor}/Install Certificates.command"')
 
 
 def main(argv=None):
@@ -2326,8 +2759,10 @@ def main(argv=None):
     s = sub.add_parser("usage", help="刷新用量并列出")
     s.add_argument("account", nargs="?")
     s = sub.add_parser("switch", aliases=["use"], help="切换 Claude Code 账号")
-    s.add_argument("account")
-    s.add_argument("-y", "--yes", action="store_true", help="有 claude 正在运行时也不再确认")
+    s.add_argument("account", nargs="?")
+    s.add_argument("-y", "--yes", action="store_true", help="有 claude 正在运行时也不再确认，直接切")
+    s.add_argument("-w", "--wait", action="store_true", help="有 claude 正在运行时等它们都退出后再切（本命令会一直等）")
+    s.add_argument("--cancel-wait", action="store_true", help="取消登记中的等待切换")
     sub.add_parser("current", aliases=["whoami"], help="显示当前 Claude Code 账号")
     s = sub.add_parser("add-web", help="添加网页版账号")
     s.add_argument("--label", required=True)
@@ -2366,7 +2801,7 @@ def main(argv=None):
     sub.add_parser("doctor", help="检查环境，排查找不到账号等问题（不显示密钥）")
     s = sub.add_parser("env", help="Claude Code 环境：检查 / 安装 / 清理")
     esub = s.add_subparsers(dest="env_cmd")
-    esub.add_parser("doctor", help="同 cam doctor")
+    esub.add_parser("doctor", aliases=["check"], help="同 cam doctor：检查环境和 Claude 服务")
     e = esub.add_parser("install", help="用 Anthropic 官方安装器安装 Claude Code")
     e.add_argument("--npm", action="store_true", help="改用 npm 全局安装")
     e.add_argument("--force", action="store_true", help="已经装了也重新安装（可用来升级）")
@@ -2458,7 +2893,7 @@ def main(argv=None):
                       f"缓存读 {r['cache_read']:>12,}  合计(不含缓存读) {tot:>11,}")
         elif c == "serve":
             serve(store, "0.0.0.0" if args.lan else "127.0.0.1", args.port, args.refresh_every)
-        elif c == "doctor" or (c == "env" and args.env_cmd in (None, "doctor")):
+        elif c == "doctor" or (c == "env" and args.env_cmd in (None, "doctor", "check")):
             cmd_doctor(store)
         elif c == "env" and args.env_cmd == "install":
             cmd_env_install(store, args)

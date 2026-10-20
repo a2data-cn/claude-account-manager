@@ -73,10 +73,11 @@ export PATH="$PATH:/path/to/claude-account-manager/scripts"
 cam                       # 列出所有账号；顺便自动保存新登录的账号
 cam usage                 # 刷新用量
 cam switch 工作号          # 按名称 / 序号 / 邮箱 / id 切换
+cam switch 工作号 --wait   # 有 claude 会话在跑时，等它们都退出后再切（不打断正在跑的任务）
 cam set 工作号 --expires 2026-11-03 --auto-renew --price '$100/月'
 cam serve --lan           # 启动 Web 面板，手机扫链接即可访问
 cam local --days 7        # 本机每天消耗了多少 token、记在哪个号上
-cam doctor                # 找不到账号等问题时，逐项检查（不显示密钥）
+cam doctor                # 逐项检查环境，并实测 Claude 服务是否正常（出口地区、api.anthropic.com、claude.ai）；不显示密钥
 cam env install           # 用 Anthropic 官方安装器安装 Claude Code
 cam env clean             # 清理 Claude Code 缓存（默认只预演，加 --apply 才执行）
 ```
@@ -85,10 +86,19 @@ Windows 用 `scripts\cam.cmd`，用法相同。
 
 ### Claude Code 环境：检查、安装、清理
 
-`cam doctor`（也可以写成 `cam env doctor`）除了检查登录和数据目录，还会查出几类常见的“切换了却不生效”：
+`cam doctor`（也可以写成 `cam env doctor` / `cam env check`）除了检查登录和数据目录，还会查出几类常见的“切换了却不生效”：
 - PATH 里有好几份 `claude`（比如 npm 版和原生版并存），会列出来并标明实际运行的是哪个
 - 设置了 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 等环境变量，或者 `settings.json` 里配了 `apiKeyHelper`、`~/.claude.json` 里存着 `primaryApiKey`。这些都优先于订阅登录，切换账号就没有效果
 - 当前有几个 `claude` 进程在运行
+
+最后一段"服务检查"实测 Claude 服务本身是否正常，排查"是网络问题还是账号问题"：
+- DNS：`api.anthropic.com`、`claude.ai` 解析到哪里
+- 出口地区：从 Cloudflare 看到的国家和 IP。落在 Anthropic 公开名单里不支持的地区会提示，但以下面的实测为准
+- `api.anthropic.com`：用当前登录实测，区分"服务正常 / 登录已过期 / 拒绝访问（通常是地区不支持）/ 连不上"，并显示时延
+- `claude.ai`：是否可达，是否被公司网络的人机验证页拦住
+- 代理：当前终端的代理环境变量
+
+桌面版的"手机与设置"页和手机面板底部也有"Claude 服务检测"按钮，结果一样。
 
 ```bash
 cam env install            # 没装就用官方原生安装器装（curl -fsSL https://claude.ai/install.sh | bash，Windows 用 install.ps1）
@@ -126,7 +136,15 @@ cam rule alert 85
 cam rule ls
 ```
 
-时间规则只在"进入时间段"的那一刻切换，时间段内你手动换号，工具不会再改回去。
+时间规则只在"进入时间段"的那一刻切换，时间段内你手动换号，工具不会再改回去。进入时间段时如果有 `claude` 会话正在运行，不会打断它：先记下来，等会话都退出后再切；要是整个时间段都没等到，就作废。
+
+### 切换时有会话在跑
+
+切换只替换凭据，正在运行的 `claude` 会话内存里还是旧账号的 token，需要退出重开。所以有会话在跑时：
+- `cam switch` 在终端里会问你：等它们结束后再切（默认）、现在就切、还是取消。`--wait` 直接选"等"，`-y` 直接选"现在切"
+- 桌面版和手机面板会弹同样的三选一；选"等"之后页面顶部会显示"等当前 claude 会话结束后自动切换到 X"，随时可以取消（`cam switch --cancel-wait` 也行）
+- 菜单栏 / 托盘点一下切换，有会话在跑时默认就是"等"，并弹通知告诉你
+- 等待期间由桌面版、`cam serve` 或菜单栏插件在后台盯着，会话一退出就切；`cam switch --wait` 自己也会一直等
 
 想让目录规则对所有 `claude` 命令都生效，可以在 shell 配置里加一行 `alias claude='cam claude'`。
 
@@ -186,9 +204,10 @@ macOS 首次打开未签名应用时，需要右键选择"打开"。
 ## 数据与安全
 
 - 所有数据存在 `~/.claude-accounts/`（可用 `CAM_HOME` 改位置），目录权限 700、凭据文件权限 600，不上传任何地方
-- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
+- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查另外会访问 `claude.ai/cdn-cgi/trace`（连不上时退到 `www.cloudflare.com/cdn-cgi/trace`）来看出口地区。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
 - 用量和资料接口是 Claude Code 自己在用的接口，并非公开 API，Anthropic 改动后可能需要更新本工具；拿不到数据时界面会显示原因，不影响切换
 - 删除账号时凭据会移到 backups 目录，不直接销毁
+- 只有确认了"当前这份登录是谁的"才会存进对应账号：refresh token 和某个账号保存的一致，或者联网核对过。离线、或者 access token 已过期又换过 refresh token 时核对不了，就先暂存（`secrets/_pending-live.json`），不往任何账号里写，界面上会提示；联网后或切换时核对清楚再归档。这样旧会话写回的别人的 token 不会被存错账号
 
 ## 目录结构
 
