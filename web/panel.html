@@ -248,7 +248,6 @@ details.src[open] summary::before { content: "▾"; }
   .sources li { grid-template-columns: 1fr; gap: 0; }
 }
 .check-groups .checks { margin: 0; }
-.panel > .check-groups { margin-top: 12px; }
 .check-groups h4, .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }
@@ -448,14 +447,6 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     </div>
   </section>
 
-  <section class="block" id="check-block" hidden>
-    <h2>Claude 服务检测</h2>
-    <div class="panel">
-      <p class="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
-      <button class="btn" id="btn-check" type="button">开始检测</button>
-      <div class="check-groups" id="check-list" hidden></div>
-    </div>
-  </section>
 
   <section class="block" id="privacy-block" hidden>
     <h2>隐私与数据源</h2>
@@ -804,8 +795,10 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
   // “重新检测”的完整结果直接展开在环境状态卡里（和桌面版一样），重绘时保留
   let envChecks = null, envChecking = false;
+  const CHECK_TIP = "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
   function envButton(label) {
-    return `<div class="env-acts"><button class="btn" data-act="recheck"${envChecking ? " disabled" : ""}>${envChecking ? "检测中…" : label}</button></div>`;
+    const fold = envChecks && !envChecking ? `<button class="btn quiet" data-act="env-fold">收起</button>` : "";
+    return `<div class="env-acts">${fold}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></div>`;
   }
   const envChecksHtml = () => envChecks ? `<div class="env-checks check-groups">${renderChecks(envChecks)}</div>` : "";
   async function runEnvCheck() {
@@ -844,7 +837,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   // ---- 渲染
   let state = null, accountBusy = false;
   function syncAccountBusy() {
-    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
+    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="env-fold"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
       .forEach((button) => { button.disabled = accountBusy; });
   }
   function render() {
@@ -854,7 +847,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       : reg.status === "unsupported" ? `<span class="reg-bad"> · 出口 ${esc(reg.loc)} ⚠ 不在支持名单</span>`
       : reg.status === "unknown" ? " · 出口地区未知" : "";
     const sc = state.risk_score;
-    const scTxt = sc && reg.status ? `<span class="risk ${esc(sc.grade)}" title="${esc(sc.label)}。${esc(sc.advice)}">风险 ${esc(sc.score)}</span>` : "";
+    const scTxt = sc && reg.status ? `<span class="risk ${esc(sc.grade)}" title="环境评分（越高越安全）：${esc(sc.label)}。${esc(sc.advice)}">环境 ${esc(sc.score)}</span>` : "";
     $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}${scTxt}`;
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
     const p = state.pending_switch;
@@ -1002,7 +995,6 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     try {
       state = await api("GET", "/api/state");
       render(); loadLocal(); loadRules(); loadPrivacy();
-      $("#check-block").hidden = false;
     } catch (e) {
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
       else $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`;
@@ -1234,24 +1226,14 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     saveRules({ alert_threshold: Number($("#alert-pct").value) }, "提醒阈值已保存");
   };
 
-  // ---- Claude 服务检测（后端要做网络探测，得等几秒）
+  // ---- 检测结果的标记
   const CHECK_MARK = { ok: "✓", bad: "✗", warn: "!", info: "·" };
-  $("#btn-check").onclick = () => busy($("#btn-check"), async () => {
-    const btn = $("#btn-check");
-    btn.textContent = "检测中…";
-    try {
-      const r = await api("GET", "/api/service-check");
-      $("#check-list").innerHTML = renderChecks(r.items || []);
-      $("#check-list").hidden = false;
-      load(); // 检测会刷新后台缓存，顶部的分数跟着更新
-    } catch (err) { toast(err.message, true); }
-    finally { btn.textContent = "开始检测"; }
-  });
 
   // ---- 事件委托
   document.addEventListener("click", async (e) => {
     const re = e.target.closest("[data-act=recheck]");
     if (re) { runEnvCheck(); return; }
+    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; render(); return; }
     const b = e.target.closest("button[data-act]");
     if (!b || b.disabled) return;
     if (accountBusy && b.dataset.act !== "select") return;

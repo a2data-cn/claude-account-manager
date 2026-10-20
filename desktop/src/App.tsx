@@ -93,8 +93,27 @@ function useServiceCheck(toast: (m: string, bad?: boolean) => void, after?: () =
 
 type ServiceCheckState = ReturnType<typeof useServiceCheck>;
 
-/** 环境状态卡：分数、出口、网络类型、上次检测时间、风险提醒，点"重新检测"在卡下展开完整结果。只提醒，不拦 */
-function EnvCard({ state, sc: { items, checking, check } }: { state: State; sc: ServiceCheckState }) {
+const CHECK_TIP =
+  "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
+
+function EnvActs({ label, sc: { items, checking, check, reset } }: { label: string; sc: ServiceCheckState }) {
+  return (
+    <div className="env-acts">
+      {items && !checking && (
+        <button className="btn quiet" onClick={reset}>
+          收起
+        </button>
+      )}
+      <button className="btn" disabled={checking} title={CHECK_TIP} onClick={check}>
+        {checking ? "检测中，要等几秒…" : label}
+      </button>
+    </div>
+  );
+}
+
+/** 环境状态卡：分数、出口、网络类型、上次检测时间、风险提醒，点"重新检测"在卡下展开完整服务检测结果。只提醒，不拦 */
+function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
+  const { items } = sc;
   const reg = state.region;
   const score = state.risk_score;
   if (!reg?.status || !score) {
@@ -105,11 +124,7 @@ function EnvCard({ state, sc: { items, checking, check } }: { state: State; sc: 
           <div className="env-lab">还没检测</div>
         </div>
         <div className="env-empty">后台每隔几分钟自动检测一次出口地区和环境风险；也可以现在就测。只提醒，不拦任何操作。</div>
-        <div className="env-acts">
-          <button className="btn" disabled={checking} onClick={check}>
-            {checking ? "检测中…" : "立即检测"}
-          </button>
-        </div>
+        <EnvActs label="立即检测" sc={sc} />
         {items && (
           <div className="env-checks">
             <CheckList items={items} />
@@ -149,11 +164,7 @@ function EnvCard({ state, sc: { items, checking, check } }: { state: State; sc: 
           {ago(reg.checked_at)} · 后台每隔几分钟自动检测
         </div>
       </div>
-      <div className="env-acts">
-        <button className="btn" disabled={checking} onClick={check}>
-          {checking ? "检测中…" : "重新检测"}
-        </button>
-      </div>
+      <EnvActs label="重新检测" sc={sc} />
       {items ? (
         <div className="env-checks">
           <CheckList items={items} />
@@ -174,22 +185,6 @@ function EnvCard({ state, sc: { items, checking, check } }: { state: State; sc: 
   );
 }
 
-/** Claude 服务检测（设置页）：后端做 DNS、出口地区、两个域名、代理 / VPN 的探测，再列出环境里的风险点，要等几秒。只提醒，不拦 */
-function ServiceCheck({ toast, reload }: { toast: (m: string, bad?: boolean) => void; reload: () => void }) {
-  const { items, checking, check } = useServiceCheck(toast, reload);
-  return (
-    <section className="block">
-      <h2>Claude 服务检测</h2>
-      <div className="panel">
-        <p className="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、DNS 配置、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
-        <button className="btn" disabled={checking} onClick={check}>
-          {checking ? "检测中…" : "开始检测"}
-        </button>
-        {items && <CheckList items={items} />}
-      </div>
-    </section>
-  );
-}
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
@@ -385,8 +380,11 @@ export default function App() {
             )}
             {state.region?.status === "unknown" && <span> · 出口地区未知</span>}
             {state.risk_score && state.region?.status && (
-              <span className={`risk ${state.risk_score.grade}`} title={`${state.risk_score.label}。${state.risk_score.advice}`}>
-                风险 {state.risk_score.score}
+              <span
+                className={`risk ${state.risk_score.grade}`}
+                title={`环境评分（越高越安全）：${state.risk_score.label}。${state.risk_score.advice}`}
+              >
+                环境 {state.risk_score.score}
               </span>
             )}
           </span>
@@ -425,7 +423,6 @@ export default function App() {
               </button>
             </div>
           </section>
-          <ServiceCheck toast={toast} reload={load} />
           <Privacy toast={toast} onChanged={load} onCleared={envSc.reset} />
         </>
       ) : (

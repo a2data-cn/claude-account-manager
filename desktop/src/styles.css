@@ -238,7 +238,6 @@ details.src[open] summary::before { content: "▾"; }
   .sources li { grid-template-columns: 1fr; gap: 0; }
 }
 .check-groups .checks { margin: 0; }
-.panel > .check-groups { margin-top: 12px; }
 .check-groups h4, .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }
