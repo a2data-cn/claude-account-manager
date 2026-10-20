@@ -1,6 +1,6 @@
 [package]
 name = "claude-accounts"
-version = "1.2.0"
+version = "1.2.1"
 description = "Claude 多账号管理"
 edition = "2021"
 
