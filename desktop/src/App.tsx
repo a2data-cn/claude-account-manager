@@ -472,21 +472,23 @@ export default function App() {
               <div className="sec-head">
                 <h2>账号 · {sorted.length} 个</h2>
                 <span className="hint">
-                  {badCount > 0 && <span style={{ color: "var(--hot)", fontWeight: 600 }}>{badCount} 个异常 · </span>}
-                  左右滑动，点一下看详情
+                  {badCount > 0 && <span className="bad-count">{badCount} 个异常</span>}
+                  {badCount > 0 && " · "}
+                  点账号卡看详情
                 </span>
-                <span className="spacer" style={{ flex: 1 }} />
-                <button
-                  className="btn quiet"
-                  disabled={!!busy}
-                  title="检查 Claude Code 现在登录的是不是新账号，是就保存"
-                  onClick={detectLogin}
-                >
-                  {busy === "detect" ? "检测中…" : "检测新登录"}
-                </button>
-                <button className="btn quiet" disabled={!!busy} onClick={() => setAdding(true)}>
-                  ＋ 添加账号
-                </button>
+                <span className="sec-acts">
+                  <button
+                    className="btn quiet"
+                    disabled={!!busy}
+                    title="检查 Claude Code 现在登录的是不是新账号，是就保存"
+                    onClick={detectLogin}
+                  >
+                    {busy === "detect" ? "检测中…" : "检测新登录"}
+                  </button>
+                  <button className="btn quiet" disabled={!!busy} onClick={() => setAdding(true)}>
+                    ＋ 添加账号
+                  </button>
+                </span>
               </div>
               <div className="strip">
                 {sorted.map((a) => (
