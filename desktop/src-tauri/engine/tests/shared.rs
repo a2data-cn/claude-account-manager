@@ -1,6 +1,6 @@
 //! 跑 tests/shared 里的数据。scripts/test_cam.py 的 SharedFixtureTest 跑的是同一份，两边规则必须一致。
 
-use cam_engine::api::{apply_manual, days_left_at};
+use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::store::{accounts, find_index, parse_day, s};
@@ -58,6 +58,19 @@ fn rule_cases() {
         let at = chrono::NaiveDateTime::parse_from_str(c["at"].as_str().unwrap(), "%Y-%m-%dT%H:%M").unwrap();
         let got = match_time_rule(&data, at).and_then(|r| s(&r, "id").map(|x| json!(x)));
         assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn health_cases() {
+    for c in cases(&fixture("health.json"), "cases") {
+        let h = account_health(&c["account"], c["has_creds"].as_bool().unwrap(), c["days_left"].as_i64());
+        let kinds: Vec<Value> = h["issues"].as_array().unwrap().iter().map(|i| i["kind"].clone()).collect();
+        let got = json!({"level": h["level"], "label": h["label"], "kinds": kinds});
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+        for i in h["issues"].as_array().unwrap() {
+            assert_eq!(i.as_object().unwrap().len(), 5, "{}", c["name"]);
+        }
     }
 }
 

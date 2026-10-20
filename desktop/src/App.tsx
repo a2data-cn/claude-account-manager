@@ -1,8 +1,16 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, command, inTauri, onEvent } from "./api";
 import { ago } from "./format";
-import { AccountCard } from "./components/AccountCard";
-import { AddDialog, EditDialog, SwitchChoiceDialog, type AddValues, type EditValues, type SwitchChoice } from "./components/Dialogs";
+import { AccountDetail, AccountTile } from "./components/AccountCard";
+import {
+  AddDialog,
+  EditDialog,
+  RemoveDialog,
+  SwitchChoiceDialog,
+  type AddValues,
+  type EditValues,
+  type SwitchChoice,
+} from "./components/Dialogs";
 import { LocalUsage } from "./components/LocalUsage";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Rules } from "./components/Rules";
@@ -167,6 +175,22 @@ export default function App() {
   const [editing, setEditing] = useState<Account | null>(null);
   const [adding, setAdding] = useState(false);
   const [choice, setChoice] = useState<SwitchChoice | null>(null); // 有会话在跑时的三选一
+  const [removing, setRemoving] = useState<Account | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("cam-selected");
+    } catch {
+      return null;
+    }
+  });
+  const select = (a: Account) => {
+    setSelectedId(a.id);
+    try {
+      localStorage.setItem("cam-selected", a.id);
+    } catch {
+      /* 存不了就只在本次会话里记住 */
+    }
+  };
   const [tab, setTab] = useState<Tab>("accounts");
   const [toastMsg, setToastMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const toastTimer = useRef<number>();
@@ -214,6 +238,19 @@ export default function App() {
       return ux - uy;
     });
   }, [state]);
+
+  const selected = sorted.find((a) => a.id === selectedId) || sorted.find((a) => a.is_active) || sorted[0] || null;
+  const badCount = sorted.filter((a) => a.health?.level === "error").length;
+  // 环境有风险时把环境状态卡放到最上面，没风险时放到账号详情下面
+  const risky = !!(state?.risk_score && state.region?.status && state.risk_score.grade !== "low");
+  // 选中的卡不在可见范围时，把账号条滑到它
+  useEffect(() => {
+    const strip = document.querySelector<HTMLElement>(".strip");
+    const cur = strip?.querySelector<HTMLElement>(".tile.sel");
+    if (!strip || !cur) return;
+    const l = cur.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft;
+    if (l < strip.scrollLeft || l + cur.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = Math.max(0, l - 3);
+  }, [selected?.id]);
 
   const run = async (key: string, fn: () => Promise<void>) => {
     setBusy(key);
@@ -265,14 +302,14 @@ export default function App() {
       toast("已保存");
     });
 
-  const remove = (a: Account) => {
-    if (!confirm(`删除“${a.label || a.email}”？凭据会移到备份目录，不会直接销毁。`)) return;
+  const remove = (a: Account) =>
     run(a.id, async () => {
       setState(await api<State>("DELETE", `/api/accounts/${a.id}`));
+      setRemoving(null);
       setEditing(null);
-      toast("已删除");
+      if (selectedId === a.id) setSelectedId(null);
+      toast("已移除。Claude Code 的项目和会话都还在，凭据在备份目录里");
     });
-  };
 
   const add = (v: AddValues) =>
     run("add", async () => {
@@ -312,14 +349,9 @@ export default function App() {
           </nav>
         )}
         {tab === "accounts" && (
-          <>
-            <button className="btn quiet" onClick={() => setAdding(true)}>
-              添加账号
-            </button>
-            <button className="btn" disabled={busy === "all"} onClick={() => refresh()}>
-              {busy === "all" ? "刷新中…" : "刷新用量"}
-            </button>
-          </>
+          <button className="btn" disabled={busy === "all"} onClick={() => refresh()}>
+            {busy === "all" ? "刷新中…" : "刷新用量"}
+          </button>
         )}
       </header>
 
@@ -341,7 +373,6 @@ export default function App() {
         </>
       ) : (
         <main aria-live="polite">
-          {state && <EnvCard state={state} toast={toast} reload={load} />}
           {state?.warning && (
             <div className="notice" role="alert">
               ⚠ {state.warning}
@@ -361,6 +392,7 @@ export default function App() {
               <p className="hint">{error}</p>
             </div>
           )}
+          {state && risky && <EnvCard state={state} toast={toast} reload={load} />}
           {state && !state.accounts.length && (
             <div className="panel empty">
               <h2>还没有账号</h2>
@@ -370,19 +402,47 @@ export default function App() {
                   导入当前登录
                 </button>
               </p>
+              <p className="hint">
+                用网页版 claude.ai 或 API Key：
+                <button className="btn" onClick={() => setAdding(true)}>
+                  添加账号
+                </button>
+              </p>
             </div>
           )}
-          {sorted.map((a) => (
-            <AccountCard
-              key={a.id}
-              a={a}
-              busy={busy === a.id}
-              onSwitch={switchTo}
-              onOpen={openWeb}
-              onRefresh={(x) => refresh(x.id)}
-              onEdit={setEditing}
-            />
-          ))}
+          {selected && (
+            <>
+              <div className="sec-head">
+                <h2>账号 · {sorted.length} 个</h2>
+                <span className="hint">
+                  {badCount > 0 && <span style={{ color: "var(--hot)", fontWeight: 600 }}>{badCount} 个异常 · </span>}
+                  左右滑动，点一下看详情
+                </span>
+                <span className="spacer" style={{ flex: 1 }} />
+                <button className="btn quiet" onClick={() => setAdding(true)}>
+                  ＋ 添加账号
+                </button>
+              </div>
+              <div className="strip" role="list">
+                {sorted.map((a) => (
+                  <AccountTile key={a.id} a={a} selected={a.id === selected.id} onSelect={select} />
+                ))}
+                <button type="button" className="tile add" onClick={() => setAdding(true)}>
+                  <span className="plus">＋</span>添加账号
+                </button>
+              </div>
+              <AccountDetail
+                a={selected}
+                busy={busy === selected.id}
+                onSwitch={switchTo}
+                onOpen={openWeb}
+                onRefresh={(x) => refresh(x.id)}
+                onEdit={setEditing}
+                onRemove={setRemoving}
+              />
+            </>
+          )}
+          {state && !risky && <EnvCard state={state} toast={toast} reload={load} />}
           {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
           {state && <LocalUsage accounts={state.accounts} stamp={state.generated_at} />}
           {state && (
@@ -393,7 +453,16 @@ export default function App() {
         </main>
       )}
 
-      <EditDialog account={editing} onClose={() => setEditing(null)} onSave={saveEdit} onDelete={remove} />
+      <EditDialog
+        account={editing}
+        onClose={() => setEditing(null)}
+        onSave={saveEdit}
+        onDelete={(a) => {
+          setEditing(null);
+          setRemoving(a);
+        }}
+      />
+      <RemoveDialog account={removing} onClose={() => setRemoving(null)} onConfirm={remove} />
       <AddDialog open={adding} onClose={() => setAdding(false)} onAdd={add} />
       <SwitchChoiceDialog
         choice={choice}

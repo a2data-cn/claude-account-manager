@@ -1433,6 +1433,13 @@ class SharedFixtureTest(unittest.TestCase):
         for c in fx["agrees"]:
             self.assertEqual(self.cam.identity_agrees(c["account"], c["uuid"], c["email"]), c["expect"], c["name"])
 
+    def test_account_health(self):
+        for c in shared("health.json")["cases"]:
+            h = self.cam.account_health(c["account"], c["has_creds"], c["days_left"])
+            got = {"level": h["level"], "label": h["label"], "kinds": [i["kind"] for i in h["issues"]]}
+            self.assertEqual(got, c["expect"], c["name"])
+            self.assertTrue(all(set(i) == {"kind", "level", "text", "advice", "detail"} for i in h["issues"]), c["name"])
+
     def test_find_account(self):
         fx = shared("find_account.json")
         data = {"accounts": fx["accounts"]}

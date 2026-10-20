@@ -21,6 +21,8 @@
   --hot: #BF3B33;
   --live: #1E7F55;
   --live-soft: #DCEFE5;
+  --violet: #6B4FC8;
+  --hot-soft: #F7E1DF;
   --focus: #2C62C9;
   --radius-lg: 14px;
   --radius-sm: 6px;
@@ -30,13 +32,13 @@
   :root:not([data-theme="light"]) {
     --paper: #141920; --surface: #1C232C; --ink: #E5EAF0; --muted: #94A0AF; --line: #2E3843;
     --track: #2A333E; --ok: #6E9BF0; --warn: #E0A93B; --hot: #EE776E; --live: #4CC08A; --live-soft: #1B3A2D;
-    --focus: #6E9BF0; color-scheme: dark;
+    --violet: #A48BF0; --hot-soft: #3A2220; --focus: #6E9BF0; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --paper: #141920; --surface: #1C232C; --ink: #E5EAF0; --muted: #94A0AF; --line: #2E3843;
   --track: #2A333E; --ok: #6E9BF0; --warn: #E0A93B; --hot: #EE776E; --live: #4CC08A; --live-soft: #1B3A2D;
-  --focus: #6E9BF0; color-scheme: dark;
+  --violet: #A48BF0; --hot-soft: #3A2220; --focus: #6E9BF0; color-scheme: dark;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -67,29 +69,69 @@ header.top .spacer { flex: 1; }
 .btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
 .btn.quiet:hover { color: var(--ink); }
 
-/* 账号行 */
-.acc {
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  padding: 16px 18px; margin-bottom: 12px;
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 8px 28px;
-  grid-template-areas: "who gauges" "acts gauges"; grid-template-rows: auto 1fr;
-}
-.acc > .who { grid-area: who; }
-.acc > .gauges { grid-area: gauges; }
-.acc > .acts { grid-area: acts; align-self: end; }
-.acc.is-live { border-color: var(--live); box-shadow: inset 4px 0 0 var(--live); }
-.who { min-width: 0; }
-.who .name { font-size: 17px; font-weight: 650; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 8px; }
-.who .mail { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip { font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+/* 标签：套餐、状态 */
+.chip { font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; line-height: 1.5; }
 .chip.live { background: var(--live-soft); border-color: transparent; color: var(--live); }
 .chip.plan { color: var(--ink); }
-.facts { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; color: var(--muted); }
-.facts li { margin: 2px 0; }
-.facts .due-soon { color: var(--warn); font-weight: 600; }
-.facts .due-now { color: var(--hot); font-weight: 600; }
-.facts .err { color: var(--warn); }
-.acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.chip.p-pro { color: var(--ok); border-color: currentColor; }
+.chip.p-max { color: var(--violet); border-color: currentColor; }
+.chip.p-team { color: var(--live); border-color: currentColor; }
+.chip.p-enterprise { color: var(--paper); background: var(--ink); border-color: var(--ink); }
+.chip.p-free, .chip.p-api, .chip.p-unknown { color: var(--muted); }
+.chip.st-error { background: var(--hot); border-color: var(--hot); color: #fff; }
+.chip.st-warn { color: var(--warn); border-color: currentColor; }
+.chip.due-soon { color: var(--warn); border-color: currentColor; }
+.chip.due-now { color: var(--hot); border-color: currentColor; }
+
+/* 账号区：上面一排可横向滑动的账号卡，下面是选中账号的详情 */
+.sec-head { display: flex; align-items: baseline; gap: 10px; margin: 6px 0 10px; }
+.sec-head h2 { font-size: 15px; font-weight: 650; margin: 0; }
+.sec-head .hint { margin: 0; }
+.strip { display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x proximity; padding: 3px 3px 12px; margin: 0 -3px 4px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+.strip::-webkit-scrollbar { height: 6px; }
+.strip::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.strip::-webkit-scrollbar-track { background: transparent; }
+.tile { flex: 0 0 216px; scroll-snap-align: start; position: relative; text-align: left; cursor: pointer; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 14px 12px 16px;
+  display: grid; grid-template-rows: auto auto 1fr auto; gap: 6px; min-height: 132px; }
+.tile:hover { border-color: var(--muted); }
+.tile.sel { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.tile.live::before { content: ""; position: absolute; left: -1px; top: 14px; bottom: 14px; width: 4px; border-radius: 0 4px 4px 0; background: var(--live); }
+.tile.bad { background: linear-gradient(var(--hot-soft), var(--surface) 70%); }
+.t-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.t-name { flex: 1; min-width: 0; font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-sub { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t-chips { display: flex; gap: 4px; flex-wrap: wrap; align-content: start; }
+.t-meter { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.t-meter .g-bar { display: block; flex: 1; height: 6px; margin: 0; }
+.t-meter .g-fill { display: block; }
+.t-meter b { min-width: 2.6em; text-align: right; color: var(--ink); font-weight: 650; }
+.tile.add { border-style: dashed; background: transparent; color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.tile.add:hover { color: var(--ink); }
+.tile.add .plus { font-size: 28px; line-height: 1; font-weight: 300; }
+
+.detail { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px 20px; margin-bottom: 12px; }
+.d-head { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px 16px; }
+.d-title { flex: 1 1 280px; min-width: 0; }
+.d-title .name { font-size: 20px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.d-title .mail { color: var(--muted); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
+.d-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn.danger { color: var(--hot); }
+.btn.danger:hover { border-color: var(--hot); }
+.d-body { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px 36px; margin-top: 18px; }
+.d-info { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 16px; font-size: 13px; align-content: start; }
+.d-info dt { color: var(--muted); }
+.d-info dd { margin: 0; overflow-wrap: anywhere; }
+.d-info .due-soon { color: var(--warn); font-weight: 600; }
+.d-info .due-now { color: var(--hot); font-weight: 600; }
+.issues { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; }
+.issue { border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 13px; background: var(--paper); }
+.issue.error { border-left-color: var(--hot); }
+.issue.warn { border-left-color: var(--warn); }
+.issue b { display: block; font-size: 14px; }
+.issue .advice { display: block; color: var(--ink); margin-top: 2px; }
+.issue .raw { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
 
 /* 额度表：数字 + 进度 + 时间进度刻度 */
 .gauges { display: grid; gap: 12px; align-content: start; }
@@ -110,7 +152,12 @@ header.top .spacer { flex: 1; }
 .g-mini b { color: var(--ink); font-weight: 600; }
 
 @media (max-width: 680px) {
-  .acc { grid-template-columns: 1fr; grid-template-areas: "who" "gauges" "acts"; padding: 14px; gap: 12px; }
+  .tile { flex-basis: 70vw; max-width: 250px; }
+  .detail { padding: 14px; }
+  .d-title .name { font-size: 18px; }
+  .d-body { grid-template-columns: 1fr; margin-top: 14px; }
+  .d-acts { width: 100%; }
+  .d-acts .btn { flex: 1 1 auto; }
   .g-pct { font-size: 22px; }
   header.top h1 { font-size: 18px; }
   header.top .host { display: none; }
@@ -168,7 +215,6 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
   .env-facts div { white-space: normal; }
   .env-acts .btn { flex: 1; }
   .btn { min-height: 40px; }
-  .acts .btn { flex: 1 1 auto; }
 }
 
 /* 本地消耗柱状图 */
@@ -205,6 +251,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
 .dlg-acts .danger { margin-right: auto; color: var(--hot); }
 .dlg-acts.wrap { flex-wrap: wrap; }
 .dlg-text { margin: 0 0 14px; font-size: 14px; line-height: 1.5; }
+.btn.danger-fill { background: var(--hot); border-color: var(--hot); color: #fff; }
+.btn.danger-fill:hover { opacity: .9; }
+.rm-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.rm-list li { padding-left: 1.5em; text-indent: -1.5em; }
+.rm-list .keep::before { content: "✓ "; color: var(--live); font-weight: 700; }
+.rm-list .drop::before { content: "– "; color: var(--hot); font-weight: 700; }
+.rm-block { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--hot-soft); color: var(--hot); font-weight: 600; font-size: 13px; }
 
 .toast {
   position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
@@ -243,7 +296,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     <h1>Claude 账号</h1>
     <span class="host" id="host"></span>
     <span class="spacer"></span>
-    <button class="btn quiet" id="btn-add" type="button">添加账号</button>
     <button class="btn" id="btn-refresh" type="button">刷新用量</button>
   </header>
 
@@ -315,7 +367,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     <div class="field" id="fw-admin"><label for="f-admin">Admin Key（可选，用于读取本月花费）</label><input id="f-admin" name="admin_key" type="password" autocomplete="off"></div>
     <div class="field"><label for="f-note">备注</label><textarea id="f-note" name="note" rows="2"></textarea></div>
     <div class="dlg-acts">
-      <button class="btn quiet danger" type="button" id="btn-delete">删除账号</button>
+      <button class="btn quiet danger" type="button" id="btn-delete">移除账号</button>
       <button class="btn" value="cancel" formnovalidate>取消</button>
       <button class="btn primary" value="save" id="btn-save">保存</button>
     </div>
@@ -348,6 +400,17 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     <div class="dlg-acts">
       <button class="btn" value="cancel" formnovalidate>取消</button>
       <button class="btn primary" value="ok" id="btn-add-ok">导入当前登录</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-remove">
+  <form method="dialog">
+    <h3 id="rm-title">移除账号</h3>
+    <div class="dlg-text" id="rm-body"></div>
+    <div class="dlg-acts">
+      <button class="btn" value="cancel">取消</button>
+      <button class="btn danger-fill" value="ok" id="rm-ok">移除</button>
     </div>
   </form>
 </dialog>
@@ -468,45 +531,105 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     return `<li class="${cls}">${txt}${m.auto_renew ? "，自动续期" : ""}${m.price ? "，" + esc(m.price) : ""}</li>`;
   }
 
-  function accountRow(a) {
+  // ---- 账号：上面一排账号卡（可横向滑动），下面是选中账号的详情
+  const PLAN_CLASS = { free: "p-free", pro: "p-pro", max: "p-max", team: "p-team", enterprise: "p-enterprise", api: "p-api" };
+  function planChip(a) {
+    const p = a.plan_display || (a.kind === "api" ? "api" : null);
+    if (!p) return `<span class="chip p-unknown" title="还没拿到套餐信息，可以在“编辑”里手动选">套餐未知</span>`;
+    return `<span class="chip ${PLAN_CLASS[p] || "plan"}">${esc(PLAN[p] || p)}</span>`;
+  }
+  function dueInfo(a) {
+    if (a.days_left === null || a.days_left === undefined) return null;
+    const d = a.days_left;
+    return { d, cls: d < 0 || d <= 2 ? "due-now" : d <= 7 ? "due-soon" : "",
+             short: d > 0 ? `${d} 天后到期` : d === 0 ? "今天到期" : `已过期 ${-d} 天` };
+  }
+  function statusChips(a) {
+    const h = a.health || {};
+    const out = [];
+    if (a.is_active) out.push(`<span class="chip live">正在用</span>`);
+    if (h.level === "error") out.push(`<span class="chip st-error">异常</span>`);
+    else if (h.level === "warn") out.push(`<span class="chip st-warn">注意</span>`);
+    const due = dueInfo(a);
+    if (due && due.cls && !(h.issues || []).some((i) => i.kind === "expired")) out.push(`<span class="chip ${due.cls}">${due.short}</span>`);
+    return out.join("");
+  }
+  function tileMeter(a) {
     const u = a.usage || {};
-    const plan = a.plan_display ? `<span class="chip plan">${esc(PLAN[a.plan_display] || a.plan_display)}</span>` : "";
-    const live = a.is_active ? `<span class="chip live">Claude Code 正在用</span>` : "";
-    const facts = [
-      `<li>${KIND[a.kind]}${a.org_name ? "，" + esc(a.org_name) : ""}</li>`,
-      dueFact(a),
-      a.kind === "api" && a.api_key_hint ? `<li>Key ${esc(a.api_key_hint)}${u.key_valid === true ? "，有效" : u.key_valid === false ? "，无效" : ""}</li>` : "",
-      (a.manual || {}).note ? `<li>${esc(a.manual.note)}</li>` : "",
-      u.error ? `<li class="err">${esc(u.error)}</li>` : "",
-      `<li>用量更新于 ${ago(u.fetched_at)}</li>`,
-    ].join("");
-
-    let gauges = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
-      .filter((k) => u[k]).map((k) => gauge(k, u[k])).join("");
+    if (u.cost_month_usd !== undefined && u.cost_month_usd !== null) return `<span class="t-meter">本月花费 <b style="margin-left:auto">$${Number(u.cost_month_usd).toFixed(2)}</b></span>`;
+    const w = u.five_hour;
+    if (!w) return `<span class="t-meter">${a.kind === "claude_web" && !a.has_session_key ? "不自动读取用量" : "还没有用量"}</span>`;
+    const pct = Math.max(0, Math.min(100, w.utilization));
+    const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
+    return `<span class="t-meter">5 小时<span class="g-bar"><span class="g-fill ${cls}" style="width:${pct}%"></span></span><b>${pct.toFixed(0)}%</b></span>`;
+  }
+  function tile(a, sel) {
+    const h = a.health || {};
+    const sub = a.email && a.email !== a.label ? a.email : KIND[a.kind];
+    return `<button type="button" class="tile${sel ? " sel" : ""}${a.is_active ? " live" : ""}${h.level === "error" ? " bad" : ""}"
+      data-act="select" data-id="${esc(a.id)}" aria-pressed="${sel}" aria-label="${esc(nameOf(a))}">
+      <span class="t-top"><span class="t-name">${esc(a.label || a.email || "未命名")}</span>${planChip(a)}</span>
+      <span class="t-sub">${esc(sub)}</span>
+      <span class="t-chips">${statusChips(a)}</span>
+      ${tileMeter(a)}
+    </button>`;
+  }
+  function detailView(a) {
+    const u = a.usage || {};
+    const m = a.manual || {};
+    const h = a.health || { issues: [] };
+    let gauges = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"].filter((k) => u[k]).map((k) => gauge(k, u[k])).join("");
     if (u.cost_month_usd !== undefined && u.cost_month_usd !== null) {
       gauges += `<div class="g"><div class="g-head"><span class="g-name">本月花费</span><span class="g-pct">$${Number(u.cost_month_usd).toFixed(2)}</span></div></div>`;
     }
     if (!gauges) {
       gauges = `<div class="g-empty">${a.kind === "claude_web" && !a.has_session_key
-        ? "网页版账号默认不抓取用量。填写 sessionKey 后可尝试自动获取，或在“编辑”里手动记录到期日。"
-        : a.kind === "api" && !a.has_admin_key ? "填写 Admin Key 后可显示本月花费。" : "还没有用量数据，点“刷新用量”。"}</div>`;
+        ? "网页版账号默认不读取用量。填写 sessionKey 后可以自动获取，或者在“编辑”里手动记录到期日。"
+        : a.kind === "api" && !a.has_admin_key ? "填写 Admin Key 后可以显示本月花费。" : "还没有用量数据，点“刷新”。"}</div>`;
     }
-
+    const due = dueInfo(a);
+    const info = [
+      ["类型", esc(KIND[a.kind]) + (a.org_name ? " · " + esc(a.org_name) : "")],
+      due ? ["到期", `<span class="${due.cls}">${due.short}${m.expires_at ? "（" + esc(m.expires_at) + "）" : ""}</span>${m.auto_renew ? " · 自动续期" : ""}`] : null,
+      m.price ? ["价格", esc(m.price)] : null,
+      a.kind === "api" && a.api_key_hint ? ["Key", esc(a.api_key_hint) + (u.key_valid === true ? " · 有效" : u.key_valid === false ? " · 无效" : "")] : null,
+      a.kind === "claude_code" ? ["最近切换", a.last_switched_at ? ago(a.last_switched_at) : "还没切换过"] : null,
+      ["用量更新", ago(u.fetched_at)],
+      m.note ? ["备注", esc(m.note)] : null,
+    ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+    const issues = (h.issues || []).map((i) => `<li class="issue ${esc(i.level)}"><b>${esc(i.text)}</b><span class="advice">${esc(i.advice)}</span>${i.detail ? `<span class="raw">${esc(i.detail)}</span>` : ""}</li>`).join("");
     const acts = [];
-    if (a.kind === "claude_code" && !a.is_active) acts.push(`<button class="btn primary" data-act="switch" data-id="${a.id}">切换到这个账号</button>`);
-    if (a.kind === "claude_web") acts.push(`<button class="btn primary" data-act="open" data-id="${a.id}">在电脑上打开</button>`);
-    acts.push(`<button class="btn" data-act="refresh" data-id="${a.id}">刷新</button>`);
-    acts.push(`<button class="btn quiet" data-act="edit" data-id="${a.id}">编辑</button>`);
-
-    return `<article class="acc${a.is_active ? " is-live" : ""}" aria-label="${esc(nameOf(a))}">
-      <div class="who">
-        <div class="name">${esc(a.label || a.email || "未命名")} ${plan} ${live}</div>
-        ${a.email && a.email !== a.label ? `<div class="mail">${esc(a.email)}</div>` : ""}
-        <ul class="facts">${facts}</ul>
+    if (a.kind === "claude_code" && !a.is_active) acts.push(`<button class="btn primary" data-act="switch" data-id="${esc(a.id)}">切换到这个账号</button>`);
+    if (a.kind === "claude_web") acts.push(`<button class="btn primary" data-act="open" data-id="${esc(a.id)}">在电脑上打开</button>`);
+    acts.push(`<button class="btn" data-act="refresh" data-id="${esc(a.id)}">刷新</button>`);
+    acts.push(`<button class="btn" data-act="edit" data-id="${esc(a.id)}">编辑</button>`);
+    acts.push(`<button class="btn quiet danger" data-act="remove" data-id="${esc(a.id)}">移除</button>`);
+    return `<section class="detail" aria-label="${esc(nameOf(a))} 的详情">
+      <div class="d-head">
+        <div class="d-title"><div class="name">${esc(a.label || a.email || "未命名")} ${planChip(a)} ${statusChips(a)}</div>
+          ${a.email && a.email !== a.label ? `<div class="mail">${esc(a.email)}</div>` : ""}</div>
+        <div class="d-acts">${acts.join("")}</div>
       </div>
-      <div class="gauges">${gauges}</div>
-      <div class="acts">${acts.join("")}</div>
-    </article>`;
+      ${issues ? `<ul class="issues">${issues}</ul>` : ""}
+      <div class="d-body"><div class="gauges">${gauges}</div><dl class="d-info">${info}</dl></div>
+    </section>`;
+  }
+  // 选中的卡不在可见范围时，把账号条滑到它（重绘会把滚动位置清零）
+  function revealSelected(root) {
+    const strip = root.querySelector(".strip"), cur = strip && strip.querySelector(".tile.sel");
+    if (!cur) return;
+    const l = cur.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft;
+    if (l < strip.scrollLeft || l + cur.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = Math.max(0, l - 3);
+  }
+  let selectedId = null;
+  try { selectedId = localStorage.getItem("cam-selected"); } catch (_) {}
+  function select(id) {
+    selectedId = id;
+    try { localStorage.setItem("cam-selected", id); } catch (_) {}
+    const s = document.querySelector(".strip"), x = s ? s.scrollLeft : 0;
+    render();
+    const s2 = document.querySelector(".strip");
+    if (s2) { s2.scrollLeft = x; revealSelected($("#list")); }
   }
 
   // ---- 环境状态卡 / 检测结果分组（和桌面版同样的分组）
@@ -573,14 +696,16 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}${scTxt}`;
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
     const p = state.pending_switch;
-    const notice = envCard(state)
-      + (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
-      + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "");
+    const risky = state.risk_score && (state.region || {}).status && state.risk_score.grade !== "low";
+    const env = envCard(state);
+    const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
+      + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "")
+      + (risky ? env : "");
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
         <p class="hint"><b>用 Claude Code（命令行）</b>：确认终端里 <code>claude</code> 已登录，点下面的按钮导入。以后 <code>/login</code> 换号会自动保存。</p>
         <p><button class="btn primary" data-act="import">导入当前登录</button></p>
-        <p class="hint" style="margin-top:14px"><b>用网页版 claude.ai</b>：点“添加账号”选网页版，每个号一个独立浏览器窗口，登录状态长期保留。填入 sessionKey 后可自动显示额度。</p></div>`;
+        <p class="hint" style="margin-top:14px"><b>用网页版 claude.ai 或 API Key</b>：<button class="btn" data-act="add">添加账号</button> 选对应类型。网页版每个号一个独立浏览器窗口，登录状态长期保留。</p></div>` + (risky ? "" : env);
       return;
     }
     // Claude Code 当前账号排最前，其余按 5 小时余量从多到少
@@ -591,7 +716,16 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
       const uy = y.usage && y.usage.five_hour ? y.usage.five_hour.utilization : 999;
       return ux - uy;
     });
-    list.innerHTML = notice + sorted.map(accountRow).join("");
+    const sel = sorted.find((a) => a.id === selectedId) || sorted.find((a) => a.is_active) || sorted[0];
+    const bad = sorted.filter((a) => (a.health || {}).level === "error").length;
+    list.innerHTML = notice
+      + `<div class="sec-head"><h2>账号 · ${sorted.length} 个</h2><span class="hint">${bad ? `<span style="color:var(--hot);font-weight:600">${bad} 个异常</span> · ` : ""}左右滑动，点一下看详情</span>
+          <span class="spacer" style="flex:1"></span><button class="btn quiet" data-act="add">＋ 添加账号</button></div>`
+      + `<div class="strip" role="list">${sorted.map((a) => tile(a, a.id === sel.id)).join("")}
+          <button type="button" class="tile add" data-act="add"><span class="plus">＋</span>添加账号</button></div>`
+      + detailView(sel)
+      + (risky ? "" : env);
+    revealSelected(list);
   }
 
   function renderLogin(msg) {
@@ -703,7 +837,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#fw-session").hidden = a.kind !== "claude_web";
     $("#fw-api").hidden = a.kind !== "api";
     $("#fw-admin").hidden = a.kind !== "api";
-    $("#btn-delete").hidden = a.is_active;
     $("#dlg-edit").returnValue = ""; // 上次关闭留下的返回值不清掉，按 Esc 关闭会被当成“保存”
     $("#dlg-edit").showModal();
   }
@@ -719,11 +852,34 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     try { state = await api("PATCH", "/api/accounts/" + editing.id, body); render(); toast("已保存"); }
     catch (e) { toast(e.message, true); }
   });
-  $("#btn-delete").onclick = async () => {
-    if (!editing || !confirm(`删除“${nameOf(editing)}”？凭据会移到备份目录，不会直接销毁。`)) return;
-    try { state = await api("DELETE", "/api/accounts/" + editing.id); $("#dlg-edit").close("cancel"); render(); toast("已删除"); }
-    catch (e) { toast(e.message, true); }
-  };
+  $("#btn-delete").onclick = () => { if (!editing) return; const a = editing; $("#dlg-edit").close("cancel"); openRemove(a); };
+
+  // ---- 移除：只从这个工具里移除，Claude Code 的项目、会话、设置都保留
+  let removing = null;
+  function openRemove(a) {
+    removing = a;
+    const blocked = a.kind === "claude_code" && a.is_active;
+    $("#rm-title").textContent = `移除“${nameOf(a)}”？`;
+    $("#rm-body").innerHTML = `只从这个工具里移除，不会动 Claude 本身：
+      <ul class="rm-list">
+        <li class="keep">保留：Claude Code 的项目、会话记录、设置和 MCP 配置（~/.claude 里的都不动）</li>
+        <li class="keep">保留：这个账号在 Anthropic 那边的订阅、对话和数据</li>
+        <li class="drop">移除：这里保存的${a.kind === "api" ? " API Key" : a.kind === "claude_web" ? " sessionKey 和独立浏览器窗口的登录状态" : "登录凭据"}、它的切号规则（都移到备份目录，可以找回）</li>
+      </ul>${blocked ? `<div class="rm-block">这是 Claude Code 正在用的账号，先切换到其它账号再移除。</div>` : ""}`;
+    $("#rm-ok").disabled = blocked;
+    $("#dlg-remove").returnValue = "";
+    $("#dlg-remove").showModal();
+  }
+  $("#dlg-remove").addEventListener("close", async () => {
+    const a = removing;
+    removing = null;
+    if (!a || $("#dlg-remove").returnValue !== "ok") return;
+    try {
+      state = await api("DELETE", "/api/accounts/" + a.id);
+      if (selectedId === a.id) selectedId = null;
+      render(); toast("已移除。Claude Code 的项目和会话都还在，凭据在备份目录里");
+    } catch (e) { toast(e.message, true); }
+  });
 
   // ---- 添加
   function syncAddKind() {
@@ -736,7 +892,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#btn-add-ok").textContent = k === "claude_code" ? "导入当前登录" : "添加";
   }
   $("#a-kind").onchange = syncAddKind;
-  $("#btn-add").onclick = () => { $("#form-add").reset(); syncAddKind(); $("#dlg-add").returnValue = ""; $("#dlg-add").showModal(); };
+  function openAdd() { $("#form-add").reset(); syncAddKind(); $("#dlg-add").returnValue = ""; $("#dlg-add").showModal(); }
   $("#dlg-add").addEventListener("close", async () => {
     if ($("#dlg-add").returnValue !== "ok") return;
     const kind = $("#a-kind").value;
@@ -848,6 +1004,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
         catch (err) { toast(err.message, true); } break;
       case "refresh": refresh(id, b); break;
       case "edit": if (a) openEdit(a); break;
+      case "select": select(id); break;
+      case "add": openAdd(); break;
+      case "remove": if (a) openRemove(a); break;
       case "import": doAdd({ kind: "claude_code" }); break;
       case "rule-rm":
         if (rules) saveRules({ rules: rules.rules.filter((r) => r.id !== id) }, "规则已删除");

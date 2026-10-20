@@ -151,7 +151,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | Web 面板 |
-| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
+| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；每个账号带 `health`（`level`: ok / info / warn / error，`label`: 正常 / 注意 / 异常，`issues`: [{`kind`, `level`, `text`, `advice`, `detail`}]，由 `account_health` 根据有没有保存凭据、用量报错和到期日算出，两边规则见 `tests/shared/health.json`）；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
 | POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
 | POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup`。每种返回都带 `risks`（warn / bad 的风险提示），只提醒不拦 |

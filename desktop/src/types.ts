@@ -43,6 +43,22 @@ export interface Account {
   api_key_hint?: string | null;
   has_admin_key?: boolean;
   has_session_key?: boolean;
+  last_switched_at?: string | null;
+  health?: AccountHealth; // 后端算的健康状态：正常 / 注意 / 异常，附原因和修复建议
+}
+
+export interface HealthIssue {
+  kind: string; // no_credentials / wrong_owner / login_invalid / session_invalid / key_invalid / stale / network / usage_error / expired
+  level: "info" | "warn" | "error";
+  text: string;
+  advice: string;
+  detail: string | null; // 原始报错
+}
+
+export interface AccountHealth {
+  level: "ok" | "info" | "warn" | "error";
+  label: string;
+  issues: HealthIssue[];
 }
 
 export interface State {

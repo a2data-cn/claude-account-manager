@@ -1761,6 +1761,67 @@ def days_left(acc, today=None):
     return (d - (today or dt.date.today())).days
 
 
+HEALTH_LEVELS = ("ok", "info", "warn", "error")
+HEALTH_LABEL = {"ok": "正常", "info": "正常", "warn": "注意", "error": "异常"}
+HEALTH_TEXT = {  # kind → (level, 一句话, 怎么办)。规则和 Rust 版 api::account_health 一致（tests/shared/health.json）
+    "no_credentials": ("error", "没有保存可用的凭据", "用这个账号登录 Claude Code（在 claude 里 /login）后点“导入当前登录”，或运行 cam import。"),
+    "wrong_owner": ("error", "保存的登录实际属于别的账号", "可能被旧的 claude 会话覆盖了。用这个账号重新登录 Claude Code 后导入，会自动修正。"),
+    "login_invalid": ("error", "登录已失效，无法续期", "用这个账号在 Claude Code 里重新登录一次（/login），会自动保存。在那之前切换到它也用不了。"),
+    "session_invalid": ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),
+    "key_invalid": ("error", "API Key 无效或没有填写", "在“编辑”里换一个有效的 Key。"),
+    "stale": ("info", "用量没更新：登录过期了，后台不替不常用的账号续登录", "点“刷新”会续一次；切换到这个账号时也会自动续。"),
+    "network": ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
+    "usage_error": ("warn", "用量获取失败", "稍后再刷新；持续出现请把错误信息发给作者。"),
+    "expired": ("warn", "订阅已过期", "续费后在“编辑”里改到期日；没续的话这个号可能已经降级为免费版。"),
+}
+
+
+def _health_kind_of_error(kind, err):
+    """把用量报错归类成健康问题的种类；None 表示这不是问题（例如网页号本来就没填 sessionKey）。"""
+    if "实际属于" in err:
+        return "wrong_owner"
+    if "没有保存凭据" in err:
+        return "no_credentials"
+    if "登录已失效" in err or "没有 refresh token" in err:
+        return "login_invalid"
+    if "未填写 sessionKey" in err:
+        return None
+    if "sessionKey 已过期或无效" in err:
+        return "session_invalid"
+    if "没有填写 API Key" in err:
+        return "key_invalid"
+    if "后台不会替它续登录" in err:
+        return "stale"
+    if any(k in err for k in ("人机验证", "网络错误", "续登录失败", "HTTP 5", "HTTP 429")):
+        return "network"
+    return "usage_error"
+
+
+def account_health(acc, has_creds, days):
+    """账号健康状态 {"level", "label", "issues": [{"kind", "level", "text", "advice", "detail"}]}。只用于显示。"""
+    kinds = []
+    u = acc.get("usage") or {}
+    if acc.get("kind") == "claude_code" and not has_creds:
+        kinds.append(("no_credentials", None))
+    err = u.get("error")
+    if err:
+        k = _health_kind_of_error(acc.get("kind"), err)
+        if k and k not in [x for x, _ in kinds]:
+            kinds.append((k, err))
+    if acc.get("kind") == "api" and u.get("key_valid") is False and "key_invalid" not in [x for x, _ in kinds]:
+        kinds.append(("key_invalid", u.get("key_error")))
+    if isinstance(days, int) and days < 0:
+        kinds.append(("expired", None))
+    issues = []
+    for k, detail in kinds:
+        level, text, advice = HEALTH_TEXT[k]
+        if k == "expired":
+            text = f"订阅已过期 {-days} 天"
+        issues.append({"kind": k, "level": level, "text": text, "advice": advice, "detail": detail})
+    level = max((i["level"] for i in issues), key=HEALTH_LEVELS.index, default="ok")
+    return {"level": level, "label": HEALTH_LABEL[level], "issues": issues}
+
+
 def public_state(store, data):
     accs = []
     active = data["active"].get("claude_code")
@@ -1769,6 +1830,10 @@ def public_state(store, data):
         p["is_active"] = a["id"] == active
         p["days_left"] = days_left(a)
         p["plan_display"] = a.get("plan") or (a.get("manual") or {}).get("plan")
+        has_creds = False
+        if a["kind"] == "claude_code":
+            has_creds = bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
+        p["health"] = account_health(a, has_creds, p["days_left"])
         if a["kind"] == "api":
             sec = store.load_secret(a["id"])
             p["api_key_hint"] = mask(sec.get("api_key"))
@@ -2201,8 +2266,9 @@ def print_accounts(store, data):
         if a["kind"] == "api" and a.get("api_key_hint"):
             ok = u.get("key_valid")
             print(f"     Key {a['api_key_hint']} " + ("" if ok is None else color("有效", "g") if ok else color("无效", "r")))
-        if u.get("error"):
-            print("     " + color("⚠ " + u["error"], "y"))
+        for iss in (a.get("health") or {}).get("issues") or []:
+            c = {"error": "r", "warn": "y"}.get(iss["level"], "d")
+            print("     " + color(f"{'✗ 异常' if iss['level'] == 'error' else '⚠ 注意' if iss['level'] == 'warn' else '·'}：{iss['text']}。{iss['advice']}", c))
         if (a.get("manual") or {}).get("note"):
             print("     " + color("备注：" + a["manual"]["note"], "d"))
     if st.get("warning"):

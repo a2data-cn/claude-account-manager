@@ -41,6 +41,89 @@ fn days_left(acc: &Value) -> Value {
     days_left_at(acc, chrono::Local::now().date_naive())
 }
 
+const HEALTH_LEVELS: [&str; 4] = ["ok", "info", "warn", "error"];
+
+/// kind → (level, 一句话, 怎么办)。规则和 cam.py 的 account_health 一致（tests/shared/health.json）
+fn health_text(kind: &str) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        "no_credentials" => ("error", "没有保存可用的凭据", "用这个账号登录 Claude Code（在 claude 里 /login）后点“导入当前登录”，或运行 cam import。"),
+        "wrong_owner" => ("error", "保存的登录实际属于别的账号", "可能被旧的 claude 会话覆盖了。用这个账号重新登录 Claude Code 后导入，会自动修正。"),
+        "login_invalid" => ("error", "登录已失效，无法续期", "用这个账号在 Claude Code 里重新登录一次（/login），会自动保存。在那之前切换到它也用不了。"),
+        "session_invalid" => ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),
+        "key_invalid" => ("error", "API Key 无效或没有填写", "在“编辑”里换一个有效的 Key。"),
+        "stale" => ("info", "用量没更新：登录过期了，后台不替不常用的账号续登录", "点“刷新”会续一次；切换到这个账号时也会自动续。"),
+        "network" => ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
+        "expired" => ("warn", "订阅已过期", "续费后在“编辑”里改到期日；没续的话这个号可能已经降级为免费版。"),
+        _ => ("warn", "用量获取失败", "稍后再刷新；持续出现请把错误信息发给作者。"),
+    }
+}
+
+/// 把用量报错归类成健康问题的种类；None 表示这不是问题（例如网页号本来就没填 sessionKey）。
+fn health_kind_of_error(err: &str) -> Option<&'static str> {
+    if err.contains("实际属于") {
+        Some("wrong_owner")
+    } else if err.contains("没有保存凭据") {
+        Some("no_credentials")
+    } else if err.contains("登录已失效") || err.contains("没有 refresh token") {
+        Some("login_invalid")
+    } else if err.contains("未填写 sessionKey") {
+        None
+    } else if err.contains("sessionKey 已过期或无效") {
+        Some("session_invalid")
+    } else if err.contains("没有填写 API Key") {
+        Some("key_invalid")
+    } else if err.contains("后台不会替它续登录") {
+        Some("stale")
+    } else if ["人机验证", "网络错误", "续登录失败", "HTTP 5", "HTTP 429"].iter().any(|k| err.contains(k)) {
+        Some("network")
+    } else {
+        Some("usage_error")
+    }
+}
+
+/// 账号健康状态 {level, label, issues: [{kind, level, text, advice, detail}]}。只用于显示。
+pub fn account_health(acc: &Value, has_creds: bool, days: Option<i64>) -> Value {
+    let mut kinds: Vec<(&str, Option<String>)> = Vec::new();
+    let u = acc.get("usage").cloned().unwrap_or(Value::Null);
+    let kind = s(acc, "kind").unwrap_or("");
+    if kind == "claude_code" && !has_creds {
+        kinds.push(("no_credentials", None));
+    }
+    if let Some(err) = s(&u, "error") {
+        if let Some(k) = health_kind_of_error(err) {
+            if !kinds.iter().any(|(x, _)| *x == k) {
+                kinds.push((k, Some(err.to_string())));
+            }
+        }
+    }
+    if kind == "api" && u.get("key_valid").and_then(|v| v.as_bool()) == Some(false) && !kinds.iter().any(|(x, _)| *x == "key_invalid") {
+        kinds.push(("key_invalid", s(&u, "key_error").map(String::from)));
+    }
+    if days.is_some_and(|d| d < 0) {
+        kinds.push(("expired", None));
+    }
+    let issues: Vec<Value> = kinds
+        .into_iter()
+        .map(|(k, detail)| {
+            let (level, text, advice) = health_text(k);
+            let text = if k == "expired" { format!("订阅已过期 {} 天", -days.unwrap_or(0)) } else { text.to_string() };
+            json!({"kind": k, "level": level, "text": text, "advice": advice, "detail": detail})
+        })
+        .collect();
+    let level = issues
+        .iter()
+        .filter_map(|i| s(i, "level"))
+        .max_by_key(|l| HEALTH_LEVELS.iter().position(|x| x == l).unwrap_or(0))
+        .unwrap_or("ok")
+        .to_string();
+    let label = match level.as_str() {
+        "error" => "异常",
+        "warn" => "注意",
+        _ => "正常",
+    };
+    json!({"level": level, "label": label, "issues": issues})
+}
+
 const PUBLIC_FIELDS: [&str; 12] = [
     "id",
     "kind",
@@ -67,7 +150,11 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             }
             let id = s(a, "id").unwrap_or_default();
             p.insert("is_active".into(), json!(active.as_deref() == Some(id)));
-            p.insert("days_left".into(), days_left(a));
+            let dl = days_left(a);
+            let has_creds = s(a, "kind") == Some("claude_code")
+                && store.load_secret(id).get("claudeAiOauth").and_then(|o| s(o, "refreshToken")).is_some();
+            p.insert("health".into(), account_health(a, has_creds, dl.as_i64()));
+            p.insert("days_left".into(), dl);
             let plan = s(a, "plan").or_else(|| a.get("manual").and_then(|m| s(m, "plan")));
             p.insert("plan_display".into(), json!(plan));
             match s(a, "kind") {

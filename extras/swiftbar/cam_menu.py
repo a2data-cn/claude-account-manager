@@ -166,6 +166,12 @@ def _background_work(store):
     return st
 
 
+def health_of(store, a):
+    """账号健康状态（正常 / 注意 / 异常），规则见 cam.account_health。"""
+    has = a["kind"] == "claude_code" and bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
+    return cam.account_health(a, has, cam.days_left(a))
+
+
 def render(store, st, out=print):
     data = store.load()
     accs = data["accounts"]
@@ -214,12 +220,17 @@ def render(store, st, out=print):
                 nums.append(f"7d {f7:.0f}%")
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
             name = esc(a.get("label") or a.get("email") or "未命名")
-            text = f"{name}{('  ' + plan) if plan else ''}{('    ' + ' · '.join(nums)) if nums else ''}"
+            h = health_of(store, a)
+            flag = f"  ⚠ {h['label']}" if h["level"] in ("warn", "error") else ""
+            text = f"{name}{('  ' + plan) if plan else ''}{flag}{('    ' + ' · '.join(nums)) if nums else ''}"
             if a["id"] == act_id:
                 out(f"{text} | checked=true")
             else:
-                c = color_for(f5)
+                c = "#BF3B33,#EE776E" if h["level"] == "error" else color_for(f5)
                 out(f"{text} | {action('switch', a['id'])}" + (f" color={c}" if c else ""))
+            for i in h["issues"]:
+                out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={'#BF3B33,#EE776E' if i['level'] == 'error' else '#B87A08,#E0A93B' if i['level'] == 'warn' else 'gray'}")
+                out(f"--   {esc(i['advice'])[:80]} | size=11 color=gray")
             # 子菜单：详细信息
             u = a.get("usage") or {}
             for k, nm in (("five_hour", "5 小时"), ("seven_day", "7 天"), ("seven_day_opus", "7 天 Opus"),
@@ -228,12 +239,9 @@ def render(store, st, out=print):
                 if w:
                     out(f"--{nm}：已用 {w['utilization']:.0f}%，{cam.fmt_reset(w.get('resets_at'))}")
             dl = cam.days_left(a)
-            if dl is not None:
+            if dl is not None and dl >= 0:
                 exp = (a.get("manual") or {}).get("expires_at")
-                txt = f"{dl} 天后到期（{exp}）" if dl >= 0 else f"已过期 {-dl} 天"
-                out(f"--{txt}" + (" | color=#BF3B33,#EE776E" if dl <= 2 else ""))
-            if u.get("error"):
-                out(f"--⚠ {esc(u['error'])[:80]} | color=#B87A08,#E0A93B")
+                out(f"--{dl} 天后到期（{exp}）" + (" | color=#BF3B33,#EE776E" if dl <= 2 else ""))
             if a.get("email") and a.get("email") != a.get("label"):
                 out(f"--{esc(a['email'])} | color=gray")
             if a["id"] != act_id:

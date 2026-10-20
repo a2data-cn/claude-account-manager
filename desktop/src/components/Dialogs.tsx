@@ -132,11 +132,9 @@ export function EditDialog({
           <textarea id="f-note" rows={2} value={v.note} onChange={set("note")} />
         </div>
         <div className="dlg-acts">
-          {!account.is_active && (
-            <button type="button" className="btn quiet danger" onClick={() => onDelete(account)}>
-              删除账号
-            </button>
-          )}
+          <button type="button" className="btn quiet danger" onClick={() => onDelete(account)}>
+            移除账号
+          </button>
           <button type="button" className="btn" onClick={onClose}>
             取消
           </button>
@@ -284,6 +282,48 @@ export function SwitchChoiceDialog({
             </button>
             <button type="button" className="btn primary" onClick={() => onPick(choice.account, "wait")}>
               等会话结束后自动切换
+            </button>
+          </div>
+        </form>
+      )}
+    </dialog>
+  );
+}
+
+/** 移除账号：只从这个工具里移除，Claude Code 的项目、会话、设置都保留；正在用的 Claude Code 账号要先切走 */
+export function RemoveDialog({
+  account,
+  onClose,
+  onConfirm,
+}: {
+  account: Account | null;
+  onClose: () => void;
+  onConfirm: (a: Account) => void;
+}) {
+  const ref = useModal(!!account);
+  const blocked = !!account && account.kind === "claude_code" && account.is_active;
+  const what =
+    account?.kind === "api" ? " API Key" : account?.kind === "claude_web" ? " sessionKey 和独立浏览器窗口的登录状态" : "登录凭据";
+  return (
+    <dialog ref={ref} onClose={onClose}>
+      {account && (
+        <form method="dialog" onSubmit={(e) => e.preventDefault()}>
+          <h3>移除“{account.label || account.email || account.id}”？</h3>
+          <div className="dlg-text">
+            只从这个工具里移除，不会动 Claude 本身：
+            <ul className="rm-list">
+              <li className="keep">保留：Claude Code 的项目、会话记录、设置和 MCP 配置（~/.claude 里的都不动）</li>
+              <li className="keep">保留：这个账号在 Anthropic 那边的订阅、对话和数据</li>
+              <li className="drop">移除：这里保存的{what}、它的切号规则（都移到备份目录，可以找回）</li>
+            </ul>
+            {blocked && <div className="rm-block">这是 Claude Code 正在用的账号，先切换到其它账号再移除。</div>}
+          </div>
+          <div className="dlg-acts">
+            <button type="button" className="btn" onClick={onClose}>
+              取消
+            </button>
+            <button type="button" className="btn danger-fill" disabled={blocked} onClick={() => onConfirm(account)}>
+              移除
             </button>
           </div>
         </form>
