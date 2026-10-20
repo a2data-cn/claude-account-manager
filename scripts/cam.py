@@ -340,19 +340,18 @@ def find_account(data, key):
 # --------------------------------------------------------------------------- Claude Code 凭据
 
 def keychain_read():
-    try:
-        r = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", getpass.getuser(), "-w"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if r.returncode != 0:
-        # 有些版本 account 不是用户名，退一步只按 service 查
-        r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
-                           capture_output=True, text=True, timeout=15)
-        if r.returncode != 0:
+    """读不出来（没有条目、被拒绝、超时）都返回 None。"""
+    # 有些版本 account 不是用户名，查不到时退一步只按 service 查
+    for by_user in (["-a", getpass.getuser()], []):
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, *by_user, "-w"],
+                               capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
             return None
+        if r.returncode == 0:
+            break
+    else:
+        return None
     raw = r.stdout.strip()
     try:
         return json.loads(raw)
@@ -378,7 +377,12 @@ def keychain_write(obj):
     user = getpass.getuser().replace('"', '')
     # 通过 stdin 交互模式写入，密钥不会出现在进程参数里
     cmd = f'add-generic-password -U -a "{user}" -s "{KEYCHAIN_SERVICE}" -X {payload}\n'
-    r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, timeout=15)
+    try:
+        r = subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise CamError("写入钥匙串超时（可能在等授权弹窗）。重新运行，弹窗时点“始终允许”")
+    except OSError as e:
+        raise CamError(f"无法调用 security：{e}")
     if r.returncode != 0 or "error" in (r.stderr or "").lower():
         raise CamError(f"写入钥匙串失败：{r.stderr.strip() or r.returncode}")
 
@@ -2089,10 +2093,16 @@ def remove_path(p):
 
 
 def keychain_delete():
-    r = subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", getpass.getuser()],
-                       capture_output=True, timeout=15)
-    if r.returncode != 0:  # 和 keychain_read 一样，account 不是用户名时只按 service 删
-        subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE], capture_output=True, timeout=15)
+    try:
+        r = subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", getpass.getuser()],
+                           capture_output=True, timeout=15)
+        if r.returncode != 0:  # 和 keychain_read 一样，account 不是用户名时只按 service 删
+            subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE],
+                           capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise CamError("删除钥匙串里的 Claude Code 登录超时（可能在等授权弹窗）。重新运行，弹窗时点“始终允许”")
+    except OSError as e:
+        raise CamError(f"无法调用 security：{e}")
 
 
 def cmd_env_install(store, args):

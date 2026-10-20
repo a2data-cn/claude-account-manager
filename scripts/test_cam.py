@@ -7,12 +7,14 @@ import importlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 import urllib.request
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -930,6 +932,46 @@ class SharedFixtureTest(unittest.TestCase):
         for c in fx["days_left"]:
             got = self.cam.days_left(c["account"], dt.date.fromisoformat(c["today"]))
             self.assertEqual(got, c["expect"], c["name"])
+
+
+
+class KeychainTest(unittest.TestCase):
+    """钥匙串只在 macOS 上用，这里伪造 security 命令：卡住超时、命令不存在时不能直接抛 Python 异常。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, HERE)
+        import cam
+        cls.cam = cam
+
+    def fake_security(self, *results):
+        """每次调用依次取 results 里的一项：(返回码, 输出) 或要抛出的异常。"""
+        it = iter(results)
+
+        def run(cmd, **kw):
+            r = next(it)
+            if isinstance(r, BaseException):
+                raise r
+            return subprocess.CompletedProcess(cmd, r[0], r[1], "")
+        return mock.patch.object(self.cam.subprocess, "run", run)
+
+    def test_read(self):
+        timeout = subprocess.TimeoutExpired("security", 15)
+        with self.fake_security((44, ""), timeout):  # 按用户名查不到，退一步查时卡住
+            self.assertIsNone(self.cam.keychain_read())
+        with self.fake_security(OSError("security not found")):
+            self.assertIsNone(self.cam.keychain_read())
+        with self.fake_security((44, ""), (0, '{"claudeAiOauth": {}}\n')):
+            self.assertEqual(self.cam.keychain_read(), {"claudeAiOauth": {}})
+
+    def test_write_and_delete(self):
+        timeout = subprocess.TimeoutExpired("security", 15)
+        with self.fake_security(timeout), self.assertRaises(self.cam.CamError):
+            self.cam.keychain_write({"claudeAiOauth": {}})
+        with self.fake_security((44, ""), timeout), self.assertRaises(self.cam.CamError):
+            self.cam.keychain_delete()
+        with self.fake_security(OSError("security not found")), self.assertRaises(self.cam.CamError):
+            self.cam.keychain_delete()
 
 
 if __name__ == "__main__":
