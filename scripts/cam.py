@@ -2749,6 +2749,29 @@ REGION_ADVICE = {
 STATUS_URL = os.environ.get("CAM_STATUS_URL", "https://status.anthropic.com/api/v2/status.json")
 CF_META_URL = os.environ.get("CAM_CF_META_URL", "https://speed.cloudflare.com/meta")  # 出口 IP 的运营商、城市
 IPINFO_URL = os.environ.get("CAM_IPINFO_URL", "https://ipinfo.io/json")  # Cloudflare 的 meta 接口拒绝时退到这里
+# IP 类型（家庭宽带 / 机房 / 代理 / 手机网络）：有 ipapi.is 的 key 用它的数据库；没有就用 ip-api.com 的免费接口（只有 http）
+IPAPI_IS_URL = os.environ.get("CAM_IPAPI_IS_URL", "https://api.ipapi.is/")
+IPAPI_IS_KEY = os.environ.get("CAM_IPAPI_IS_KEY", "")
+IPAPI_URL = os.environ.get("CAM_IPAPI_URL",
+                           "http://ip-api.com/json/?fields=status,countryCode,city,regionName,isp,org,as,mobile,proxy,hosting,query")
+RDAP_URL = os.environ.get("CAM_RDAP_URL", "https://rdap.org/ip/")  # IP 的注册国（原生 / 广播 IP）；空字符串表示不查
+CF_TRACE4_URL = os.environ.get("CAM_CF_TRACE4_URL", "https://1.1.1.1/cdn-cgi/trace")  # 只走 IPv4 的出口
+CF_TRACE6_URL = os.environ.get("CAM_CF_TRACE6_URL", "https://[2606:4700:4700::1111]/cdn-cgi/trace")  # 只走 IPv6 的出口
+IP_TYPE_NAMES = {"residential": "家庭 / 公司宽带", "hosting": "机房 / 云服务器", "proxy": "代理 / VPN 出口", "tor": "Tor 出口节点",
+                 "mobile": "手机网络"}
+# 公共 DNS → (名称, 国家)。Google / Cloudflare / Quad9 这类任播的全球都有节点，国家记 None，不拿来判断位置
+KNOWN_DNS = {
+    "8.8.8.8": ("Google", None), "8.8.4.4": ("Google", None), "2001:4860:4860::8888": ("Google", None),
+    "2001:4860:4860::8844": ("Google", None), "1.1.1.1": ("Cloudflare", None), "1.0.0.1": ("Cloudflare", None),
+    "2606:4700:4700::1111": ("Cloudflare", None), "2606:4700:4700::1001": ("Cloudflare", None), "9.9.9.9": ("Quad9", None),
+    "149.112.112.112": ("Quad9", None), "208.67.222.222": ("OpenDNS", None), "208.67.220.220": ("OpenDNS", None),
+    "223.5.5.5": ("阿里 DNS", "CN"), "223.6.6.6": ("阿里 DNS", "CN"), "2400:3200::1": ("阿里 DNS", "CN"),
+    "2400:3200:baba::1": ("阿里 DNS", "CN"), "119.29.29.29": ("腾讯 DNSPod", "CN"), "182.254.116.116": ("腾讯 DNSPod", "CN"),
+    "114.114.114.114": ("114DNS", "CN"), "114.114.115.115": ("114DNS", "CN"), "180.76.76.76": ("百度 DNS", "CN"),
+    "1.2.4.8": ("CNNIC", "CN"), "210.2.4.8": ("CNNIC", "CN"), "168.95.1.1": ("中华电信 HiNet", "TW"),
+    "168.95.192.1": ("中华电信 HiNet", "TW"), "168.126.63.1": ("KT", "KR"), "168.126.63.2": ("KT", "KR"),
+    "77.88.8.8": ("Yandex", "RU"), "77.88.8.1": ("Yandex", "RU"),
+}
 # 出口 IP 的运营商名里有这些就当作云服务商 / 机房（不是家庭或公司宽带）
 HOSTING_WORDS = ("hosting", "cloud", "data center", "datacenter", "server", "vps", "dedicated", "colocation",
                  "amazon", "aws", "google llc", "google cloud", "microsoft corporation", "azure", "digitalocean", "linode",
@@ -2820,16 +2843,28 @@ def detect_region(timeout=6):
     out = {"loc": (kv.get("loc") or "").strip().upper() or None, "ip": kv.get("ip"), "colo": kv.get("colo"),
            "ms": int((time.time() - t0) * 1000),
            "warp": kv.get("warp", "off").strip() in ("on", "plus") or kv.get("gateway", "off").strip() == "on",
-           "skew": skew, "asn": None, "org": None, "city": None, "meta_loc": None}
+           "skew": skew, "asn": None, "org": None, "city": None, "meta_loc": None, "ip_type": None, "reg_loc": None,
+           "v4_ip": None, "v4_loc": None, "v6_ip": None, "v6_loc": None}
     meta = fetch_exit_meta(timeout)
     if meta:
         out.update(meta)
+    v4, v6 = trace_only(CF_TRACE4_URL), trace_only(CF_TRACE6_URL)
+    if v4:
+        out["v4_ip"], out["v4_loc"] = v4
+    if v6:
+        out["v6_ip"], out["v6_loc"] = v6
+    if not out["reg_loc"]:
+        out["reg_loc"] = fetch_ip_registration(out["ip"])
     return out
 
 
 def fetch_exit_meta(timeout=6):
-    """出口 IP 的 ASN、运营商、城市和国家：先问 Cloudflare 的 meta 接口，拒绝时退到 ipinfo.io。查不到返回 None。"""
-    for url in (CF_META_URL, IPINFO_URL):
+    """出口 IP 的 ASN、运营商、城市、国家和类型。来源按优先级：ipapi.is（有 key 时，带 IP 类型 / VPN / Tor 标记）、
+    ip-api.com（免费，带机房 / 代理 / 手机标记，只有 http）、Cloudflare meta、ipinfo.io（后两个没有标记）。查不到返回 None。"""
+    urls = ([f"{IPAPI_IS_URL}?key={urllib.parse.quote(IPAPI_IS_KEY)}"] if IPAPI_IS_KEY else []) + [IPAPI_URL, CF_META_URL, IPINFO_URL]
+    for url in urls:
+        if not url:
+            continue
         st, txt = http_text(url, timeout)
         if st != 200:
             continue
@@ -2843,22 +2878,128 @@ def fetch_exit_meta(timeout=6):
 
 
 def parse_exit_meta(j):
-    """统一两种格式：Cloudflare {asn, asOrganization, city, region, country} 和 ipinfo {org: "AS7922 Comcast…", city, region, country}。"""
-    if not isinstance(j, dict):
+    """统一几种格式：ipapi.is {asn:{asn,org,country}, company:{type}, is_datacenter, is_vpn, is_proxy, is_tor, is_mobile, location:{…}}、
+    ip-api.com {as, isp, org, countryCode, city, regionName, hosting, proxy, mobile}、
+    Cloudflare {asn, asOrganization, city, region, country}、ipinfo {org: "AS7922 Comcast…", city, region, country}。
+    返回 {asn, org, city, meta_loc, ip_type, reg_loc}；ip_type 为 residential / hosting / proxy / tor / mobile / None（这个来源不带标记）。"""
+    if not isinstance(j, dict) or j.get("status") == "fail":
         return None
-    asn, org = j.get("asn"), j.get("asOrganization") or None
-    if not org and j.get("org"):
-        head, _, rest = str(j["org"]).partition(" ")
-        if head.startswith("AS") and head[2:].isdigit():
-            asn = asn or int(head[2:])
-            org = rest.strip() or None
-        else:
-            org = str(j["org"])
-    city = ", ".join(x for x in (j.get("city"), j.get("region")) if x)
-    loc = str(j.get("country") or "").strip().upper() or None
+    asn, org, ip_type, reg_loc = None, None, None, None
+    loc_src = j.get("location") if isinstance(j.get("location"), dict) else j
+    if isinstance(j.get("asn"), dict):  # ipapi.is
+        asn = j["asn"].get("asn")
+        org = j["asn"].get("org") or (j.get("company") or {}).get("name")
+        reg_loc = str(j["asn"].get("country") or "").strip().upper() or None
+        ctype = (j.get("company") or {}).get("type")
+        if j.get("is_tor"):
+            ip_type = "tor"
+        elif j.get("is_vpn") or j.get("is_proxy"):
+            ip_type = "proxy"
+        elif j.get("is_datacenter") or ctype == "hosting":
+            ip_type = "hosting"
+        elif j.get("is_mobile"):
+            ip_type = "mobile"
+        elif ctype:
+            ip_type = "residential"
+    else:
+        asn = j.get("asn") if isinstance(j.get("asn"), int) else None
+        org = j.get("asOrganization") or j.get("isp") or None
+        as_field = j.get("as") if isinstance(j.get("as"), str) else (j.get("org") if not org else None)
+        if as_field:
+            head, _, rest = str(as_field).partition(" ")
+            if head.startswith("AS") and head[2:].isdigit():
+                asn = asn or int(head[2:])
+                org = org or rest.strip() or None
+            else:
+                org = org or str(as_field)
+        if "hosting" in j or "proxy" in j:  # ip-api.com
+            ip_type = "proxy" if j.get("proxy") else "hosting" if j.get("hosting") else "mobile" if j.get("mobile") else "residential"
+    city = ", ".join(x for x in (loc_src.get("city"), loc_src.get("region") or loc_src.get("regionName") or loc_src.get("state")) if x)
+    country = loc_src.get("country_code") or j.get("countryCode") or loc_src.get("country") or ""
+    loc = str(country).strip().upper() if len(str(country).strip()) == 2 else None
     if not org and not loc:
         return None
-    return {"asn": asn, "org": org, "city": city or None, "meta_loc": loc}
+    return {"asn": asn, "org": org, "city": city or None, "meta_loc": loc, "ip_type": ip_type, "reg_loc": reg_loc}
+
+
+def fetch_ip_registration(ip, timeout=6):
+    """IP 在 RIR 登记的国家（RDAP）。查不到返回 None（ARIN 的分配记录常常没写国家）。"""
+    if not RDAP_URL or not ip:
+        return None
+    st, txt = http_text(f"{RDAP_URL}{ip}", timeout)
+    if st != 200:
+        return None
+    try:
+        j = json.loads(txt)
+    except json.JSONDecodeError:
+        return None
+    c = str((j or {}).get("country") or "").strip().upper() if isinstance(j, dict) else ""
+    return c if len(c) == 2 else None
+
+
+def trace_only(url, timeout=4):
+    """只用某一个协议（IPv4 或 IPv6 的 IP 直连）访问 Cloudflare trace，返回 (ip, loc) 或 None（该协议不可用）。"""
+    if not url:
+        return None
+    st, txt = http_text(url, timeout)
+    if st != 200 or "loc=" not in txt:
+        return None
+    kv = dict(line.split("=", 1) for line in txt.splitlines() if "=" in line)
+    return kv.get("ip"), (kv.get("loc") or "").strip().upper() or None
+
+
+def is_private_ip(ip):
+    import ipaddress
+    try:
+        a = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return False
+    return a.is_private or a.is_loopback or a.is_link_local
+
+
+def system_dns_servers():
+    """本机配置的 DNS 服务器 [{"ip", "name", "country", "private"}]。只读本机配置，不往外发任何探测。
+    测试用 CAM_TEST_DNS="8.8.8.8,223.5.5.5"（空字符串表示查不到）。"""
+    t = os.environ.get("CAM_TEST_DNS")
+    ips = []
+    if t is not None:
+        ips = [x.strip() for x in t.split(",") if x.strip()]
+    elif IS_WIN:
+        out = _run_text(["powershell", "-NoProfile", "-Command",
+                         "Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }"], timeout=15)
+        ips = [l.strip() for l in out.splitlines() if l.strip()]
+    elif IS_MAC:
+        for line in _run_text(["scutil", "--dns"]).splitlines():
+            line = line.strip()
+            if line.startswith("nameserver[") and ":" in line:
+                ips.append(line.split(":", 1)[1].strip())
+    else:
+        try:
+            with open("/etc/resolv.conf", encoding="utf-8") as f:
+                ips = [l.split()[1] for l in f if l.startswith("nameserver") and len(l.split()) > 1]
+        except OSError:
+            ips = []
+        if any(ip.startswith("127.0.0.53") for ip in ips):  # systemd-resolved 的本机代理，真正的上游看 resolvectl
+            for line in _run_text(["resolvectl", "status"]).splitlines():
+                if "DNS Servers:" in line or "Current DNS Server:" in line:
+                    ips.extend(line.split(":", 1)[1].split())
+    out, seen = [], set()
+    for ip in ips:
+        ip = ip.strip().split("%")[0]
+        if not ip or ip in seen or ip.startswith("127.0.0.53"):
+            continue
+        seen.add(ip)
+        name, country = KNOWN_DNS.get(ip, (None, None))
+        out.append({"ip": ip, "name": name, "country": country, "private": is_private_ip(ip)})
+    return out[:6]
+
+
+def local_env():
+    """本机的区域设置快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。"""
+    tz = system_timezone()
+    lc = system_locale()
+    return {"tz": tz[0] if tz else None, "tz_cc": tz[1] if tz else [],
+            "locale": lc[0] if lc else None, "locale_cc": lc[1] if lc else None, "dns": system_dns_servers()}
 
 
 def hosting_exit(org):
@@ -3057,7 +3198,7 @@ def region_view(data):
     return {"loc": c.get("loc"), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
             "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
             "warp": bool(c.get("warp")), "prev_loc": c.get("prev_loc"), "changed_at": c.get("changed_at"),
-            "org": c.get("org"), "city": c.get("city")}
+            "org": c.get("org"), "city": c.get("city"), "ip_type": c.get("ip_type")}
 
 
 def check_region(store, max_age=300):
@@ -3074,7 +3215,9 @@ def check_region(store, max_age=300):
         old = data.get("region") or {}
         reg = {"loc": r.get("loc"), "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
                "warp": bool(r.get("warp")), "skew": r.get("skew"), "asn": r.get("asn"), "org": r.get("org"),
-               "city": r.get("city"), "meta_loc": r.get("meta_loc"), "checked_at": now_iso()}
+               "city": r.get("city"), "meta_loc": r.get("meta_loc"), "ip_type": r.get("ip_type"), "reg_loc": r.get("reg_loc"),
+               "v4_ip": r.get("v4_ip"), "v4_loc": r.get("v4_loc"), "v6_ip": r.get("v6_ip"), "v6_loc": r.get("v6_loc"),
+               "env": local_env(), "checked_at": now_iso()}
         if old.get("loc") and reg["loc"] and old["loc"] != reg["loc"]:
             reg["prev_loc"], reg["changed_at"] = old["loc"], reg["checked_at"]
         elif old.get("prev_loc"):
@@ -3115,9 +3258,36 @@ def risk_items(data, include_region=True):
             f"出口地区判定不一致：trace 接口看到 {region_label(loc)}，meta 接口看到 {region_label(reg['meta_loc'])}",
             "多半是 IPv4 和 IPv6 走了不同出口，或代理只分流了一部分流量。这种情况下服务端看到的地区可能和你以为的不一样，"
             "先统一出口再判断。")
-    if hosting_exit(reg.get("org")):
-        add("isp", "warn", f"出口 IP 属于 {reg['org']}（AS{reg.get('asn')}），像云服务商 / 机房，不是家庭或公司宽带",
+    ip_type = reg.get("ip_type")
+    if ip_type == "tor":
+        add("tor_exit", "warn", f"出口 IP 是 Tor 出口节点（{reg.get('org') or '?'}）",
+            "Tor 出口几乎一定会被当作高风险流量，账号很容易被限制；人所在地仍按实际位置判断。")
+    elif ip_type == "proxy":
+        add("proxy_ip", "warn", f"出口 IP 被数据库标记为代理 / VPN 出口（{reg.get('org') or '?'}，AS{reg.get('asn')}）",
+            "服务端的 IP 库同样能查到这个标记，这是最常见的风控信号之一；人所在地仍按实际位置判断。")
+    elif ip_type == "hosting" or (ip_type is None and hosting_exit(reg.get("org"))):
+        add("isp", "warn", f"出口 IP 属于 {reg.get('org') or '?'}（AS{reg.get('asn')}），是机房 / 云服务器，不是家庭或公司宽带",
             "这类出口通常被当作 VPN / 代理流量看待，是常见的风控信号之一；人所在地仍按实际位置判断。")
+    if reg.get("reg_loc") and loc and reg["reg_loc"] != loc:
+        add("ip_origin", "info", f"出口 IP 注册在 {region_label(reg['reg_loc'])}，定位在 {region_label(loc)}（广播 IP）",
+            "不同地理库可能把它判到不同国家，服务端看到的国家不一定和这里一致。")
+    if reg.get("v4_loc") and reg.get("v6_loc") and reg["v4_loc"] != reg["v6_loc"]:
+        add("ipv6_mismatch", "warn",
+            f"IPv4 出口在 {region_label(reg['v4_loc'])}，IPv6 出口在 {region_label(reg['v6_loc'])}（{reg.get('v6_ip')}），两个协议走了不同的出口",
+            "VPN / 代理通常只接管 IPv4，IPv6 直接从本机网络出去，服务端通过 IPv6 看到的就是本机网络的真实出口。"
+            "如果 IPv6 这边在不支持地区，政策按实际所在地判断，风险与 IPv4 出口无关。")
+    env = reg.get("env") if isinstance(reg.get("env"), dict) else None
+    if env is None and reg.get("checked_at"):
+        env = local_env()  # 旧版缓存没有这一段
+    for d in (env or {}).get("dns") or []:
+        if d.get("country") and loc and d["country"] != loc:
+            text = f"DNS 解析器 {d['ip']}（{d.get('name') or '公共 DNS'}，{region_label(d['country'])}）与出口地区 {region_label(loc)} 不一致"
+            if region_status(d["country"]) == "unsupported":
+                add("dns_resolver", "warn", text,
+                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。")
+            else:
+                add("dns_resolver", "info", text, "出差或代理分流都会这样；人所在地在支持名单内就没问题。")
+            break
     if reg.get("warp"):
         add("warp", "info", "出口经过 Cloudflare WARP / Zero Trust",
             "上面的出口地区是 WARP 的出口，不是本机网络的真实出口；Anthropic 按使用者所在地判断。")
@@ -3131,7 +3301,7 @@ def risk_items(data, include_region=True):
         add("status", "bad" if ind in ("major", "critical") else "warn",
             f"Anthropic 官方状态页：{sp.get('description') or ind}（{ind}）",
             "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。")
-    tz = system_timezone()
+    tz = (env["tz"], env.get("tz_cc") or []) if env and env.get("tz") else system_timezone()
     if tz and loc and tz[1] and loc not in tz[1]:
         zone, home = tz[0], tz[1][0]
         text = f"系统时区 {zone} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
@@ -3141,7 +3311,7 @@ def risk_items(data, include_region=True):
                 "人确实在不支持地区的话，风险与出口无关。")
         else:
             add("timezone", "info", text, "出差或经过代理都会这样；人所在地在支持名单内就没问题。")
-    lc = system_locale()
+    lc = (env["locale"], env.get("locale_cc")) if env and env.get("locale") else system_locale()
     if lc and loc and lc[1] and lc[1] != loc:
         name, home = lc
         text = f"系统语言 / 区域 {name} 指向 {region_label(home)}，与出口地区 {region_label(loc)} 不一致"
@@ -3175,6 +3345,8 @@ RISK_WEIGHTS = {
     ("locale", "info"): 3, ("clock", "warn"): 10, ("warp", "info"): 5, ("vpn", "info"): 10, ("proxy", "info"): 5,
     ("status", "bad"): 30, ("status", "warn"): 10, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
     ("web", "warn"): 5, ("dns", "bad"): 20, ("accounts", "info"): 0, ("device", "info"): 0, ("scope", "info"): 0,
+    ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15, ("dns_resolver", "warn"): 15,
+    ("dns_resolver", "info"): 3, ("ip_origin", "info"): 5, ("ipv6", "info"): 0, ("dns_servers", "info"): 0,
 }
 RISK_GRADES = (  # (最低分, 档位, 说明)
     (90, "low", "风险低，可以使用"),
@@ -3239,10 +3411,27 @@ def service_check(store=None):
             + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms）", REGION_ADVICE[status])
     else:
         add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
-    if r.get("org") and not hosting_exit(r["org"]):
-        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}）", "看起来是普通宽带或运营商网络，不是机房出口")
+    ip_type = r.get("ip_type")
+    if r.get("org") and ip_type in ("residential", "mobile"):
+        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：{IP_TYPE_NAMES[ip_type]}",
+            "数据库判定为普通宽带或运营商网络，不是机房 / 代理出口" if ip_type == "residential" else "手机网络的出口 IP 会变，地区判定也可能跳动")
+    elif r.get("org") and ip_type is None and not hosting_exit(r["org"]):
+        add("isp", "info", f"网络服务商：{r['org']}（AS{r.get('asn')}），IP 类型：查不到（没有带标记的数据源）",
+            "按运营商名看不像机房；想要数据库判定可配置 ipapi.is 的 key（CAM_IPAPI_IS_KEY）")
     elif not r.get("org"):
-        add("isp", "info", "网络服务商：查不到（连不上 Cloudflare 的 meta 接口）", "判断不了出口是不是机房；不影响其它检查")
+        add("isp", "info", "网络服务商：查不到（IP 信息接口都连不上）", "判断不了出口是不是机房 / 代理；不影响其它检查")
+    if r.get("reg_loc") and r.get("loc") and r["reg_loc"] == r["loc"]:
+        add("ip_origin", "ok", f"IP 归属：注册在 {region_label(r['reg_loc'])}，与定位一致（原生 IP）")
+    elif r.get("loc") and not r.get("reg_loc"):
+        add("ip_origin_unknown", "info", "IP 归属：注册国查不到（RDAP 记录没写国家）", "美国 ARIN 的记录常常不写，不影响其它检查，不扣分")
+    if r.get("v4_loc") and r.get("v6_loc") and r["v4_loc"] == r["v6_loc"]:
+        add("ipv6", "ok", f"IPv6：可用，出口 {r.get('v6_ip')}，地区与 IPv4 一致")
+    elif r.get("loc") and not r.get("v6_loc"):
+        add("ipv6", "ok", "IPv6：不可用，只有 IPv4 出口", "不会出现 IPv6 漏出真实出口的问题")
+    dns = (r.get("env") or {}).get("dns") or []
+    if dns:
+        parts = [f"{d['ip']}（{'局域网 / 本机' if d['private'] else d.get('name') or '公共 DNS'}{'，' + region_label(d['country']) if d.get('country') else ''}）" for d in dns]
+        add("dns_servers", "info", "DNS 解析器：" + "；".join(parts), "只读本机配置，没有做泄漏探测；局域网 DNS 最终走哪里取决于路由器")
     # api.anthropic.com：有登录就用当前登录实测
     creds = read_live_credentials()[0] if store is not None else None
     at = oauth_block(creds).get("accessToken") if creds else None
@@ -3299,7 +3488,7 @@ def service_check(store=None):
     out.extend(risk_items(data, include_region=False))
     add("device", "info", f"设备：{platform.system()} {platform.release()}，{platform.machine()}，Python {platform.python_version()}",
         "设备类型、系统、时区、语言这些设备环境信息 Anthropic 会收集；这里只是列出来，本工具不会改动或伪装任何设备标识。")
-    add("scope", "info", "检测范围：本机能看到的信号（出口 IP 和运营商、代理 / VPN、WARP、时钟、时区、系统语言、账号使用地区）",
+    add("scope", "info", "检测范围：本机能看到的信号（出口 IP、IP 类型、IPv4 / IPv6、注册国、运营商、代理 / VPN、WARP、DNS 配置、时钟、时区、系统语言、账号使用地区）",
         "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，"
         "所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。")
     # 总体结论放最前面：评分 + 档位 + 最严重的一条

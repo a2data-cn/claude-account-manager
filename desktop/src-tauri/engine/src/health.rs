@@ -73,6 +73,54 @@ fn cf_meta_url() -> String {
 fn ipinfo_url() -> String {
     std::env::var("CAM_IPINFO_URL").unwrap_or_else(|_| "https://ipinfo.io/json".into())
 }
+/// IP 类型（家庭宽带 / 机房 / 代理 / 手机网络）：有 ipapi.is 的 key 用它的数据库；没有就用 ip-api.com 的免费接口（只有 http）
+fn ipapi_is_url() -> String {
+    std::env::var("CAM_IPAPI_IS_URL").unwrap_or_else(|_| "https://api.ipapi.is/".into())
+}
+fn ipapi_is_key() -> String {
+    std::env::var("CAM_IPAPI_IS_KEY").unwrap_or_default()
+}
+fn ipapi_url() -> String {
+    std::env::var("CAM_IPAPI_URL").unwrap_or_else(|_| {
+        "http://ip-api.com/json/?fields=status,countryCode,city,regionName,isp,org,as,mobile,proxy,hosting,query".into()
+    })
+}
+/// IP 的注册国（原生 / 广播 IP）；空字符串表示不查
+fn rdap_url() -> String {
+    std::env::var("CAM_RDAP_URL").unwrap_or_else(|_| "https://rdap.org/ip/".into())
+}
+/// 只走 IPv4 / 只走 IPv6 的出口；空字符串表示不查
+fn cf_trace4_url() -> String {
+    std::env::var("CAM_CF_TRACE4_URL").unwrap_or_else(|_| "https://1.1.1.1/cdn-cgi/trace".into())
+}
+fn cf_trace6_url() -> String {
+    std::env::var("CAM_CF_TRACE6_URL").unwrap_or_else(|_| "https://[2606:4700:4700::1111]/cdn-cgi/trace".into())
+}
+
+pub fn ip_type_name(t: &str) -> &'static str {
+    match t {
+        "residential" => "家庭 / 公司宽带",
+        "hosting" => "机房 / 云服务器",
+        "proxy" => "代理 / VPN 出口",
+        "tor" => "Tor 出口节点",
+        "mobile" => "手机网络",
+        _ => "未知",
+    }
+}
+
+/// 公共 DNS → (名称, 国家)。Google / Cloudflare / Quad9 这类任播的全球都有节点，国家记空，不拿来判断位置
+const KNOWN_DNS: &[(&str, &str, &str)] = &[
+    ("8.8.8.8", "Google", ""), ("8.8.4.4", "Google", ""), ("2001:4860:4860::8888", "Google", ""),
+    ("2001:4860:4860::8844", "Google", ""), ("1.1.1.1", "Cloudflare", ""), ("1.0.0.1", "Cloudflare", ""),
+    ("2606:4700:4700::1111", "Cloudflare", ""), ("2606:4700:4700::1001", "Cloudflare", ""), ("9.9.9.9", "Quad9", ""),
+    ("149.112.112.112", "Quad9", ""), ("208.67.222.222", "OpenDNS", ""), ("208.67.220.220", "OpenDNS", ""),
+    ("223.5.5.5", "阿里 DNS", "CN"), ("223.6.6.6", "阿里 DNS", "CN"), ("2400:3200::1", "阿里 DNS", "CN"),
+    ("2400:3200:baba::1", "阿里 DNS", "CN"), ("119.29.29.29", "腾讯 DNSPod", "CN"), ("182.254.116.116", "腾讯 DNSPod", "CN"),
+    ("114.114.114.114", "114DNS", "CN"), ("114.114.115.115", "114DNS", "CN"), ("180.76.76.76", "百度 DNS", "CN"),
+    ("1.2.4.8", "CNNIC", "CN"), ("210.2.4.8", "CNNIC", "CN"), ("168.95.1.1", "中华电信 HiNet", "TW"),
+    ("168.95.192.1", "中华电信 HiNet", "TW"), ("168.126.63.1", "KT", "KR"), ("168.126.63.2", "KT", "KR"),
+    ("77.88.8.8", "Yandex", "RU"), ("77.88.8.1", "Yandex", "RU"),
+];
 
 /// 出口 IP 的运营商名里有这些就当作云服务商 / 机房（不是家庭或公司宽带）
 const HOSTING_WORDS: &[&str] = &[
@@ -171,19 +219,39 @@ pub fn detect_region() -> Option<Value> {
     let mut out = json!({
         "loc": get("loc").map(|l| l.to_uppercase()), "ip": get("ip"), "colo": get("colo"),
         "ms": t0.elapsed().as_millis() as u64, "warp": warp, "skew": skew,
-        "asn": null, "org": null, "city": null, "meta_loc": null
+        "asn": null, "org": null, "city": null, "meta_loc": null, "ip_type": null, "reg_loc": null,
+        "v4_ip": null, "v4_loc": null, "v6_ip": null, "v6_loc": null
     });
     if let Some(meta) = fetch_exit_meta() {
-        for k in ["asn", "org", "city", "meta_loc"] {
+        for k in ["asn", "org", "city", "meta_loc", "ip_type", "reg_loc"] {
             out[k] = meta.get(k).cloned().unwrap_or(Value::Null);
         }
+    }
+    if let Some((ip, loc)) = trace_only(&cf_trace4_url()) {
+        out["v4_ip"] = json!(ip);
+        out["v4_loc"] = json!(loc);
+    }
+    if let Some((ip, loc)) = trace_only(&cf_trace6_url()) {
+        out["v6_ip"] = json!(ip);
+        out["v6_loc"] = json!(loc);
+    }
+    if s(&out, "reg_loc").is_none() {
+        let ip = s(&out, "ip").unwrap_or("").to_string();
+        out["reg_loc"] = json!(fetch_ip_registration(&ip));
     }
     Some(out)
 }
 
-/// 出口 IP 的 ASN、运营商、城市和国家：先问 Cloudflare 的 meta 接口，拒绝时退到 ipinfo.io。查不到返回 None。
+/// 出口 IP 的 ASN、运营商、城市、国家和类型。来源按优先级：ipapi.is（有 key 时，带 IP 类型 / VPN / Tor 标记）、
+/// ip-api.com（免费，带机房 / 代理 / 手机标记，只有 http）、Cloudflare meta、ipinfo.io（后两个没有标记）。查不到返回 None。
 pub fn fetch_exit_meta() -> Option<Value> {
-    for url in [cf_meta_url(), ipinfo_url()] {
+    let mut urls = Vec::new();
+    let key = ipapi_is_key();
+    if !key.is_empty() {
+        urls.push(format!("{}?key={}", ipapi_is_url(), key));
+    }
+    urls.extend([ipapi_url(), cf_meta_url(), ipinfo_url()]);
+    for url in urls.into_iter().filter(|u| !u.is_empty()) {
         let (st, txt) = http_text(&url, 6);
         if st != 200 {
             continue;
@@ -195,29 +263,203 @@ pub fn fetch_exit_meta() -> Option<Value> {
     None
 }
 
-/// 统一两种格式：Cloudflare {asn, asOrganization, city, region, country} 和 ipinfo {org: "AS7922 Comcast…", city, region, country}。
+fn parse_as_field(v: &str, asn: &mut Option<u64>, org: &mut Option<String>) {
+    let (head, rest) = v.split_once(' ').unwrap_or((v, ""));
+    if let Some(n) = head.strip_prefix("AS").and_then(|n| n.parse::<u64>().ok()) {
+        *asn = asn.or(Some(n));
+        if org.is_none() {
+            *org = Some(rest.trim().to_string()).filter(|r| !r.is_empty());
+        }
+    } else if org.is_none() {
+        *org = Some(v.to_string());
+    }
+}
+
+/// 统一几种格式：ipapi.is {asn:{asn,org,country}, company:{type}, is_datacenter, is_vpn, is_proxy, is_tor, is_mobile, location:{…}}、
+/// ip-api.com {as, isp, org, countryCode, city, regionName, hosting, proxy, mobile}、
+/// Cloudflare {asn, asOrganization, city, region, country}、ipinfo {org: "AS7922 Comcast…", city, region, country}。
+/// 返回 {asn, org, city, meta_loc, ip_type, reg_loc}；ip_type 为 residential / hosting / proxy / tor / mobile / null（这个来源不带标记）。
 pub fn parse_exit_meta(j: &Value) -> Option<Value> {
     j.as_object()?;
-    let (mut asn, mut org) = (j.get("asn").and_then(|v| v.as_u64()), s(j, "asOrganization").map(String::from));
-    if org.is_none() {
-        if let Some(o) = s(j, "org") {
-            let (head, rest) = o.split_once(' ').unwrap_or((o, ""));
-            if let Some(n) = head.strip_prefix("AS").and_then(|n| n.parse::<u64>().ok()) {
-                asn = asn.or(Some(n));
-                org = Some(rest.trim().to_string()).filter(|r| !r.is_empty());
-            } else {
-                org = Some(o.to_string());
+    if s(j, "status") == Some("fail") {
+        return None;
+    }
+    let truthy = |k: &str| j.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+    let (mut asn, mut org, ip_type, reg_loc): (Option<u64>, Option<String>, Option<&str>, Option<String>);
+    let loc_src = j.get("location").filter(|l| l.is_object()).unwrap_or(j);
+    if let Some(a) = j.get("asn").filter(|a| a.is_object()) {
+        // ipapi.is
+        asn = a.get("asn").and_then(|v| v.as_u64());
+        org = s(a, "org").or_else(|| j.get("company").and_then(|c| s(c, "name"))).map(String::from);
+        reg_loc = s(a, "country").map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty());
+        let ctype = j.get("company").and_then(|c| s(c, "type"));
+        ip_type = if truthy("is_tor") {
+            Some("tor")
+        } else if truthy("is_vpn") || truthy("is_proxy") {
+            Some("proxy")
+        } else if truthy("is_datacenter") || ctype == Some("hosting") {
+            Some("hosting")
+        } else if truthy("is_mobile") {
+            Some("mobile")
+        } else if ctype.is_some() {
+            Some("residential")
+        } else {
+            None
+        };
+    } else {
+        asn = j.get("asn").and_then(|v| v.as_u64());
+        org = s(j, "asOrganization").or_else(|| s(j, "isp")).map(String::from);
+        if let Some(v) = s(j, "as") {
+            parse_as_field(v, &mut asn, &mut org);
+        } else if org.is_none() {
+            if let Some(v) = s(j, "org") {
+                parse_as_field(v, &mut asn, &mut org);
             }
         }
+        ip_type = if j.get("hosting").is_some() || j.get("proxy").is_some() {
+            // ip-api.com
+            Some(if truthy("proxy") {
+                "proxy"
+            } else if truthy("hosting") {
+                "hosting"
+            } else if truthy("mobile") {
+                "mobile"
+            } else {
+                "residential"
+            })
+        } else {
+            None
+        };
+        reg_loc = None;
     }
-    let city = [s(j, "city"), s(j, "region")].iter().flatten().cloned().collect::<Vec<_>>().join(", ");
-    let loc = s(j, "country").map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty());
+    let region = s(loc_src, "region").or_else(|| s(loc_src, "regionName")).or_else(|| s(loc_src, "state"));
+    let city = [s(loc_src, "city"), region].iter().flatten().cloned().collect::<Vec<_>>().join(", ");
+    let country = s(loc_src, "country_code").or_else(|| s(j, "countryCode")).or_else(|| s(loc_src, "country")).unwrap_or("");
+    let loc = Some(country.trim().to_uppercase()).filter(|c| c.len() == 2);
     if org.is_none() && loc.is_none() {
         return None;
     }
     Some(json!({
-        "asn": asn, "org": org, "city": if city.is_empty() { None } else { Some(city) }, "meta_loc": loc
+        "asn": asn, "org": org, "city": if city.is_empty() { None } else { Some(city) }, "meta_loc": loc,
+        "ip_type": ip_type, "reg_loc": reg_loc
     }))
+}
+
+/// IP 在 RIR 登记的国家（RDAP）。查不到返回 None（ARIN 的分配记录常常没写国家）。
+pub fn fetch_ip_registration(ip: &str) -> Option<String> {
+    let base = rdap_url();
+    if base.is_empty() || ip.is_empty() {
+        return None;
+    }
+    let (st, txt) = http_text(&format!("{}{}", base, ip), 6);
+    if st != 200 {
+        return None;
+    }
+    let j: Value = serde_json::from_str(&txt).ok()?;
+    let c = s(&j, "country")?.trim().to_uppercase();
+    if c.len() == 2 { Some(c) } else { None }
+}
+
+/// 只用某一个协议（IPv4 或 IPv6 的 IP 直连）访问 Cloudflare trace，返回 (ip, loc) 或 None（该协议不可用）。
+pub fn trace_only(url: &str) -> Option<(Option<String>, Option<String>)> {
+    if url.is_empty() {
+        return None;
+    }
+    let (st, txt) = http_text(url, 4);
+    if st != 200 || !txt.contains("loc=") {
+        return None;
+    }
+    let get = |k: &str| {
+        txt.lines()
+            .find_map(|l| l.strip_prefix(&format!("{}=", k)))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    Some((get("ip"), get("loc").map(|l| l.to_uppercase())))
+}
+
+pub fn is_private_ip(ip: &str) -> bool {
+    let ip = ip.split('%').next().unwrap_or(ip);
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => a.is_private() || a.is_loopback() || a.is_link_local(),
+        Ok(std::net::IpAddr::V6(a)) => {
+            a.is_loopback() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
+/// 本机配置的 DNS 服务器 [{ip, name, country, private}]。只读本机配置，不往外发任何探测。
+/// 测试用 CAM_TEST_DNS="8.8.8.8,223.5.5.5"（空字符串表示查不到）。
+pub fn system_dns_servers() -> Vec<Value> {
+    let mut ips: Vec<String> = Vec::new();
+    if let Ok(t) = std::env::var("CAM_TEST_DNS") {
+        ips = t.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+    } else if cfg!(windows) {
+        let out = run_text(
+            "powershell",
+            &["-NoProfile", "-Command", "Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }"],
+        );
+        ips = out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    } else if cfg!(target_os = "macos") {
+        for line in run_text("scutil", &["--dns"]).lines() {
+            let line = line.trim();
+            if line.starts_with("nameserver[") {
+                if let Some((_, v)) = line.split_once(':') {
+                    ips.push(v.trim().to_string());
+                }
+            }
+        }
+    } else {
+        if let Ok(txt) = std::fs::read_to_string("/etc/resolv.conf") {
+            for line in txt.lines() {
+                let mut it = line.split_whitespace();
+                if it.next() == Some("nameserver") {
+                    if let Some(ip) = it.next() {
+                        ips.push(ip.to_string());
+                    }
+                }
+            }
+        }
+        if ips.iter().any(|ip| ip.starts_with("127.0.0.53")) {
+            // systemd-resolved 的本机代理，真正的上游看 resolvectl
+            for line in run_text("resolvectl", &["status"]).lines() {
+                if line.contains("DNS Servers:") || line.contains("Current DNS Server:") {
+                    if let Some((_, v)) = line.split_once(':') {
+                        ips.extend(v.split_whitespace().map(String::from));
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw in ips {
+        let ip = raw.trim().split('%').next().unwrap_or("").to_string();
+        if ip.is_empty() || ip.starts_with("127.0.0.53") || !seen.insert(ip.clone()) {
+            continue;
+        }
+        let known = KNOWN_DNS.iter().find(|(k, _, _)| *k == ip);
+        out.push(json!({
+            "ip": ip, "name": known.map(|(_, n, _)| *n), "country": known.map(|(_, _, c)| *c).filter(|c| !c.is_empty()),
+            "private": is_private_ip(&ip)
+        }));
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
+/// 本机的区域设置快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
+pub fn local_env() -> Value {
+    let tz = system_timezone();
+    let lc = system_locale();
+    json!({
+        "tz": tz.as_ref().map(|t| t.0.clone()), "tz_cc": tz.as_ref().map(|t| t.1.clone()).unwrap_or_default(),
+        "locale": lc.as_ref().map(|l| l.0.clone()), "locale_cc": lc.as_ref().and_then(|l| l.1.clone()),
+        "dns": system_dns_servers()
+    })
 }
 
 /// 运营商名像云服务商 / 机房时为 true（这类出口通常被当作 VPN / 代理流量）。
@@ -461,7 +703,7 @@ pub fn region_view(data: &Value) -> Value {
     let Some(checked) = s(&c, "checked_at").map(String::from) else {
         return json!({"loc": null, "ip": null, "status": null, "checked_at": null,
                       "message": "还没有检测过出口地区", "advice": "", "warp": false, "prev_loc": null, "changed_at": null,
-                      "org": null, "city": null});
+                      "org": null, "city": null, "ip_type": null});
     };
     let loc = s(&c, "loc").map(String::from);
     let status = region_status(loc.as_deref());
@@ -470,7 +712,7 @@ pub fn region_view(data: &Value) -> Value {
         "message": region_message(loc.as_deref(), status), "advice": region_advice(status),
         "warp": c.get("warp").and_then(|v| v.as_bool()).unwrap_or(false),
         "prev_loc": s(&c, "prev_loc"), "changed_at": s(&c, "changed_at"),
-        "org": s(&c, "org"), "city": s(&c, "city")
+        "org": s(&c, "org"), "city": s(&c, "city"), "ip_type": s(&c, "ip_type")
     })
 }
 
@@ -493,7 +735,10 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     let mut reg = json!({
         "loc": new_loc, "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
         "warp": r.get("warp").and_then(|v| v.as_bool()).unwrap_or(false), "skew": r.get("skew"),
-        "asn": r.get("asn"), "org": r.get("org"), "city": r.get("city"), "meta_loc": r.get("meta_loc"), "checked_at": now
+        "asn": r.get("asn"), "org": r.get("org"), "city": r.get("city"), "meta_loc": r.get("meta_loc"),
+        "ip_type": r.get("ip_type"), "reg_loc": r.get("reg_loc"),
+        "v4_ip": r.get("v4_ip"), "v4_loc": r.get("v4_loc"), "v6_ip": r.get("v6_ip"), "v6_loc": r.get("v6_loc"),
+        "env": local_env(), "checked_at": now
     });
     match (s(&old, "loc"), new_loc.as_deref()) {
         (Some(o), Some(n)) if o != n => {
@@ -566,17 +811,85 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             );
         }
     }
-    if hosting_exit(s(&reg, "org")) {
-        add(
+    let org = s(&reg, "org").unwrap_or("?");
+    let asn = reg.get("asn").filter(|v| !v.is_null()).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    match s(&reg, "ip_type") {
+        Some("tor") => add(
+            "tor_exit",
+            "warn",
+            format!("出口 IP 是 Tor 出口节点（{}）", org),
+            "Tor 出口几乎一定会被当作高风险流量，账号很容易被限制；人所在地仍按实际位置判断。",
+        ),
+        Some("proxy") => add(
+            "proxy_ip",
+            "warn",
+            format!("出口 IP 被数据库标记为代理 / VPN 出口（{}，AS{}）", org, asn),
+            "服务端的 IP 库同样能查到这个标记，这是最常见的风控信号之一；人所在地仍按实际位置判断。",
+        ),
+        t if t == Some("hosting") || (t.is_none() && hosting_exit(s(&reg, "org"))) => add(
             "isp",
             "warn",
-            format!(
-                "出口 IP 属于 {}（AS{}），像云服务商 / 机房，不是家庭或公司宽带",
-                s(&reg, "org").unwrap_or(""),
-                reg.get("asn").map(|v| v.to_string()).unwrap_or_else(|| "?".into())
-            ),
+            format!("出口 IP 属于 {}（AS{}），是机房 / 云服务器，不是家庭或公司宽带", org, asn),
             "这类出口通常被当作 VPN / 代理流量看待，是常见的风控信号之一；人所在地仍按实际位置判断。",
-        );
+        ),
+        _ => {}
+    }
+    if let (Some(r), Some(l)) = (s(&reg, "reg_loc"), loc.as_deref()) {
+        if r != l {
+            add(
+                "ip_origin",
+                "info",
+                format!("出口 IP 注册在 {}，定位在 {}（广播 IP）", region_label(Some(r)), region_label(Some(l))),
+                "不同地理库可能把它判到不同国家，服务端看到的国家不一定和这里一致。",
+            );
+        }
+    }
+    if let (Some(v4), Some(v6)) = (s(&reg, "v4_loc"), s(&reg, "v6_loc")) {
+        if v4 != v6 {
+            add(
+                "ipv6_mismatch",
+                "warn",
+                format!(
+                    "IPv4 出口在 {}，IPv6 出口在 {}（{}），两个协议走了不同的出口",
+                    region_label(Some(v4)),
+                    region_label(Some(v6)),
+                    s(&reg, "v6_ip").unwrap_or("?")
+                ),
+                "VPN / 代理通常只接管 IPv4，IPv6 直接从本机网络出去，服务端通过 IPv6 看到的就是本机网络的真实出口。\
+                 如果 IPv6 这边在不支持地区，政策按实际所在地判断，风险与 IPv4 出口无关。",
+            );
+        }
+    }
+    let env: Option<Value> = match reg.get("env").filter(|e| e.is_object()) {
+        Some(e) => Some(e.clone()),
+        None if s(&reg, "checked_at").is_some() => Some(local_env()), // 旧版缓存没有这一段
+        None => None,
+    };
+    if let (Some(e), Some(l)) = (&env, loc.as_deref()) {
+        for d in e.get("dns").and_then(|d| d.as_array()).cloned().unwrap_or_default() {
+            let Some(c) = s(&d, "country") else { continue };
+            if c == l {
+                continue;
+            }
+            let text = format!(
+                "DNS 解析器 {}（{}，{}）与出口地区 {} 不一致",
+                s(&d, "ip").unwrap_or("?"),
+                s(&d, "name").unwrap_or("公共 DNS"),
+                region_label(Some(c)),
+                region_label(Some(l))
+            );
+            if region_status(Some(c)) == "unsupported" {
+                add(
+                    "dns_resolver",
+                    "warn",
+                    text,
+                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。",
+                );
+            } else {
+                add("dns_resolver", "info", text, "出差或代理分流都会这样；人所在地在支持名单内就没问题。");
+            }
+            break;
+        }
     }
     if reg.get("warp").and_then(|v| v.as_bool()).unwrap_or(false) {
         add(
@@ -608,7 +921,18 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             );
         }
     }
-    if let (Some((zone, cc)), Some(l)) = (system_timezone(), loc.as_deref()) {
+    let tz_cached = env.as_ref().and_then(|e| {
+        s(e, "tz").map(|z| {
+            (
+                z.to_string(),
+                e.get("tz_cc")
+                    .and_then(|c| c.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+        })
+    });
+    if let (Some((zone, cc)), Some(l)) = (tz_cached.or_else(system_timezone), loc.as_deref()) {
         if !cc.is_empty() && !cc.iter().any(|c| c == l) {
             let home = cc[0].as_str();
             let text = format!("系统时区 {} 指向 {}，与出口地区 {} 不一致", zone, region_label(Some(home)), region_label(Some(l)));
@@ -625,7 +949,10 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             }
         }
     }
-    if let (Some((name, Some(home))), Some(l)) = (system_locale(), loc.as_deref()) {
+    let lc_cached = env
+        .as_ref()
+        .and_then(|e| s(e, "locale").map(|n| (n.to_string(), s(e, "locale_cc").map(String::from))));
+    if let (Some((name, Some(home))), Some(l)) = (lc_cached.or_else(system_locale), loc.as_deref()) {
         if home != l {
             let text = format!("系统语言 / 区域 {} 指向 {}，与出口地区 {} 不一致", name, region_label(Some(&home)), region_label(Some(l)));
             if region_status(Some(&home)) == "unsupported" {
@@ -688,6 +1015,8 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("locale", "info", 3), ("clock", "warn", 10), ("warp", "info", 5), ("vpn", "info", 10), ("proxy", "info", 5),
     ("status", "bad", 30), ("status", "warn", 10), ("api", "bad", 40), ("api", "warn", 5), ("web", "bad", 10),
     ("web", "warn", 5), ("dns", "bad", 20), ("accounts", "info", 0), ("device", "info", 0), ("scope", "info", 0),
+    ("tor_exit", "warn", 40), ("proxy_ip", "warn", 25), ("ipv6_mismatch", "warn", 15), ("dns_resolver", "warn", 15),
+    ("dns_resolver", "info", 3), ("ip_origin", "info", 5), ("ipv6", "info", 0), ("dns_servers", "info", 0),
 ];
 /// (最低分, 档位, 说明)
 const RISK_GRADES: &[(i64, &str, &str)] = &[
@@ -825,15 +1154,54 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         }
         None => add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）".into(), region_advice("unknown")),
     }
-    match s(&r, "org") {
-        Some(org) if !hosting_exit(Some(org)) => add(
+    let asn = r.get("asn").filter(|v| !v.is_null()).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    match (s(&r, "org"), s(&r, "ip_type")) {
+        (Some(org), Some(t)) if t == "residential" || t == "mobile" => add(
             "isp",
             "info",
-            format!("网络服务商：{}（AS{}）", org, r.get("asn").map(|v| v.to_string()).unwrap_or_else(|| "?".into())),
-            "看起来是普通宽带或运营商网络，不是机房出口",
+            format!("网络服务商：{}（AS{}），IP 类型：{}", org, asn, ip_type_name(t)),
+            if t == "residential" { "数据库判定为普通宽带或运营商网络，不是机房 / 代理出口" } else { "手机网络的出口 IP 会变，地区判定也可能跳动" },
         ),
-        Some(_) => {} // 机房出口由 risk_items 以 warn 给出
-        None => add("isp", "info", "网络服务商：查不到（连不上 Cloudflare 的 meta 接口）".into(), "判断不了出口是不是机房；不影响其它检查"),
+        (Some(org), None) if !hosting_exit(Some(org)) => add(
+            "isp",
+            "info",
+            format!("网络服务商：{}（AS{}），IP 类型：查不到（没有带标记的数据源）", org, asn),
+            "按运营商名看不像机房；想要数据库判定可配置 ipapi.is 的 key（CAM_IPAPI_IS_KEY）",
+        ),
+        (Some(_), _) => {} // 机房 / 代理 / Tor 出口由 risk_items 以 warn 给出
+        (None, _) => add("isp", "info", "网络服务商：查不到（IP 信息接口都连不上）".into(), "判断不了出口是不是机房 / 代理；不影响其它检查"),
+    }
+    match (s(&r, "reg_loc"), s(&r, "loc")) {
+        (Some(reg_loc), Some(l)) if reg_loc == l => {
+            add("ip_origin", "ok", format!("IP 归属：注册在 {}，与定位一致（原生 IP）", region_label(Some(reg_loc))), "")
+        }
+        (None, Some(_)) => add(
+            "ip_origin_unknown",
+            "info",
+            "IP 归属：注册国查不到（RDAP 记录没写国家）".into(),
+            "美国 ARIN 的记录常常不写，不影响其它检查，不扣分",
+        ),
+        _ => {} // 不一致由 risk_items 给出
+    }
+    match (s(&r, "v4_loc"), s(&r, "v6_loc"), s(&r, "loc")) {
+        (Some(v4), Some(v6), _) if v4 == v6 => add("ipv6", "ok", format!("IPv6：可用，出口 {}，地区与 IPv4 一致", s(&r, "v6_ip").unwrap_or("?")), ""),
+        (_, None, Some(_)) => add("ipv6", "ok", "IPv6：不可用，只有 IPv4 出口".into(), "不会出现 IPv6 漏出真实出口的问题"),
+        _ => {}
+    }
+    if let Some(dns) = r.get("env").and_then(|e| e.get("dns")).and_then(|d| d.as_array()).filter(|d| !d.is_empty()) {
+        let parts: Vec<String> = dns
+            .iter()
+            .map(|d| {
+                let who = if d.get("private").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    "局域网 / 本机".to_string()
+                } else {
+                    s(d, "name").unwrap_or("公共 DNS").to_string()
+                };
+                let c = s(d, "country").map(|c| format!("，{}", region_label(Some(c)))).unwrap_or_default();
+                format!("{}（{}{}）", s(d, "ip").unwrap_or("?"), who, c)
+            })
+            .collect();
+        add("dns_servers", "info", format!("DNS 解析器：{}", parts.join("；")), "只读本机配置，没有做泄漏探测；局域网 DNS 最终走哪里取决于路由器");
     }
     // api.anthropic.com：有登录就用当前登录实测
     let at = read_live()
@@ -916,7 +1284,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     }));
     out.push(json!({
         "kind": "scope", "level": "info",
-        "text": "检测范围：本机能看到的信号（出口 IP 和运营商、代理 / VPN、WARP、时钟、时区、系统语言、账号使用地区）",
+        "text": "检测范围：本机能看到的信号（出口 IP、IP 类型、IPv4 / IPv6、注册国、运营商、代理 / VPN、WARP、DNS 配置、时钟、时区、系统语言、账号使用地区）",
         "advice": "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，\
                    所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。"
     }));

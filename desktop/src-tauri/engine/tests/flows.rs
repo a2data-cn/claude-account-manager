@@ -5,7 +5,9 @@ use cam_engine::api::{api_switch, public_state, route};
 use cam_engine::claude::{
     apply_pending_switch, apply_pending_switch_at, import_current, is_claude_cmd, switch_account, PENDING_ID,
 };
-use cam_engine::health::{check_region, parse_exit_meta, risk_items, risk_score, service_check, tunnel_kind};
+use cam_engine::health::{
+    check_region, parse_exit_meta, risk_items, risk_score, service_check, system_dns_servers, tunnel_kind,
+};
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
 use cam_engine::usage::{ensure_fresh_token, refresh_usage};
@@ -33,10 +35,16 @@ struct Mock {
     trace_ts_offset: i64,
     /// 官方状态页：空表示 none
     status_indicator: String,
-    /// /meta 返回的运营商，空表示 Comcast
+    /// /meta 和 /ipapi 返回的运营商，空表示 Comcast
     meta_org: String,
-    /// /meta 返回的国家，空表示和 trace 一致
+    /// /meta 和 /ipapi 返回的国家，空表示和 trace 一致
     meta_country: String,
+    /// /ipapi（ip-api.com 格式）的 IP 类型：空表示 residential；"fail" 表示查询失败
+    ipapi_type: String,
+    /// /rdap/<ip> 返回的注册国：空表示 US；"-" 表示记录没写
+    rdap_country: String,
+    /// /trace6 的地区：空表示 IPv6 不可用
+    trace6_loc: String,
 }
 
 fn mock() -> &'static Mutex<Mock> {
@@ -73,6 +81,55 @@ fn mock_base() -> &'static str {
                     drop(m);
                     let body = format!("fl=1\nip=1.2.3.4\nts={:.3}\nloc={}\ncolo=SJC\nwarp={}\n", ts, loc, warp);
                     let _ = req.respond(tiny_http::Response::from_string(body));
+                    continue;
+                }
+                if path.starts_with("/ipapi") {
+                    let body = if m.ipapi_type == "fail" {
+                        json!({"status": "fail", "message": "quota"})
+                    } else {
+                        let org = if m.meta_org.is_empty() { "Comcast Cable Communications, LLC" } else { m.meta_org.as_str() };
+                        let country = if !m.meta_country.is_empty() {
+                            m.meta_country.clone()
+                        } else if m.trace_loc.is_empty() {
+                            "US".to_string()
+                        } else {
+                            m.trace_loc.clone()
+                        };
+                        let t = m.ipapi_type.as_str();
+                        json!({"status": "success", "countryCode": country, "city": "San Jose", "regionName": "California",
+                               "isp": org, "org": org, "as": format!("AS7922 {}", org), "mobile": t == "mobile",
+                               "proxy": t == "proxy", "hosting": t == "hosting", "query": "1.2.3.4"})
+                    }
+                    .to_string();
+                    drop(m);
+                    let _ = req.respond(tiny_http::Response::from_string(body));
+                    continue;
+                }
+                if path.starts_with("/rdap/") {
+                    let body = match m.rdap_country.as_str() {
+                        "-" => json!({"handle": "NET-1"}),
+                        "" => json!({"handle": "NET-1", "country": "US"}),
+                        c => json!({"handle": "NET-1", "country": c}),
+                    }
+                    .to_string();
+                    drop(m);
+                    let _ = req.respond(tiny_http::Response::from_string(body));
+                    continue;
+                }
+                if path == "/trace4" {
+                    let loc = if m.trace_loc.is_empty() { "US".to_string() } else { m.trace_loc.clone() };
+                    drop(m);
+                    let _ = req.respond(tiny_http::Response::from_string(format!("ip=1.2.3.4\nloc={}\ncolo=SJC\n", loc)));
+                    continue;
+                }
+                if path == "/trace6" {
+                    let loc = m.trace6_loc.clone();
+                    drop(m);
+                    let _ = if loc.is_empty() {
+                        req.respond(tiny_http::Response::from_string("{}").with_status_code(404))
+                    } else {
+                        req.respond(tiny_http::Response::from_string(format!("ip=2001:db8::1\nloc={}\ncolo=HKG\n", loc)))
+                    };
                     continue;
                 }
                 if path == "/meta" {
@@ -162,7 +219,13 @@ impl Env {
         std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", base));
         std::env::set_var("CAM_STATUS_URL", format!("{}/status.json", base));
         std::env::set_var("CAM_CF_META_URL", format!("{}/meta", base));
+        std::env::set_var("CAM_IPAPI_URL", format!("{}/ipapi", base));
+        std::env::set_var("CAM_IPAPI_IS_KEY", "");
+        std::env::set_var("CAM_RDAP_URL", format!("{}/rdap/", base));
+        std::env::set_var("CAM_CF_TRACE4_URL", format!("{}/trace4", base));
+        std::env::set_var("CAM_CF_TRACE6_URL", format!("{}/trace6", base));
         std::env::set_var("CAM_TEST_LOCALE", "en_US");
+        std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
         std::env::set_var("CAM_TEST_TZ", "America/New_York=US"); // 跑测试的机器时区不定，固定成和假出口一致
         std::env::set_var("CAM_TEST_ROUTE_IF", "");
         for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
@@ -567,42 +630,93 @@ fn risk_items_and_reminders() {
     // 时区指向不支持地区而出口在支持地区：warn；指向支持地区：info；一致：不提
     mock().lock().unwrap().trace_loc = "SG".into();
     check_region(&store, 0).unwrap();
-    std::env::set_var("CAM_TEST_TZ", "Asia/Hong_Kong=HK");
-    let items = risk_items(&e.data(), true);
+    // 本机设置随出口一起缓存，改了环境变量要重新检测一次
+    let risks_with = |k: &str, v: &str| {
+        std::env::set_var(k, v);
+        check_region(&store, 0).unwrap();
+        risk_items(&e.data(), true)
+    };
+    let items = risks_with("CAM_TEST_TZ", "Asia/Hong_Kong=HK");
     let tz = by_kind(&items, "timezone").unwrap();
     assert_eq!(tz["level"], "warn");
     assert!(tz["text"].as_str().unwrap().contains("Asia/Hong_Kong 指向 HK（香港），与出口地区 SG（新加坡） 不一致"), "{}", tz);
-    std::env::set_var("CAM_TEST_TZ", "Asia/Tokyo=JP");
-    assert_eq!(by_kind(&risk_items(&e.data(), true), "timezone").unwrap()["level"], "info");
-    std::env::set_var("CAM_TEST_TZ", "Asia/Singapore=SG,MY");
-    assert!(by_kind(&risk_items(&e.data(), true), "timezone").is_none());
+    assert_eq!(by_kind(&risks_with("CAM_TEST_TZ", "Asia/Tokyo=JP"), "timezone").unwrap()["level"], "info");
+    assert!(by_kind(&risks_with("CAM_TEST_TZ", "Asia/Singapore=SG,MY"), "timezone").is_none());
     std::env::set_var("CAM_TEST_TZ", "America/New_York=US");
     // 系统语言指向不支持地区：warn；指向支持地区：info
-    std::env::set_var("CAM_TEST_LOCALE", "zh_CN.UTF-8");
-    let lc = by_kind(&risk_items(&e.data(), true), "locale").cloned().unwrap();
+    let lc = by_kind(&risks_with("CAM_TEST_LOCALE", "zh_CN.UTF-8"), "locale").cloned().unwrap();
     assert_eq!(lc["level"], "warn");
     assert!(lc["text"].as_str().unwrap().contains("zh_CN 指向 CN（中国大陆），与出口地区 SG（新加坡） 不一致"), "{}", lc);
-    std::env::set_var("CAM_TEST_LOCALE", "ja-JP");
-    assert_eq!(by_kind(&risk_items(&e.data(), true), "locale").unwrap()["level"], "info");
+    assert_eq!(by_kind(&risks_with("CAM_TEST_LOCALE", "ja-JP"), "locale").unwrap()["level"], "info");
     std::env::set_var("CAM_TEST_LOCALE", "en_US");
-    // 机房出口 + 两个接口看到的国家不一致
+    // DNS 解析器：局域网和任播的不提；不支持地区的公共 DNS 与出口不一致 → warn；支持地区 → info
+    assert!(by_kind(&risks_with("CAM_TEST_DNS", "192.168.1.1,8.8.8.8"), "dns_resolver").is_none());
+    let d = by_kind(&risks_with("CAM_TEST_DNS", "192.168.1.1,223.5.5.5"), "dns_resolver").cloned().unwrap();
+    assert_eq!(d["level"], "warn");
+    assert!(d["text"].as_str().unwrap().contains("223.5.5.5（阿里 DNS，CN（中国大陆））与出口地区 SG（新加坡） 不一致"), "{}", d);
+    assert_eq!(by_kind(&risks_with("CAM_TEST_DNS", "168.95.1.1"), "dns_resolver").unwrap()["level"], "info");
+    std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
+    check_region(&store, 0).unwrap();
+    // IP 类型：数据库标记为代理 → warn；IPv6 出口和 IPv4 不同 → warn；注册国不同 → info
+    {
+        let mut m = mock().lock().unwrap();
+        m.ipapi_type = "proxy".into();
+        m.trace6_loc = "HK".into();
+        m.rdap_country = "CA".into();
+    }
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    let items = risk_items(&d, true);
+    let p = by_kind(&items, "proxy_ip").unwrap();
+    assert_eq!(p["level"], "warn");
+    assert!(p["text"].as_str().unwrap().contains("被数据库标记为代理 / VPN 出口"), "{}", p);
+    let v6 = by_kind(&items, "ipv6_mismatch").unwrap();
+    assert_eq!(v6["level"], "warn");
+    assert!(v6["text"].as_str().unwrap().contains("IPv4 出口在 SG（新加坡），IPv6 出口在 HK（香港）（2001:db8::1）"), "{}", v6);
+    let o = by_kind(&items, "ip_origin").unwrap();
+    assert_eq!(o["level"], "info");
+    assert!(o["text"].as_str().unwrap().contains("注册在 CA（加拿大），定位在 SG（新加坡）（广播 IP）"), "{}", o);
+    assert_eq!(d["region"]["ip_type"], "proxy");
+    // 手机网络、IPv6 不可用、注册国一致：都不提；服务检查里各有一行
+    {
+        let mut m = mock().lock().unwrap();
+        m.ipapi_type = "mobile".into();
+        m.trace6_loc = String::new();
+        m.rdap_country = "SG".into();
+    }
+    check_region(&store, 0).unwrap();
+    let items = risk_items(&e.data(), true);
+    assert!(["proxy_ip", "isp", "ipv6_mismatch", "ip_origin"].iter().all(|k| by_kind(&items, k).is_none()));
+    let items = service_check(&store);
+    assert!(by_kind(&items, "isp").unwrap()["text"].as_str().unwrap().contains("IP 类型：手机网络"));
+    assert!(by_kind(&items, "ipv6").unwrap()["text"].as_str().unwrap().contains("IPv6：不可用"));
+    assert_eq!(by_kind(&items, "ip_origin").unwrap()["level"], "ok");
+    assert!(by_kind(&items, "dns_servers").unwrap()["text"].as_str().unwrap().contains("192.168.1.1（局域网 / 本机）"));
+    // 机房出口（数据库标记）+ 两个接口看到的国家不一致；数据源没有标记时按运营商名判断
     {
         let mut m = mock().lock().unwrap();
         m.meta_org = "DigitalOcean, LLC".into();
         m.meta_country = "CA".into();
+        m.ipapi_type = "hosting".into();
+        m.rdap_country = String::new();
     }
     check_region(&store, 0).unwrap();
     let items = risk_items(&e.data(), true);
     let isp = by_kind(&items, "isp").unwrap();
     assert_eq!(isp["level"], "warn");
-    assert!(isp["text"].as_str().unwrap().contains("DigitalOcean, LLC（AS7922），像云服务商 / 机房"), "{}", isp);
+    assert!(isp["text"].as_str().unwrap().contains("DigitalOcean, LLC（AS7922），是机房 / 云服务器"), "{}", isp);
     let mm = by_kind(&items, "region_mismatch").unwrap();
     assert_eq!(mm["level"], "warn");
     assert!(mm["text"].as_str().unwrap().contains("trace 接口看到 SG（新加坡），meta 接口看到 CA（加拿大）"), "{}", mm);
+    mock().lock().unwrap().ipapi_type = "fail".into(); // ip-api 查询失败 → 退到 Cloudflare meta（没有标记）→ 关键字判断
+    check_region(&store, 0).unwrap();
+    assert!(e.data()["region"]["ip_type"].is_null());
+    assert_eq!(by_kind(&risk_items(&e.data(), true), "isp").unwrap()["level"], "warn");
     {
         let mut m = mock().lock().unwrap();
         m.meta_org = String::new();
         m.meta_country = String::new();
+        m.ipapi_type = String::new();
     }
     // WARP、时钟偏差、官方状态页
     {
@@ -637,8 +751,8 @@ fn risk_items_and_reminders() {
     let ks = kinds(&items);
     assert_eq!(ks.iter().filter(|k| *k == "region").count(), 1);
     for k in [
-        "summary", "dns", "region", "isp", "api", "web", "proxy", "vpn", "region_change", "warp", "clock", "status", "accounts",
-        "device", "scope",
+        "summary", "dns", "region", "isp", "ip_origin", "ipv6", "dns_servers", "api", "web", "proxy", "vpn", "region_change",
+        "warp", "clock", "status", "accounts", "device", "scope",
     ] {
         assert!(ks.iter().any(|x| x == k), "缺少 {}：{:?}", k, ks);
     }
@@ -664,11 +778,41 @@ fn risk_items_and_reminders() {
     assert_eq!(d["active"]["claude_code"], json!(a));
     let acc = d["accounts"].as_array().unwrap().iter().find(|x| x["id"] == json!(a)).unwrap();
     assert_eq!(acc["regions"][0]["loc"], "SG");
-    // 运营商信息的两种来源格式
+    // 运营商信息的几种来源格式
     let m = parse_exit_meta(&json!({"org": "AS7922 Comcast Cable", "city": "Denver", "country": "us"})).unwrap();
-    assert_eq!(m, json!({"asn": 7922, "org": "Comcast Cable", "city": "Denver", "meta_loc": "US"}));
+    assert_eq!(m, json!({"asn": 7922, "org": "Comcast Cable", "city": "Denver", "meta_loc": "US", "ip_type": null, "reg_loc": null}));
     assert_eq!(parse_exit_meta(&json!({"asn": 14061, "asOrganization": "DigitalOcean, LLC", "country": "SG"})).unwrap()["asn"], 14061);
     assert!(parse_exit_meta(&json!({"ip": "1.2.3.4"})).is_none());
+    assert!(parse_exit_meta(&json!({"status": "fail", "message": "quota"})).is_none());
+    let m = parse_exit_meta(&json!({"status": "success", "countryCode": "HK", "city": "Hong Kong", "regionName": "",
+                                    "isp": "Choopa", "as": "AS20473 The Constant Company", "hosting": true, "proxy": false, "mobile": false}))
+    .unwrap();
+    assert_eq!((m["asn"].as_u64(), m["org"].as_str(), m["meta_loc"].as_str(), m["ip_type"].as_str(), m["city"].as_str()),
+               (Some(20473), Some("Choopa"), Some("HK"), Some("hosting"), Some("Hong Kong")));
+    let m = parse_exit_meta(&json!({"ip": "1.2.3.4", "is_tor": true, "is_vpn": false, "is_datacenter": true,
+                                    "asn": {"asn": 4134, "org": "Chinanet", "country": "cn"}, "company": {"name": "Chinanet", "type": "isp"},
+                                    "location": {"country_code": "SG", "city": "Singapore", "state": "Central"}}))
+    .unwrap();
+    assert_eq!(
+        (m["asn"].as_u64(), m["org"].as_str(), m["meta_loc"].as_str(), m["ip_type"].as_str(), m["reg_loc"].as_str(), m["city"].as_str()),
+        (Some(4134), Some("Chinanet"), Some("SG"), Some("tor"), Some("CN"), Some("Singapore, Central"))
+    );
+    // DNS 服务器分类
+    std::env::set_var("CAM_TEST_DNS", "10.0.0.1,8.8.8.8,223.5.5.5,fe80::1%en0,1.2.3.4");
+    let dns = system_dns_servers();
+    std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
+    let rows: Vec<(String, bool, Option<String>, Option<String>)> = dns
+        .iter()
+        .map(|d| (d["ip"].as_str().unwrap().to_string(), d["private"].as_bool().unwrap(),
+                  d["name"].as_str().map(String::from), d["country"].as_str().map(String::from)))
+        .collect();
+    assert_eq!(rows, vec![
+        ("10.0.0.1".to_string(), true, None, None),
+        ("8.8.8.8".to_string(), false, Some("Google".to_string()), None),
+        ("223.5.5.5".to_string(), false, Some("阿里 DNS".to_string()), Some("CN".to_string())),
+        ("fe80::1".to_string(), true, None, None),
+        ("1.2.3.4".to_string(), false, None, None),
+    ]);
     // VPN / 隧道判断
     assert!(tunnel_kind("utun4", "").is_some());
     assert!(tunnel_kind("Ethernet 2", "TAP-Windows Adapter V9").is_some());

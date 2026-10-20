@@ -94,8 +94,11 @@ Windows 用 `scripts\cam.cmd`，用法相同。
 最后一段"服务检查"实测 Claude 服务本身是否正常，并把使用环境里的风险点逐项列出来，排查"是网络问题、环境问题还是账号问题"。第一行是总体结论：环境风险评分（满分 100，每个风险点按轻重扣分）加档位——90 分以上"风险低，可以使用"，70–89"有风险，建议先处理提醒项再使用"，70 以下"风险高，不建议在当前环境使用；是否继续由你决定"——再带上最严重的那一条。评分只汇总本机能看到的信号，满分也不代表一定合规。下面每一项都附"→ 这意味着什么、建议怎么做"。**全部只提醒，不拦任何操作**，是否继续由用户自己决定：
 - DNS：`api.anthropic.com`、`claude.ai` 解析到哪里
 - 出口地区：从 Cloudflare 看到的国家、城市、IP 和节点，并对照 Anthropic 官网公布的支持国家/地区名单（美国、英国、日本等 180 多个；中国大陆、香港、澳门、俄罗斯等不在内）。不在名单内会醒目提醒：按 Anthropic 政策该地区不提供服务，继续使用可能导致账号被限制或封禁，建议换到支持地区的网络出口。在名单内也会说明：这只是 IP 这一项没问题，Anthropic 结合 IP 和其他信号综合判断所在地。名单会变，以官网为准
-- 网络服务商：出口 IP 属于哪个运营商（ASN）。属于云服务商 / 机房（DigitalOcean、AWS、阿里云等）而不是家庭或公司宽带时提醒：这类出口通常被当作 VPN / 代理流量看待
-- 出口地区判定一致性：Cloudflare 两个接口看到的国家不一致（IPv4 / IPv6 出口不同、代理只分流了一部分）时提醒
+- 网络服务商和 IP 类型：出口 IP 属于哪个运营商（ASN），数据库判定它是家庭 / 公司宽带、机房 / 云服务器、代理 / VPN 出口、Tor 出口节点还是手机网络。机房、代理、Tor 都会提醒：这类出口通常被当作 VPN / 代理流量看待。免费数据源是 ip-api.com（只有 http）；配置 `CAM_IPAPI_IS_KEY` 后改用 ipapi.is 的数据库（更准，带 VPN / Tor 标记）；都查不到时按运营商名里的关键字判断
+- IP 归属：IP 在 RIR 登记的国家（RDAP）和定位国是否一致（原生 IP / 广播 IP）。不一致时说明不同地理库可能判到不同国家
+- IPv4 / IPv6 双栈：两个协议分别测出口。VPN / 代理通常只接管 IPv4，IPv6 直接从本机网络出去，两边地区不同时提醒"服务端通过 IPv6 看到的就是本机网络的真实出口"
+- 出口地区判定一致性：两个接口看到的国家不一致（代理只分流了一部分）时提醒
+- DNS 解析器：本机配置的 DNS 服务器是局域网的、任播公共 DNS（Google、Cloudflare 等，不拿来判断位置）还是某个国家的公共 DNS（阿里、腾讯、114、HiNet 等）；用的是不支持地区的公共 DNS 而出口在支持地区时提醒。**只读本机配置，不做泄漏探测**（泄漏探测要往第三方的记录服务发带标识的查询，没有做）
 - `api.anthropic.com`：用当前登录实测，区分"服务正常 / 登录已过期 / 拒绝访问（通常是地区不支持）/ 连不上 / 服务端故障"，并显示时延
 - `claude.ai`：是否可达，是否被公司网络的人机验证页拦住（只影响网页账号读额度，不影响切号）
 - 代理：当前终端的代理环境变量，以及系统级代理设置（macOS 网络设置、Windows Internet 选项、GNOME）；有代理时出口地区就是代理的出口
@@ -233,7 +236,7 @@ macOS 首次打开未签名应用时，需要右键选择"打开"。
 ## 数据与安全
 
 - 所有数据存在 `~/.claude-accounts/`（可用 `CAM_HOME` 改位置），目录权限 700、凭据文件权限 600，不上传任何地方
-- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查和后台的出口地区记录另外会访问 `claude.ai/cdn-cgi/trace`（连不上时退到 `www.cloudflare.com/cdn-cgi/trace`）看出口地区，`speed.cloudflare.com/meta`（拒绝时退到 `ipinfo.io/json`）看出口 IP 的运营商和城市，以及 `status.anthropic.com` 的状态接口；这些请求只带出口 IP，不带任何账号信息。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
+- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查和后台的出口地区记录另外会访问 `claude.ai/cdn-cgi/trace`（连不上时退到 `www.cloudflare.com/cdn-cgi/trace`）看出口地区，`ip-api.com`（免费接口只有 http；配置了 `CAM_IPAPI_IS_KEY` 时改用 `api.ipapi.is`）看出口 IP 的运营商、城市和类型，查不到时退到 `speed.cloudflare.com/meta` 和 `ipinfo.io/json`；`rdap.org`（会跳转到对应 RIR）看 IP 的注册国；`1.1.1.1` 和 `[2606:4700:4700::1111]` 的 trace 接口分别看 IPv4 / IPv6 出口；以及 `status.anthropic.com` 的状态接口。这些请求只带出口 IP，不带任何账号信息。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
 - 用量和资料接口是 Claude Code 自己在用的接口，并非公开 API，Anthropic 改动后可能需要更新本工具；拿不到数据时界面会显示原因，不影响切换
 - 删除账号时凭据会移到 backups 目录，不直接销毁
 - 只有确认了"当前这份登录是谁的"才会存进对应账号：refresh token 和某个账号保存的一致，或者联网核对过。离线、或者 access token 已过期又换过 refresh token 时核对不了，就先暂存（`secrets/_pending-live.json`），不往任何账号里写，界面上会提示；联网后或切换时核对清楚再归档。这样旧会话写回的别人的 token 不会被存错账号

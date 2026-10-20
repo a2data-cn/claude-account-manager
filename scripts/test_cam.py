@@ -30,8 +30,11 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     trace_loc = "US"
     trace_warp = False
     trace_ts_offset = 0  # 服务器时间相对本机的偏差（秒）
-    meta_org = "Comcast Cable Communications, LLC"  # /meta 返回的运营商
-    meta_country = None  # /meta 返回的国家，None 表示和 trace 一致
+    meta_org = "Comcast Cable Communications, LLC"  # /meta 和 /ipapi 返回的运营商
+    meta_country = None  # /meta 和 /ipapi 返回的国家，None 表示和 trace 一致
+    ipapi_type = "residential"  # /ipapi（ip-api.com 格式）的 IP 类型：residential / hosting / proxy / mobile / None=查询失败
+    rdap_country = "US"  # /rdap/<ip> 返回的注册国，None 表示记录没写
+    trace6_loc = None  # /trace6 的地区，None 表示 IPv6 不可用
     status_indicator = "none"  # 官方状态页：none / minor / major / critical
 
     def log_message(self, *a):
@@ -96,6 +99,23 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
         if self.path == "/cdn-cgi/trace":
             return self._send_html(200, f"fl=1\nip=1.2.3.4\nts={time.time() + self.trace_ts_offset:.3f}\n"
                                         f"loc={self.trace_loc}\ncolo=SJC\nwarp={'on' if self.trace_warp else 'off'}\n")
+        if self.path.startswith("/ipapi"):
+            if self.ipapi_type is None:
+                return self._send(200, {"status": "fail", "message": "quota"})
+            return self._send(200, {"status": "success", "countryCode": self.meta_country or self.trace_loc, "city": "San Jose",
+                                    "regionName": "California", "isp": self.meta_org, "org": self.meta_org,
+                                    "as": f"AS7922 {self.meta_org}", "mobile": self.ipapi_type == "mobile",
+                                    "proxy": self.ipapi_type == "proxy", "hosting": self.ipapi_type == "hosting",
+                                    "query": "1.2.3.4"})
+        if self.path.startswith("/rdap/"):
+            return self._send(200, {"handle": "NET-1", "country": self.rdap_country} if self.rdap_country
+                              else {"handle": "NET-1"})
+        if self.path == "/trace4":
+            return self._send_html(200, f"ip=1.2.3.4\nloc={self.trace_loc}\ncolo=SJC\n")
+        if self.path == "/trace6":
+            if not self.trace6_loc:
+                return self._send(404, {})
+            return self._send_html(200, f"ip=2001:db8::1\nloc={self.trace6_loc}\ncolo=HKG\n")
         if self.path == "/meta":
             return self._send(200, {"clientIp": "1.2.3.4", "asn": 7922, "asOrganization": self.meta_org, "city": "San Jose",
                                     "region": "California", "country": self.meta_country or self.trace_loc})
@@ -162,7 +182,13 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_TOKEN_URLS"] = base + "/v1/oauth/token"
         os.environ["CAM_STATUS_URL"] = base + "/status.json"
         os.environ["CAM_CF_META_URL"] = base + "/meta"
+        os.environ["CAM_IPAPI_URL"] = base + "/ipapi"
+        os.environ["CAM_IPAPI_IS_KEY"] = ""
+        os.environ["CAM_RDAP_URL"] = base + "/rdap/"
+        os.environ["CAM_CF_TRACE4_URL"] = base + "/trace4"
+        os.environ["CAM_CF_TRACE6_URL"] = base + "/trace6"
         os.environ["CAM_TEST_LOCALE"] = "en_US"
+        os.environ["CAM_TEST_DNS"] = "192.168.1.1"
         os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
         os.environ["CAM_TEST_ROUTE_IF"] = ""
         os.environ["CAM_NO_KEYCHAIN"] = "1"
@@ -200,6 +226,9 @@ class CamTest(unittest.TestCase):
         MockAnthropic.status_indicator = "none"
         MockAnthropic.meta_org = "Comcast Cable Communications, LLC"
         MockAnthropic.meta_country = None
+        MockAnthropic.ipapi_type = "residential"
+        MockAnthropic.rdap_country = "US"
+        MockAnthropic.trace6_loc = None
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
@@ -553,8 +582,8 @@ class CamTest(unittest.TestCase):
             os.environ.pop("CAM_NO_RISK_PROMPT")
         # 出口回到美国但时区指向香港：75 分 → 60–89 档只提醒不问；把 confirm 阈值调到 80 后变成要问 y/N
         MockAnthropic.trace_loc = "US"
-        self.cam.check_region(store, max_age=0)
         os.environ["CAM_TEST_TZ"] = "Asia/Hong_Kong=HK"
+        self.cam.check_region(store, max_age=0)  # 时区随出口一起缓存，改了要重新检测
         try:
             sc = self.cam.risk_score(self.cam.risk_items(self.data()))
             self.assertEqual(sc["score"], 40)  # 时区指向不支持地区 25 + 出口变化 15 + 当前账号两地使用 20
@@ -945,35 +974,76 @@ class CamTest(unittest.TestCase):
         # 时区指向不支持地区而出口在支持地区：warn；指向支持地区：info；一致：不提
         MockAnthropic.trace_loc = "SG"
         self.cam.check_region(store, max_age=0)
-        os.environ["CAM_TEST_TZ"] = "Asia/Hong_Kong=HK"
+        def risks_with(**env):  # 本机设置随出口一起缓存，改了环境变量要重新检测一次
+            for k, v in env.items():
+                os.environ[k] = v
+            self.cam.check_region(store, max_age=0)
+            return {r["kind"]: r for r in self.cam.risk_items(self.data())}
+
         try:
-            tz = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "timezone")
+            tz = risks_with(CAM_TEST_TZ="Asia/Hong_Kong=HK")["timezone"]
             self.assertEqual(tz["level"], "warn")
             self.assertIn("Asia/Hong_Kong 指向 HK（香港），与出口地区 SG（新加坡） 不一致", tz["text"])
-            os.environ["CAM_TEST_TZ"] = "Asia/Tokyo=JP"
-            tz = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "timezone")
-            self.assertEqual(tz["level"], "info")
-            os.environ["CAM_TEST_TZ"] = "Asia/Singapore=SG,MY"
-            self.assertFalse([r for r in self.cam.risk_items(self.data()) if r["kind"] == "timezone"])
+            self.assertEqual(risks_with(CAM_TEST_TZ="Asia/Tokyo=JP")["timezone"]["level"], "info")
+            self.assertNotIn("timezone", risks_with(CAM_TEST_TZ="Asia/Singapore=SG,MY"))
         finally:
             os.environ["CAM_TEST_TZ"] = "America/New_York=US"
         # 系统语言指向不支持地区：warn；指向支持地区：info
-        os.environ["CAM_TEST_LOCALE"] = "zh_CN.UTF-8"
         try:
-            lc = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "locale")
+            lc = risks_with(CAM_TEST_LOCALE="zh_CN.UTF-8")["locale"]
             self.assertEqual(lc["level"], "warn")
             self.assertIn("zh_CN 指向 CN（中国大陆），与出口地区 SG（新加坡） 不一致", lc["text"])
-            os.environ["CAM_TEST_LOCALE"] = "ja-JP"
-            self.assertEqual(next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "locale")["level"], "info")
+            self.assertEqual(risks_with(CAM_TEST_LOCALE="ja-JP")["locale"]["level"], "info")
         finally:
             os.environ["CAM_TEST_LOCALE"] = "en_US"
-        # 机房出口 + 两个接口看到的国家不一致
+        # DNS 解析器：局域网和任播的不提；不支持地区的公共 DNS 与出口不一致 → warn；和出口同国不提
+        try:
+            self.assertNotIn("dns_resolver", risks_with(CAM_TEST_DNS="192.168.1.1,8.8.8.8"))
+            d = risks_with(CAM_TEST_DNS="192.168.1.1,223.5.5.5")["dns_resolver"]
+            self.assertEqual(d["level"], "warn")
+            self.assertIn("223.5.5.5（阿里 DNS，CN（中国大陆））与出口地区 SG（新加坡） 不一致", d["text"])
+            self.assertEqual(risks_with(CAM_TEST_DNS="168.95.1.1")["dns_resolver"]["level"], "info")
+        finally:
+            os.environ["CAM_TEST_DNS"] = "192.168.1.1"
+        self.cam.check_region(store, max_age=0)
+        # IP 类型：数据库标记为代理 → warn；机房 → warn；手机 → 不提；IPv6 出口和 IPv4 不同 → warn；注册国不同 → info
+        MockAnthropic.ipapi_type = "proxy"
+        MockAnthropic.trace6_loc = "HK"
+        MockAnthropic.rdap_country = "CA"
+        self.cam.check_region(store, max_age=0)
+        kinds = {r["kind"]: r for r in self.cam.risk_items(self.data())}
+        self.assertEqual(kinds["proxy_ip"]["level"], "warn")
+        self.assertIn("被数据库标记为代理 / VPN 出口", kinds["proxy_ip"]["text"])
+        self.assertEqual(kinds["ipv6_mismatch"]["level"], "warn")
+        self.assertIn("IPv4 出口在 SG（新加坡），IPv6 出口在 HK（香港）（2001:db8::1）", kinds["ipv6_mismatch"]["text"])
+        self.assertEqual(kinds["ip_origin"]["level"], "info")
+        self.assertIn("注册在 CA（加拿大），定位在 SG（新加坡）（广播 IP）", kinds["ip_origin"]["text"])
+        self.assertEqual(self.data()["region"]["ip_type"], "proxy")
+        MockAnthropic.ipapi_type = "mobile"
+        MockAnthropic.trace6_loc = None
+        MockAnthropic.rdap_country = "SG"
+        self.cam.check_region(store, max_age=0)
+        kinds = {r["kind"]: r for r in self.cam.risk_items(self.data())}
+        self.assertFalse({"proxy_ip", "isp", "ipv6_mismatch", "ip_origin"} & set(kinds))
+        items = self.cam.service_check(store)
+        self.assertIn("IP 类型：手机网络", next(i for i in items if i["kind"] == "isp")["text"])
+        self.assertIn("IPv6：不可用", next(i for i in items if i["kind"] == "ipv6")["text"])
+        self.assertEqual(next(i for i in items if i["kind"] == "ip_origin")["level"], "ok")
+        self.assertIn("192.168.1.1（局域网 / 本机）", next(i for i in items if i["kind"] == "dns_servers")["text"])
+        MockAnthropic.ipapi_type = "residential"
+        # 机房出口（数据库标记）+ 两个接口看到的国家不一致；数据源没有标记时按运营商名判断
         MockAnthropic.meta_org = "DigitalOcean, LLC"
         MockAnthropic.meta_country = "CA"
+        MockAnthropic.ipapi_type = "hosting"
         self.cam.check_region(store, max_age=0)
         kinds = {r["kind"]: r for r in self.cam.risk_items(self.data())}
         self.assertEqual(kinds["isp"]["level"], "warn")
-        self.assertIn("DigitalOcean, LLC（AS7922），像云服务商 / 机房", kinds["isp"]["text"])
+        self.assertIn("DigitalOcean, LLC（AS7922），是机房 / 云服务器", kinds["isp"]["text"])
+        MockAnthropic.ipapi_type = None  # ip-api 查询失败 → 退到 Cloudflare meta（没有标记）→ 关键字判断
+        self.cam.check_region(store, max_age=0)
+        self.assertIsNone(self.data()["region"]["ip_type"])
+        self.assertEqual({r["kind"]: r for r in self.cam.risk_items(self.data())}["isp"]["level"], "warn")
+        MockAnthropic.ipapi_type = "residential"
         self.assertEqual(kinds["region_mismatch"]["level"], "warn")
         self.assertIn("trace 接口看到 SG（新加坡），meta 接口看到 CA（加拿大）", kinds["region_mismatch"]["text"])
         MockAnthropic.meta_org = "Comcast Cable Communications, LLC"
@@ -1005,8 +1075,8 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.cam.risk_score([{"kind": "new_kind", "level": "warn"}])["score"], 90)
         kinds = [i["kind"] for i in items]
         self.assertEqual(kinds.count("region"), 1)
-        for k in ("summary", "dns", "region", "isp", "api", "web", "proxy", "vpn", "region_change", "warp", "clock", "status",
-                  "accounts", "device", "scope"):
+        for k in ("summary", "dns", "region", "isp", "ip_origin", "ipv6", "dns_servers", "api", "web", "proxy", "vpn",
+                  "region_change", "warp", "clock", "status", "accounts", "device", "scope"):
             self.assertIn(k, kinds)
         reg = next(i for i in items if i["kind"] == "region")
         self.assertIn("San Jose, California", reg["text"])
@@ -1026,11 +1096,29 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.data()["active"]["claude_code"], a_id)
         a = next(x for x in self.data()["accounts"] if x["id"] == a_id)
         self.assertEqual(a["regions"][0]["loc"], "SG")
-        # 运营商信息的两种来源格式
+        # 运营商信息的几种来源格式
         self.assertEqual(self.cam.parse_exit_meta({"org": "AS7922 Comcast Cable", "city": "Denver", "country": "us"}),
-                         {"asn": 7922, "org": "Comcast Cable", "city": "Denver", "meta_loc": "US"})
+                         {"asn": 7922, "org": "Comcast Cable", "city": "Denver", "meta_loc": "US", "ip_type": None, "reg_loc": None})
         self.assertEqual(self.cam.parse_exit_meta({"asn": 14061, "asOrganization": "DigitalOcean, LLC", "country": "SG"})["asn"], 14061)
         self.assertIsNone(self.cam.parse_exit_meta({"ip": "1.2.3.4"}))
+        self.assertIsNone(self.cam.parse_exit_meta({"status": "fail", "message": "quota"}))
+        m = self.cam.parse_exit_meta({"status": "success", "countryCode": "HK", "city": "Hong Kong", "regionName": "",
+                                      "isp": "Choopa", "as": "AS20473 The Constant Company", "hosting": True, "proxy": False, "mobile": False})
+        self.assertEqual((m["asn"], m["org"], m["meta_loc"], m["ip_type"], m["city"]), (20473, "Choopa", "HK", "hosting", "Hong Kong"))
+        m = self.cam.parse_exit_meta({"ip": "1.2.3.4", "is_tor": True, "is_vpn": False, "is_datacenter": True,
+                                      "asn": {"asn": 4134, "org": "Chinanet", "country": "cn"}, "company": {"name": "Chinanet", "type": "isp"},
+                                      "location": {"country_code": "SG", "city": "Singapore", "state": "Central"}})
+        self.assertEqual((m["asn"], m["org"], m["meta_loc"], m["ip_type"], m["reg_loc"], m["city"]),
+                         (4134, "Chinanet", "SG", "tor", "CN", "Singapore, Central"))
+        # DNS 服务器分类
+        os.environ["CAM_TEST_DNS"] = "10.0.0.1,8.8.8.8,223.5.5.5,fe80::1%en0,1.2.3.4"
+        try:
+            dns = self.cam.system_dns_servers()
+        finally:
+            os.environ["CAM_TEST_DNS"] = "192.168.1.1"
+        self.assertEqual([(d["ip"], d["private"], d["name"], d["country"]) for d in dns],
+                         [("10.0.0.1", True, None, None), ("8.8.8.8", False, "Google", None), ("223.5.5.5", False, "阿里 DNS", "CN"),
+                          ("fe80::1", True, None, None), ("1.2.3.4", False, None, None)])
         # VPN / 隧道判断
         self.assertTrue(self.cam.tunnel_kind("utun4"))
         self.assertTrue(self.cam.tunnel_kind("Ethernet 2", "TAP-Windows Adapter V9"))

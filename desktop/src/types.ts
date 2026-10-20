@@ -89,7 +89,7 @@ export interface SwitchResult {
 }
 
 export interface ServiceCheckItem {
-  kind?: string; // summary / dns / region / api / web / proxy / vpn / region_change / warp / clock / status / timezone / account_regions / accounts
+  kind?: string; // summary / dns / region / isp / ip_origin / ipv6 / dns_servers / api / web / proxy / vpn / region_change / region_mismatch / proxy_ip / tor_exit / ipv6_mismatch / dns_resolver / warp / clock / status / timezone / locale / account_regions / accounts / device / scope
   level: "ok" | "bad" | "warn" | "info";
   text: string;
   advice: string; // 这意味着什么 / 建议怎么做，可能为空
@@ -109,6 +109,7 @@ export interface RegionInfo {
   changed_at?: string | null;
   org?: string | null; // 出口 IP 的运营商
   city?: string | null;
+  ip_type?: "residential" | "hosting" | "proxy" | "tor" | "mobile" | null; // 数据库判定的 IP 类型，null = 数据源没有标记
 }
 
 export interface LocalRow {
