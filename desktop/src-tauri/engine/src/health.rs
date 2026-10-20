@@ -1171,7 +1171,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             "accounts",
             "info",
             format!("本机保存了 {} 个 Claude Code 账号", n),
-            "Anthropic 账号仅限本人使用，多人共用同一账号违反使用条款。",
+            "按 Anthropic 消费者条款，账号和登录信息不能给别人用或分享；一个人自己用多个号条款没有明确禁止。",
         );
     }
     out

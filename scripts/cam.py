@@ -3703,7 +3703,7 @@ def risk_items(data, include_region=True):
     n = sum(1 for a in data.get("accounts") or [] if a.get("kind") == "claude_code")
     if n >= 2:
         add("accounts", "info", f"本机保存了 {n} 个 Claude Code 账号",
-            "Anthropic 账号仅限本人使用，多人共用同一账号违反使用条款。")
+            "按 Anthropic 消费者条款，账号和登录信息不能给别人用或分享；一个人自己用多个号条款没有明确禁止。")
     return out
 
 
