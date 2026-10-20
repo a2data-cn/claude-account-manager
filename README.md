@@ -200,7 +200,7 @@ extras/swiftbar/      macOS 菜单栏小工具
 web/panel.html        Web 面板（手机 / 浏览器），脚本版和桌面版共用
 desktop/              Tauri 桌面版
 desktop/src-tauri/engine/  核心逻辑 crate cam-engine，与 cam.py 对应的 Rust 实现，不依赖 Tauri
-tests/shared/         两边共用的测试数据（身份识别、账号查找、切号规则、自动续期）
+tests/shared/         两边共用的测试数据（身份识别、账号查找、切号规则、自动续期、编辑账号和到期日）
 docs/DESIGN.md        数据格式、切换流程、锁、HTTP API
 ```
 

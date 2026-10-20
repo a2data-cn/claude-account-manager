@@ -21,18 +21,24 @@ fn mask(k: Option<&str>) -> Value {
     }
 }
 
-fn days_left(acc: &Value) -> Value {
-    let exp = acc
-        .get("manual")
-        .and_then(|m| s(m, "expires_at"))
-        .or_else(|| acc.get("auto").and_then(|m| s(m, "subscription_expires_at")));
-    match exp.and_then(parse_time) {
-        Some(d) => {
-            let today = chrono::Local::now().date_naive();
-            json!((d.date_naive() - today).num_days())
-        }
+/// 手动填的到期日优先；没填时用接口返回的订阅到期时间（换算成本地日期）。与 cam.py 一致。
+pub fn days_left_at(acc: &Value, today: chrono::NaiveDate) -> Value {
+    let day = match acc.get("manual").and_then(|m| s(m, "expires_at")).filter(|m| !m.is_empty()) {
+        Some(m) => parse_day(m),
+        None => acc
+            .get("auto")
+            .and_then(|a| s(a, "subscription_expires_at"))
+            .and_then(parse_time)
+            .map(|t| t.with_timezone(&chrono::Local).date_naive()),
+    };
+    match day {
+        Some(d) => json!((d - today).num_days()),
         None => Value::Null,
     }
+}
+
+fn days_left(acc: &Value) -> Value {
+    days_left_at(acc, chrono::Local::now().date_naive())
 }
 
 const PUBLIC_FIELDS: [&str; 12] = [
@@ -144,54 +150,78 @@ pub fn add_account(store: &Store, b: &Value) -> R<()> {
     store.save(&mut data)
 }
 
+const MANUAL_TEXT: [&str; 3] = ["plan", "price", "note"];
+const MANUAL_BOOL: [&str; 2] = ["auto_renew", "app_mode"];
+
+/// 把要修改的字段校验后写进 acc（名称和 manual.*），出错时返回 Err 且不改 acc。
+/// 规则和 cam.py 的 apply_manual 一致（tests/shared/manual.json）：
+/// 文字字段只收字符串，空字符串表示清除；开关只收 true/false；到期日只收 YYYY-MM-DD。
+/// 只有到期日真的变了才清掉 renew_day，所以界面整份提交表单时不会把月底扣费日弄丢。
+pub fn apply_manual(acc: &mut Value, f: &Value) -> R<()> {
+    let f = f.as_object().ok_or("请求体应为 JSON 对象")?;
+    let mut m = acc.get("manual").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let mut label = acc.get("label").cloned().unwrap_or(Value::Null);
+    match f.get("label") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(l)) if l.trim().is_empty() => {}
+        Some(Value::String(l)) => label = json!(l.trim().chars().take(60).collect::<String>()),
+        Some(_) => return Err("名称应为文字".into()),
+    }
+    for k in MANUAL_TEXT.iter().chain(MANUAL_BOOL.iter()).chain(["expires_at", "cycle"].iter()) {
+        let Some(v) = f.get(*k) else { continue };
+        let mut v = if v.as_str() == Some("") { Value::Null } else { v.clone() };
+        if MANUAL_BOOL.contains(k) {
+            if !v.is_null() && !v.is_boolean() {
+                return Err(format!("{} 应为 true 或 false", k));
+            }
+        } else if !v.is_null() && !v.is_string() {
+            return Err(if *k == "expires_at" {
+                "到期日格式应为 YYYY-MM-DD".into()
+            } else {
+                format!("{} 应为文字", k)
+            });
+        }
+        if *k == "expires_at" {
+            if let Some(x) = v.as_str() {
+                if parse_day(x).is_none() {
+                    return Err("到期日格式应为 YYYY-MM-DD".into());
+                }
+                v = json!(&x[..10]);
+            }
+            if m.get("expires_at").unwrap_or(&Value::Null) != &v {
+                m.remove("renew_day"); // 换了到期日，扣费日按新日期重新算
+            }
+        }
+        if *k == "cycle" && !matches!(v.as_str(), None | Some("monthly") | Some("yearly")) {
+            return Err("cycle 只能是 monthly 或 yearly".into());
+        }
+        m.insert(k.to_string(), v);
+    }
+    acc["label"] = label;
+    acc["manual"] = Value::Object(m);
+    Ok(())
+}
+
 pub fn update_manual(store: &Store, key: &str, f: &Value) -> R<()> {
+    if !f.is_object() {
+        return Err("请求体应为 JSON 对象".into());
+    }
     let _g = store.lock()?;
     let mut data = store.load()?;
     let i = find_index(&data, key)?;
     let id = s(&accounts(&data)[i], "id").unwrap_or_default().to_string();
-    {
-        let acc = &mut accounts_mut(&mut data)[i];
-        if let Some(l) = s(f, "label") {
-            acc["label"] = json!(l.chars().take(60).collect::<String>());
-        }
-        if !acc.get("manual").map(|m| m.is_object()).unwrap_or(false) {
-            acc["manual"] = json!({});
-        }
-        let m = &mut acc["manual"];
-        for k in ["plan", "expires_at", "auto_renew", "cycle", "price", "note", "app_mode"] {
-            let Some(v) = f.get(k) else { continue };
-            let mut v = v.clone();
-            if v.as_str() == Some("") {
-                v = Value::Null;
-            }
-            if k == "expires_at" {
-                if let Some(x) = v.as_str() {
-                    if parse_time(x).is_none() {
-                        return Err("到期日格式应为 YYYY-MM-DD".into());
-                    }
-                    v = json!(x.chars().take(10).collect::<String>());
-                    // 换了到期日，续期日按新日期重新算
-                    if let Some(o) = m.as_object_mut() {
-                        o.remove("renew_day");
-                    }
-                }
-            }
-            if k == "cycle" {
-                if let Some(x) = v.as_str() {
-                    if x != "monthly" && x != "yearly" {
-                        return Err("cycle 只能是 monthly 或 yearly".into());
-                    }
-                }
-            }
-            m[k] = v;
-        }
-    }
+    apply_manual(&mut accounts_mut(&mut data)[i], f)?;
     let mut sec = store.load_secret(&id);
     let mut touched = false;
     for k in ["session_key", "api_key", "admin_key"] {
-        if let Some(v) = s(f, k).map(str::trim).filter(|x| !x.is_empty()) {
-            sec[k] = json!(v);
-            touched = true;
+        match f.get(k) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(v)) if v.trim().is_empty() => {}
+            Some(Value::String(v)) => {
+                sec[k] = json!(v.trim());
+                touched = true;
+            }
+            Some(_) => return Err(format!("{} 应为文字", k)),
         }
     }
     if touched {
@@ -211,12 +241,28 @@ pub fn remove_account(store: &Store, key: &str) -> R<()> {
         return Err("这是 Claude Code 当前正在用的账号，请先切换到其它账号再删除".into());
     }
     let d = store.new_backup_dir(&format!("removed-{}", id))?;
-    write_json_atomic(&d.join("account.json"), &acc, true)?;
+    let mine = |r: &Value| s(r, "account") == Some(id.as_str());
+    let rules: Vec<Value> = data
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter(|r| mine(r)).cloned().collect())
+        .unwrap_or_default();
+    let mut saved = acc.clone();
+    saved["rules"] = json!(rules);
+    write_json_atomic(&d.join("account.json"), &saved, true)?;
     let sp = store.secret_path(&id);
     if sp.exists() {
         std::fs::rename(&sp, d.join("secret.json")).map_err(|e| e.to_string())?;
     }
+    let prof = store.profiles_dir().join(&id);
+    if prof.is_dir() {
+        // 网页账号的浏览器 Profile（含登录 Cookie）也一起移走
+        std::fs::rename(&prof, d.join("browser-profile")).map_err(|e| e.to_string())?;
+    }
     accounts_mut(&mut data).remove(i);
+    if let Some(a) = data.get_mut("rules").and_then(|v| v.as_array_mut()) {
+        a.retain(|r| !mine(r));
+    }
     store.save(&mut data)
 }
 

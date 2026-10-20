@@ -911,6 +911,26 @@ class SharedFixtureTest(unittest.TestCase):
             self.cam.roll_renewals(data, dt.date.fromisoformat(c["today"]))
             self.assertEqual(data["accounts"][0]["manual"], c["expect"], c["name"])
 
+    def test_manual(self):
+        import copy
+        import datetime as dt
+        fx = shared("manual.json")
+        for c in fx["parse_day"]:
+            d = self.cam.parse_day(c["input"])
+            self.assertEqual(d.isoformat() if d else None, c["expect"], c["name"])
+        for c in fx["apply"]:
+            acc = copy.deepcopy(fx["account"])
+            if c["expect"] is None:
+                with self.assertRaises(self.cam.CamError, msg=c["name"]):
+                    self.cam.apply_manual(acc, c["fields"])
+                self.assertEqual(acc, fx["account"], c["name"] + "：出错时不应改动账号")
+            else:
+                self.cam.apply_manual(acc, c["fields"])
+                self.assertEqual(acc, c["expect"], c["name"])
+        for c in fx["days_left"]:
+            got = self.cam.days_left(c["account"], dt.date.fromisoformat(c["today"]))
+            self.assertEqual(got, c["expect"], c["name"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

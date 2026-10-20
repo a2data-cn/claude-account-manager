@@ -34,6 +34,20 @@ pub fn parse_time(v: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|d| d.and_utc())
 }
 
+/// 严格的 YYYY-MM-DD（后面可以跟 T 或空格开头的时间），其它写法返回 None。与 cam.py 的 parse_day 一致：
+/// 到期日两边都按这个规则认，避免一边能存、另一边读不出来。
+pub fn parse_day(v: &str) -> Option<chrono::NaiveDate> {
+    let b = v.as_bytes();
+    if b.len() < 10 || (b.len() > 10 && b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if !(digits(0..4) && b[4] == b'-' && digits(5..7) && b[7] == b'-' && digits(8..10)) {
+        return None;
+    }
+    chrono::NaiveDate::from_ymd_opt(v[..4].parse().ok()?, v[5..7].parse().ok()?, v[8..10].parse().ok()?)
+}
+
 pub fn new_id() -> String {
     let mut b = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut b);
@@ -293,9 +307,17 @@ impl Store {
         Ok(d)
     }
 
+    /// 只清理切换前的现场备份（<时间戳>-before-<id>），保留最近 BACKUP_KEEP 份。
+    /// 删除账号、退出登录留下的备份里有唯一一份凭据，不自动清理。与 cam.py 一致。
     pub fn prune_backups(&self) {
         if let Ok(rd) = fs::read_dir(self.backups_dir()) {
-            let mut names: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            let mut names: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    n.get(16..).map(|t| t.starts_with("before-")).unwrap_or(false)
+                })
+                .collect();
             names.sort();
             if names.len() > BACKUP_KEEP {
                 for p in &names[..names.len() - BACKUP_KEEP] {

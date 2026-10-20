@@ -148,10 +148,10 @@ fn find_acc<'a>(data: &'a Value, id: &str) -> R<&'a Value> {
 fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Value)>> {
     let saved = store.load_secret(id).get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
     if active_code_id(data).as_deref() == Some(id) {
-        let (creds, _) = read_live();
+        let (creds, _) = read_live()?;
         if let Some(c) = creds {
             let ob = oauth_block(&c);
-            if let (Some(t), Some(i)) = (s(&ob, "accessToken"), identify(data, &read_oauth_account(), &c)) {
+            if let (Some(t), Some(i)) = (s(&ob, "accessToken"), identify(data, &read_oauth_account()?, &c)) {
                 if s(&accounts(data)[i], "id") == Some(id) {
                     return Ok(Some((t.to_string(), ob.clone())));
                 }
@@ -521,10 +521,7 @@ pub fn roll_renewals_at(data: &mut Value, today: chrono::NaiveDate) {
         if m.get("auto_renew").and_then(|v| v.as_bool()) != Some(true) {
             continue;
         }
-        let Some(mut d) = s(m, "expires_at")
-            .and_then(|e| e.get(..10))
-            .and_then(|e| chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d").ok())
-        else {
+        let Some(mut d) = s(m, "expires_at").and_then(parse_day) else {
             continue;
         };
         let step = if s(m, "cycle") == Some("yearly") { 12 } else { 1 };

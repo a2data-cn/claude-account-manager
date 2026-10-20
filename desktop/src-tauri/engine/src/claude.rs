@@ -88,16 +88,17 @@ fn keychain_write(v: &Value) -> R<()> {
 
 // ---------------------------------------------------------------- 当前生效的凭据
 
-pub fn read_live() -> (Option<Value>, Option<&'static str>) {
+/// 凭据文件损坏时报错，不当成“没登录”：否则切换时不会备份它，直接就覆盖了。与 cam.py 一致。
+pub fn read_live() -> R<(Option<Value>, Option<&'static str>)> {
     if use_keychain() {
         if let Some(v) = keychain_read() {
-            return (Some(v), Some("keychain"));
+            return Ok((Some(v), Some("keychain")));
         }
     }
-    match read_json(&credentials_file()) {
-        Ok(Some(v)) => (Some(v), Some("file")),
-        _ => (None, None),
-    }
+    Ok(match read_json(&credentials_file())? {
+        Some(v) => (Some(v), Some("file")),
+        None => (None, None),
+    })
 }
 
 pub fn write_live(creds: &Value, where_hint: Option<&str>) -> R<()> {
@@ -113,12 +114,11 @@ pub fn write_live(creds: &Value, where_hint: Option<&str>) -> R<()> {
     }
 }
 
-pub fn read_oauth_account() -> Value {
-    read_json(&claude_json_file())
-        .ok()
-        .flatten()
+/// ~/.claude.json 损坏时报错，不当成“没有 oauthAccount”继续往下切。
+pub fn read_oauth_account() -> R<Value> {
+    Ok(read_json(&claude_json_file())?
         .and_then(|v| v.get("oauthAccount").cloned())
-        .unwrap_or(Value::Null)
+        .unwrap_or(Value::Null))
 }
 
 /// 只替换 oauthAccount，~/.claude.json 其它字段原样保留；Claude Code 同时在写也不会丢它的改动。
@@ -239,13 +239,13 @@ fn apply_meta(acc: &mut Value, oa: &Value, creds: &Value) {
 /// 凭据和 ~/.claude.json 里的 oauthAccount 对不上时，以凭据为准：token 存进它真正的主人名下，
 /// 不会覆盖别的账号，并在 data["live_mismatch"] 里留下说明。逻辑与 cam.py 的 snapshot_live 一致。
 pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, create: bool) -> R<Option<usize>> {
-    let (creds, where_) = read_live();
+    let (creds, where_) = read_live()?;
     let creds = match creds {
         Some(c) if s(&oauth_block(&c), "accessToken").is_some() => c,
         _ => return Ok(None),
     };
     let ob = oauth_block(&creds);
-    let oa = read_oauth_account();
+    let oa = read_oauth_account()?;
     let has_oa = oa.as_object().map(|o| !o.is_empty()).unwrap_or(false);
     let (oa_uuid, oa_email) = (s(&oa, "accountUuid"), s(&oa, "emailAddress"));
     let mut idx = identify(data, &oa, &creds);
@@ -344,7 +344,7 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
 
 fn backup_live(store: &Store, tag: &str) -> R<PathBuf> {
     let d = store.new_backup_dir(tag)?;
-    let (creds, where_) = read_live();
+    let (creds, where_) = read_live()?;
     if let Some(c) = creds {
         write_json_atomic(&d.join("credentials.json"), &json!({"store": where_, "data": c}), true)?;
     }
@@ -356,6 +356,28 @@ fn backup_live(store: &Store, tag: &str) -> R<PathBuf> {
     }
     store.prune_backups();
     Ok(d)
+}
+
+/// 当前登录已经是 id 这个号，但 ~/.claude.json 里的 oauthAccount 不是它的（上次切换只完成了一半，
+/// 或旧会话把凭据写回了）：用它保存的 oauthAccount 改回来。返回是否改了。与 cam.py 一致。
+fn repair_oauth_account(store: &Store, data: &mut Value, id: &str) -> R<bool> {
+    let oa = read_oauth_account()?;
+    let has_oa = oa.as_object().map(|o| !o.is_empty()).unwrap_or(false);
+    let Some(acc) = accounts(data).iter().find(|a| s(a, "id") == Some(id)) else {
+        return Ok(false);
+    };
+    if has_oa && identity_agrees(acc, s(&oa, "accountUuid"), s(&oa, "emailAddress")) {
+        return Ok(false);
+    }
+    let saved = store.load_secret(id).get("oauthAccount").cloned().unwrap_or(Value::Null);
+    if !saved.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+        return Ok(false);
+    }
+    write_oauth_account(&saved)?;
+    if let Some(o) = data.as_object_mut() {
+        o.remove("live_mismatch");
+    }
+    Ok(true)
 }
 
 pub struct SwitchResult {
@@ -379,6 +401,7 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     let cur = snapshot_live(store, &mut data, None, true)?;
     if let Some(ci) = cur {
         if s(&accounts(&data)[ci], "id") == Some(tid.as_str()) {
+            repair_oauth_account(store, &mut data, &tid)?;
             store.save(&mut data)?;
             return Ok(SwitchResult {
                 id: tid,
@@ -397,16 +420,21 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     }
     // 3：备份
     let backup = backup_live(store, &format!("before-{}", tid))?;
-    // 4：写入
-    let (_, where_) = read_live();
+    // 4：先写 ~/.claude.json 再写凭据，凭据写失败就把 oauthAccount 改回去。
+    // 万一中途崩溃，凭据还是原来那个号的，再切一次就能完成；反过来的话会被当成“已经是当前账号”。
+    let (_, where_) = read_live()?;
     let mut raw = secret
         .get("raw")
         .cloned()
         .filter(|v| v.is_object())
         .unwrap_or_else(|| json!({}));
     raw["claudeAiOauth"] = ob;
-    write_live(&raw, where_)?;
+    let prev_oa = read_oauth_account()?;
     write_oauth_account(secret.get("oauthAccount").unwrap_or(&Value::Null))?;
+    if let Err(e) = write_live(&raw, where_) {
+        let _ = write_oauth_account(&prev_oa); // 回滚失败时保留原来的错误
+        return Err(e);
+    }
     if let Some(o) = data.as_object_mut() {
         o.remove("live_mismatch"); // 凭据和 oauthAccount 现在是同一个账号的
     }

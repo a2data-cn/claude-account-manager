@@ -1,8 +1,9 @@
 //! 跑 tests/shared 里的数据。scripts/test_cam.py 的 SharedFixtureTest 跑的是同一份，两边规则必须一致。
 
+use cam_engine::api::{apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::rules::{match_time_rule, validate};
-use cam_engine::store::{accounts, find_index, s};
+use cam_engine::store::{accounts, find_index, parse_day, s};
 use cam_engine::usage::roll_renewals_at;
 use serde_json::{json, Value};
 
@@ -67,5 +68,28 @@ fn renewal_cases() {
         let today = chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
         roll_renewals_at(&mut data, today);
         assert_eq!(data["accounts"][0]["manual"], c["expect"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn manual_cases() {
+    let fx = fixture("manual.json");
+    for c in cases(&fx, "parse_day") {
+        let got = parse_day(c["input"].as_str().unwrap()).map(|d| json!(d.format("%Y-%m-%d").to_string()));
+        assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "apply") {
+        let mut acc = fx["account"].clone();
+        match apply_manual(&mut acc, &c["fields"]) {
+            Ok(()) => assert_eq!(acc, c["expect"], "{}", c["name"]),
+            Err(_) => {
+                assert_eq!(c["expect"], Value::Null, "{}", c["name"]);
+                assert_eq!(acc, fx["account"], "{}：出错时不应改动账号", c["name"]);
+            }
+        }
+    }
+    for c in cases(&fx, "days_left") {
+        let today = chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
+        assert_eq!(days_left_at(&c["account"], today), c["expect"], "{}", c["name"]);
     }
 }

@@ -104,7 +104,7 @@ def now_iso() -> str:
 
 
 def parse_iso(s):
-    if not s:
+    if not s or not isinstance(s, str):
         return None
     try:
         s = s.replace("Z", "+00:00")
@@ -118,6 +118,23 @@ def parse_iso(s):
             return d.replace(tzinfo=dt.timezone.utc)
         except ValueError:
             return None
+
+
+def parse_day(s):
+    """严格的 YYYY-MM-DD（后面可以跟 T 或空格开头的时间），返回 date；其它写法返回 None。
+
+    到期日两边都按这个规则认，避免一边能存、另一边读不出来。
+    """
+    if not isinstance(s, str) or len(s) < 10 or (len(s) > 10 and s[10] not in "T "):
+        return None
+    head = s[:10]
+    # 只认 ASCII 数字：str.isdigit 也认全角数字，Rust 版不认，存下去 Rust 版就读不出来了
+    if not (head.isascii() and head[:4].isdigit() and head[4] == "-" and head[5:7].isdigit() and head[7] == "-" and head[8:].isdigit()):
+        return None
+    try:
+        return dt.date(int(head[:4]), int(head[5:7]), int(head[8:]))
+    except ValueError:
+        return None
 
 
 def read_json(path, default=None):
@@ -285,8 +302,12 @@ class Store:
         return d
 
     def prune_backups(self):
+        """只清理切换前的现场备份（<时间戳>-before-<id>），保留最近 BACKUP_KEEP 份。
+
+        删除账号、退出登录留下的备份里有唯一一份凭据，不自动清理。
+        """
         try:
-            items = sorted(os.listdir(self.backups_dir))
+            items = sorted(n for n in os.listdir(self.backups_dir) if n[16:].startswith("before-"))
         except FileNotFoundError:
             return
         for name in items[:-BACKUP_KEEP]:
@@ -340,6 +361,16 @@ def keychain_read():
             return json.loads(bytes.fromhex(raw).decode())
         except Exception:
             return None
+
+
+def keychain_exists():
+    """钥匙串里有没有 Claude Code 的条目（只查是否存在，不读内容，不会弹授权窗）。查不了时按“有”算，宁可不删。"""
+    try:
+        r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
+                           capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return r.returncode == 0
 
 
 def keychain_write(obj):
@@ -666,6 +697,20 @@ def running_warning(procs):
             "并可能在刷新 token 后把旧账号写回。请退出这些会话后重开（可用 claude --continue 接着聊）。")
 
 
+def repair_oauth_account(store, data, acc):
+    """当前登录已经是 acc，但 ~/.claude.json 里的 oauthAccount 不是它的（上次切换只完成了一半，
+    或旧会话把凭据写回了）：用 acc 保存的 oauthAccount 改回来。返回是否改了。"""
+    oa = read_oauth_account() or {}
+    if oa and identity_agrees(acc, oa.get("accountUuid"), oa.get("emailAddress")):
+        return False
+    saved = store.load_secret(acc["id"]).get("oauthAccount")
+    if not saved:
+        return False
+    write_oauth_account(saved)
+    data.pop("live_mismatch", None)
+    return True
+
+
 def switch_code_account(store, key):
     with store.lock():
         data = store.load()
@@ -674,18 +719,30 @@ def switch_code_account(store, key):
             raise CamError("只有 Claude Code 账号需要切换；网页账号请用 cam open，API 账号无需切换")
         current = snapshot_live(store, data)  # 第 1、2 步：快照并回写
         if current and current["id"] == target["id"]:
+            repair_oauth_account(store, data, target)
             store.save(data)
             return target, None, False
         secret = store.load_secret(target["id"])
         ob = secret.get("claudeAiOauth")
         if not ob or not ob.get("refreshToken"):
+            store.save(data)  # 快照可能刚导入了新账号，先存下
             raise CamError("该账号没有保存可用的凭据，请先用这个账号登录 Claude Code 后执行 cam import")
         backup = backup_live(store, f"before-{target['id']}")  # 第 3 步
         _, where = read_live_credentials()
         raw = dict(secret.get("raw") or {})
         raw["claudeAiOauth"] = ob
-        write_live_credentials(raw, where)  # 第 4 步
+        # 第 4 步：先写 ~/.claude.json 再写凭据，凭据写失败就把 oauthAccount 改回去。
+        # 万一中途崩溃，凭据还是原来那个号的，再切一次就能完成；反过来的话会被当成“已经是当前账号”。
+        prev_oa = read_oauth_account()
         write_oauth_account(secret.get("oauthAccount"))
+        try:
+            write_live_credentials(raw, where)
+        except BaseException:
+            try:
+                write_oauth_account(prev_oa)
+            except Exception:  # noqa: BLE001  回滚失败时保留原来的错误
+                pass
+            raise
         data.pop("live_mismatch", None)  # 凭据和 oauthAccount 现在是同一个账号的
         data["active"]["claude_code"] = target["id"]  # 第 5 步
         target["last_switched_at"] = now_iso()
@@ -1064,16 +1121,14 @@ def roll_renewals(data, today=None):
     today = today or dt.date.today()
     for a in data["accounts"]:
         m = a.get("manual") or {}
-        exp = m.get("expires_at")
-        if not exp or not m.get("auto_renew"):
-            continue
-        try:
-            d = dt.date.fromisoformat(exp[:10])
-        except ValueError:
+        d = parse_day(m.get("expires_at"))
+        if not d or m.get("auto_renew") is not True:
             continue
         step = 12 if m.get("cycle") == "yearly" else 1
         # 记住原始扣费日，避免 1 月 31 日顺延到 2 月 28 日后一直停在 28 日
-        anchor = m.get("renew_day") or d.day
+        anchor = m.get("renew_day")
+        if not (isinstance(anchor, int) and not isinstance(anchor, bool) and 1 <= anchor <= 31):
+            anchor = d.day
         changed = False
         while d < today:
             d = add_months(d, step, anchor)
@@ -1155,11 +1210,18 @@ def validate_rules(data, rules):
     return out
 
 
+def live_rules(data):
+    """指向现存 Claude Code 账号的规则。账号被删掉后留下的规则（旧版本删账号时不清理）一律忽略，
+    下次保存规则时自然就去掉了。"""
+    ids = {a["id"] for a in data["accounts"] if a["kind"] == "claude_code"}
+    return [r for r in data.get("rules", []) if isinstance(r, dict) and r.get("account") in ids]
+
+
 def match_dir_rule(data, cwd):
     """最长前缀匹配。"""
     cwd = norm_path(cwd)
     best = None
-    for r in data.get("rules", []):
+    for r in live_rules(data):
         if r.get("type") != "dir":
             continue
         root = norm_path(r["path"])
@@ -1173,7 +1235,7 @@ def match_time_rule(data, when=None):
     when = when or dt.datetime.now()
     wd = when.isoweekday()
     mins = when.hour * 60 + when.minute
-    for r in data.get("rules", []):
+    for r in live_rules(data):
         if r.get("type") != "time":
             continue
         st, en = parse_hhmm(r["start"]), parse_hhmm(r["end"])
@@ -1203,7 +1265,7 @@ def apply_time_rules(store, when=None):
 
 
 def rules_view(data):
-    return {"rules": data.get("rules", []),
+    return {"rules": live_rules(data),
             "alert_threshold": (data.get("prefs") or {}).get("alert_threshold", DEFAULT_ALERT)}
 
 
@@ -1355,12 +1417,17 @@ PUBLIC_FIELDS = ("id", "kind", "label", "email", "plan", "org_name", "rate_limit
                  "created_at", "last_switched_at", "auto")
 
 
-def days_left(acc):
-    exp = (acc.get("manual") or {}).get("expires_at") or (acc.get("auto") or {}).get("subscription_expires_at")
-    d = parse_iso(exp)
+def days_left(acc, today=None):
+    """手动填的到期日优先；没填时用接口返回的订阅到期时间（换算成本地日期）。"""
+    manual = (acc.get("manual") or {}).get("expires_at")
+    if isinstance(manual, str) and manual:
+        d = parse_day(manual)
+    else:
+        t = parse_iso((acc.get("auto") or {}).get("subscription_expires_at"))
+        d = t.astimezone().date() if t else None
     if not d:
         return None
-    return (d.date() - dt.date.today()).days
+    return (d - (today or dt.date.today())).days
 
 
 def public_state(store, data):
@@ -1389,28 +1456,63 @@ def mask(s):
     return s[:10] + "…" + s[-4:] if len(s) > 16 else "…"
 
 
+MANUAL_TEXT = ("plan", "price", "note")
+MANUAL_BOOL = ("auto_renew", "app_mode")
+SECRET_FIELDS = ("session_key", "api_key", "admin_key")
+
+
+def apply_manual(acc, fields):
+    """把要修改的字段校验后写进 acc（名称和 manual.*），出错时抛 CamError 且不改 acc。
+
+    规则和 Rust 版 api::apply_manual 一致（tests/shared/manual.json）：
+    文字字段只收字符串，空字符串表示清除；开关只收 true/false；到期日只收 YYYY-MM-DD。
+    只有到期日真的变了才清掉 renew_day，所以界面整份提交表单时不会把月底扣费日弄丢。
+    """
+    m = dict(acc.get("manual") or {})
+    label = acc.get("label")
+    if fields.get("label") is not None:
+        if not isinstance(fields["label"], str):
+            raise CamError("名称应为文字")
+        if fields["label"].strip():
+            label = fields["label"].strip()[:60]
+    for k in MANUAL_TEXT + MANUAL_BOOL + ("expires_at", "cycle"):
+        if k not in fields:
+            continue
+        v = fields[k]
+        if v == "":
+            v = None
+        if k in MANUAL_BOOL:
+            if v is not None and not isinstance(v, bool):
+                raise CamError(f"{k} 应为 true 或 false")
+        elif v is not None and not isinstance(v, str):
+            raise CamError("到期日格式应为 YYYY-MM-DD" if k == "expires_at" else f"{k} 应为文字")
+        if k == "expires_at" and v is not None:
+            if not parse_day(v):
+                raise CamError("到期日格式应为 YYYY-MM-DD")
+            v = v[:10]
+        if k == "expires_at" and v != m.get("expires_at"):
+            m.pop("renew_day", None)  # 换了到期日，扣费日按新日期重新算
+        if k == "cycle" and v not in (None, "monthly", "yearly"):
+            raise CamError("cycle 只能是 monthly 或 yearly")
+        m[k] = v
+    acc["label"] = label
+    acc["manual"] = m
+
+
 def update_manual(store, key, fields):
+    if not isinstance(fields, dict):
+        raise CamError("请求体应为 JSON 对象")
     with store.lock():
         data = store.load()
         acc = find_account(data, key)
-        if "label" in fields and fields["label"]:
-            acc["label"] = str(fields["label"])[:60]
-        m = acc.setdefault("manual", {})
-        for k in ("plan", "expires_at", "auto_renew", "cycle", "price", "note", "app_mode"):
-            if k in fields:
-                v = fields[k]
-                if k == "expires_at" and v:
-                    if not parse_iso(str(v)):
-                        raise CamError("到期日格式应为 YYYY-MM-DD")
-                    v = str(v)[:10]
-                    m.pop("renew_day", None)
-                if k == "cycle" and v not in (None, "", "monthly", "yearly"):
-                    raise CamError("cycle 只能是 monthly 或 yearly")
-                m[k] = v if v != "" else None
-        for k in ("session_key", "api_key", "admin_key"):
-            if fields.get(k):
+        apply_manual(acc, fields)
+        for k in SECRET_FIELDS:
+            v = fields.get(k)
+            if v is not None and not isinstance(v, str):
+                raise CamError(f"{k} 应为文字")
+            if v and v.strip():
                 sec = store.load_secret(acc["id"])
-                sec[k] = fields[k].strip()
+                sec[k] = v.strip()
                 store.save_secret(acc["id"], sec)
         roll_renewals(data)
         store.save(data)
@@ -1424,11 +1526,16 @@ def remove_account(store, key):
         if data["active"].get("claude_code") == acc["id"]:
             raise CamError("这是 Claude Code 当前正在用的账号，请先切换到其它账号再删除")
         d = store.new_backup_dir(f"removed-{acc['id']}")
-        write_json_atomic(os.path.join(d, "account.json"), acc, private=True)
+        rules = [r for r in data.get("rules", []) if r.get("account") == acc["id"]]
+        write_json_atomic(os.path.join(d, "account.json"), dict(acc, rules=rules), private=True)
         sp = store.secret_path(acc["id"])
         if os.path.exists(sp):
             shutil.move(sp, os.path.join(d, "secret.json"))
+        prof = os.path.join(store.profiles_dir, acc["id"])
+        if os.path.isdir(prof):  # 网页账号的浏览器 Profile（含登录 Cookie）也一起移走
+            shutil.move(prof, os.path.join(d, "browser-profile"))
         data["accounts"] = [a for a in data["accounts"] if a["id"] != acc["id"]]
+        data["rules"] = [r for r in data.get("rules", []) if r.get("account") != acc["id"]]
         store.save(data)
         return acc, d
 
@@ -1856,7 +1963,7 @@ def cmd_rule(store, args):
                 print(f"{r['id']}  时间 周{days} {r['start']}–{r['end']} → {who}{mark}")
         print(color(f"额度提醒阈值：{rv['alert_threshold']}%", "d"))
         return
-    rules = list(data.get("rules", []))
+    rules = rules_view(data)["rules"]
     if rc == "add-dir":
         acc = find_account(data, args.account)
         rules.append({"type": "dir", "path": args.path, "account": acc["id"]})
@@ -2041,6 +2148,14 @@ def print_install_conflicts(found):
     print("  多份并存容易出现“升级了却没生效”。保留一份即可，npm 版可用 npm uninstall -g @anthropic-ai/claude-code 卸载")
 
 
+def mark_logged_out(store):
+    with store.lock():
+        data = store.load()
+        data["active"]["claude_code"] = None
+        data.pop("live_mismatch", None)
+        store.save(data)
+
+
 def cmd_env_clean(store, args):
     """分层清理。默认只预演；--apply 才执行。会话记录、设置、CLAUDE.md、插件和 cam 自己的数据永远不动（--purge 除外）。"""
     cfg = claude_config_dir()
@@ -2077,28 +2192,32 @@ def cmd_env_clean(store, args):
         if not confirm("确定要把整个 Claude Code 配置移走？"):
             print("已取消")
             return
+    kc = None
+    if (args.logout or args.purge) and use_keychain():
+        kc = keychain_read()
+        if not kc and keychain_exists():
+            # 读不出来就删，最新的 refresh token 就没了
+            raise CamError("钥匙串里有 Claude Code 的登录，但读取失败（被拒绝或超时）。为了不丢掉最新的登录，"
+                           "这次什么都没改。重新运行，弹窗时点“始终允许”")
     if args.logout or args.purge:
         with store.lock():
             data = store.load()
             snapshot_live(store, data)  # 先把当前账号的最新 token 存好
-            data["active"]["claude_code"] = None
-            data.pop("live_mismatch", None)
             store.save(data)
     if args.purge:
         dest = os.path.join(store.root, "env-backups", dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
         os.makedirs(dest)
         if not IS_WIN:
             os.chmod(dest, 0o700)
-        if use_keychain():
-            kc = keychain_read()
-            if kc:
-                write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
-                keychain_delete()
+        if kc:
+            write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
+            keychain_delete()
         cj = claude_json_file()
         if os.path.lexists(cfg):
             shutil.move(cfg, os.path.join(dest, "claude-config"))
         if os.path.lexists(cj):
             shutil.move(cj, os.path.join(dest, "claude.json"))
+        mark_logged_out(store)
         print(color(f"✓ 已移到 {dest}", "g"))
         print("  需要恢复时，把里面的 claude-config 移回 " + cfg + "，claude.json 移回 " + cj)
         return
@@ -2108,12 +2227,13 @@ def cmd_env_clean(store, args):
         print(color(f"✓ 已清理 {len(cache)} 项缓存", "g"))
     if args.logout:
         backup = backup_live(store, "env-logout")
-        if use_keychain():
+        if kc:
             keychain_delete()
         if os.path.exists(claude_credentials_file()):
             os.unlink(claude_credentials_file())
         if os.path.exists(claude_json_file()):
             write_oauth_account(None)
+        mark_logged_out(store)
         print(color(f"✓ 已退出登录，退出前的登录状态备份在 {backup}", "g"))
         print("  运行 claude 重新登录，或 cam switch <账号> 切回已保存的账号")
 

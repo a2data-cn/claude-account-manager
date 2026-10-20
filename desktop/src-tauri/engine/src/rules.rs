@@ -97,6 +97,23 @@ pub fn validate(data: &Value, rules: &Value) -> R<Vec<Value>> {
     Ok(out)
 }
 
+/// 指向现存 Claude Code 账号的规则。账号被删掉后留下的规则（旧版本删账号时不清理）一律忽略，
+/// 下次保存规则时自然就去掉了。与 cam.py 的 live_rules 一致。
+pub fn live_rules(data: &Value) -> Vec<Value> {
+    let ids: Vec<&str> = accounts(data)
+        .iter()
+        .filter(|a| s(a, "kind") == Some("claude_code"))
+        .filter_map(|a| s(a, "id"))
+        .collect();
+    data.get("rules")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|r| s(r, "account").map(|a| ids.contains(&a)).unwrap_or(false))
+        .cloned()
+        .collect()
+}
+
 pub fn alert_threshold(data: &Value) -> i64 {
     data.get("prefs")
         .and_then(|p| p.get("alert_threshold"))
@@ -105,7 +122,7 @@ pub fn alert_threshold(data: &Value) -> i64 {
 }
 
 pub fn rules_view(data: &Value) -> Value {
-    json!({"rules": data.get("rules").cloned().unwrap_or(json!([])), "alert_threshold": alert_threshold(data)})
+    json!({"rules": live_rules(data), "alert_threshold": alert_threshold(data)})
 }
 
 pub fn save_rules(store: &Store, body: &Value) -> R<Value> {
@@ -138,7 +155,8 @@ pub fn match_time_rule(data: &Value, now: chrono::NaiveDateTime) -> Option<Value
     let wd = now.weekday().number_from_monday();
     let prev = if wd == 1 { 7 } else { wd - 1 };
     let mins = now.hour() * 60 + now.minute();
-    for r in data.get("rules").and_then(|v| v.as_array()).into_iter().flatten() {
+    for r in live_rules(data) {
+        let r = &r;
         if s(r, "type") != Some("time") {
             continue;
         }
