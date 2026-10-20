@@ -5,7 +5,7 @@ use cam_engine::api::{api_switch, public_state, route};
 use cam_engine::claude::{
     apply_pending_switch, apply_pending_switch_at, import_current, is_claude_cmd, switch_account, PENDING_ID,
 };
-use cam_engine::health::{check_region, parse_exit_meta, risk_items, service_check, tunnel_kind};
+use cam_engine::health::{check_region, parse_exit_meta, risk_items, risk_score, service_check, tunnel_kind};
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
 use cam_engine::usage::{ensure_fresh_token, refresh_usage};
@@ -496,16 +496,21 @@ fn service_check_reports_region_and_services() {
     let items = service_check(&Store::new());
     let text = items.iter().map(|i| i["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>().join("\n");
     assert_eq!(items[0]["level"], "ok", "{}", text);
-    assert!(text.contains("总体：Claude 服务正常"), "{}", text);
+    assert!(text.contains("Claude 服务正常"), "{}", text);
     assert!(text.contains("出口地区 US（美国） 在 Anthropic 支持名单内"), "{}", text);
     assert!(text.contains("服务正常，当前登录可用"), "{}", text);
     assert!(text.contains("可达"), "{}", text);
     assert!(items.iter().all(|i| i.get("advice").is_some()));
+    assert_eq!((items[0]["score"].as_i64(), items[0]["grade"].as_str()), (Some(100), Some("low")));
+    assert!(items[0]["text"].as_str().unwrap().contains("100/100，风险低，可以使用"), "{}", text);
     // 不在支持名单内：提醒并给建议，总体结论跟着变
+    // （不在名单 60 + 出口从 US 变到 CN 15 + 当前账号两地使用 20 + 时区指向美国 5 → 0 分，风险高）
     mock().lock().unwrap().trace_loc = "CN".into();
     let items = service_check(&Store::new());
-    assert_eq!(items[0]["level"], "warn");
-    assert!(items[0]["text"].as_str().unwrap().contains("有风险"));
+    assert_eq!(items[0]["level"], "bad");
+    assert_eq!((items[0]["score"].as_i64(), items[0]["grade"].as_str()), (Some(0), Some("high")));
+    assert!(items[0]["text"].as_str().unwrap().contains("0/100，风险高，不建议在当前环境使用"), "{}", items[0]);
+    assert!(items[0]["text"].as_str().unwrap().contains("出口地区 CN"));
     let reg = items.iter().find(|i| i["text"].as_str().unwrap().starts_with("出口地区")).unwrap();
     assert_eq!(reg["level"], "warn");
     assert!(reg["text"].as_str().unwrap().contains("CN（中国大陆） 不在 Anthropic 支持名单内"));
@@ -533,8 +538,10 @@ fn risk_items_and_reminders() {
     let store = Store::new();
     check_region(&store, 300).unwrap();
     // 没有风险时只有“账号数”这条 info
-    let risks = public_state(&store, &e.data())["risks"].as_array().cloned().unwrap();
+    let st = public_state(&store, &e.data());
+    let risks = st["risks"].as_array().cloned().unwrap();
     assert_eq!(kinds(&risks), vec!["accounts"]);
+    assert_eq!((st["risk_score"]["score"].as_i64(), st["risk_score"]["grade"].as_str()), (Some(100), Some("low")));
     assert!(risks.iter().all(|r| r.as_object().unwrap().len() == 4 && r.get("advice").is_some()));
     // 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
     mock().lock().unwrap().trace_loc = "HK".into();
@@ -551,6 +558,9 @@ fn risk_items_and_reminders() {
     let ar = by_kind(&items, "account_regions").unwrap();
     assert!(ar["text"].as_str().unwrap().contains("2 个地区使用过：HK（香港）、US（美国）"), "{}", ar);
     assert_eq!(d["region"]["prev_loc"], "US");
+    let sc = public_state(&store, &d)["risk_score"].clone(); // 不在名单 60 + 出口变化 15 + 多地区 20 + 时区指向美国 5 → 0 分
+    assert_eq!((sc["score"].as_i64(), sc["grade"].as_str()), (Some(0), Some("high")));
+    assert!(sc["label"].as_str().unwrap().contains("不建议"));
     // 变化提示在 24 小时内保留，再次检测到同一地区不会丢
     check_region(&store, 0).unwrap();
     assert_eq!(e.data()["region"]["prev_loc"], "US");
@@ -616,6 +626,14 @@ fn risk_items_and_reminders() {
     let items = service_check(&store);
     assert_eq!(items[0]["level"], "bad");
     assert!(items[0]["text"].as_str().unwrap().contains("Anthropic 官方状态页"), "{}", items[0]);
+    assert_eq!(items[0]["grade"], "high");
+    assert!(items[0]["score"].as_i64().unwrap() < 70);
+    // 评分单独算
+    let sc = risk_score(&[json!({"kind": "timezone", "level": "warn"}), json!({"kind": "clock", "level": "warn"})]);
+    assert_eq!((sc["score"].as_i64(), sc["grade"].as_str()), (Some(65), Some("high")));
+    let sc = risk_score(&[json!({"kind": "region_change", "level": "warn"}), json!({"kind": "warp", "level": "info"})]);
+    assert_eq!((sc["score"].as_i64(), sc["grade"].as_str()), (Some(80), Some("medium")));
+    assert_eq!(risk_score(&[json!({"kind": "new_kind", "level": "warn"})])["score"], 90);
     let ks = kinds(&items);
     assert_eq!(ks.iter().filter(|k| *k == "region").count(), 1);
     for k in [

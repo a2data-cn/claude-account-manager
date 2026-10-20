@@ -184,6 +184,11 @@ export default function App() {
               <span className="reg-bad"> · 出口 {state.region.loc} ⚠ 不在支持名单</span>
             )}
             {state.region?.status === "unknown" && <span> · 出口地区未知</span>}
+            {state.risk_score && state.region?.status && (
+              <span className={`risk ${state.risk_score.grade}`} title={`${state.risk_score.label}。${state.risk_score.advice}`}>
+                风险 {state.risk_score.score}
+              </span>
+            )}
           </span>
         )}
         <span className="spacer" />

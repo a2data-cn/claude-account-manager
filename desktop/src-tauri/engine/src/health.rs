@@ -681,6 +681,44 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     out
 }
 
+/// 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
+const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
+    ("region", "warn", 60), ("account_regions", "warn", 20), ("region_change", "warn", 15), ("isp", "warn", 20),
+    ("region_mismatch", "warn", 15), ("timezone", "warn", 25), ("timezone", "info", 5), ("locale", "warn", 15),
+    ("locale", "info", 3), ("clock", "warn", 10), ("warp", "info", 5), ("vpn", "info", 10), ("proxy", "info", 5),
+    ("status", "bad", 30), ("status", "warn", 10), ("api", "bad", 40), ("api", "warn", 5), ("web", "bad", 10),
+    ("web", "warn", 5), ("dns", "bad", 20), ("accounts", "info", 0), ("device", "info", 0), ("scope", "info", 0),
+];
+/// (最低分, 档位, 说明)
+const RISK_GRADES: &[(i64, &str, &str)] = &[
+    (90, "low", "风险低，可以使用"),
+    (70, "medium", "有风险，建议先处理提醒项再使用"),
+    (0, "high", "风险高，不建议在当前环境使用；是否继续由你决定"),
+];
+const RISK_SCORE_ADVICE: &str = "评分只汇总本机能看到的信号，满分也不代表一定合规；低于 90 时逐条看提醒和建议。";
+
+/// 把风险项汇总成 {score, grade, label, advice}。只用于提示。
+pub fn risk_score(items: &[Value]) -> Value {
+    let mut score: i64 = 100;
+    for it in items {
+        let (kind, level) = (s(it, "kind").unwrap_or(""), s(it, "level").unwrap_or(""));
+        if kind == "summary" {
+            continue;
+        }
+        score -= match RISK_WEIGHTS.iter().find(|(k, l, _)| *k == kind && *l == level) {
+            Some((_, _, w)) => *w,
+            None => match level {
+                "warn" => 10,
+                "bad" => 30,
+                _ => 0,
+            },
+        };
+    }
+    let score = score.max(0);
+    let (_, grade, label) = RISK_GRADES.iter().find(|(floor, _, _)| score >= *floor).unwrap_or(&RISK_GRADES[2]);
+    json!({"score": score, "grade": grade, "label": label, "advice": RISK_SCORE_ADVICE})
+}
+
 fn region_denied(msg: &str) -> bool {
     let low = msg.to_lowercase();
     ["region", "country", "not available", "unsupported", "not allowed", "地区"]
@@ -856,7 +894,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     parts.extend(system_proxy().into_iter().map(|p| format!("系统设置 {}", p)));
     add(
         "proxy",
-        "info",
+        if parts.is_empty() { "ok" } else { "info" },
         format!("代理：{}", if parts.is_empty() { "无（直连）".to_string() } else { parts.join("；") }),
         if parts.is_empty() { "直连，出口地区就是本机网络的出口" } else { "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" },
     );
@@ -882,14 +920,25 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         "advice": "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，\
                    所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。"
     }));
-    // 总体结论放最前面
+    // 总体结论放最前面：评分 + 档位 + 最严重的一条
+    let sc = risk_score(&out);
     let first = |lv: &str| out.iter().find(|i| s(i, "level") == Some(lv)).cloned();
-    let summary = if let Some(b) = first("bad") {
-        json!({"kind": "summary", "level": "bad", "text": format!("总体：当前无法正常使用 —— {}", s(&b, "text").unwrap_or("")), "advice": b["advice"]})
-    } else if let Some(w) = first("warn") {
-        json!({"kind": "summary", "level": "warn", "text": format!("总体：可以使用，但有风险 —— {}", s(&w, "text").unwrap_or("")), "advice": w["advice"]})
+    let (first_bad, first_warn) = (first("bad"), first("warn"));
+    let worst = first_bad.clone().or_else(|| first_warn.clone());
+    let grade = s(&sc, "grade").unwrap_or("");
+    let level = if first_bad.is_some() || grade == "high" {
+        "bad"
+    } else if first_warn.is_some() || grade == "medium" {
+        "warn"
     } else {
-        json!({"kind": "summary", "level": "ok", "text": "总体：Claude 服务正常，出口地区在支持名单内，没有发现风险点", "advice": ""})
+        "ok"
+    };
+    let head = format!("总体：{}/100，{}", sc["score"], s(&sc, "label").unwrap_or(""));
+    let summary = match &worst {
+        Some(w) => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
+                          "text": format!("{} —— {}", head, s(w, "text").unwrap_or("")), "advice": w["advice"]}),
+        None => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
+                       "text": format!("{}；Claude 服务正常，出口地区在支持名单内，没有发现风险点", head), "advice": RISK_SCORE_ADVICE}),
     };
     out.insert(0, summary);
     out

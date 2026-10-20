@@ -56,6 +56,15 @@ export interface State {
   pending_switch?: PendingSwitch | null; // 已记录、等 claude 会话结束后由后台执行的切换
   region?: RegionInfo | null; // 后台上次检测到的出口地区，只用于提示
   risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
+  risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
+}
+
+/** 环境风险评分：满分 100，≥90 低 / 70–89 中 / <70 高。只是把提醒汇总成一个数 */
+export interface RiskScore {
+  score: number;
+  grade: "low" | "medium" | "high";
+  label: string;
+  advice: string;
 }
 
 export interface PendingSwitch {
@@ -84,6 +93,8 @@ export interface ServiceCheckItem {
   level: "ok" | "bad" | "warn" | "info";
   text: string;
   advice: string; // 这意味着什么 / 建议怎么做，可能为空
+  score?: number; // 只有 summary 项有：实测后的评分和档位
+  grade?: "low" | "medium" | "high";
 }
 
 export interface RegionInfo {

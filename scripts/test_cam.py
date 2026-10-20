@@ -816,16 +816,22 @@ class CamTest(unittest.TestCase):
         items = self.cam.service_check(self.cam.Store())
         text = "\n".join(i["text"] for i in items)
         self.assertEqual(items[0]["level"], "ok")
-        self.assertIn("总体：Claude 服务正常", items[0]["text"])
+        self.assertIn("Claude 服务正常", items[0]["text"])
         self.assertIn("出口地区 US（美国） 在 Anthropic 支持名单内", text)
         self.assertIn("服务正常，当前登录可用", text)
         self.assertIn("可达", text)
-        self.assertTrue(all(set(i) == {"kind", "level", "text", "advice"} for i in items))
+        self.assertTrue(all(set(i) == {"kind", "level", "text", "advice"} for i in items[1:]))
+        self.assertEqual(set(items[0]), {"kind", "level", "text", "advice", "score", "grade"})
         # 不在支持名单内：提醒并给建议，总体结论跟着变
+        self.assertEqual((items[0]["score"], items[0]["grade"]), (100, "low"))
+        self.assertIn("100/100，风险低，可以使用", items[0]["text"])
         MockAnthropic.trace_loc = "CN"
         items = self.cam.service_check(self.cam.Store())
-        self.assertEqual(items[0]["level"], "warn")
-        self.assertIn("有风险", items[0]["text"])
+        # 不在名单 60 + 出口从 US 变到 CN 15 + 当前账号两地使用 20 + 时区指向美国 5 → 0 分，风险高
+        self.assertEqual(items[0]["level"], "bad")
+        self.assertEqual((items[0]["score"], items[0]["grade"]), (0, "high"))
+        self.assertIn("0/100，风险高，不建议在当前环境使用", items[0]["text"])
+        self.assertIn("出口地区 CN", items[0]["text"])
         reg = next(i for i in items if i["text"].startswith("出口地区"))
         self.assertEqual(reg["level"], "warn")
         self.assertIn("CN（中国大陆） 不在 Anthropic 支持名单内", reg["text"])
@@ -851,8 +857,10 @@ class CamTest(unittest.TestCase):
         store = self.cam.Store()
         self.cam.check_region(store)
         # 没有风险时只有“账号数”这条 info
-        risks = self.cam.public_state(store, self.data())["risks"]
+        st = self.cam.public_state(store, self.data())
+        risks = st["risks"]
         self.assertEqual([r["kind"] for r in risks], ["accounts"])
+        self.assertEqual((st["risk_score"]["score"], st["risk_score"]["grade"]), (100, "low"))
         self.assertTrue(all(set(r) == {"kind", "level", "text", "advice"} for r in risks))
         # 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
         MockAnthropic.trace_loc = "HK"
@@ -866,6 +874,9 @@ class CamTest(unittest.TestCase):
         self.assertIn("刚刚", kinds["region_change"]["text"])
         self.assertIn("2 个地区使用过：HK（香港）、US（美国）", kinds["account_regions"]["text"])
         self.assertEqual(d["region"]["prev_loc"], "US")
+        sc = self.cam.public_state(store, d)["risk_score"]  # 不在名单 60 + 出口变化 15 + 多地区 20 + 时区指向美国 5 → 0 分
+        self.assertEqual((sc["score"], sc["grade"]), (0, "high"))
+        self.assertIn("不建议", sc["label"])
         # 变化提示在 24 小时内保留，再次检测到同一地区不会丢
         self.cam.check_region(store, max_age=0)
         self.assertEqual(self.data()["region"]["prev_loc"], "US")
@@ -922,6 +933,14 @@ class CamTest(unittest.TestCase):
         items = self.cam.service_check(store)
         self.assertEqual(items[0]["level"], "bad")
         self.assertIn("Anthropic 官方状态页", items[0]["text"])
+        self.assertEqual(items[0]["grade"], "high")
+        self.assertLess(items[0]["score"], 70)
+        # 评分单独算：中档
+        sc = self.cam.risk_score([{"kind": "timezone", "level": "warn"}, {"kind": "clock", "level": "warn"}])
+        self.assertEqual((sc["score"], sc["grade"]), (65, "high"))
+        sc = self.cam.risk_score([{"kind": "region_change", "level": "warn"}, {"kind": "warp", "level": "info"}])
+        self.assertEqual((sc["score"], sc["grade"]), (80, "medium"))
+        self.assertEqual(self.cam.risk_score([{"kind": "new_kind", "level": "warn"}])["score"], 90)
         kinds = [i["kind"] for i in items]
         self.assertEqual(kinds.count("region"), 1)
         for k in ("summary", "dns", "region", "isp", "api", "web", "proxy", "vpn", "region_change", "warp", "clock", "status",

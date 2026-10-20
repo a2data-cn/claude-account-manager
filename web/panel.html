@@ -130,6 +130,11 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .notice .n-advice { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
 .host .reg-ok { color: var(--live); }
 .host .reg-bad { color: var(--hot); font-weight: 600; }
+/* 环境风险评分：≥90 低 / 70–89 中 / <70 高 */
+.host .risk { margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); white-space: nowrap; }
+.host .risk.low { color: var(--live); }
+.host .risk.medium { color: var(--warn); }
+.host .risk.high { color: var(--hot); border-color: var(--hot); }
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 
 /* 本地消耗柱状图 */
@@ -478,7 +483,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     const regTxt = reg.status === "supported" ? `<span class="reg-ok"> · 出口 ${esc(reg.loc)} ✓</span>`
       : reg.status === "unsupported" ? `<span class="reg-bad"> · 出口 ${esc(reg.loc)} ⚠ 不在支持名单</span>`
       : reg.status === "unknown" ? " · 出口地区未知" : "";
-    $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}`;
+    const sc = state.risk_score;
+    const scTxt = sc && reg.status ? `<span class="risk ${esc(sc.grade)}" title="${esc(sc.label)}。${esc(sc.advice)}">风险 ${esc(sc.score)}</span>` : "";
+    $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}${scTxt}`;
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
     const p = state.pending_switch;
     const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")

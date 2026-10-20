@@ -1692,7 +1692,7 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risk_items(data),
-            "generated_at": now_iso()}
+            "risk_score": risk_score(risk_items(data)), "generated_at": now_iso()}
 
 
 def mask(s):
@@ -2122,8 +2122,11 @@ def print_accounts(store, data):
     risks = [r for r in st.get("risks") or [] if r["level"] in ("warn", "bad")]
     for i, r in enumerate(risks):
         print(("\n" if i == 0 else "") + color(f"! {r['text']}。{r['advice']}", "y"))
-    if risks:
-        print(color("  （cam doctor 查看完整的服务检查）", "d"))
+    sc = st.get("risk_score") or {}
+    if sc and (st.get("region") or {}).get("status"):  # 后台检测过才有意义
+        c = {"low": "g", "medium": "y", "high": "r"}[sc["grade"]]
+        print(("" if risks else "\n") + color(f"环境风险评分 {sc['score']}/100：{sc['label']}", c)
+              + color("（据后台缓存；cam doctor 实测并查看完整的服务检查）", "d"))
 
 
 # --------------------------------------------------------------------------- 命令
@@ -3055,6 +3058,34 @@ def risk_items(data, include_region=True):
     return out
 
 
+# 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
+RISK_WEIGHTS = {
+    ("region", "warn"): 60, ("account_regions", "warn"): 20, ("region_change", "warn"): 15, ("isp", "warn"): 20,
+    ("region_mismatch", "warn"): 15, ("timezone", "warn"): 25, ("timezone", "info"): 5, ("locale", "warn"): 15,
+    ("locale", "info"): 3, ("clock", "warn"): 10, ("warp", "info"): 5, ("vpn", "info"): 10, ("proxy", "info"): 5,
+    ("status", "bad"): 30, ("status", "warn"): 10, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
+    ("web", "warn"): 5, ("dns", "bad"): 20, ("accounts", "info"): 0, ("device", "info"): 0, ("scope", "info"): 0,
+}
+RISK_GRADES = (  # (最低分, 档位, 说明)
+    (90, "low", "风险低，可以使用"),
+    (70, "medium", "有风险，建议先处理提醒项再使用"),
+    (0, "high", "风险高，不建议在当前环境使用；是否继续由你决定"),
+)
+RISK_SCORE_ADVICE = "评分只汇总本机能看到的信号，满分也不代表一定合规；低于 90 时逐条看提醒和建议。"
+
+
+def risk_score(items):
+    """把风险项汇总成 {score, grade, label, advice}。只用于提示。"""
+    score = 100
+    for it in items:
+        if it.get("kind") == "summary":
+            continue
+        score -= RISK_WEIGHTS.get((it.get("kind"), it["level"]), {"warn": 10, "bad": 30}.get(it["level"], 0))
+    score = max(0, score)
+    grade, label = next((g, l) for floor, g, l in RISK_GRADES if score >= floor)
+    return {"score": score, "grade": grade, "label": label, "advice": RISK_SCORE_ADVICE}
+
+
 def region_denied(msg):
     low = (msg or "").lower()
     return any(k in low for k in ("region", "country", "not available", "unsupported", "not allowed", "地区"))
@@ -3147,7 +3178,7 @@ def service_check(store=None):
         add("web", "warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
     # 代理：环境变量 + 系统设置；VPN：默认路由
     parts = [f"{k}={v}" for k, v in proxies.items()] + [f"系统设置 {p}" for p in system_proxy()]
-    add("proxy", "info", "代理：" + ("；".join(parts) if parts else "无（直连）"),
+    add("proxy", "info" if parts else "ok", "代理：" + ("；".join(parts) if parts else "无（直连）"),
         "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" if parts else "直连，出口地区就是本机网络的出口")
     tun = default_route_tunnel()
     if tun:
@@ -3161,18 +3192,21 @@ def service_check(store=None):
     add("scope", "info", "检测范围：本机能看到的信号（出口 IP 和运营商、代理 / VPN、WARP、时钟、时区、系统语言、账号使用地区）",
         "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，"
         "所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。")
-    # 总体结论放最前面
+    # 总体结论放最前面：评分 + 档位 + 最严重的一条
+    sc = risk_score(out)
     first_bad = next((i for i in out if i["level"] == "bad"), None)
     first_warn = next((i for i in out if i["level"] == "warn"), None)
-    if first_bad:
-        out.insert(0, {"kind": "summary", "level": "bad", "text": "总体：当前无法正常使用 —— " + first_bad["text"],
-                       "advice": first_bad["advice"]})
-    elif first_warn:
-        out.insert(0, {"kind": "summary", "level": "warn", "text": "总体：可以使用，但有风险 —— " + first_warn["text"],
-                       "advice": first_warn["advice"]})
+    worst = first_bad or first_warn
+    head = f"总体：{sc['score']}/100，{sc['label']}"
+    if first_bad or sc["grade"] == "high":
+        level = "bad"
+    elif first_warn or sc["grade"] == "medium":
+        level = "warn"
     else:
-        out.insert(0, {"kind": "summary", "level": "ok", "text": "总体：Claude 服务正常，出口地区在支持名单内，没有发现风险点",
-                       "advice": ""})
+        level = "ok"
+    out.insert(0, {"kind": "summary", "level": level, "score": sc["score"], "grade": sc["grade"],
+                   "text": head + (f" —— {worst['text']}" if worst else "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"),
+                   "advice": worst["advice"] if worst else RISK_SCORE_ADVICE})
     return out
 
 

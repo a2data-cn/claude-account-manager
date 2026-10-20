@@ -102,6 +102,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "pending_switch": pending_switch_view(data),
         "region": super::health::region_view(data),
         "risks": super::health::risk_items(data, true),
+        "risk_score": super::health::risk_score(&super::health::risk_items(data, true)),
         "generated_at": now_iso()
     })
 }
