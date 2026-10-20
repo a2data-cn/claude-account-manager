@@ -213,6 +213,7 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_CF_TRACE6_URL"] = base + "/trace6"
         os.environ["CAM_TEST_LOCALE"] = "en_US"
         os.environ["CAM_TEST_DNS"] = "192.168.1.1"
+        os.environ["CAM_TEST_PROXY"] = ""  # 不读本机的系统代理设置（macOS 上开着系统代理时结果会变）
         os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
         os.environ["CAM_TEST_ROUTE_IF"] = ""
         os.environ["CAM_NO_KEYCHAIN"] = "1"
@@ -1282,9 +1283,20 @@ class CamTest(unittest.TestCase):
                 ssl.create_default_context = lambda: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 ssl.get_default_verify_paths = lambda: real[1]()._replace(capath=empty, cafile=None)
                 self.cam.CA_FALLBACKS = ("/nonexistent/cert.pem", bundle)
-                ctx, used = self.cam.make_ssl_context()
+                env = {k: v for k, v in os.environ.items() if k != "SSL_CERT_FILE"}
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(sys.modules, {"certifi": None}):
+                    ctx, used = self.cam.make_ssl_context()  # 没有 certifi：用系统证书文件
                 self.assertEqual(used, bundle)
                 self.assertGreater(ctx.cert_store_stats()["x509_ca"], 0)
+                fake = type(sys)("certifi")
+                fake.where = lambda: bundle
+                self.cam.CA_FALLBACKS = ("/nonexistent/cert.pem",)
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(sys.modules, {"certifi": fake}):
+                    ctx, used = self.cam.make_ssl_context()  # 装了 certifi：优先用它
+                self.assertEqual(used, bundle)
+                with mock.patch.dict(os.environ, dict(env, SSL_CERT_FILE=bundle), clear=True), \
+                        mock.patch.dict(sys.modules, {"certifi": None}):
+                    self.assertEqual(self.cam.make_ssl_context()[1], bundle)  # SSL_CERT_FILE 最优先
             finally:
                 ssl.create_default_context, ssl.get_default_verify_paths, self.cam.CA_FALLBACKS = real
         self.assertTrue(self.cam.is_cert_error("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"))
@@ -1574,7 +1586,9 @@ class CamTest(unittest.TestCase):
     def test_env_clean_purge_moves_everything_to_backup(self):
         cfg = self._fake_claude_env()
         a_id, _ = self._two_accounts()
-        self.assertEqual(self.run_cam("env", "clean", "--purge", "--apply"), 1)  # 非交互必须 -y
+        import io
+        with mock.patch.object(sys, "stdin", io.StringIO()):  # 在终端里跑测试时 stdin 是交互的，这里固定成非交互
+            self.assertEqual(self.run_cam("env", "clean", "--purge", "--apply"), 1)  # 非交互必须 -y
         self.assertTrue(os.path.isdir(cfg))
         self.assertEqual(self.run_cam("env", "clean", "--purge", "--apply", "-y"), 0)
         self.assertFalse(os.path.exists(cfg))

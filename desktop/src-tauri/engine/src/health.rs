@@ -751,6 +751,10 @@ pub fn system_timezone() -> Option<(String, Vec<String>)> {
 
 /// 系统级代理设置（不是环境变量）：["HTTPS 127.0.0.1:7890", "PAC http://…"] 之类，没有时为空。
 pub fn system_proxy() -> Vec<String> {
+    // 测试用 CAM_TEST_PROXY="HTTPS 127.0.0.1:7890"（空字符串表示没有）
+    if let Ok(t) = std::env::var("CAM_TEST_PROXY") {
+        return t.split(',').filter(|x| !x.is_empty()).map(String::from).collect();
+    }
     let mut out = Vec::new();
     if cfg!(target_os = "macos") {
         let txt = run_text("scutil", &["--proxy"]);

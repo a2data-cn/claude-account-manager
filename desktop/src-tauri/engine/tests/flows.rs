@@ -271,6 +271,7 @@ impl Env {
         std::env::set_var("CAM_CF_TRACE6_URL", format!("{}/trace6", base));
         std::env::set_var("CAM_TEST_LOCALE", "en_US");
         std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
+        std::env::set_var("CAM_TEST_PROXY", ""); // 不读本机的系统代理设置
         std::env::set_var("CAM_TEST_TZ", "America/New_York=US"); // 跑测试的机器时区不定，固定成和假出口一致
         std::env::set_var("CAM_TEST_ROUTE_IF", "");
         for k in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {

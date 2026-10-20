@@ -3494,7 +3494,11 @@ def _run_text(cmd, timeout=8):
 
 
 def system_proxy():
-    """系统级代理设置（不是环境变量）：["HTTPS 127.0.0.1:7890", "PAC http://…"] 之类，没有时为空列表。"""
+    """系统级代理设置（不是环境变量）：["HTTPS 127.0.0.1:7890", "PAC http://…"] 之类，没有时为空列表。
+    测试用 CAM_TEST_PROXY="HTTPS 127.0.0.1:7890"（空字符串表示没有）。"""
+    t = os.environ.get("CAM_TEST_PROXY")
+    if t is not None:
+        return [x for x in t.split(",") if x]
     out = []
     if IS_MAC:
         kv = {}
