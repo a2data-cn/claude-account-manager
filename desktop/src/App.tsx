@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, command, inTauri, onEvent } from "./api";
+import { ago } from "./format";
 import { AccountCard } from "./components/AccountCard";
 import { AddDialog, EditDialog, SwitchChoiceDialog, type AddValues, type EditValues, type SwitchChoice } from "./components/Dialogs";
 import { LocalUsage } from "./components/LocalUsage";
@@ -10,42 +11,150 @@ import type { Account, ServiceCheckItem, State, SwitchResult } from "./types";
 type Tab = "accounts" | "settings";
 const KIND_ORDER = ["claude_code", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "✓", bad: "✗", warn: "!", info: "·" };
+/** 检测结果分组（和手机面板同样的分组） */
+const CHECK_GROUPS: [string, string[]][] = [
+  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
+  ["本机", ["clock", "timezone", "locale", "device"]],
+  ["服务", ["api", "web", "status"]],
+  ["账号", ["account_regions", "accounts"]],
+  ["说明", ["scope"]],
+];
+const IP_TYPE: Record<string, string> = { residential: "家庭 / 公司宽带", hosting: "机房 / 云服务器", proxy: "代理 / VPN 出口", tor: "Tor 出口节点", mobile: "手机网络" };
 
-/** Claude 服务检测：后端做 DNS、出口地区、两个域名、代理 / VPN 的探测，再列出环境里的风险点，要等几秒。只提醒，不拦 */
-function ServiceCheck({ toast }: { toast: (m: string, bad?: boolean) => void }) {
+function CheckRow({ it, cls }: { it: ServiceCheckItem; cls?: string }) {
+  return (
+    <li className={`${it.level}${cls ? " " + cls : ""}`}>
+      <span className="mark">{CHECK_MARK[it.level] || "·"}</span>
+      <span>
+        {it.text}
+        {it.advice && <span className="advice">→ {it.advice}</span>}
+      </span>
+    </li>
+  );
+}
+
+/** 服务检测结果：总体结论在最上面，其余按网络 / 本机 / 服务 / 账号分组 */
+function CheckList({ items }: { items: ServiceCheckItem[] }) {
+  const rest = items.filter((i) => i.kind !== "summary");
+  const used = new Set<ServiceCheckItem>();
+  const groups = CHECK_GROUPS.map(([name, kinds]) => {
+    const rows = rest.filter((i) => kinds.includes(i.kind || ""));
+    rows.forEach((i) => used.add(i));
+    return [name, rows] as [string, ServiceCheckItem[]];
+  }).filter(([, rows]) => rows.length);
+  const other = rest.filter((i) => !used.has(i));
+  return (
+    <ul className="checks">
+      {items.filter((i) => i.kind === "summary").map((it, i) => <CheckRow key={`s${i}`} it={it} cls="summary" />)}
+      {[...groups, ...(other.length ? [["其它", other] as [string, ServiceCheckItem[]]] : [])].map(([name, rows]) => (
+        <Fragment key={name}>
+          <h4>{name}</h4>
+          {rows.map((it, i) => <CheckRow key={`${name}${i}`} it={it} />)}
+        </Fragment>
+      ))}
+    </ul>
+  );
+}
+
+function useServiceCheck(toast: (m: string, bad?: boolean) => void, after?: () => void) {
   const [items, setItems] = useState<ServiceCheckItem[] | null>(null);
   const [checking, setChecking] = useState(false);
   const check = async () => {
     setChecking(true);
     try {
       setItems((await api<{ items: ServiceCheckItem[] }>("GET", "/api/service-check")).items);
+      after?.(); // 检测会刷新后台缓存，顶部的分数跟着更新
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
       setChecking(false);
     }
   };
+  return { items, checking, check };
+}
+
+/** 环境状态卡：分数、出口、网络类型、上次检测时间、风险提醒，点"重新检测"在卡下展开完整结果。只提醒，不拦 */
+function EnvCard({ state, toast, reload }: { state: State; toast: (m: string, bad?: boolean) => void; reload: () => void }) {
+  const { items, checking, check } = useServiceCheck(toast, reload);
+  const reg = state.region;
+  const sc = state.risk_score;
+  if (!reg?.status || !sc) {
+    return (
+      <section className="env" aria-label="环境状态">
+        <div className="env-score">
+          <div className="env-num">–</div>
+          <div className="env-lab">还没检测</div>
+        </div>
+        <div className="env-empty">后台每隔几分钟自动检测一次出口地区和环境风险；也可以现在就测。只提醒，不拦任何操作。</div>
+        <div className="env-acts">
+          <button className="btn" disabled={checking} onClick={check}>
+            {checking ? "检测中…" : "立即检测"}
+          </button>
+        </div>
+        {items && <div className="env-risks"><CheckList items={items} /></div>}
+      </section>
+    );
+  }
+  const risks = (state.risks ?? []).filter((r) => r.level === "warn" || r.level === "bad");
+  return (
+    <section className={`env ${sc.grade}`} aria-label="环境状态">
+      <div className="env-score">
+        <div className="env-num">
+          {sc.score}
+          <small>/100</small>
+        </div>
+        <div className="env-lab">{sc.label.split("，")[0]}</div>
+      </div>
+      <div className="env-facts">
+        <div>
+          <span className="k">出口</span>
+          <span className={reg.status === "unsupported" ? "bad" : ""}>
+            {reg.status === "unknown" ? "查不到" : `${reg.loc}${reg.city ? " · " + reg.city : ""}`}
+            {reg.status === "unsupported" ? " · 不在支持名单" : reg.status === "supported" ? " · 支持名单内" : ""}
+          </span>
+        </div>
+        <div>
+          <span className="k">网络</span>
+          {reg.org ? `${reg.org}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}` : "查不到"}
+        </div>
+        <div>
+          <span className="k">检测</span>
+          {ago(reg.checked_at)} · 后台每隔几分钟自动检测
+        </div>
+      </div>
+      <div className="env-acts">
+        <button className="btn" disabled={checking} onClick={check}>
+          {checking ? "检测中…" : "重新检测"}
+        </button>
+      </div>
+      {(risks.length > 0 || items) && (
+        <div className="env-risks">
+          {!items &&
+            risks.map((r) => (
+              <li key={r.kind ?? r.text} className={r.level}>
+                {r.text}
+                {r.advice && <span className="advice">{r.advice}</span>}
+              </li>
+            ))}
+          {items && <CheckList items={items} />}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Claude 服务检测（设置页）：后端做 DNS、出口地区、两个域名、代理 / VPN 的探测，再列出环境里的风险点，要等几秒。只提醒，不拦 */
+function ServiceCheck({ toast, reload }: { toast: (m: string, bad?: boolean) => void; reload: () => void }) {
+  const { items, checking, check } = useServiceCheck(toast, reload);
   return (
     <section className="block">
       <h2>Claude 服务检测</h2>
       <div className="panel">
-        <p className="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
+        <p className="hint">检查 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、DNS 配置、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。</p>
         <button className="btn" disabled={checking} onClick={check}>
           {checking ? "检测中…" : "开始检测"}
         </button>
-        {items && (
-          <ul className="checks">
-            {items.map((it, i) => (
-              <li key={i} className={it.level}>
-                <span className="mark">{CHECK_MARK[it.level] || "·"}</span>
-                <span>
-                  {it.text}
-                  {it.advice && <span className="advice">→ {it.advice}</span>}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+        {items && <CheckList items={items} />}
       </div>
     </section>
   );
@@ -228,23 +337,16 @@ export default function App() {
               </button>
             </div>
           </section>
-          <ServiceCheck toast={toast} />
+          <ServiceCheck toast={toast} reload={load} />
         </>
       ) : (
         <main aria-live="polite">
+          {state && <EnvCard state={state} toast={toast} reload={load} />}
           {state?.warning && (
             <div className="notice" role="alert">
               ⚠ {state.warning}
             </div>
           )}
-          {(state?.risks ?? [])
-            .filter((r) => r.level === "warn" || r.level === "bad")
-            .map((r) => (
-              <div key={r.kind ?? r.text} className={`notice${r.level === "bad" || r.kind === "region" ? " bad" : ""}`} role="alert">
-                ⚠ {r.text}
-                {r.advice && <span className="n-advice">{r.advice}</span>}
-              </div>
-            ))}
           {state?.pending_switch && (
             <div className="notice pending" role="status">
               <span className="n-text">{state.pending_switch.message}</span>

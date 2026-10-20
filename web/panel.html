@@ -136,6 +136,40 @@ section.block h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .host .risk.medium { color: var(--warn); }
 .host .risk.high { color: var(--hot); border-color: var(--hot); }
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
+.checks li.summary .advice { font-weight: 400; }
+/* 环境状态卡：分数、出口、网络类型、上次检测、风险提醒。只提示，不拦 */
+.env { background: var(--surface); border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius-lg); padding: 14px 18px; margin-bottom: 12px;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 20px; grid-template-areas: "score facts acts" "risks risks risks"; align-items: center; }
+.env.low { border-left-color: var(--live); }
+.env.medium { border-left-color: var(--warn); }
+.env.high { border-left-color: var(--hot); }
+.env-score { grid-area: score; text-align: center; min-width: 72px; }
+.env-num { font-size: 34px; font-weight: 750; line-height: 1; letter-spacing: -.03em; }
+.env-num small { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+.env.low .env-num { color: var(--live); }
+.env.medium .env-num { color: var(--warn); }
+.env.high .env-num { color: var(--hot); }
+.env-lab { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.env-facts { grid-area: facts; display: grid; gap: 3px; font-size: 13px; min-width: 0; }
+.env-facts div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.env-facts .k { display: inline-block; min-width: 3em; color: var(--muted); }
+.env-facts .bad { color: var(--hot); font-weight: 600; }
+.env-acts { grid-area: acts; display: flex; gap: 8px; }
+.env-risks { grid-area: risks; list-style: none; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); font-size: 13px; display: grid; gap: 6px; }
+.env-risks li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
+.env-risks li::before { content: "! "; font-weight: 700; color: var(--warn); }
+.env-risks li.bad::before { color: var(--hot); }
+.env-risks .advice { display: block; text-indent: 0; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.env-empty { grid-area: facts; font-size: 13px; color: var(--muted); }
+@media (max-width: 680px) {
+  .env { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "score facts" "acts acts" "risks risks"; padding: 12px 14px; }
+  .env-facts div { white-space: normal; }
+  .env-acts .btn { flex: 1; }
+  .btn { min-height: 40px; }
+  .acts .btn { flex: 1 1 auto; }
+}
 
 /* 本地消耗柱状图 */
 .bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
@@ -475,6 +509,57 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     </article>`;
   }
 
+  // ---- 环境状态卡 / 检测结果分组（和桌面版同样的分组）
+  const CHECK_GROUPS = [
+    ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
+    ["本机", ["clock", "timezone", "locale", "device"]],
+    ["服务", ["api", "web", "status"]],
+    ["账号", ["account_regions", "accounts"]],
+    ["说明", ["scope"]],
+  ];
+  const IP_TYPE = { residential: "家庭 / 公司宽带", hosting: "机房 / 云服务器", proxy: "代理 / VPN 出口", tor: "Tor 出口节点", mobile: "手机网络" };
+  function checkItem(it, cls) {
+    return `<li class="${esc(it.level)}${cls ? " " + cls : ""}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`;
+  }
+  function renderChecks(items) {
+    const summary = items.filter((i) => i.kind === "summary");
+    const rest = items.filter((i) => i.kind !== "summary");
+    let html = summary.map((i) => checkItem(i, "summary")).join("");
+    const used = new Set();
+    for (const [name, kinds] of CHECK_GROUPS) {
+      const rows = rest.filter((i) => kinds.includes(i.kind));
+      if (!rows.length) continue;
+      rows.forEach((i) => used.add(i));
+      html += `<h4>${name}</h4>` + rows.map((i) => checkItem(i)).join("");
+    }
+    const other = rest.filter((i) => !used.has(i));
+    if (other.length) html += `<h4>其它</h4>` + other.map((i) => checkItem(i)).join("");
+    return html;
+  }
+  function envCard(st) {
+    const reg = st.region || {};
+    const sc = st.risk_score;
+    if (!reg.status || !sc) {
+      return `<section class="env" aria-label="环境状态"><div class="env-score"><div class="env-num">–</div><div class="env-lab">还没检测</div></div>
+        <div class="env-empty">后台每隔几分钟自动检测一次出口地区和环境风险；也可以现在就测。只提醒，不拦任何操作。</div>
+        <div class="env-acts"><button class="btn" data-act="recheck">立即检测</button></div></section>`;
+    }
+    const risks = (st.risks || []).filter((r) => r.level === "warn" || r.level === "bad");
+    const exitTxt = reg.status === "unknown" ? "查不到" : `${esc(reg.loc)}${reg.city ? " · " + esc(reg.city) : ""}`;
+    const exitCls = reg.status === "unsupported" ? "bad" : "";
+    const net = reg.org ? `${esc(reg.org)}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}` : "查不到";
+    return `<section class="env ${esc(sc.grade)}" aria-label="环境状态">
+      <div class="env-score"><div class="env-num">${esc(sc.score)}<small>/100</small></div><div class="env-lab">${esc(sc.label.split("，")[0])}</div></div>
+      <div class="env-facts">
+        <div><span class="k">出口</span><span class="${exitCls}">${exitTxt}${reg.status === "unsupported" ? " · 不在支持名单" : reg.status === "supported" ? " · 支持名单内" : ""}</span></div>
+        <div><span class="k">网络</span>${net}</div>
+        <div><span class="k">检测</span>${ago(reg.checked_at)} · 后台每隔几分钟自动检测</div>
+      </div>
+      <div class="env-acts"><button class="btn" data-act="recheck">重新检测</button></div>
+      ${risks.length ? `<ul class="env-risks">${risks.map((r) => `<li class="${esc(r.level)}">${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</li>`).join("")}</ul>` : ""}
+    </section>`;
+  }
+
   // ---- 渲染
   let state = null;
   function render() {
@@ -488,9 +573,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}${scTxt}`;
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${new Date(state.generated_at).toLocaleString()}`;
     const p = state.pending_switch;
-    const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
-      + (state.risks || []).filter((r) => r.level === "warn" || r.level === "bad").map((r) =>
-          `<div class="notice${r.level === "bad" || r.kind === "region" ? " bad" : ""}" role="alert">⚠ ${esc(r.text)}${r.advice ? `<span class="n-advice">${esc(r.advice)}</span>` : ""}</div>`).join("")
+    const notice = envCard(state)
+      + (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
       + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "");
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
@@ -737,15 +821,17 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; }
     btn.textContent = "检测中…";
     try {
       const r = await api("GET", "/api/service-check");
-      $("#check-list").innerHTML = (r.items || []).map((it) =>
-        `<li class="${esc(it.level)}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`).join("");
+      $("#check-list").innerHTML = renderChecks(r.items || []);
       $("#check-list").hidden = false;
+      load(); // 检测会刷新后台缓存，顶部的分数跟着更新
     } catch (err) { toast(err.message, true); }
     finally { btn.textContent = "开始检测"; }
   });
 
   // ---- 事件委托
   document.addEventListener("click", async (e) => {
+    const re = e.target.closest("[data-act=recheck]");
+    if (re) { $("#check-block").scrollIntoView({ behavior: "smooth", block: "start" }); $("#btn-check").click(); return; }
     const b = e.target.closest("button[data-act]");
     if (!b) return;
     const id = b.dataset.id;

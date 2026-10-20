@@ -3284,7 +3284,8 @@ def risk_items(data, include_region=True):
             text = f"DNS 解析器 {d['ip']}（{d.get('name') or '公共 DNS'}，{region_label(d['country'])}）与出口地区 {region_label(loc)} 不一致"
             if region_status(d["country"]) == "unsupported":
                 add("dns_resolver", "warn", text,
-                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。")
+                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。"
+                    "如果人确实已经在支持地区，多半是以前手动填的 DNS 没改回来：系统网络设置里把 DNS 改回自动获取（或 1.1.1.1 / 8.8.8.8 这类任播 DNS）。")
             else:
                 add("dns_resolver", "info", text, "出差或代理分流都会这样；人所在地在支持名单内就没问题。")
             break
@@ -3431,7 +3432,9 @@ def service_check(store=None):
     dns = (r.get("env") or {}).get("dns") or []
     if dns:
         parts = [f"{d['ip']}（{'局域网 / 本机' if d['private'] else d.get('name') or '公共 DNS'}{'，' + region_label(d['country']) if d.get('country') else ''}）" for d in dns]
-        add("dns_servers", "info", "DNS 解析器：" + "；".join(parts), "只读本机配置，没有做泄漏探测；局域网 DNS 最终走哪里取决于路由器")
+        add("dns_servers", "info", "DNS 解析器：" + "；".join(parts),
+            "局域网 DNS 最终走路由器配置的上游；Google / Cloudflare 这类任播 DNS 全球有节点，不代表位置；某国公共 DNS 说明本机网络大概率在那个国家。"
+            "人在支持地区的话，用当地网络自动获取的 DNS 或任播 DNS 即可；出差前手动填过国内 DNS 的，到了支持地区记得在系统网络设置里改回自动获取。只读本机配置，没有做泄漏探测")
     # api.anthropic.com：有登录就用当前登录实测
     creds = read_live_credentials()[0] if store is not None else None
     at = oauth_block(creds).get("accessToken") if creds else None

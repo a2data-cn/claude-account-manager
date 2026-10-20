@@ -883,7 +883,8 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                     "dns_resolver",
                     "warn",
                     text,
-                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。",
+                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。\
+                     如果人确实已经在支持地区，多半是以前手动填的 DNS 没改回来：系统网络设置里把 DNS 改回自动获取（或 1.1.1.1 / 8.8.8.8 这类任播 DNS）。",
                 );
             } else {
                 add("dns_resolver", "info", text, "出差或代理分流都会这样；人所在地在支持名单内就没问题。");
@@ -1201,7 +1202,13 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                 format!("{}（{}{}）", s(d, "ip").unwrap_or("?"), who, c)
             })
             .collect();
-        add("dns_servers", "info", format!("DNS 解析器：{}", parts.join("；")), "只读本机配置，没有做泄漏探测；局域网 DNS 最终走哪里取决于路由器");
+        add(
+            "dns_servers",
+            "info",
+            format!("DNS 解析器：{}", parts.join("；")),
+            "局域网 DNS 最终走路由器配置的上游；Google / Cloudflare 这类任播 DNS 全球有节点，不代表位置；某国公共 DNS 说明本机网络大概率在那个国家。\
+             人在支持地区的话，用当地网络自动获取的 DNS 或任播 DNS 即可；出差前手动填过国内 DNS 的，到了支持地区记得在系统网络设置里改回自动获取。只读本机配置，没有做泄漏探测",
+        );
     }
     // api.anthropic.com：有登录就用当前登录实测
     let at = read_live()
