@@ -915,13 +915,16 @@ fn ip_lookup_sources_and_privacy() {
     // ip-api 模式：先问 ip-api.com
     let pv = save_privacy(&store, &json!({"ip_lookup": "ip-api"})).unwrap();
     assert_eq!(pv["ip_lookup"], "ip-api");
-    assert!(pv["sources"].as_array().unwrap().iter().any(|s| s["name"].as_str().unwrap().contains("ip-api.com")));
+    assert!(pv["sources"].as_array().unwrap().iter().any(|s| s["name"].as_str().unwrap().contains("ip-api.com") && s["warn"] == true));
     check_region(&store, 0).unwrap();
     assert_eq!(e.data()["region"]["meta_source"], "ip-api.com");
     // 关闭：只问 claude.ai 和状态页
     let pv = save_privacy(&store, &json!({"ip_lookup": "off"})).unwrap();
     let names: Vec<&str> = pv["sources"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["claude.ai/cdn-cgi/trace", "status.anthropic.com"]);
+    assert!(pv["sources"].as_array().unwrap().iter().all(|s| s["group"] == "anthropic"));
+    let titles: Vec<&str> = pv["modes"].as_array().unwrap().iter().map(|m| m["title"].as_str().unwrap()).collect();
+    assert_eq!(titles, vec!["自动（推荐）", "加上 ip-api.com", "关闭"]);
     mock().lock().unwrap().calls.clear();
     check_region(&store, 0).unwrap();
     let mut paths: Vec<String> = mock().lock().unwrap().calls.iter().map(|c| c.1.clone()).collect();
@@ -967,6 +970,40 @@ fn meta_cached_while_exit_ip_unchanged() {
     check_region(&store, 0).unwrap();
     assert_eq!(hits("/ipapiis").len(), 2);
     std::env::set_var("CAM_META_TTL", "0");
+}
+
+#[test]
+fn region_unknown_and_service_status_keep_scores_consistent() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    // 出口查不到：顶部分数不再是 100，单独扣 30
+    {
+        let _g = store.lock().unwrap();
+        let mut d = store.load().unwrap();
+        d["region"] = json!({"loc": null, "checked_at": cam_engine::store::now_iso()});
+        store.save(&mut d).unwrap();
+    }
+    let risks = risk_items(&e.data(), true);
+    assert!(by_kind(&risks, "region_unknown").is_some());
+    assert_eq!(risk_score(&risks)["score"], 70);
+    // 服务检测记下的连接问题也算进顶部分数；网络恢复后后台检测清掉 claude.ai 的旧问题，api 的保留
+    {
+        let _g = store.lock().unwrap();
+        let mut d = store.load().unwrap();
+        d["service_status"] = json!({"checked_at": cam_engine::store::now_iso(), "items": [
+            {"kind": "web", "level": "bad", "text": "claude.ai：连不上", "advice": ""},
+            {"kind": "api", "level": "bad", "text": "api.anthropic.com：连不上", "advice": ""}
+        ]});
+        store.save(&mut d).unwrap();
+    }
+    let kinds_now = kinds(&risk_items(&e.data(), true));
+    assert!(kinds_now.contains(&"web".to_string()) && kinds_now.contains(&"api".to_string()));
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    assert_eq!(d["service_status"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(d["service_status"]["items"][0]["kind"], "api");
+    assert!(by_kind(&risk_items(&d, true), "region_unknown").is_none());
 }
 
 #[test]

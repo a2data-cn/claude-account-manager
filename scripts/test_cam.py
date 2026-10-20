@@ -1196,12 +1196,14 @@ class CamTest(unittest.TestCase):
         # ip-api 模式：先问 ip-api.com
         pv = self.cam.save_privacy(store, {"ip_lookup": "ip-api"})
         self.assertEqual(pv["ip_lookup"], "ip-api")
-        self.assertTrue(any("ip-api.com" in s["name"] for s in pv["sources"]))
+        self.assertTrue(any("ip-api.com" in s["name"] and s["warn"] for s in pv["sources"]))
         self.cam.check_region(store, max_age=0)
         self.assertEqual(self.data()["region"]["meta_source"], "ip-api.com")
         # 关闭：只问 claude.ai 和状态页
         pv = self.cam.save_privacy(store, {"ip_lookup": "off"})
         self.assertEqual([s["name"] for s in pv["sources"]], ["claude.ai/cdn-cgi/trace", "status.anthropic.com"])
+        self.assertEqual({s["group"] for s in pv["sources"]}, {"anthropic"})
+        self.assertEqual([m["title"] for m in pv["modes"]], ["自动（推荐）", "加上 ip-api.com", "关闭"])
         MockAnthropic.calls = []
         self.cam.check_region(store, max_age=0)
         self.assertEqual(sorted({c[1] for c in MockAnthropic.calls}), ["/cdn-cgi/trace", "/status.json"])
@@ -1267,6 +1269,49 @@ class CamTest(unittest.TestCase):
         # 后台进程的入口会做完整检测并保存
         self.cam.background_region_check(store)
         self.assertEqual(self.data()["region"]["ip"], "5.6.7.8")
+
+    def test_ssl_fallback_and_consistent_scores(self):
+        import ssl
+        # python.org 版 Python 没带根证书：默认一张都没加载到时，改用系统自带的证书文件，照常校验
+        real = (ssl.create_default_context, ssl.get_default_verify_paths, self.cam.CA_FALLBACKS)
+        bundle = next((f for f in ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem", "/etc/pki/tls/certs/ca-bundle.crt")
+                       if os.path.isfile(f)), None)
+        if bundle:
+            empty = os.path.join(self.tmp, "no-such-dir")
+            try:
+                ssl.create_default_context = lambda: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ssl.get_default_verify_paths = lambda: real[1]()._replace(capath=empty, cafile=None)
+                self.cam.CA_FALLBACKS = ("/nonexistent/cert.pem", bundle)
+                ctx, used = self.cam.make_ssl_context()
+                self.assertEqual(used, bundle)
+                self.assertGreater(ctx.cert_store_stats()["x509_ca"], 0)
+                self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+            finally:
+                ssl.create_default_context, ssl.get_default_verify_paths, self.cam.CA_FALLBACKS = real
+        self.assertTrue(self.cam.is_cert_error("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"))
+        # 出口查不到：顶部分数不再是 100，并单独扣分（不按“不在名单”扣 60）
+        self._two_accounts()
+        store = self.cam.Store()
+        with store.lock():
+            d = store.load()
+            d["region"] = {"loc": None, "checked_at": self.cam.now_iso()}
+            store.save(d)
+        risks = self.cam.risk_items(self.data())
+        self.assertIn("region_unknown", [r["kind"] for r in risks])
+        self.assertEqual(self.cam.risk_score(risks)["score"], 70)
+        # 服务检测发现 api / claude.ai 连不上：记下来，顶部分数和服务检测一致
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}  # 当前登录可用
+        MockAnthropic.cloudflare = True  # claude.ai 返回人机验证页 → web warn
+        items = self.cam.service_check(store)
+        ss = self.data().get("service_status") or {}
+        self.assertEqual([i["kind"] for i in ss.get("items", [])], ["web"])
+        self.assertIn("web", [r["kind"] for r in self.cam.risk_items(self.data())])
+        self.assertEqual(self.cam.risk_score(self.cam.risk_items(self.data()))["score"], items[0]["score"])
+        # 网络恢复后，后台检测把 claude.ai 的旧问题清掉
+        MockAnthropic.cloudflare = False
+        self.cam.check_region(store, max_age=0)
+        self.assertNotIn("service_status", self.data())
+        self.assertEqual(self.cam.risk_score(self.cam.risk_items(self.data()))["score"], 100)
 
     def test_region_cached_for_display(self):
         self._two_accounts()

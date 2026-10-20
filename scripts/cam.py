@@ -35,6 +35,7 @@ import secrets as pysecrets
 import shutil
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -928,6 +929,56 @@ def switch_code_account(store, key):
 
 # --------------------------------------------------------------------------- 网络
 
+# 默认证书一张都没加载到时，按顺序试这些（macOS 自带 /etc/ssl/cert.pem；后面是各 Linux 发行版和 Homebrew 的位置）
+CA_FALLBACKS = ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                "/etc/ssl/ca-bundle.pem", "/opt/homebrew/etc/openssl@3/cert.pem", "/usr/local/etc/openssl@3/cert.pem",
+                "/usr/local/etc/openssl/cert.pem")
+
+
+def make_ssl_context():
+    """返回 (SSLContext, 改用的证书文件或 None)。
+
+    python.org 装的 Python（macOS 常见）默认不带根证书，所有 https 都会 CERTIFICATE_VERIFY_FAILED，
+    要手动运行一次 Install Certificates.command。这里在默认证书一张都没加载到时，依次改用 SSL_CERT_FILE、
+    certifi（装了的话）和系统自带的证书文件，开箱即用。证书照常校验，不会关掉校验。
+    """
+    ctx = ssl.create_default_context()
+    if ctx.cert_store_stats().get("x509_ca"):
+        return ctx, None
+    paths = ssl.get_default_verify_paths()
+    try:  # 按目录存放的证书要用到时才读进来，统计是 0 也可能是好的
+        if paths.capath and os.path.isdir(paths.capath) and os.listdir(paths.capath):
+            return ctx, None
+    except OSError:
+        pass
+    cands = [os.environ.get("SSL_CERT_FILE")]
+    try:
+        import certifi  # noqa: PLC0415  不是必需的依赖
+        cands.append(certifi.where())
+    except ImportError:
+        pass
+    for f in cands + list(CA_FALLBACKS):
+        if f and os.path.isfile(f):
+            try:
+                ctx.load_verify_locations(cafile=f)
+                return ctx, f
+            except (ssl.SSLError, OSError):
+                continue
+    return ctx, None
+
+
+SSL_CTX, SSL_CA_FALLBACK = make_ssl_context()
+
+
+def is_cert_error(msg):
+    return "CERTIFICATE_VERIFY_FAILED" in (msg or "")
+
+
+CERT_ADVICE = ("本机 Python 不认识 HTTPS 证书（python.org 版 Python 常见）。运行一次 "
+               f'open "/Applications/Python {sys.version_info.major}.{sys.version_info.minor}/Install Certificates.command"'
+               "，或设置环境变量 SSL_CERT_FILE 指向证书文件")
+
+
 def http_json(method, url, headers=None, body=None, timeout=20):
     h = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     h.update(headers or {})
@@ -937,7 +988,7 @@ def http_json(method, url, headers=None, body=None, timeout=20):
         h["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
             txt = r.read().decode("utf-8", "replace")
             return r.status, (json.loads(txt) if txt.strip() else {})
     except urllib.error.HTTPError as e:
@@ -1120,7 +1171,7 @@ def web_get(path, sk, timeout=20):
     }
     req = urllib.request.Request(url, headers=h, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
             raw = r.read().decode("utf-8", "replace")
             code = r.status
     except urllib.error.HTTPError as e:
@@ -1613,26 +1664,30 @@ def background_region_check(store):
 
 def privacy_sources(cfg):
     """当前设置下会访问哪些外部服务、各发了什么。只发出口 IP，不发任何账号信息。"""
-    out = [{"name": "claude.ai/cdn-cgi/trace", "what": "出口国家、IP、时钟。这是 Anthropic 自己的网站，访问 Claude 时它本来就看得到"},
-           {"name": "status.anthropic.com", "what": "Anthropic 官方状态页，不带任何本机信息"}]
+    def src(name, what, group="third", warn=False):
+        return {"name": name, "what": what, "group": group, "warn": warn}
+
+    out = [src("claude.ai/cdn-cgi/trace", "出口国家、IP、时钟。访问 Claude 时它本来就看得到", "anthropic"),
+           src("status.anthropic.com", "官方状态页，不带任何本机信息", "anthropic")]
     if cfg["mode"] == "off":
         return out
     if cfg["mode"] == "ip-api":
-        out.append({"name": "ip-api.com（http）", "what": "出口 IP 的运营商、城市、机房 / 代理标记。免费接口仅限非商业用途"})
-    out += [{"name": "api.ipapi.is", "what": "出口 IP 的运营商、城市"
-             + ("、机房 / VPN / Tor 标记（已配置 key）" if cfg["ipapi_key"] else "（没配 key：每天 30 次，不带类型标记）")},
-            {"name": "ipinfo.io", "what": "上一家查不到时：运营商、城市"},
-            {"name": "speed.cloudflare.com", "what": "再查不到时：运营商、城市"},
-            {"name": "rdap.org", "what": "出口 IP 的注册国"},
-            {"name": "1.1.1.1 / Cloudflare IPv6", "what": "分别测 IPv4、IPv6 出口"},
-            {"name": "www.cloudflare.com", "what": "claude.ai 连不上时，代替它看出口国家"}]
+        out.append(src("ip-api.com（http）", "运营商、城市、机房 / 代理标记。免费接口仅限非商业用途", warn=True))
+    out += [src("api.ipapi.is", "运营商、城市" + ("、机房 / VPN / Tor 标记" if cfg["ipapi_key"] else "（没配 key：每天 30 次，不带类型标记）")),
+            src("ipinfo.io", "上一家查不到时：运营商、城市"),
+            src("speed.cloudflare.com", "再查不到时：运营商、城市"),
+            src("rdap.org", "出口 IP 的注册国"),
+            src("1.1.1.1 / Cloudflare IPv6", "分别测 IPv4、IPv6 出口"),
+            src("www.cloudflare.com", "claude.ai 连不上时，代替它看出口国家")]
     return out
 
 
 def privacy_view(store):
     cfg = ip_lookup_config(store)
     data = store.load()
-    return {"ip_lookup": cfg["mode"], "modes": [{"value": k, "label": v} for k, v in IP_LOOKUP_MODES.items()],
+    return {"ip_lookup": cfg["mode"],
+            "modes": [{"value": k, "label": v, "title": IP_LOOKUP_TITLES[k][0], "desc": IP_LOOKUP_TITLES[k][1]}
+                      for k, v in IP_LOOKUP_MODES.items()],
             "env_override": bool(os.environ.get("CAM_IP_LOOKUP")),
             "has_ipapi_key": bool(cfg["ipapi_key"]), "has_ipinfo_token": bool(cfg["ipinfo_token"]),
             "meta_ttl_hours": round(META_TTL / 3600, 1), "sources": privacy_sources(cfg),
@@ -2924,7 +2979,7 @@ def http_text(url, timeout=8):
     """GET 纯文本。返回 (状态, 文本)；状态 0 表示没连上。"""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
@@ -2972,6 +3027,11 @@ IP_LOOKUP_MODES = {
     "auto": "自动：ipapi.is → ipinfo.io → Cloudflare（都可以商用）",
     "ip-api": "自动，并优先用 ip-api.com（带机房 / 代理标记；仅限非商业用途，只有 http）",
     "off": "关闭：只查 claude.ai 自己的出口信息和 Anthropic 状态页，不查运营商和 IP 类型",
+}
+IP_LOOKUP_TITLES = {  # 界面上的短标题和一句话说明，和 Rust 版 health::IP_LOOKUP_TITLES 一致
+    "auto": ("自动（推荐）", "ipapi.is → ipinfo.io → Cloudflare，都可以商用"),
+    "ip-api": ("加上 ip-api.com", "多一个带机房 / 代理标记的来源；仅限非商业用途，只有 http"),
+    "off": ("关闭", "只看出口国家和官方状态，不查运营商和 IP 类型"),
 }
 LOOKUP_SECRET_ID = "_ip-lookup"  # ipapi.is 的 key、ipinfo 的 token 存在 secrets 目录，不进 accounts.json
 META_TTL = int(os.environ.get("CAM_META_TTL", "86400"))  # 出口 IP 没变时，运营商 / 类型 / 注册国多久重查一次（秒）
@@ -3523,6 +3583,11 @@ def check_region(store, max_age=300):
         else:
             data.pop("status_page", None)
         note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"])
+        ss = data.get("service_status")
+        if reg["loc"] and isinstance(ss, dict):  # 连得上 claude.ai 了：网络、证书、claude.ai 的旧问题不再算
+            ss["items"] = [i for i in ss.get("items") or [] if i.get("kind") == "api"]
+            if not ss["items"]:
+                data.pop("service_status", None)
         store.save(data)
     return region_view(data)
 
@@ -3542,6 +3607,14 @@ def risk_items(data, include_region=True):
     loc = reg.get("loc") if reg.get("checked_at") else None
     if include_region and loc and region_status(loc) == "unsupported":
         add("region", "warn", region_message(loc, "unsupported"), REGION_ADVICE["unsupported"])
+    if include_region and reg.get("checked_at") and not loc:
+        add("region_unknown", "warn", "出口地区查不到：上次检测连不上 claude.ai 和 Cloudflare", REGION_ADVICE["unknown"])
+    if include_region:  # 最近一次服务检测发现的连接问题（后台检测到网络恢复后会清掉）
+        ss = data.get("service_status") or {}
+        at = parse_iso(ss.get("checked_at"))
+        if at and (now - at).total_seconds() < 3600:
+            for it in ss.get("items") or []:
+                add(it["kind"], it["level"], it["text"], it.get("advice", ""))
     changed = parse_iso(reg.get("changed_at"))
     if reg.get("prev_loc") and loc and changed and (now - changed).total_seconds() < REGION_CHANGE_HOURS * 3600:
         add("region_change", "warn",
@@ -3636,7 +3709,7 @@ def risk_items(data, include_region=True):
 
 # 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
 RISK_WEIGHTS = {
-    ("region", "warn"): 60, ("account_regions", "warn"): 20, ("region_change", "warn"): 15, ("isp", "warn"): 20,
+    ("region", "warn"): 60, ("region_unknown", "warn"): 30, ("tls", "bad"): 0, ("account_regions", "warn"): 20, ("region_change", "warn"): 15, ("isp", "warn"): 20,
     ("region_mismatch", "warn"): 15, ("timezone", "warn"): 25, ("timezone", "info"): 5, ("locale", "warn"): 15,
     ("locale", "info"): 3, ("clock", "warn"): 10, ("warp", "info"): 5, ("vpn", "info"): 10, ("proxy", "info"): 5,
     ("status", "bad"): 30, ("status", "warn"): 10, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
@@ -3706,7 +3779,7 @@ def service_check(store=None):
             f"{region_message(r['loc'], status)}（IP {r.get('ip')}" + (f"，{r['city']}" if r.get("city") else "")
             + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms）", REGION_ADVICE[status])
     else:
-        add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
+        add("region_unknown", "warn", "出口地区：查不到（连不上 claude.ai 和 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
     ip_type = r.get("ip_type")
     src_note = f"（数据：{r['meta_source']}）" if r.get("meta_source") else ""
     if r.get("lookup_mode") == "off":
@@ -3792,6 +3865,10 @@ def service_check(store=None):
     else:
         add("vpn", "ok", "VPN：默认路由没有经过隧道接口", "只看本机默认路由；透明代理和路由器上的 VPN 看不出来")
     out.extend(risk_items(data, include_region=False))
+    if any(is_cert_error(i["text"]) for i in out):
+        add("tls", "bad", "HTTPS 证书校验失败（CERTIFICATE_VERIFY_FAILED），上面连不上的几项都是这个原因", CERT_ADVICE)
+    elif SSL_CA_FALLBACK:
+        add("tls", "info", f"证书：本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}", "证书照常校验；想用 Python 自己的证书可以运行一次 Install Certificates.command")
     add("device", "info", f"设备：{platform.system()} {platform.release()}，{platform.machine()}，Python {platform.python_version()}",
         "设备类型、系统、时区、语言这些设备环境信息 Anthropic 会收集；这里只是列出来，本工具不会改动或伪装任何设备标识。")
     add("scope", "info", "检测范围：本机能看到的信号（出口 IP、IP 类型、IPv4 / IPv6、注册国、运营商、代理 / VPN、WARP、DNS 配置、时钟、时区、系统语言、账号使用地区）",
@@ -3812,6 +3889,15 @@ def service_check(store=None):
     out.insert(0, {"kind": "summary", "level": level, "score": sc["score"], "grade": sc["grade"],
                    "text": head + (f" —— {worst['text']}" if worst else "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"),
                    "advice": worst["advice"] if worst else RISK_SCORE_ADVICE})
+    if store is not None:  # 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
+        bad = [i for i in out if i["kind"] in ("api", "web", "dns", "tls") and i["level"] in ("warn", "bad")]
+        with store.lock():
+            d = store.load()
+            if bad:
+                d["service_status"] = {"checked_at": now_iso(), "items": bad}
+            else:
+                d.pop("service_status", None)
+            store.save(d)
     return out
 
 
@@ -3878,9 +3964,8 @@ def cmd_doctor(store):
         print(f"{marks[it['level']]} {it['text']}")
         if it["advice"]:
             print(color(f"    → {it['advice']}", "d"))
-    if any("CERTIFICATE_VERIFY_FAILED" in it["text"] for it in items):
-        print("    这是 python.org 版 Python 没装根证书，运行一次即可修好：")
-        print(f'    open "/Applications/Python {sys.version_info.major}.{sys.version_info.minor}/Install Certificates.command"')
+    if SSL_CA_FALLBACK:
+        print(color(f"    · 本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}（证书照常校验）", "d"))
 
 
 def main(argv=None):

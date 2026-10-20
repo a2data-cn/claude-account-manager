@@ -325,6 +325,22 @@ export default function App() {
       toast("已移除。Claude Code 的项目和会话都还在，凭据在备份目录里");
     });
 
+  // 检测新登录：Claude Code 里 /login 换了号之后点一下，是新账号就保存，不是就说明已经存过（和手机面板一致）
+  const detectLogin = () =>
+    run("detect", async () => {
+      const before = new Set((state?.accounts ?? []).map((a) => a.id));
+      const s = await api<State>("POST", "/api/accounts", { kind: "claude_code" });
+      setState(s);
+      const added = s.accounts.find((a) => !before.has(a.id));
+      const cur = s.accounts.find((a) => a.is_active);
+      if (added) {
+        select(added);
+        toast(`发现新账号，已保存：${added.label || added.email}`);
+      } else {
+        toast(cur ? `Claude Code 现在登录的是"${cur.label || cur.email}"，已经保存过了` : "没有发现新登录");
+      }
+    });
+
   const add = (v: AddValues) =>
     run("add", async () => {
       setState(await api<State>("POST", "/api/accounts", v));
@@ -435,6 +451,14 @@ export default function App() {
                   左右滑动，点一下看详情
                 </span>
                 <span className="spacer" style={{ flex: 1 }} />
+                <button
+                  className="btn quiet"
+                  disabled={busy === "detect"}
+                  title="检查 Claude Code 现在登录的是不是新账号，是就保存"
+                  onClick={detectLogin}
+                >
+                  {busy === "detect" ? "检测中…" : "检测新登录"}
+                </button>
                 <button className="btn quiet" onClick={() => setAdding(true)}>
                   ＋ 添加账号
                 </button>

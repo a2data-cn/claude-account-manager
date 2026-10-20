@@ -83,6 +83,12 @@ pub const IP_LOOKUP_MODES: &[(&str, &str)] = &[
     ("ip-api", "自动，并优先用 ip-api.com（带机房 / 代理标记；仅限非商业用途，只有 http）"),
     ("off", "关闭：只查 claude.ai 自己的出口信息和 Anthropic 状态页，不查运营商和 IP 类型"),
 ];
+/// 界面上的短标题和一句话说明，和 cam.py 的 IP_LOOKUP_TITLES 一致
+pub const IP_LOOKUP_TITLES: &[(&str, &str, &str)] = &[
+    ("auto", "自动（推荐）", "ipapi.is → ipinfo.io → Cloudflare，都可以商用"),
+    ("ip-api", "加上 ip-api.com", "多一个带机房 / 代理标记的来源；仅限非商业用途，只有 http"),
+    ("off", "关闭", "只看出口国家和官方状态，不查运营商和 IP 类型"),
+];
 /// ipapi.is 的 key、ipinfo 的 token 存在 secrets 目录，不进 accounts.json
 pub const LOOKUP_SECRET_ID: &str = "_ip-lookup";
 const META_FIELDS: &[&str] = &["asn", "org", "city", "meta_loc", "ip_type", "reg_loc", "meta_source", "meta_at"];
@@ -891,6 +897,19 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     }
     let act = active_code_id(&data);
     note_account_region(&mut data, act.as_deref(), new_loc.as_deref());
+    if new_loc.is_some() {
+        // 连得上 claude.ai 了：网络、证书、claude.ai 的旧问题不再算
+        let mut drop_all = false;
+        if let Some(items) = data.get_mut("service_status").and_then(|ss| ss.get_mut("items")).and_then(|i| i.as_array_mut()) {
+            items.retain(|i| s(i, "kind") == Some("api"));
+            drop_all = items.is_empty();
+        }
+        if drop_all {
+            if let Some(o) = data.as_object_mut() {
+                o.remove("service_status");
+            }
+        }
+    }
     store.save(&mut data)?;
     Ok(region_view(&data))
 }
@@ -909,6 +928,30 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
         if let Some(l) = loc.as_deref() {
             if region_status(Some(l)) == "unsupported" {
                 add("region", "warn", region_message(Some(l), "unsupported"), region_advice("unsupported"));
+            }
+        } else if s(&reg, "checked_at").is_some() {
+            add(
+                "region_unknown",
+                "warn",
+                "出口地区查不到：上次检测连不上 claude.ai 和 Cloudflare".into(),
+                region_advice("unknown"),
+            );
+        }
+        // 最近一次服务检测发现的连接问题（后台检测到网络恢复后会清掉）
+        if let Some(ss) = data.get("service_status") {
+            let fresh = s(ss, "checked_at")
+                .and_then(parse_time)
+                .map(|t| now.signed_duration_since(t).num_seconds() < 3600)
+                .unwrap_or(false);
+            if fresh {
+                for it in ss.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default() {
+                    add(
+                        s(&it, "kind").unwrap_or(""),
+                        s(&it, "level").unwrap_or("warn"),
+                        s(&it, "text").unwrap_or("").to_string(),
+                        s(&it, "advice").unwrap_or(""),
+                    );
+                }
             }
         }
     }
@@ -1136,7 +1179,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
 
 /// 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
 const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
-    ("region", "warn", 60), ("account_regions", "warn", 20), ("region_change", "warn", 15), ("isp", "warn", 20),
+    ("region", "warn", 60), ("region_unknown", "warn", 30), ("tls", "bad", 0), ("account_regions", "warn", 20), ("region_change", "warn", 15), ("isp", "warn", 20),
     ("region_mismatch", "warn", 15), ("timezone", "warn", 25), ("timezone", "info", 5), ("locale", "warn", 15),
     ("locale", "info", 3), ("clock", "warn", 10), ("warp", "info", 5), ("vpn", "info", 10), ("proxy", "info", 5),
     ("status", "bad", 30), ("status", "warn", 10), ("api", "bad", 40), ("api", "warn", 5), ("web", "bad", 10),
@@ -1278,7 +1321,12 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                 region_advice(status),
             );
         }
-        None => add("region", "warn", "出口地区：查不到（连不上 Cloudflare 的 trace 接口）".into(), region_advice("unknown")),
+        None => add(
+            "region_unknown",
+            "warn",
+            "出口地区：查不到（连不上 claude.ai 和 Cloudflare 的 trace 接口）".into(),
+            region_advice("unknown"),
+        ),
     }
     let asn = r.get("asn").filter(|v| !v.is_null()).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
     let src_note = s(&r, "meta_source").map(|m| format!("（数据：{}）", m)).unwrap_or_default();
@@ -1451,32 +1499,47 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                        "text": format!("{}；Claude 服务正常，出口地区在支持名单内，没有发现风险点", head), "advice": RISK_SCORE_ADVICE}),
     };
     out.insert(0, summary);
+    // 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
+    let bad: Vec<Value> = out
+        .iter()
+        .filter(|i| matches!(s(i, "kind"), Some("api" | "web" | "dns" | "tls")) && matches!(s(i, "level"), Some("warn" | "bad")))
+        .cloned()
+        .collect();
+    if let Ok(_g) = store.lock() {
+        if let Ok(mut d) = store.load() {
+            if bad.is_empty() {
+                if let Some(o) = d.as_object_mut() {
+                    o.remove("service_status");
+                }
+            } else {
+                d["service_status"] = json!({"checked_at": now_iso(), "items": bad});
+            }
+            let _ = store.save(&mut d);
+        }
+    }
     out
 }
 
 /// 当前设置下会访问哪些外部服务、各发了什么。只发出口 IP，不发任何账号信息。与 cam.py 一致。
 pub fn privacy_sources(cfg: &LookupConfig) -> Vec<Value> {
+    let src = |name: &str, what: &str, group: &str, warn: bool| json!({"name": name, "what": what, "group": group, "warn": warn});
     let mut out = vec![
-        json!({"name": "claude.ai/cdn-cgi/trace", "what": "出口国家、IP、时钟。这是 Anthropic 自己的网站，访问 Claude 时它本来就看得到"}),
-        json!({"name": "status.anthropic.com", "what": "Anthropic 官方状态页，不带任何本机信息"}),
+        src("claude.ai/cdn-cgi/trace", "出口国家、IP、时钟。访问 Claude 时它本来就看得到", "anthropic", false),
+        src("status.anthropic.com", "官方状态页，不带任何本机信息", "anthropic", false),
     ];
     if cfg.mode == "off" {
         return out;
     }
     if cfg.mode == "ip-api" {
-        out.push(json!({"name": "ip-api.com（http）", "what": "出口 IP 的运营商、城市、机房 / 代理标记。免费接口仅限非商业用途"}));
+        out.push(src("ip-api.com（http）", "运营商、城市、机房 / 代理标记。免费接口仅限非商业用途", "third", true));
     }
-    let ipapi = if cfg.ipapi_key.is_empty() {
-        "出口 IP 的运营商、城市（没配 key：每天 30 次，不带类型标记）"
-    } else {
-        "出口 IP 的运营商、城市、机房 / VPN / Tor 标记（已配置 key）"
-    };
-    out.push(json!({"name": "api.ipapi.is", "what": ipapi}));
-    out.push(json!({"name": "ipinfo.io", "what": "上一家查不到时：运营商、城市"}));
-    out.push(json!({"name": "speed.cloudflare.com", "what": "再查不到时：运营商、城市"}));
-    out.push(json!({"name": "rdap.org", "what": "出口 IP 的注册国"}));
-    out.push(json!({"name": "1.1.1.1 / Cloudflare IPv6", "what": "分别测 IPv4、IPv6 出口"}));
-    out.push(json!({"name": "www.cloudflare.com", "what": "claude.ai 连不上时，代替它看出口国家"}));
+    let ipapi = if cfg.ipapi_key.is_empty() { "运营商、城市（没配 key：每天 30 次，不带类型标记）" } else { "运营商、城市、机房 / VPN / Tor 标记" };
+    out.push(src("api.ipapi.is", ipapi, "third", false));
+    out.push(src("ipinfo.io", "上一家查不到时：运营商、城市", "third", false));
+    out.push(src("speed.cloudflare.com", "再查不到时：运营商、城市", "third", false));
+    out.push(src("rdap.org", "出口 IP 的注册国", "third", false));
+    out.push(src("1.1.1.1 / Cloudflare IPv6", "分别测 IPv4、IPv6 出口", "third", false));
+    out.push(src("www.cloudflare.com", "claude.ai 连不上时，代替它看出口国家", "third", false));
     out
 }
 
@@ -1487,7 +1550,13 @@ pub fn privacy_view(store: &Store) -> R<Value> {
         .iter()
         .filter(|a| a.get("regions").and_then(|r| r.as_array()).map(|r| !r.is_empty()).unwrap_or(false))
         .count();
-    let modes: Vec<Value> = IP_LOOKUP_MODES.iter().map(|(v, l)| json!({"value": v, "label": l})).collect();
+    let modes: Vec<Value> = IP_LOOKUP_MODES
+        .iter()
+        .map(|(v, l)| {
+            let (_, title, desc) = IP_LOOKUP_TITLES.iter().find(|(k, _, _)| k == v).copied().unwrap_or((v, v, ""));
+            json!({"value": v, "label": l, "title": title, "desc": desc})
+        })
+        .collect();
     let hours = (meta_ttl() as f64 / 3600.0 * 10.0).round() / 10.0;
     Ok(json!({
         "ip_lookup": cfg.mode, "modes": modes,

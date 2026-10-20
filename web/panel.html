@@ -200,11 +200,44 @@ section.block h2 { font-family: var(--serif); font-size: 15px; font-weight: 500;
 .host .risk.high { color: var(--hot); border-color: var(--hot); }
 .checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* 隐私与数据源 */
-.sources { list-style: none; margin: 6px 0 10px; padding: 0; display: grid; gap: 4px; font-size: 12.5px; }
-.sources b { font-weight: 600; margin-right: 8px; }
+.pv-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+.seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.seg-opt { display: grid; gap: 2px; align-content: start; text-align: left; cursor: pointer; color: var(--ink);
+  border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 8px 10px 8px 28px; position: relative;
+  transition: border-color .12s, box-shadow .12s; }
+.seg-opt::before { content: ""; position: absolute; left: 10px; top: 11px; width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.seg-opt b { font-size: 13px; font-weight: 600; }
+.seg-opt span { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.seg-opt:hover { border-color: var(--muted); }
+.seg-opt.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--surface); }
+.seg-opt.on::before { border-color: var(--accent); background: radial-gradient(var(--accent) 45%, transparent 50%); }
+.seg-opt:disabled { cursor: not-allowed; opacity: .6; }
+.keys { display: grid; gap: 8px; margin-bottom: 14px; }
+.key-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) auto; gap: 6px 10px; align-items: center; }
+.key-name { display: grid; gap: 1px; min-width: 0; }
+.key-name b { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.key-name small { font-size: 11.5px; color: var(--muted); }
+.key-row input { width: 100%; min-height: 30px; padding: 5px 9px; font-size: 13px; border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); }
+.key-acts { display: flex; gap: 6px; }
+.chip.c-ok { color: var(--live); border-color: currentColor; }
+details.src { border-top: 1px solid var(--line); padding-top: 10px; }
+details.src summary { cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none; }
+details.src summary::-webkit-details-marker { display: none; }
+details.src summary::before { content: "▸"; display: inline-block; width: 1.1em; }
+details.src[open] summary::before { content: "▾"; }
+.src-group { margin-top: 10px; }
+.src-group h5 { margin: 0 0 4px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.sources { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; font-size: 12.5px; }
+.sources li { display: grid; grid-template-columns: 13em minmax(0, 1fr); gap: 10px; }
+.sources b { font-weight: 600; overflow-wrap: anywhere; }
 .sources span { color: var(--muted); }
-.pv-h { margin: 14px 0 0; font-size: 13px; font-weight: 650; }
-.pv-acts { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
+.pv-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+@media (max-width: 680px) {
+  .seg { grid-template-columns: 1fr; }
+  .key-row { grid-template-columns: 1fr; }
+  .sources li { grid-template-columns: 1fr; gap: 0; }
+}
 .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
 .checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
 .checks li.summary .advice { font-weight: 400; }
@@ -372,17 +405,12 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   <section class="block" id="privacy-block" hidden>
     <h2>隐私与数据源</h2>
     <div class="panel">
-      <p class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。下面可以选择查不查运营商和 IP 类型、用哪家的数据。</p>
-      <div class="field"><label for="pv-mode">外部 IP 查询</label><select id="pv-mode"></select><span class="hint" id="pv-env" hidden>被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span></div>
-      <form class="row2" id="pv-form">
-        <div class="field"><label for="pv-key">ipapi.is key（免费注册，每天 1000 次，可商用，带机房 / VPN 标记）</label><input id="pv-key" type="password" autocomplete="off"></div>
-        <div class="field"><label for="pv-tok">ipinfo.io token（可选）</label><input id="pv-tok" type="password" autocomplete="off"></div>
-        <div class="pv-acts"><button class="btn" type="submit">保存 key</button><button class="btn quiet danger" type="button" id="pv-del" hidden>删除已保存的 key</button></div>
-      </form>
-      <h4 class="pv-h">当前设置下会访问</h4>
-      <ul class="sources" id="pv-sources"></ul>
-      <p class="hint" id="pv-ttl"></p>
-      <div class="alert-row"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div>
+      <p class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。</p>
+      <p class="pv-label">外部 IP 查询<span id="pv-env" hidden> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span></p>
+      <div class="seg" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
+      <div class="keys" id="pv-keys"></div>
+      <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details>
+      <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div>
     </div>
   </section>
 
@@ -777,7 +805,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const bad = sorted.filter((a) => (a.health || {}).level === "error").length;
     list.innerHTML = notice
       + `<div class="sec-head"><h2>账号 · ${sorted.length} 个</h2><span class="hint">${bad ? `<span style="color:var(--hot);font-weight:600">${bad} 个异常</span> · ` : ""}左右滑动，点一下看详情</span>
-          <span class="spacer" style="flex:1"></span><button class="btn quiet" data-act="add">＋ 添加账号</button></div>`
+          <span class="spacer" style="flex:1"></span><button class="btn quiet" data-act="detect" title="检查 Claude Code 现在登录的是不是新账号，是就保存">检测新登录</button><button class="btn quiet" data-act="add">＋ 添加账号</button></div>`
       + `<div class="strip" role="list">${sorted.map((a) => tile(a, a.id === sel.id)).join("")}
           <button type="button" class="tile add" data-act="add"><span class="plus">＋</span>添加账号</button></div>`
       + detailView(sel)
@@ -825,16 +853,31 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
 
   // ---- 隐私与数据源
+  const KEYS = [  // [字段, 名字, 说明, 已配置字段, 没配时的提示]
+    ["ipapi_key", "ipapi.is key", "免费注册 · 每天 1000 次 · 可商用 · 带机房 / VPN 标记", "has_ipapi_key", "没配：每天 30 次，不带类型标记"],
+    ["ipinfo_token", "ipinfo.io token", "可选 · 上一家查不到时用", "has_ipinfo_token", "没配也能用"],
+  ];
   function renderPrivacy(p) {
-    $("#pv-mode").innerHTML = p.modes.map((m) => `<option value="${esc(m.value)}"${m.value === p.ip_lookup ? " selected" : ""}>${esc(m.label)}</option>`).join("");
-    $("#pv-mode").disabled = p.env_override;
     $("#pv-env").hidden = !p.env_override;
-    $("#pv-key").placeholder = p.has_ipapi_key ? "已配置，留空不修改" : "没配：每天 30 次，不带类型标记";
-    $("#pv-tok").placeholder = p.has_ipinfo_token ? "已配置，留空不修改" : "没配";
-    $("#pv-del").hidden = !(p.has_ipapi_key || p.has_ipinfo_token);
-    $("#pv-sources").innerHTML = p.sources.map((s) => `<li><b>${esc(s.name)}</b><span>${esc(s.what)}</span></li>`).join("");
-    $("#pv-ttl").textContent = `出口 IP 没变时，运营商信息 ${p.meta_ttl_hours} 小时内不重查。`;
-    $("#pv-hist").textContent = `地区记录：${p.history.accounts} 个账号记过使用地区（用来提醒“同一账号多地区使用”）`;
+    $("#pv-modes").innerHTML = p.modes.map((m) => `<button type="button" class="seg-opt${m.value === p.ip_lookup ? " on" : ""}" role="radio"
+      aria-checked="${m.value === p.ip_lookup}" data-mode="${esc(m.value)}"${p.env_override ? " disabled" : ""}><b>${esc(m.title || m.label)}</b><span>${esc(m.desc || "")}</span></button>`).join("");
+    $("#pv-keys").hidden = p.ip_lookup === "off";
+    $("#pv-keys").innerHTML = KEYS.map(([k, name, desc, has, empty]) => `<div class="key-row">
+      <div class="key-name"><b>${name} <span class="chip${p[has] ? " c-ok" : ""}">${p[has] ? "已配置" : "未配置"}</span></b><small>${desc}</small></div>
+      <input type="password" autocomplete="off" data-key="${k}" aria-label="${name}" placeholder="${p[has] ? "已配置，输入新的可替换" : empty}">
+      <div class="key-acts"><button type="button" class="btn" data-key-save="${k}">保存</button>${p[has] ? `<button type="button" class="btn quiet danger" data-key-del="${k}">删除</button>` : ""}</div>
+    </div>`).join("");
+    const groups = [["anthropic", "Anthropic（访问 Claude 时本来就会连）"], ["third", "第三方（只发出口 IP）"]];
+    const third = p.sources.filter((s) => s.group === "third").length;
+    $("#pv-src-sum").textContent = third
+      ? `会访问 ${p.sources.length} 个服务，其中第三方 ${third} 个 · 出口 IP 不变时运营商信息 ${p.meta_ttl_hours} 小时内不重查`
+      : `只访问 ${p.sources.length} 个 Anthropic 服务，不访问任何第三方`;
+    $("#pv-groups").innerHTML = groups.map(([g, title]) => {
+      const rows = p.sources.filter((s) => (s.group || "third") === g);
+      return rows.length ? `<div class="src-group"><h5>${title}</h5><ul class="sources">${rows.map((s) =>
+        `<li><b>${esc(s.name)}${s.warn ? ` <span class="chip st-warn">仅限非商业</span>` : ""}</b><span>${esc(s.what)}</span></li>`).join("")}</ul></div>` : "";
+    }).join("");
+    $("#pv-hist").textContent = `地区记录：${p.history.accounts} 个账号记过使用地区，用来提醒“同一账号多地区使用”`;
     $("#privacy-block").hidden = false;
   }
   async function loadPrivacy() {
@@ -843,17 +886,18 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   async function savePrivacy(method, path, body, msg) {
     try { renderPrivacy(await api(method, path, body)); toast(msg); load(); } catch (e) { toast(e.message, true); }
   }
-  $("#pv-mode").onchange = (e) => savePrivacy("PUT", "/api/privacy", { ip_lookup: e.target.value }, "已保存，下次检测按新设置");
-  $("#pv-form").onsubmit = (e) => {
-    e.preventDefault();
-    const body = {};
-    if ($("#pv-key").value.trim()) body.ipapi_key = $("#pv-key").value.trim();
-    if ($("#pv-tok").value.trim()) body.ipinfo_token = $("#pv-tok").value.trim();
-    if (!Object.keys(body).length) return;
-    $("#pv-key").value = ""; $("#pv-tok").value = "";
-    savePrivacy("PUT", "/api/privacy", body, "已保存 key");
-  };
-  $("#pv-del").onclick = () => savePrivacy("PUT", "/api/privacy", { ipapi_key: "", ipinfo_token: "" }, "已删除 key");
+  $("#privacy-block").addEventListener("click", (e) => {
+    const m = e.target.closest("[data-mode]");
+    if (m && !m.classList.contains("on")) return savePrivacy("PUT", "/api/privacy", { ip_lookup: m.dataset.mode }, "已保存，下次检测按新设置");
+    const s = e.target.closest("[data-key-save]");
+    if (s) {
+      const k = s.dataset.keySave, v = $(`#pv-keys input[data-key="${k}"]`).value.trim();
+      if (!v) return toast("先填上 key 再保存", true);
+      return savePrivacy("PUT", "/api/privacy", { [k]: v }, "已保存");
+    }
+    const d = e.target.closest("[data-key-del]");
+    if (d) return savePrivacy("PUT", "/api/privacy", { [d.dataset.keyDel]: "" }, "已删除");
+  });
   $("#pv-clear").onclick = () => savePrivacy("DELETE", "/api/privacy/history", undefined, "已清除出口信息和地区记录");
 
   async function load() {
@@ -993,6 +1037,21 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     }
     await doAdd(body);
   });
+  // 检测新登录：Claude Code 里 /login 换了号之后点一下，是新账号就保存，不是就说明已经存过
+  async function detectLogin(btn) {
+    await busy(btn, async () => {
+      const before = new Set(state.accounts.map((a) => a.id));
+      try {
+        state = await api("POST", "/api/accounts", { kind: "claude_code" });
+        const added = state.accounts.find((a) => !before.has(a.id));
+        const cur = state.accounts.find((a) => a.is_active);
+        if (added) { selectedId = added.id; toast(`发现新账号，已保存：${nameOf(added)}`); }
+        else toast(cur ? `Claude Code 现在登录的是“${nameOf(cur)}”，已经保存过了` : "没有发现新登录");
+        render();
+      } catch (e) { toast(e.message, true); }
+    });
+  }
+
   async function doAdd(body) {
     try {
       state = await api("POST", "/api/accounts", body); render();
@@ -1097,6 +1156,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       case "add": openAdd(); break;
       case "remove": if (a) openRemove(a); break;
       case "import": doAdd({ kind: "claude_code" }); break;
+      case "detect": await detectLogin(b); break;
       case "rule-rm":
         if (rules) saveRules({ rules: rules.rules.filter((r) => r.id !== id) }, "规则已删除");
         break;

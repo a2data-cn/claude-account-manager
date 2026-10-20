@@ -69,8 +69,8 @@ bash extras/swiftbar/install.sh
 工具不保存密码。Claude 登录要走邮箱验证或 Google 授权，所以每个号的第一次登录需要你自己完成：
 
 1. 终端运行 `claude`，输入 `/login`，在浏览器里登录第一个账号
-2. 运行 `cam`（或打开桌面版），它会自动发现这个账号并保存
-3. 再次 `/login` 登录第二个账号，重复第 2 步，依此类推
+2. 运行 `cam`（或在桌面版 / 手机面板的账号区点"检测新登录"），它会发现这个账号并保存；桌面版和 `cam serve` 在后台也会自动发现
+3. 再次 `/login` 登录第二个账号（Claude Code 会直接替换当前登录，已保存的号不会丢），重复第 2 步，依此类推
 
 完成后：
 - **切换**：`cam switch 工作号`，或在桌面版 / 托盘 / 手机上点一下
@@ -118,7 +118,11 @@ Windows 用 `scripts\cam.cmd`，用法相同。
 
 ### Claude Code 环境：检查、安装、清理
 
-`cam doctor`（也可以写成 `cam env doctor` / `cam env check`）除了检查登录和数据目录，还会查出几类常见的“切换了却不生效”：
+`cam doctor`（也可以写成 `cam env doctor` / `cam env check`）除了检查登录和数据目录，还会查出几类常见的“切换了却不生效”。
+
+python.org 装的 Python（macOS 上常见）默认不带根证书，https 请求会报 `CERTIFICATE_VERIFY_FAILED`。脚本版发现默认证书一张都没加载到时，会自动改用 `SSL_CERT_FILE`、certifi（装了的话）或系统自带的证书文件（macOS 是 `/etc/ssl/cert.pem`），证书照常校验，`cam doctor` 会写明用的是哪个文件。
+
+常见的“切换了却不生效”：
 - PATH 里有好几份 `claude`（比如 npm 版和原生版并存），会列出来并标明实际运行的是哪个
 - 设置了 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 等环境变量，或者 `settings.json` 里配了 `apiKeyHelper`、`~/.claude.json` 里存着 `primaryApiKey`。这些都优先于订阅登录，切换账号就没有效果
 - 当前有几个 `claude` 进程在运行

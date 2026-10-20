@@ -133,12 +133,12 @@ export interface RegionInfo {
 /** GET / PUT /api/privacy：外部 IP 查询设置和会访问哪些服务 */
 export interface PrivacyInfo {
   ip_lookup: "auto" | "ip-api" | "off";
-  modes: { value: string; label: string }[];
+  modes: { value: string; label: string; title?: string; desc?: string }[];
   env_override: boolean;
   has_ipapi_key: boolean;
   has_ipinfo_token: boolean;
   meta_ttl_hours: number;
-  sources: { name: string; what: string }[];
+  sources: { name: string; what: string; group?: "anthropic" | "third"; warn?: boolean }[];
   history: { accounts: number; checked_at: string | null };
 }
 

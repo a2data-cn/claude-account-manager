@@ -2,11 +2,20 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { PrivacyInfo } from "../types";
 
-/** 隐私与数据源：外部 IP 查询的开关和数据源、ipapi.is / ipinfo 的 key、清除地区记录。只发出口 IP，不发账号信息 */
+type KeyField = "ipapi_key" | "ipinfo_token";
+const KEYS: [KeyField, string, string, "has_ipapi_key" | "has_ipinfo_token", string][] = [
+  ["ipapi_key", "ipapi.is key", "免费注册 · 每天 1000 次 · 可商用 · 带机房 / VPN 标记", "has_ipapi_key", "没配：每天 30 次，不带类型标记"],
+  ["ipinfo_token", "ipinfo.io token", "可选 · 上一家查不到时用", "has_ipinfo_token", "没配也能用"],
+];
+const GROUPS: ["anthropic" | "third", string][] = [
+  ["anthropic", "Anthropic（访问 Claude 时本来就会连）"],
+  ["third", "第三方（只发出口 IP）"],
+];
+
+/** 隐私与数据源：外部 IP 查询三选一、每个 key 一行、会访问的服务（默认折叠）、清除地区记录。和手机面板同一套布局 */
 export function Privacy({ toast, onChanged }: { toast: (m: string, bad?: boolean) => void; onChanged: () => void }) {
   const [p, setP] = useState<PrivacyInfo | null>(null);
-  const [key, setKey] = useState("");
-  const [tok, setTok] = useState("");
+  const [vals, setVals] = useState<Record<KeyField, string>>({ ipapi_key: "", ipinfo_token: "" });
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -15,90 +24,117 @@ export function Privacy({ toast, onChanged }: { toast: (m: string, bad?: boolean
       .catch((e) => toast((e as Error).message, true));
   }, [toast]);
 
-  const save = async (body: Record<string, string>, msg: string, method: "PUT" | "DELETE" = "PUT") => {
+  const call = async (method: "PUT" | "DELETE", body: Record<string, string> | undefined, msg: string) => {
     setBusy(true);
     try {
-      setP(await api<PrivacyInfo>(method, method === "PUT" ? "/api/privacy" : "/api/privacy/history", method === "PUT" ? body : undefined));
+      setP(await api<PrivacyInfo>(method, method === "PUT" ? "/api/privacy" : "/api/privacy/history", body));
       toast(msg);
       onChanged();
+      return true;
     } catch (e) {
       toast((e as Error).message, true);
+      return false;
     } finally {
       setBusy(false);
     }
   };
 
   if (!p) return null;
+  const third = p.sources.filter((s) => s.group === "third").length;
   return (
     <section className="block">
       <h2>隐私与数据源</h2>
       <div className="panel">
-        <p className="hint">环境检测只发送这台电脑的出口 IP，不发送任何账号、邮箱或凭据。下面可以选择查不查运营商和 IP 类型、用哪家的数据。</p>
-        <div className="field">
-          <label htmlFor="pv-mode">外部 IP 查询</label>
-          <select
-            id="pv-mode"
-            value={p.ip_lookup}
-            disabled={busy || p.env_override}
-            onChange={(e) => save({ ip_lookup: e.target.value }, "已保存，下次检测按新设置")}
-          >
-            {p.modes.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-          {p.env_override && <span className="hint">被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span>}
-        </div>
-        <form
-          className="row2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const body: Record<string, string> = {};
-            if (key.trim()) body.ipapi_key = key.trim();
-            if (tok.trim()) body.ipinfo_token = tok.trim();
-            if (!Object.keys(body).length) return;
-            save(body, "已保存 key").then(() => {
-              setKey("");
-              setTok("");
-            });
-          }}
-        >
-          <div className="field">
-            <label htmlFor="pv-key">ipapi.is key（免费注册，每天 1000 次，可商用，带机房 / VPN 标记）</label>
-            <input id="pv-key" type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)}
-              placeholder={p.has_ipapi_key ? "已配置，留空不修改" : "没配：每天 30 次，不带类型标记"} />
-          </div>
-          <div className="field">
-            <label htmlFor="pv-tok">ipinfo.io token（可选）</label>
-            <input id="pv-tok" type="password" autoComplete="off" value={tok} onChange={(e) => setTok(e.target.value)}
-              placeholder={p.has_ipinfo_token ? "已配置，留空不修改" : "没配"} />
-          </div>
-          <div className="pv-acts">
-            <button className="btn" type="submit" disabled={busy || (!key.trim() && !tok.trim())}>
-              保存 key
+        <p className="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。</p>
+        <p className="pv-label">
+          外部 IP 查询{p.env_override && <span> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span>}
+        </p>
+        <div className="seg" role="radiogroup" aria-label="外部 IP 查询">
+          {p.modes.map((m) => (
+            <button
+              key={m.value}
+              type="button"
+              role="radio"
+              aria-checked={m.value === p.ip_lookup}
+              className={`seg-opt${m.value === p.ip_lookup ? " on" : ""}`}
+              disabled={busy || p.env_override}
+              onClick={() => m.value !== p.ip_lookup && call("PUT", { ip_lookup: m.value }, "已保存，下次检测按新设置")}
+            >
+              <b>{m.title || m.label}</b>
+              <span>{m.desc}</span>
             </button>
-            {(p.has_ipapi_key || p.has_ipinfo_token) && (
-              <button className="btn quiet danger" type="button" disabled={busy}
-                onClick={() => save({ ipapi_key: "", ipinfo_token: "" }, "已删除 key")}>
-                删除已保存的 key
-              </button>
-            )}
-          </div>
-        </form>
-        <h4 className="pv-h">当前设置下会访问</h4>
-        <ul className="sources">
-          {p.sources.map((s) => (
-            <li key={s.name}>
-              <b>{s.name}</b>
-              <span>{s.what}</span>
-            </li>
           ))}
-        </ul>
-        <p className="hint">出口 IP 没变时，运营商信息 {p.meta_ttl_hours} 小时内不重查。</p>
-        <div className="alert-row">
-          <span>地区记录：{p.history.accounts} 个账号记过使用地区（用来提醒"同一账号多地区使用"）</span>
-          <button className="btn" disabled={busy} onClick={() => save({}, "已清除出口信息和地区记录", "DELETE")}>
+        </div>
+        {p.ip_lookup !== "off" && (
+          <div className="keys">
+            {KEYS.map(([k, name, desc, has, empty]) => (
+              <div className="key-row" key={k}>
+                <div className="key-name">
+                  <b>
+                    {name} <span className={`chip${p[has] ? " c-ok" : ""}`}>{p[has] ? "已配置" : "未配置"}</span>
+                  </b>
+                  <small>{desc}</small>
+                </div>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  aria-label={name}
+                  value={vals[k]}
+                  placeholder={p[has] ? "已配置，输入新的可替换" : empty}
+                  onChange={(e) => setVals({ ...vals, [k]: e.target.value })}
+                />
+                <div className="key-acts">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={() => {
+                      const v = vals[k].trim();
+                      if (!v) return toast("先填上 key 再保存", true);
+                      call("PUT", { [k]: v }, "已保存").then((ok) => ok && setVals({ ...vals, [k]: "" }));
+                    }}
+                  >
+                    保存
+                  </button>
+                  {p[has] && (
+                    <button type="button" className="btn quiet danger" disabled={busy} onClick={() => call("PUT", { [k]: "" }, "已删除")}>
+                      删除
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <details className="src">
+          <summary>
+            {third
+              ? `会访问 ${p.sources.length} 个服务，其中第三方 ${third} 个 · 出口 IP 不变时运营商信息 ${p.meta_ttl_hours} 小时内不重查`
+              : `只访问 ${p.sources.length} 个 Anthropic 服务，不访问任何第三方`}
+          </summary>
+          {GROUPS.map(([g, title]) => {
+            const rows = p.sources.filter((s) => (s.group || "third") === g);
+            return rows.length ? (
+              <div className="src-group" key={g}>
+                <h5>{title}</h5>
+                <ul className="sources">
+                  {rows.map((s) => (
+                    <li key={s.name}>
+                      <b>
+                        {s.name}
+                        {s.warn && <span className="chip st-warn"> 仅限非商业</span>}
+                      </b>
+                      <span>{s.what}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null;
+          })}
+        </details>
+        <div className="pv-foot">
+          <span>地区记录：{p.history.accounts} 个账号记过使用地区，用来提醒"同一账号多地区使用"</span>
+          <button className="btn" disabled={busy} onClick={() => call("DELETE", undefined, "已清除出口信息和地区记录")}>
             清除地区记录
           </button>
         </div>
