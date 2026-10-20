@@ -148,7 +148,7 @@ python.org 装的 Python（macOS 上常见）默认不带根证书，https 请�
 - 本机时钟：和服务器相差超过 2 分钟会提醒（影响登录续期、HTTPS 校验，也是风控信号）
 - Anthropic 官方状态页：`status.anthropic.com` 当前有无故障，有故障时说明是 Anthropic 侧的问题
 - 系统时区：时区指向的国家和出口地区不一致时提醒；指向不支持地区时特别说明"政策按人所在地判断，不按出口 IP"
-- 系统语言 / 区域：同上（macOS 的 AppleLocale、Windows 的 Get-Culture、Linux 的 LANG）
+- 系统语言 / 区域：和出口不一致时只作参考、扣 5 分（语言只代表语言习惯，新加坡、美国很多人也用 zh_CN），建议在"语言与地区"里把地区改成所在国家（macOS 的 AppleLocale、Windows 的 Get-Culture、Linux 的 LANG）
 - 设备：系统和架构。设备环境信息 Anthropic 会收集，这里只列出来，**本工具不会改动或伪装任何设备标识**
 - 账号使用地区：当前账号 7 天内从几个地区使用过（每次后台检测和切换都会记一笔），多地区使用是常见的风控触发点
 - 账号数：本机保存了几个 Claude Code 账号，并提示账号不能给别人用（消费者条款第 2 条）

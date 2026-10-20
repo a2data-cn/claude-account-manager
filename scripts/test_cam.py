@@ -1021,7 +1021,8 @@ class CamTest(unittest.TestCase):
         # 系统语言指向不支持地区：warn；指向支持地区：info
         try:
             lc = risks_with(CAM_TEST_LOCALE="zh_CN.UTF-8")["locale"]
-            self.assertEqual(lc["level"], "warn")
+            self.assertEqual(lc["level"], "info")  # 语言只代表语言习惯，只作参考
+            self.assertEqual(self.cam.risk_score([lc])["score"], 95)
             self.assertIn("zh_CN 指向 CN（中国大陆），与出口地区 SG（新加坡） 不一致", lc["text"])
             self.assertEqual(risks_with(CAM_TEST_LOCALE="ja-JP")["locale"]["level"], "info")
         finally:
