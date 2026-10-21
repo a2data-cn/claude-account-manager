@@ -357,7 +357,7 @@ def render(store, st, out=print):
     if cam.region_view(data)["status"]:  # 后台检测过才有评分
         sc = cam.risk_score(risks)
         c = {"low": "#1F8A4C,#4CC27A", "medium": "#B87A08,#E0A93B", "high": "#BF3B33,#E06C66"}[sc["grade"]]
-        out(f"环境风险 {sc['score']}/100：{esc(sc['label'])[:60]} | size=12 color={c}")
+        out(f"环境评分 {sc['score']}/100：{esc(sc['label'])[:60]} | size=12 color={c}")
     for r in risks:  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
         if r["level"] not in ("warn", "bad"):
             continue

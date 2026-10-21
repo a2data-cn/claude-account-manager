@@ -2016,9 +2016,9 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
     tier = launch_tier(sc["score"], region_view(data)["status"], prefs)
     err = sys.stderr
     if tier == "ok":
-        print(color(f"[cam] 环境风险 {sc['score']}/100：{sc['label']}", "d"), file=err)
+        print(color(f"[cam] 环境评分 {sc['score']}/100：{sc['label']}", "d"), file=err)
         return True
-    print(color(f"[cam] 环境风险 {sc['score']}/100：{sc['label']}", "r" if tier == "strong" else "y"), file=err)
+    print(color(f"[cam] 环境评分 {sc['score']}/100：{sc['label']}", "r" if tier == "strong" else "y"), file=err)
     for r in risks:
         if r["level"] in ("warn", "bad"):
             print(color(f"[cam]   ! {r['text']}。{r['advice']}", "y"), file=err)
@@ -3220,7 +3220,7 @@ def print_accounts(store, data):
     sc = st.get("risk_score") or {}
     if sc and (st.get("region") or {}).get("status"):  # 后台检测过才有意义
         c = {"low": "g", "medium": "y", "high": "r"}[sc["grade"]]
-        print(("" if risks else "\n") + color(f"环境风险评分 {sc['score']}/100：{sc['label']}", c)
+        print(("" if risks else "\n") + color(f"环境评分 {sc['score']}/100：{sc['label']}", c)
               + color("（据后台缓存；cam doctor 实测并查看完整的服务检查）", "d"))
 
 
