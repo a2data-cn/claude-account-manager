@@ -14,7 +14,8 @@
   cam open <账号>                  打开网页版账号窗口
   cam add-api --label 名字 --key sk-ant-... [--admin-key sk-ant-admin...]
   cam serve [--lan] [--port 8787]  启动 Web 面板（手机也能看）
-  cam local [--days 30]            本地 Claude Code token 消耗统计
+  cam panel                        在浏览器打开 Web 面板（没在运行就在后台启动，只限本机）
+  cam local [--days 30]          本地 Claude Code token 消耗统计
   cam env install                  用官方安装器安装 Claude Code
   cam env clean [--logout|--purge] 清理 Claude Code 环境（默认只预演，加 --apply 执行）
 """
@@ -2835,10 +2836,8 @@ def vault_route(store, method, parts, body=None):
         raise CamError(str(error)) from error
 
 
-def open_external_url(url):
-    import cam_identity
-    if not cam_identity.allowed_external_url(url):
-        raise CamError("只允许打开 Google / Microsoft 授权页或 Claude / Anthropic 的 HTTPS 验证地址")
+def open_in_browser(url):
+    """用系统默认浏览器打开地址。调用方自己负责检查地址是否可信。"""
     if IS_MAC:
         command = ["open", url]
     elif IS_WIN:
@@ -2849,6 +2848,13 @@ def open_external_url(url):
         subprocess.run(command, check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as error:
         raise CamError("系统浏览器未打开，请复制地址重试") from error
+
+
+def open_external_url(url):
+    import cam_identity
+    if not cam_identity.allowed_external_url(url):
+        raise CamError("只允许打开 Google / Microsoft 授权页或 Claude / Anthropic 的 HTTPS 验证地址")
+    open_in_browser(url)
     return {"ok": True}
 
 
@@ -3127,6 +3133,55 @@ def serve(store, host, port, auto_refresh_min):
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def panel_running(port, token):
+    """本机 port 上是不是已经有一个用同一令牌的面板（cam serve 或桌面版开的）。不走代理。"""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return False
+
+
+def port_free(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def open_panel(store, port=8787):
+    """在浏览器打开 Web 面板（菜单栏的“打开管理面板”）。
+
+    本机已经有面板在跑就直接用；没有就在后台起一个只监听 127.0.0.1 的 cam serve，
+    它一直运行到注销或重启。端口被别的程序占了就往后找。返回打开的地址。
+    """
+    token = server_token(store)
+    for p in range(port, port + 10):
+        url = f"http://127.0.0.1:{p}/?t={token}"
+        if not panel_running(p, token):
+            if not port_free(p):
+                continue
+            kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                  "close_fds": True}
+            if IS_WIN:
+                kw["creationflags"] = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+            else:
+                kw["start_new_session"] = True
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", "--port", str(p)], **kw)
+            for _ in range(40):
+                time.sleep(0.25)
+                if panel_running(p, token):
+                    break
+            else:
+                raise CamError("面板没能启动。在终端运行 cam serve 看看报错")
+        open_in_browser(url)
+        return url
+    raise CamError(f"{port}–{port + 9} 端口都被别的程序占用了，用 cam panel --port 换一个")
 
 
 # --------------------------------------------------------------------------- 命令行输出
@@ -4927,6 +4982,8 @@ def main(argv=None):
     s.add_argument("--lan", action="store_true", help="允许局域网（手机）访问")
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--refresh-every", type=int, default=10, help="自动刷新用量间隔（分钟，0 关闭）")
+    s = sub.add_parser("panel", help="在浏览器打开 Web 面板（没在运行就在后台启动，只限本机访问）")
+    s.add_argument("--port", type=int, default=8787)
     s = sub.add_parser("json", help="输出账号状态 JSON（给其它脚本用）")
     sub.add_parser("claude", help="按目录规则切号后启动 claude（参数原样透传）")
     sub.add_parser("doctor", help="检查环境，排查找不到账号等问题（不显示密钥）")
@@ -5050,6 +5107,8 @@ def main(argv=None):
                       f"缓存读 {r['cache_read']:>12,}  合计(不含缓存读) {tot:>11,}")
         elif c == "serve":
             serve(store, "0.0.0.0" if args.lan else "127.0.0.1", args.port, args.refresh_every)
+        elif c == "panel":
+            print(f"已在浏览器打开管理面板：{open_panel(store, args.port)}")
         elif c == "doctor" or (c == "env" and args.env_cmd in (None, "doctor", "check")):
             cmd_doctor(store)
         elif c == "env" and args.env_cmd == "install":

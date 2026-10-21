@@ -27,6 +27,12 @@ PY = sys.executable
 REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
 
+# 浅色 / 深色模式各一个颜色
+GREEN = "#1F8A4C,#4CC27A"
+YELLOW = "#B87A08,#E0A93B"
+RED = "#BF3B33,#EE776E"
+GRAY = "#8E8E93,#98989D"
+
 
 def esc(s):
     """SwiftBar 用 | 分隔参数，标题里的 | 要替换掉。"""
@@ -66,7 +72,39 @@ def pct(a, key):
 def color_for(p):
     if p is None:
         return None
-    return "#BF3B33,#EE776E" if p >= 90 else "#B87A08,#E0A93B" if p >= 70 else None
+    return RED if p >= 90 else YELLOW if p >= 70 else None
+
+
+def bar(p, n=10):
+    """额度小进度条，例如 ▰▰▰▰▱▱▱▱▱▱ 42%。"""
+    k = min(n, max(0, round(p / 100 * n)))
+    return "▰" * k + "▱" * (n - k) + f" {p:.0f}%"
+
+
+def usage_nums(a):
+    """账号行右边的额度：5 小时用进度条，7 天只写数字。"""
+    f5, f7 = pct(a, "five_hour"), pct(a, "seven_day")
+    nums = []
+    if f5 is not None:
+        nums.append(bar(f5))
+    if f7 is not None:
+        nums.append(f"7天 {f7:.0f}%")
+    return ("    " + " · ".join(nums)) if nums else ""
+
+
+def row_icon(active, level):
+    """账号行前面的图标：当前在用的打勾，有问题的标三角（黄 / 红），其余空心圆。"""
+    c = RED if level == "error" else YELLOW if level == "warn" else None
+    if active:
+        return f"sfimage=checkmark.circle.fill sfcolor={c or GREEN}"
+    if c:
+        return f"sfimage=exclamationmark.triangle.fill sfcolor={c}"
+    return "sfimage=circle"
+
+
+def heading(text, icon):
+    """分区标题：灰色小字加图标。"""
+    return f"{text} | size=12 color=gray sfimage={icon} sfcolor={GRAY}"
 
 
 def short(label, n=8):
@@ -205,8 +243,9 @@ def render(store, st, out=print):
         out("Claude ⚠ | sfimage=person.2.circle")
     elif title_acc is not None and pct(title_acc, "five_hour") is not None:
         p = pct(title_acc, "five_hour")
+        # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色
         out(f"{esc(short(title_acc.get('label') or title_acc.get('email')))} {p:.0f}% | "
-            f"sfimage=person.2.circle" + (f" color={color_for(p)}" if color_for(p) else ""))
+            f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + (f" color={color_for(p)}" if color_for(p) else ""))
     elif active:
         out(f"{esc(short(active.get('label') or active.get('email')))} | sfimage=person.2.circle")
     else:
@@ -222,27 +261,23 @@ def render(store, st, out=print):
     # ---- Claude Code 账号
     code = [a for a in accs if a["kind"] == "claude_code"]
     if code:
-        out("Claude Code 账号 | size=12 color=gray")
+        out(heading("Claude Code 账号", "terminal"))
         code.sort(key=lambda a: (a["id"] != act_id, pct(a, "five_hour") if pct(a, "five_hour") is not None else 999))
         for a in code:
-            f5, f7 = pct(a, "five_hour"), pct(a, "seven_day")
-            nums = []
-            if f5 is not None:
-                nums.append(f"5h {f5:.0f}%")
-            if f7 is not None:
-                nums.append(f"7d {f7:.0f}%")
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
-            name = esc(a.get("label") or a.get("email") or "未命名")
             h = health_of(store, a)
             flag = f"  ⚠ {h['label']}" if h["level"] in ("warn", "error") else ""
-            text = f"{name}{('  ' + plan) if plan else ''}{flag}{('    ' + ' · '.join(nums)) if nums else ''}"
-            if a["id"] == act_id:
-                out(f"{text} | checked=true")
-            else:
-                c = "#BF3B33,#EE776E" if h["level"] == "error" else color_for(f5)
-                out(f"{text} | {action('switch', a['id'])}" + (f" color={c}" if c else ""))
+
+            def text(name):
+                return f"{esc(name)}{('  ' + plan) if plan else ''}{flag}{usage_nums(a)}"
+
+            params = row_icon(a["id"] == act_id, h["level"])
+            if a["id"] != act_id:
+                c = RED if h["level"] == "error" else color_for(pct(a, "five_hour"))
+                params += f" {action('switch', a['id'])}" + (f" color={c}" if c else "")
+            out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
             for i in h["issues"]:
-                out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={'#BF3B33,#EE776E' if i['level'] == 'error' else '#B87A08,#E0A93B' if i['level'] == 'warn' else 'gray'}")
+                out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={RED if i['level'] == 'error' else YELLOW if i['level'] == 'warn' else 'gray'}")
                 out(f"--   {esc(i['advice'])[:80]} | size=11 color=gray")
             # 子菜单：详细信息
             u = a.get("usage") or {}
@@ -260,28 +295,29 @@ def render(store, st, out=print):
             if a["id"] != act_id:
                 out(f"--切换到这个账号 | {action('switch', a['id'])}")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
+            if a.get("email") and a.get("email") != a.get("label"):
+                # 按住 Option 时这一行换成邮箱；要紧跟在上一行（及其子菜单）后面才会配成一对
+                out(f"{text(a['email'])} | {params} alternate=true")
         out("---")
 
     # ---- 网页版
     web = [a for a in accs if a["kind"] == "claude_web"]
     if web:
-        out("网页版 | size=12 color=gray")
+        out(heading("网页版", "globe"))
         web.sort(key=lambda a: pct(a, "five_hour") if pct(a, "five_hour") is not None else 999)
         for a in web:
-            f5, f7 = pct(a, "five_hour"), pct(a, "seven_day")
-            nums = []
-            if f5 is not None:
-                nums.append(f"5h {f5:.0f}%")
-            if f7 is not None:
-                nums.append(f"7d {f7:.0f}%")
+            f5 = pct(a, "five_hour")
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
-            name = esc(a.get("label") or a.get("email") or "未命名")
-            text = f"{name}{('  ' + plan) if plan else ''}{('    ' + ' · '.join(nums)) if nums else ''}"
-            out(f"{text} | {action('open', a['id'], refresh=False)}"
-                + (f" color={color_for(f5)}" if color_for(f5) else ""))
+            u = a.get("usage") or {}
+
+            def text(name):
+                return f"{esc(name)}{('  ' + plan) if plan else ''}{usage_nums(a)}"
+
+            params = (row_icon(False, "warn" if u.get("error") else "ok") + f" {action('open', a['id'], refresh=False)}"
+                      + (f" color={color_for(f5)}" if color_for(f5) else ""))
+            out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
             # 子菜单
             out(f"--打开浏览器窗口 | {action('open', a['id'], refresh=False)}")
-            u = a.get("usage") or {}
             for k, nm in (("five_hour", "5 小时"), ("seven_day", "7 天")):
                 w = u.get(k)
                 if w:
@@ -289,19 +325,21 @@ def render(store, st, out=print):
             dl = cam.days_left(a)
             if dl is not None:
                 exp = (a.get("manual") or {}).get("expires_at")
-                out(f"--{dl} 天后到期（{exp}）" if dl >= 0 else f"--已过期 {-dl} 天"
-                    + ("" if dl > 2 else " | color=#BF3B33,#EE776E"))
+                out((f"--{dl} 天后到期（{exp}）" if dl >= 0 else f"--已过期 {-dl} 天")
+                    + ("" if dl > 2 else f" | color={RED}"))
             if u.get("error"):
-                out(f"--⚠ {esc(u['error'])[:90]} | color=#B87A08,#E0A93B")
+                out(f"--⚠ {esc(u['error'])[:90]} | color={YELLOW}")
             elif not u:
                 out("--填入 sessionKey 可显示额度（见 README） | color=gray")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
+            if a.get("email") and a.get("email") != a.get("label"):
+                out(f"{text(a['email'])} | {params} alternate=true")  # 按住 Option 显示邮箱
         out("---")
 
     # ---- Claude 桌面版
     desk = [a for a in accs if a["kind"] == "claude_desktop"]
     if desk:
-        out("Claude 桌面版 | size=12 color=gray")
+        out(heading("Claude 桌面版", "desktopcomputer"))
         act = (data.get("active") or {}).get("claude_desktop")
         for a in desk:
             name = esc(a.get("label") or a.get("email") or "未命名")
@@ -332,7 +370,7 @@ def render(store, st, out=print):
     # ---- API
     api = [a for a in accs if a["kind"] == "api"]
     if api:
-        out("API | size=12 color=gray")
+        out(heading("API", "key"))
         for a in api:
             u = a.get("usage") or {}
             cost = f"    本月 ${u['cost_month_usd']:.2f}" if u.get("cost_month_usd") is not None else ""
@@ -340,8 +378,9 @@ def render(store, st, out=print):
         out("---")
 
     # ---- 操作
-    out(f"刷新全部用量 | {action('usage')}")
-    out(f"打开终端查看 | {action(terminal=True, refresh=False)}")
+    out(f"打开管理面板 | {action('panel', refresh=False)} sfimage=macwindow")  # 改名、规则、隐私设置都在面板里
+    out(f"刷新全部用量 | {action('usage')} sfimage=arrow.clockwise")
+    out(f"打开终端查看 | {action(terminal=True, refresh=False)} sfimage=terminal")
     if st.get("bg_owner") == "other":
         out("自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
     elif st.get("last_refresh"):
@@ -356,8 +395,9 @@ def render(store, st, out=print):
     risks = cam.risk_items(data)
     if cam.region_view(data)["status"]:  # 后台检测过才有评分
         sc = cam.risk_score(risks)
-        c = {"low": "#1F8A4C,#4CC27A", "medium": "#B87A08,#E0A93B", "high": "#BF3B33,#E06C66"}[sc["grade"]]
-        out(f"环境评分 {sc['score']}/100：{esc(sc['label'])[:60]} | size=12 color={c}")
+        c = {"low": GREEN, "medium": YELLOW, "high": RED}[sc["grade"]]
+        icon = "checkmark.shield.fill" if sc["grade"] == "low" else "exclamationmark.shield.fill"
+        out(f"环境评分 {sc['score']}/100：{esc(sc['label'])[:60]} | size=12 color={c} sfimage={icon} sfcolor={c}")
     for r in risks:  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
         if r["level"] not in ("warn", "bad"):
             continue
