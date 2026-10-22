@@ -10,12 +10,13 @@
   - 每 10 分钟刷新一次用量（环境变量 CAM_MENU_REFRESH_MIN 可改）
   - 当前账号额度超过提醒阈值时弹一次系统通知
 
+菜单里点切换时，有 claude 会话在跑就先登记、等它们退出再切；结果和出错都用系统通知告诉你。
+
 由 install.sh 生成的启动脚本调用，不需要手动运行。
 """
 import datetime as dt
 import json
 import os
-import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts"))
 import cam  # noqa: E402
 
 CAM_PY = os.path.realpath(os.path.join(HERE, "..", "..", "scripts", "cam.py"))
+MENU_PY = os.path.realpath(__file__)
 PY = sys.executable
 REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
@@ -43,15 +45,20 @@ def q(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def action(*args, refresh=True, terminal=False):
-    """生成点击后执行 cam 命令的参数串。"""
-    parts = [f"bash={q(PY)}", f"param1={q(CAM_PY)}"]
+def action(*args, refresh=True, terminal=False, script=CAM_PY):
+    """生成点击后执行 cam 命令（script=MENU_PY 时是本插件的命令）的参数串。"""
+    parts = [f"bash={q(PY)}", f"param1={q(script)}"]
     for i, a in enumerate(args, start=2):
         parts.append(f"param{i}={q(a)}")
     parts.append(f"terminal={'true' if terminal else 'false'}")
     if refresh:
         parts.append("refresh=true")
     return " ".join(parts)
+
+
+def switch_action(acc_id):
+    """点一下切换：交给本插件的 switch 命令，它会用系统通知告诉你结果（菜单没有终端，cam 的输出没人看得到）。"""
+    return action("switch", acc_id, script=MENU_PY)
 
 
 def pct(a, key):
@@ -132,13 +139,25 @@ def save_state(store, st):
 
 
 def notify(title, body):
-    if sys.platform != "darwin" or os.environ.get("CAM_MENU_NO_NOTIFY"):
+    """系统通知，和 cam serve 用同一个实现（cam.notify）。CAM_MENU_NO_NOTIFY=1 关掉。"""
+    if os.environ.get("CAM_MENU_NO_NOTIFY"):
         return
-    script = f"display notification {json.dumps(body)} with title {json.dumps(title)}"
+    cam.notify(title, body)
+
+
+def switch_from_menu(store, key):
+    """菜单里点了切换。SwiftBar 运行它时没有终端，所以结果和出错都弹通知。
+
+    有 claude 会话在跑时不打断它们，和面板里选“等”一样：先登记，会话都退出后由后台切换，切完再通知一次。
+    """
     try:
-        subprocess.run(["osascript", "-e", script], timeout=5, capture_output=True)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+        r = cam.api_switch(store, key, "wait")
+    except Exception as e:  # noqa: BLE001  什么错都要让用户看到
+        notify("切换失败", str(e))
+        return 1
+    title = "等会话结束后切换" if r.get("deferred") else "已切换账号" if r.get("changed") else "没有切换"
+    notify(title, r["message"])
+    return 0
 
 
 def background_work(store):
@@ -161,58 +180,8 @@ def background_work(store):
 
 
 def _background_work(store):
-    st = load_state(store)
-    try:
-        acc = cam.auto_import(store)
-        if acc:
-            notify("发现新账号", f"已自动保存：{acc['label']}")
-            st["last_refresh"] = 0
-    except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"自动导入：{e}"
-    try:
-        res = cam.apply_time_rules(store)
-        if res and res[2]:
-            warn = cam.running_warning(cam.running_claude_processes()) or "正在运行的会话需要重启。"
-            notify("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}。{warn}")
-    except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"时间规则：{e}"
-    try:
-        res = cam.apply_pending_switch(store)
-        if res:
-            notify("已切换账号", f"claude 会话已退出，Claude Code 已切换到 {res[0]['label']}"
-                   + ("（时间规则）" if res[2] == "rule" else ""))
-    except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"等待切换：{e}"
-    now = dt.datetime.now().timestamp()
-    if REFRESH_MIN > 0 and now - float(st.get("last_refresh") or 0) >= REFRESH_MIN * 60:
-        st["last_refresh"] = now
-        try:
-            # 定时刷新不替不常用的账号续登录，见 cam.refresh_usage
-            try:
-                cam.check_region(store)  # 菜单里常显的出口地区
-            except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
-                st["last_error"] = f"环境检测：{e}"
-            data = cam.refresh_usage(store, allow_token_refresh=False)
-            st.pop("last_error", None)
-            limit = cam.rules_view(data)["alert_threshold"]
-            act = data["active"].get("claude_code")
-            warned = set(st.get("warned") or [])
-            # 当前 Claude Code 账号 + 所有有额度的网页账号，超过阈值都提醒一次
-            for a in data["accounts"]:
-                is_active_code = a["id"] == act
-                is_web = a["kind"] == "claude_web"
-                if not is_active_code and not is_web:
-                    continue
-                w = (a.get("usage") or {}).get("five_hour") or {}
-                if w.get("utilization") is None:
-                    continue
-                key = f"{a['id']}|{w.get('resets_at')}"
-                if w["utilization"] >= limit and key not in warned:
-                    warned.add(key)
-                    notify(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", cam.fmt_reset(w.get("resets_at")))
-            st["warned"] = sorted(warned)[-50:]
-        except Exception as e:  # noqa: BLE001
-            st["last_error"] = f"刷新用量：{e}"
+    # 和 cam serve 跑的是同一轮任务、弹同样的通知；状态存在数据目录里，下一分钟接着用
+    st = cam.background_round(store, load_state(store), REFRESH_MIN, notify)
     save_state(store, st)
     return st
 
@@ -265,6 +234,7 @@ def render(store, st, out=print):
         code.sort(key=lambda a: (a["id"] != act_id, pct(a, "five_hour") if pct(a, "five_hour") is not None else 999))
         for a in code:
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
+            plan += f" {cam.plan_tier(a)}" if plan and cam.plan_tier(a) else ""
             h = health_of(store, a)
             flag = f"  ⚠ {h['label']}" if h["level"] in ("warn", "error") else ""
 
@@ -274,18 +244,22 @@ def render(store, st, out=print):
             params = row_icon(a["id"] == act_id, h["level"])
             if a["id"] != act_id:
                 c = RED if h["level"] == "error" else color_for(pct(a, "five_hour"))
-                params += f" {action('switch', a['id'])}" + (f" color={c}" if c else "")
+                params += f" {switch_action(a['id'])}" + (f" color={c}" if c else "")
             out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
             for i in h["issues"]:
                 out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={RED if i['level'] == 'error' else YELLOW if i['level'] == 'warn' else 'gray'}")
                 out(f"--   {esc(i['advice'])[:80]} | size=11 color=gray")
             # 子菜单：详细信息
             u = a.get("usage") or {}
-            for k, nm in (("five_hour", "5 小时"), ("seven_day", "7 天"), ("seven_day_opus", "7 天 Opus"),
-                          ("seven_day_sonnet", "7 天 Sonnet")):
-                w = u.get(k)
-                if w:
-                    out(f"--{nm}：已用 {w['utilization']:.0f}%，{cam.fmt_reset(w.get('resets_at'))}")
+            for nm, w, secs, local in cam.usage_windows(u):
+                nm = {"5小时": "5 小时", "7天": "7 天"}.get(nm, f"7 天 · {nm}")
+                pace = cam.window_pace(w, secs)
+                tail = f"，配速 {pace:+.0f}%" if pace is not None and abs(pace) >= 1 else ""
+                out(f"--{nm}：已用 {w['utilization']:.0f}%，{cam.fmt_reset(w.get('resets_at'))}{tail}"
+                    + (f" | color={YELLOW}" if (pace or 0) >= 15 else ""))
+                est = cam.window_estimate(w, local)
+                if est:
+                    out(f"--   {esc(est)} | size=11 color=gray")
             dl = cam.days_left(a)
             if dl is not None and dl >= 0:
                 exp = (a.get("manual") or {}).get("expires_at")
@@ -293,7 +267,7 @@ def render(store, st, out=print):
             if a.get("email") and a.get("email") != a.get("label"):
                 out(f"--{esc(a['email'])} | color=gray")
             if a["id"] != act_id:
-                out(f"--切换到这个账号 | {action('switch', a['id'])}")
+                out(f"--切换到这个账号 | {switch_action(a['id'])}")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
             if a.get("email") and a.get("email") != a.get("label"):
                 # 按住 Option 时这一行换成邮箱；要紧跟在上一行（及其子菜单）后面才会配成一对
@@ -308,6 +282,7 @@ def render(store, st, out=print):
         for a in web:
             f5 = pct(a, "five_hour")
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
+            plan += f" {cam.plan_tier(a)}" if plan and cam.plan_tier(a) else ""
             u = a.get("usage") or {}
 
             def text(name):
@@ -410,6 +385,8 @@ def render(store, st, out=print):
 
 def main():
     store = cam.Store()
+    if sys.argv[1:2] == ["switch"] and len(sys.argv) > 2:  # 菜单里点了切换，见 switch_action
+        sys.exit(switch_from_menu(store, sys.argv[2]))
     st = {}
     try:
         st = background_work(store)

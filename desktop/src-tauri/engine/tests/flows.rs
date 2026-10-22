@@ -11,7 +11,7 @@ use cam_engine::health::{
 };
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{read_json, try_lock_file, update_json_file, Store};
-use cam_engine::usage::{ensure_fresh_token, refresh_usage};
+use cam_engine::usage::{ensure_fresh_token, local_window_usage, refresh_usage};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::Read;
@@ -595,6 +595,110 @@ fn time_rule_waits_for_session_and_expires_with_window() {
     let (r, reason) = apply_pending_switch_at(&store, tue10).unwrap().unwrap();
     assert!(r.id == a && reason == "rule");
     assert_eq!(e.data()["active"]["claude_code"], json!(a));
+}
+
+#[test]
+fn manual_pending_switch_expires() {
+    let e = Env::new();
+    let (a, b) = e.two_accounts(later());
+    let store = Store::new();
+    let wait_since = |hours: i64| {
+        route(&store, "POST", &format!("/api/accounts/{a}/switch"), &json!({"mode": "wait"}));
+        let mut d = e.data();
+        d["pending_switch"]["at"] = json!((chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339());
+        store.save(&mut d).unwrap();
+    };
+    fake_claude(true);
+    // 登记放了 7 小时：不再显示；会话还在也马上清掉，之后不会再切
+    wait_since(7);
+    assert!(public_state(&store, &e.data())["pending_switch"].is_null());
+    assert!(apply_pending_switch(&store).unwrap().is_none());
+    let d = e.data();
+    assert!(d.get("pending_switch").is_none());
+    assert_eq!(d["active"]["claude_code"], json!(b));
+    // 5 小时的照常等，会话退出后切过去
+    wait_since(5);
+    assert_eq!(public_state(&store, &e.data())["pending_switch"]["account"], json!(a));
+    assert!(apply_pending_switch(&store).unwrap().is_none());
+    fake_claude(false);
+    let (r, reason) = apply_pending_switch(&store).unwrap().unwrap();
+    assert!(r.id == a && reason == "manual");
+}
+
+// ---------------------------------------------------------------- 切换前核对目标账号的登录
+
+#[test]
+fn switch_renews_expired_target_with_its_own_refresh_token() {
+    let e = Env::new();
+    let (a, _) = e.two_accounts(past()); // A 保存的 access token 已过期，当前是 B
+    let store = Store::new();
+    mock().lock().unwrap().refresh.insert("rt-A1".into(), ("at-A2".into(), "rt-A2".into()));
+    assert!(switch_account(&store, "A").unwrap().changed);
+    let (live, cj) = e.live();
+    assert_eq!(live["accessToken"], "at-A2");
+    assert_eq!(live["refreshToken"], "rt-A2");
+    assert_eq!(cj["oauthAccount"]["emailAddress"], "a@x.com");
+    assert_eq!(e.secret_rt(&a), "rt-A2");
+    assert_eq!(token_calls("rt-A1"), 1);
+    assert_eq!(token_calls("rt-B1"), 0); // 当前登录从不替它续
+}
+
+#[test]
+fn switch_to_dead_login_leaves_live_login_untouched() {
+    let e = Env::new();
+    let (a, b) = e.two_accounts(past()); // 假接口不认 rt-A1：A 的 refresh token 已作废
+    let store = Store::new();
+    let live_files = || (std::fs::read(e.creds()).unwrap(), std::fs::read(e.cj()).unwrap());
+    let before = live_files();
+    // 有会话在跑时登记了等它切到 A；会话退出后切不过去，登记作废，不会一直重试
+    fake_claude(true);
+    route(&store, "POST", &format!("/api/accounts/{a}/switch"), &json!({"mode": "wait"}));
+    fake_claude(false);
+    let err = apply_pending_switch(&store).err().unwrap();
+    assert!(err.contains("已失效") && err.contains("当前登录没有动"), "{}", err);
+    assert!(e.data().get("pending_switch").is_none());
+    let err = switch_account(&store, "A").err().unwrap();
+    assert!(err.contains("重新登录"), "{}", err);
+    assert_eq!(live_files(), before);
+    assert_eq!(e.data()["active"]["claude_code"], json!(b));
+    assert_eq!(std::fs::read_dir(store.backups_dir()).map(|d| d.count()).unwrap_or(0), 0);
+    // 连不上 token 接口：同样不切
+    std::env::set_var("CAM_TOKEN_URLS", "http://127.0.0.1:1/v1/oauth/token");
+    let r = switch_account(&store, "A");
+    std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", mock_base()));
+    let err = r.err().unwrap();
+    assert!(err.contains("续登录失败") && err.contains("当前登录没有动"), "{}", err);
+    assert_eq!(live_files(), before);
+}
+
+#[test]
+fn switch_replaces_only_the_claude_login_in_credentials() {
+    let e = Env::new();
+    let store = Store::new();
+    let add = |extra: Value| {
+        let mut c = read_json(&e.creds()).unwrap().unwrap();
+        for (k, v) in extra.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        std::fs::write(e.creds(), c.to_string()).unwrap();
+    };
+    // A 导入时凭据里有一份 MCP 服务器的登录；后来（B 在用时）MCP 重新登录过，还多了别的字段
+    e.login("at-A1", "rt-A1", "uuid-A", "a@x.com", later());
+    add(json!({"mcpOAuth": {"srv": {"accessToken": "mcp-old"}}}));
+    import_current(&store, Some("A")).unwrap();
+    e.login("at-B1", "rt-B1", "uuid-B", "b@x.com", later());
+    import_current(&store, Some("B")).unwrap();
+    add(json!({"mcpOAuth": {"srv": {"accessToken": "mcp-new"}}, "otherKey": 1}));
+    switch_account(&store, "A").unwrap();
+    let c = read_json(&e.creds()).unwrap().unwrap();
+    assert_eq!(c["claudeAiOauth"]["refreshToken"], "rt-A1");
+    assert_eq!(c["mcpOAuth"], json!({"srv": {"accessToken": "mcp-new"}})); // 不退回 A 当初那份
+    assert_eq!(c["otherKey"], json!(1));
+    switch_account(&store, "B").unwrap();
+    let c = read_json(&e.creds()).unwrap().unwrap();
+    assert_eq!(c["claudeAiOauth"]["refreshToken"], "rt-B1");
+    assert_eq!(c["mcpOAuth"], json!({"srv": {"accessToken": "mcp-new"}}));
+    assert_eq!(c["otherKey"], json!(1));
 }
 
 #[test]
@@ -1191,6 +1295,54 @@ fn usage_refuses_credentials_that_belong_to_another_account() {
     let acc = &d["accounts"][0];
     assert!(acc["usage"]["error"].as_str().unwrap().contains("b@x.com"));
     assert_eq!(acc["email"], "a@x.com");
+}
+
+#[test]
+fn local_window_usage_counts_current_windows() {
+    // 当前窗口里本机用了多少：按切换记录归属、按窗口起点截断、按模型的周额度只算那个模型。对应 test_cam.py 的同名场景
+    let e = Env::new();
+    let now = chrono::Utc::now();
+    let ev = |mid: &str, hours_ago: f64, model: &str, out: i64, cache_read: i64| {
+        let ts = now - chrono::Duration::milliseconds((hours_ago * 3600e3) as i64);
+        json!({"type": "assistant", "requestId": format!("r{}", mid),
+               "timestamp": ts.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+               "message": {"id": mid, "model": model,
+                           "usage": {"input_tokens": 10, "output_tokens": out, "cache_read_input_tokens": cache_read}}})
+        .to_string()
+    };
+    let lines = [
+        ev("m1", 1.0, "claude-opus-5-5", 1000, 100000),
+        ev("m1", 1.0, "claude-opus-5-5", 1000, 100000),
+        ev("m2", 2.0, "claude-fable-5-1", 2000, 0),
+        ev("m3", 30.0, "claude-fable-5-1", 500, 0),
+        ev("m4", 200.0, "claude-opus-5-5", 9999, 0),
+    ];
+    std::fs::write(e.root.join("claude/projects/p1/w.jsonl"), lines.join("\n") + "\n").unwrap();
+    let iso = |d: chrono::Duration| (now + d).to_rfc3339();
+    let usage = json!({
+        "five_hour": {"utilization": 20, "resets_at": iso(chrono::Duration::minutes(150))},
+        "seven_day": {"utilization": 10, "resets_at": iso(chrono::Duration::days(5))},
+        "models": [{"name": "Fable", "utilization": 8, "resets_at": iso(chrono::Duration::days(5))}]
+    });
+    let usages = HashMap::from([("A".to_string(), usage)]);
+    // 没有切换记录：都算当前账号
+    let mut data = json!({"active": {"claude_code": "A"}, "switch_log": []});
+    let got = local_window_usage(&data, &usages, now)["A"]["windows"].clone();
+    assert_eq!(got["five_hour"]["messages"], 2); // m1（去重）、m2；m3 在 5 小时窗口之前
+    assert_eq!(got["five_hour"]["tokens"], 3020);
+    let want = (10.0 * 4.0 + 1000.0 * 20.0 + 100000.0 * 0.2 + 10.0 * 10.0 + 2000.0 * 50.0) / 1e6;
+    assert!((got["five_hour"]["cost_usd"].as_f64().unwrap() - want).abs() < 1e-4);
+    assert_eq!(got["seven_day"]["messages"], 3); // m4 在 7 天窗口之前
+    assert_eq!(got["Fable"]["messages"], 2); // 只算 Fable 的
+    assert_eq!(got["Fable"]["tokens"], 2520);
+    // 一个半小时前切到了别的号：之后的消息不算 A 的，最早一次切换之前的算不出来
+    data["switch_log"] = json!([{"id": "A", "at": iso(-chrono::Duration::hours(10))},
+                                {"id": "bbbb", "at": iso(-chrono::Duration::minutes(90))}]);
+    let got = local_window_usage(&data, &usages, now)["A"]["windows"].clone();
+    assert_eq!(got["five_hour"]["messages"], 1); // 只有 m2
+    assert_eq!(got["seven_day"]["messages"], 1); // m3 在第一次切换之前
+    let none = HashMap::from([("A".to_string(), json!({"five_hour": null}))]);
+    assert!(local_window_usage(&data, &none, now).is_empty());
 }
 
 // ---------------------------------------------------------------- 文件

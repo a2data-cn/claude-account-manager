@@ -436,7 +436,13 @@ fn background(app: AppHandle) {
                         if reason == "rule" { "（时间规则）" } else { "" }
                     ),
                 ),
-                Err(e) => eprintln!("等待切换执行失败：{e}"),
+                Err(e) => {
+                    eprintln!("等待切换执行失败：{e}");
+                    // 登记已作废（目标账号的登录失效了），不会再试，告诉用户一声。与 cam.py 的 background_round 一致
+                    if store.load().map(|d| d.get("pending_switch").is_none()).unwrap_or(false) {
+                        notify(&app, "等待中的切换没有完成", &e);
+                    }
+                }
                 _ => {}
             }
 

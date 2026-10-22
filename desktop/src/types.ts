@@ -18,9 +18,23 @@ export interface Usage {
   seven_day?: Window5 | null;
   seven_day_opus?: Window5 | null;
   seven_day_sonnet?: Window5 | null;
+  models?: ModelWindow[]; // 按模型单独计的周额度，例如“7 天 · Fable”
+  breakdown?: { key: string; name: string; percent: number }[]; // 7 天额度花在了哪里
+  local?: { at: string; windows: Record<string, LocalWindow> } | null; // 本机记录里当前各窗口用了多少，键是窗口名或模型名
   cost_month_usd?: number | null;
   key_valid?: boolean;
   key_error?: string;
+}
+
+export interface ModelWindow extends Window5 {
+  name: string;
+}
+
+/** 本机 Claude Code 记录里某个额度窗口的用量；tokens 不含缓存读取，cost_usd 按 API 价折算 */
+export interface LocalWindow {
+  tokens: number;
+  cost_usd: number;
+  messages: number;
 }
 
 export interface Manual {
@@ -41,6 +55,7 @@ export interface Account {
   plan: string | null;
   plan_display: string | null;
   org_name: string | null;
+  rate_limit_tier?: string | null; // 例如 default_claude_max_20x
   manual: Manual | null;
   usage: Usage | null;
   is_active: boolean;
@@ -157,6 +172,7 @@ export interface LocalRow {
   cache_write: number;
   cache_read: number;
   messages: number;
+  cost_usd?: number; // 按 API 价折算
 }
 
 export interface Settings {

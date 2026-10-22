@@ -100,7 +100,7 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .sec-head h2 { font-family: var(--serif); font-size: 15px; font-weight: 500; margin: 0; white-space: nowrap; }
 .sec-head .bad-count { color: var(--hot); font-weight: 600; }
 .sec-head .hint { margin: 0; }
-.sec-acts { display: flex; gap: 4px; margin-left: auto; }
+.sec-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; margin-left: auto; }
 .strip { display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x proximity; padding: 3px 3px 12px; margin: 0 -3px 4px;
   scrollbar-width: thin; scrollbar-color: var(--line) transparent; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
 .strip::-webkit-scrollbar { height: 4px; }
@@ -153,8 +153,8 @@ header.top .host { color: var(--muted); font-size: 12px; }
 
 /* 额度表：数字 + 进度 + 时间进度刻度 */
 .gauges { display: grid; gap: 10px; align-content: start; }
-.g-head { display: flex; align-items: baseline; gap: 8px; }
-.g-name { font-size: 12px; color: var(--muted); min-width: 60px; }
+.g-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
+.g-name { font-size: 12px; color: var(--muted); min-width: 60px; white-space: nowrap; }
 .g-pct { font-size: 18px; font-weight: 650; line-height: 1.1; letter-spacing: -.02em; }
 .g-pct small { font-size: 11px; font-weight: 600; margin-left: 1px; }
 .g-reset { margin-left: auto; font-size: 11.5px; color: var(--muted); text-align: right; }
@@ -165,6 +165,13 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .g-tick { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); border-radius: 1px; opacity: .55; }
 .g-pace { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .g-pace.fast { color: var(--warn); }
+.g-est { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.g-mini.g-parts { flex-wrap: wrap; gap: 2px 12px; font-size: 12px; }
+/* 小号分段开关：额度看已用 / 剩余、本机消耗的时间范围 */
+.seg-mini { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--paper); }
+.seg-mini button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; line-height: 1.5; padding: 1px 10px; border-radius: 999px; cursor: pointer; }
+.seg-mini button:hover { color: var(--ink); }
+.seg-mini button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
 .g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
 .g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
 .g-mini b { color: var(--ink); font-weight: 600; }
@@ -187,6 +194,7 @@ header.top .host { color: var(--muted); font-size: 12px; }
 /* 区块 */
 section.block { margin-top: 22px; }
 section.block h2 { font-family: var(--serif); font-size: 15px; font-weight: 500; margin: 0 0 10px; }
+section.block .sec-head h2 { margin: 0; }
 .hint { color: var(--muted); font-size: 12.5px; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 14px; box-shadow: var(--shadow); }
 .panel > :first-child { margin-top: 0; }
@@ -297,6 +305,11 @@ details.src[open] summary::before { content: "▾"; }
 .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); margin-top: 10px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.legend b { color: var(--ink); font-weight: 600; margin-left: 2px; }
+.local-sum { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.local-sum b { font-size: 22px; font-weight: 650; letter-spacing: -.02em; }
+.local-sum span { font-size: 12px; color: var(--muted); }
+.legend + .hint { margin: 10px 0 0; }
 
 /* 空状态 / 登录 */
 .empty { text-align: left; padding: 22px; }
@@ -414,12 +427,14 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   </section>
 
   <section class="block" id="local-block" hidden>
-    <h2>本机 Claude Code 消耗（近 14 天，输出 token）</h2>
+    <div class="sec-head"><h2>本机 Claude Code 消耗</h2>
+      <span class="sec-acts"><span class="seg-mini" role="group" aria-label="时间范围" id="local-range"></span></span></div>
     <div class="panel">
-      <p class="hint">按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
-      <div class="bars" id="bars" role="img" aria-label="每日输出 token 柱状图"></div>
+      <div class="local-sum" id="local-sum"></div>
+      <div class="bars" id="bars" role="img" aria-label="每日消耗柱状图"></div>
       <div class="axis" id="axis"></div>
       <div class="legend" id="legend"></div>
+      <p class="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小。按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
     </div>
   </section>
 
@@ -594,17 +609,35 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   const KIND = { claude_code: "Claude Code", claude_desktop: "桌面版", claude_web: "网页版", api: "API" };
   const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
   const PLAN = { pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", free: "Free", api: "API" };
-  const nameOf = (a) => a.label || a.email || a.id;
-  function untilText(iso) {
+  // ---- 显示偏好（只记在这台设备上）：额度看已用还是剩余、邮箱打码
+  const pref = { remain: false, mask: false };
+  try { pref.remain = localStorage.getItem("cam-remain") === "1"; pref.mask = localStorage.getItem("cam-mask") === "1"; } catch (_) {}
+  function setPref(k, v) {
+    pref[k] = v;
+    try { localStorage.setItem(k === "remain" ? "cam-remain" : "cam-mask", v ? "1" : "0"); } catch (_) {}
+  }
+  // 打码后是 ch***@y***.com，截图分享时用
+  const MAIL_RE = /([^\s@<>"']{1,2})[^\s@<>"']*@([^\s@<>"'.])[^\s@<>"']*?(\.[A-Za-z]{2,})(?![\w.])/g;
+  const mail = (s) => (pref.mask && s ? String(s).replace(MAIL_RE, "$1***@$2***$3") : s);
+  const nameOf = (a) => mail(a.label || a.email || a.id);
+  // Max 的档位（5x / 20x）在接口给的 rate_limit_tier 里
+  const planTier = (a, p) => { const m = p === "max" && /max_(\d+)x/.exec(a.rate_limit_tier || ""); return m ? ` ${m[1]}x` : ""; };
+  function dur(ms) {
+    const m = Math.max(1, Math.round(ms / 60000)), h = Math.floor(m / 60), d = Math.floor(h / 24);
+    return d >= 1 ? `${d} 天 ${h % 24} 小时` : h >= 1 ? `${h} 小时 ${m % 60} 分` : `${m} 分钟`;
+  }
+  // “10月25日 08:00 重置 · 3 天 19 小时后”，今天之内省掉日期
+  function resetText(iso) {
     if (!iso) return "";
-    const ms = new Date(iso) - Date.now();
+    const t = new Date(iso), ms = t - Date.now();
     if (isNaN(ms)) return "";
     if (ms <= 0) return "已重置";
-    const m = Math.round(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24);
-    if (d >= 1) return `${d} 天 ${h % 24} 小时后重置`;
-    if (h >= 1) return `${h} 小时 ${m % 60} 分后重置`;
-    return `${m} 分钟后重置`;
+    const day = t.toDateString() === new Date().toDateString() ? "" : `${t.getMonth() + 1}月${t.getDate()}日 `;
+    return `${day}${t.toTimeString().slice(0, 5)} 重置 · ${dur(ms)}后`;
   }
+  const usd = (n) => "$" + (n >= 100 ? Math.round(n).toLocaleString("en-US") : n.toFixed(2));
+  const wan = (n) => n >= 1e8 ? (n / 1e8).toFixed(1) + " 亿" : n >= 1e5 ? Math.round(n / 1e4) + " 万" : n >= 1e4 ? (n / 1e4).toFixed(1) + " 万" : String(Math.round(n));
+
   function ago(iso) {
     if (!iso) return "从未";
     const s = (Date.now() - new Date(iso)) / 1000;
@@ -624,29 +657,52 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
   const desktopStale = (a) => (a.usage || {}).cache_stale || !(a.usage || {}).fetched_at || Date.now() - new Date(a.usage.fetched_at).getTime() > 30 * 60 * 1000;
   const desktopUsage = (a) => ["desktop_cache", "desktop_history"].includes((a.usage || {}).source);
-  function gauge(key, w, snapshot = false) {
+  const BREAKDOWN = { claude_code: "Claude Code", chat: "网页聊天", cowork: "Cowork", other: "其它" };
+  const ESTIMATE_TIP = "按本机 Claude Code 记录和当前百分比推算整个窗口，按 API 价折算（订阅不按这个收费）；这个号在别的电脑或网页上也用的话会偏高";
+  // 要显示的额度窗口：[名字, 窗口, 窗口毫秒, 本机记录]。按模型的周额度排在 7 天后面
+  function windowsOf(a) {
+    const u = a.usage || {}, local = (u.local || {}).windows || {}, out = [];
+    for (const k of ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]) {
+      if (u[k] && (a.kind !== "claude_desktop" || (desktopUsage(a) && !desktopWindowExpired(a, k, u[k])))) out.push([WINDOW_NAME[k], u[k], WINDOW_MS[k], local[k]]);
+      if (k === "seven_day") (u.models || []).forEach((m) => out.push([`7 天 · ${m.name}`, m, 7 * 86400e3, local[m.name]]));
+    }
+    return out;
+  }
+  function gauge([name, w, span, local], snapshot = false) {
     const pct = Math.max(0, Math.min(100, w.utilization));
     const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
-    // 时间刻度：这个窗口已经过去了多少
+    // 窗口已经过去了多少时间；看剩余时进度条和竖线都换成“还剩多少”
     let elapsed = null;
     if (w.resets_at && !snapshot) {
       const left = new Date(w.resets_at) - Date.now();
-      if (!isNaN(left)) elapsed = Math.max(0, Math.min(100, 100 - (left / WINDOW_MS[key]) * 100));
+      if (!isNaN(left)) elapsed = Math.max(0, Math.min(100, 100 - (left / span) * 100));
     }
+    const shown = pref.remain ? 100 - pct : pct;
+    const tick = elapsed === null ? null : pref.remain ? 100 - elapsed : elapsed;
+    // 配速：已用百分比比时间多出多少；照现在的速度什么时候用完，或者到重置时大约用到多少
     let pace = "";
-    if (elapsed !== null && elapsed > 3) {
-      const ratio = pct / elapsed;
-      pace = ratio > 1.15
-        ? `<div class="g-pace fast">用得比时间快，照这个速度会提前用完</div>`
-        : `<div class="g-pace">窗口已过 ${Math.round(elapsed)}%</div>`;
+    if (elapsed !== null && elapsed > 3 && pct >= 1) {
+      const p = Math.round(pct - elapsed);
+      const head = p > 0 ? `配速 +${p}%` : p < 0 ? `配速 ${p}%` : "配速持平";
+      const tail = pct > elapsed
+        ? `照这个速度约 ${dur((100 - pct) / (pct / ((span * elapsed) / 100)))}后用完`
+        : `照这个速度到重置约用到 ${Math.round((pct * 100) / elapsed)}%`;
+      pace = `<div class="g-pace${pct / elapsed > 1.15 ? " fast" : ""}">${head} · ${tail}</div>`;
+    }
+    let est = "";
+    if (local && local.cost_usd > 0 && !snapshot) {
+      const k = 100 / pct, full = local.cost_usd * k;
+      est = `<div class="g-est" title="${ESTIMATE_TIP}">${pct < 5 ? "整窗估算：用量还少，数据不足"
+        : pref.remain ? `还能用约 ${usd(full - local.cost_usd)} · 整窗约 ${usd(full)}`
+        : `整窗约 ${usd(full)}（${wan(local.tokens * k)} tokens）· 本机已用 ${usd(local.cost_usd)}`}</div>`;
     }
     return `<div class="g">
-      <div class="g-head"><span class="g-name">${WINDOW_NAME[key]}</span>
-        <span class="g-pct">${pct.toFixed(0)}<small>%</small></span>
-        <span class="g-reset">${esc(snapshot && !w.resets_at ? "未提供重置时间" : untilText(w.resets_at))}</span></div>
-      <div class="g-bar" title="${snapshot ? "Claude 本地额度快照" : "竖线表示窗口时间已过去的比例"}"><div class="g-fill ${cls}" style="width:${pct}%"></div>
-        ${elapsed !== null ? `<div class="g-tick" style="left:calc(${elapsed}% - 1px)"></div>` : ""}</div>
-      ${pace}</div>`;
+      <div class="g-head"><span class="g-name">${esc(name)}</span>
+        <span class="g-pct">${shown.toFixed(0)}<small>%${pref.remain ? " 剩余" : ""}</small></span>
+        <span class="g-reset">${esc(snapshot && !w.resets_at ? "未提供重置时间" : resetText(w.resets_at))}</span></div>
+      <div class="g-bar" title="${snapshot ? "Claude 本地额度快照" : pref.remain ? "竖线表示窗口还剩的时间" : "竖线表示窗口时间已过去的比例"}"><div class="g-fill ${cls}" style="width:${shown}%"></div>
+        ${tick !== null ? `<div class="g-tick" style="left:calc(${tick}% - 1px)"></div>` : ""}</div>
+      ${pace}${est}</div>`;
   }
 
   function dueFact(a) {
@@ -665,7 +721,7 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   function planChip(a) {
     const p = a.plan_display || (a.kind === "api" ? "api" : null);
     if (!p) return `<span class="chip p-unknown" title="${a.kind === "claude_desktop" ? "可以在“编辑”里手动记录套餐" : "还没拿到套餐信息，可以在“编辑”里手动选"}">套餐未知</span>`;
-    return `<span class="chip ${PLAN_CLASS[p] || "plan"}">${esc(PLAN[p] || p)}</span>`;
+    return `<span class="chip ${PLAN_CLASS[p] || "plan"}">${esc(PLAN[p] || p)}${esc(planTier(a, p))}</span>`;
   }
   function dueInfo(a) {
     if (a.days_left === null || a.days_left === undefined) return null;
@@ -691,14 +747,15 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     if (!w) return `<span class="t-meter">${a.kind === "claude_web" && !a.has_session_key ? "不自动读取用量" : "还没有用量"}</span>`;
     const pct = Math.max(0, Math.min(100, w.utilization));
     const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
-    return `<span class="t-meter">5 小时${a.kind === "claude_desktop" ? (desktopStale(a) ? " · 旧快照" : " · 本地") : ""}<span class="g-bar"><span class="g-fill ${cls}" style="width:${pct}%"></span></span><b>${pct.toFixed(0)}%</b></span>`;
+    const shown = pref.remain ? 100 - pct : pct;
+    return `<span class="t-meter">5 小时${pref.remain ? "剩余" : ""}${a.kind === "claude_desktop" ? (desktopStale(a) ? " · 旧快照" : " · 本地") : ""}<span class="g-bar"><span class="g-fill ${cls}" style="width:${shown}%"></span></span><b>${shown.toFixed(0)}%</b></span>`;
   }
   function tile(a, sel) {
     const h = a.health || {};
-    const sub = a.email && a.email !== a.label ? a.email : KIND[a.kind];
+    const sub = a.email && a.email !== a.label ? mail(a.email) : KIND[a.kind];
     return `<button type="button" class="tile${sel ? " sel" : ""}${a.is_active ? " live" : ""}${h.level === "error" ? " bad" : ""}"
       data-act="select" data-id="${esc(a.id)}" aria-pressed="${sel}">
-      <span class="t-top"><span class="t-name">${esc(a.label || a.email || "未命名")}</span>${planChip(a)}</span>
+      <span class="t-top"><span class="t-name">${esc(mail(a.label || a.email) || "未命名")}</span>${planChip(a)}</span>
       <span class="t-sub">${esc(sub)}</span>
       <span class="t-chips">${statusChips(a)}</span>
       ${tileMeter(a)}
@@ -708,7 +765,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const u = a.usage || {};
     const m = a.manual || {};
     const h = a.health || { issues: [] };
-    let gauges = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"].filter((k) => u[k] && (a.kind !== "claude_desktop" || (desktopUsage(a) && !desktopWindowExpired(a, k, u[k])))).map((k) => gauge(k, u[k], a.kind === "claude_desktop")).join("");
+    let gauges = windowsOf(a).map((g) => gauge(g, a.kind === "claude_desktop")).join("");
+    if ((u.breakdown || []).length) gauges += `<div class="g-mini g-parts" title="这个号 7 天额度花在了哪里">7 天构成：${u.breakdown.map((b) => `<span>${esc(BREAKDOWN[b.key] || b.name)} <b>${Math.round(b.percent)}%</b></span>`).join("")}</div>`;
     if (a.kind !== "claude_desktop" && u.cost_month_usd !== undefined && u.cost_month_usd !== null) {
       gauges += `<div class="g"><div class="g-head"><span class="g-name">本月花费</span><span class="g-pct">$${Number(u.cost_month_usd).toFixed(2)}</span></div></div>`;
     }
@@ -741,8 +799,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     acts.push(`<button class="btn quiet danger" data-act="remove" data-id="${esc(a.id)}">移除</button>`);
     return `<section class="detail" aria-label="${esc(nameOf(a))} 的详情">
       <div class="d-head">
-        <div class="d-title"><div class="name">${esc(a.label || a.email || "未命名")} ${planChip(a)} ${statusChips(a)}</div>
-          ${a.email && a.email !== a.label ? `<div class="mail">${esc(a.email)}</div>` : ""}</div>
+        <div class="d-title"><div class="name">${esc(mail(a.label || a.email) || "未命名")} ${planChip(a)} ${statusChips(a)}</div>
+          ${a.email && a.email !== a.label ? `<div class="mail">${esc(mail(a.email))}</div>` : ""}</div>
         <div class="d-acts">${acts.join("")}</div>
       </div>
       ${issues ? `<ul class="issues">${issues}</ul>` : ""}
@@ -877,7 +935,9 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const bad = sorted.filter((a) => (a.health || {}).level === "error").length;
     list.innerHTML = notice
       + `<div class="sec-head"><h2>账号 · ${sorted.length} 个</h2><span class="hint">${bad ? `<span class="bad-count">${bad} 个异常</span> · ` : ""}点账号卡看详情</span>
-          <span class="sec-acts"><button class="btn quiet" data-act="detect" title="检查 Claude Code 现在登录的是不是新账号，是就保存">检测新登录</button><button class="btn quiet" data-act="add">＋ 添加账号</button></span></div>`
+          <span class="sec-acts"><span class="seg-mini" role="group" aria-label="额度显示"><button type="button" data-pref="remain" data-v="0" aria-pressed="${!pref.remain}">已用</button><button type="button" data-pref="remain" data-v="1" aria-pressed="${pref.remain}">剩余</button></span>
+            <button type="button" class="btn quiet" data-pref="mask" aria-pressed="${pref.mask}" title="截图分享时把邮箱显示成 ch***@y***.com">${pref.mask ? "显示邮箱" : "邮箱打码"}</button>
+            <button class="btn quiet" data-act="detect" title="检查 Claude Code 现在登录的是不是新账号，是就保存">检测新登录</button><button class="btn quiet" data-act="add">＋ 添加账号</button></span></div>`
       + `<div class="strip">${sorted.map((a) => tile(a, a.id === sel.id)).join("")}
           <button type="button" class="tile add" data-act="add"><span class="plus">＋</span>添加账号</button></div>`
       + detailView(sel)
@@ -902,30 +962,53 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   }
 
   const COLORS = ["var(--accent)", "var(--ok)", "var(--live)", "var(--violet)", "var(--warn)", "#2D9BB0", "var(--muted)"];
+  const RANGES = [["1", "今天"], ["7", "7 天"], ["30", "30 天"]];
+  let localRange = "7", localRep = null;
+  try { localRange = RANGES.some(([v]) => v === localStorage.getItem("cam-local-range")) ? localStorage.getItem("cam-local-range") : "7"; } catch (_) {}
   async function loadLocal() {
-    try {
-      const rep = await api("GET", "/api/local-usage?days=14");
-      if (!rep.rows.length) { $("#local-block").hidden = true; return; }
-      const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
-      const ids = [...new Set(rep.rows.map((r) => r.account_id))];
-      const color = Object.fromEntries(ids.map((id, i) => [id, id === "unattributed" ? "var(--muted)" : COLORS[i % (COLORS.length - 1)]]));
-      const days = [];
-      for (let i = 13; i >= 0; i--) { const d = new Date(Date.now() - i * 86400e3); days.push(d.toLocaleDateString("sv-SE")); }
-      const byDay = Object.fromEntries(days.map((d) => [d, []]));
-      rep.rows.forEach((r) => { if (byDay[r.date]) byDay[r.date].push(r); });
-      const max = Math.max(1, ...days.map((d) => byDay[d].reduce((s, r) => s + r.output, 0)));
-      const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "k" : String(n);
-      $("#bars").innerHTML = days.map((d) => {
-        const rows = byDay[d];
-        const tip = d + (rows.length ? "\n" + rows.map((r) => `${names[r.account_id] || "未归属"}：${fmt(r.output)}`).join("\n") : "\n无");
-        return `<div class="day" data-tip="${esc(tip)}">${rows.map((r) =>
-          `<div class="seg" style="height:${(r.output / max) * 100}%;background:${color[r.account_id]}"></div>`).join("")}</div>`;
-      }).join("");
-      $("#axis").innerHTML = `<span>${days[0].slice(5)}</span><span>峰值 ${fmt(max)}</span><span>${days[13].slice(5)}</span>`;
-      $("#legend").innerHTML = ids.map((id) => `<span><i style="background:${color[id]}"></i>${esc(names[id] || "未归属")}</span>`).join("");
-      $("#local-block").hidden = false;
-    } catch (_) { $("#local-block").hidden = true; }
+    try { localRep = await api("GET", `/api/local-usage?days=${localRange}`); }
+    catch (_) { localRep = null; }
+    renderLocal();
   }
+  // 今天只看今天的记录（接口按“最近 N 天”取，会带上昨天的）；7 天 / 30 天画每天的柱子
+  function renderLocal() {
+    const today = new Date().toLocaleDateString("sv-SE");
+    const rows = localRep ? localRep.rows.filter((r) => localRange !== "1" || r.date === today) : [];
+    if (!state || !localRep || (!rows.length && localRange !== "1")) { $("#local-block").hidden = true; return; }
+    $("#local-range").innerHTML = RANGES.map(([v, t]) => `<button type="button" data-range="${v}" aria-pressed="${v === localRange}">${t}</button>`).join("");
+    const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
+    const label = (id) => names[id] || "未归属";
+    const ids = [...new Set(rows.map((r) => r.account_id))];
+    const color = Object.fromEntries(ids.map((id, i) => [id, id === "unattributed" ? "var(--muted)" : COLORS[i % (COLORS.length - 1)]]));
+    const cost = (rs) => rs.reduce((n, r) => n + (r.cost_usd || 0), 0);
+    const sum = (k) => rows.reduce((n, r) => n + r[k], 0);
+    $("#local-sum").innerHTML = rows.length
+      ? `<b>≈ ${usd(cost(rows))}</b><span>输出 ${wan(sum("output"))} · 输入和缓存写入 ${wan(sum("input") + sum("cache_write"))} · 缓存读取 ${wan(sum("cache_read"))} tokens · ${sum("messages")} 条消息</span>`
+      : `<b>≈ $0.00</b><span>今天还没有用过</span>`;
+    const days = [];
+    const n = Number(localRange);
+    for (let i = n - 1; i >= 0 && n > 1; i--) days.push(new Date(Date.now() - i * 86400e3).toLocaleDateString("sv-SE"));
+    const byDay = Object.fromEntries(days.map((d) => [d, []]));
+    rows.forEach((r) => { if (byDay[r.date]) byDay[r.date].push(r); });
+    const max = Math.max(0.01, ...days.map((d) => cost(byDay[d])));
+    $("#bars").hidden = $("#axis").hidden = !days.length;
+    $("#bars").innerHTML = days.map((d) => {
+      const rs = byDay[d];
+      const tip = d + (rs.length ? "\n" + rs.map((r) => `${label(r.account_id)}：${usd(r.cost_usd || 0)} · 输出 ${wan(r.output)}`).join("\n") : "\n无");
+      return `<div class="day" data-tip="${esc(tip)}">${rs.map((r) =>
+        `<div class="seg" style="height:${((r.cost_usd || 0) / max) * 100}%;background:${color[r.account_id]}"></div>`).join("")}</div>`;
+    }).join("");
+    if (days.length) $("#axis").innerHTML = `<span>${days[0].slice(5)}</span><span>单日最多 ${usd(max)}</span><span>${days[days.length - 1].slice(5)}</span>`;
+    $("#legend").innerHTML = ids.map((id) => `<span><i style="background:${color[id]}"></i>${esc(label(id))} <b>${usd(cost(rows.filter((r) => r.account_id === id)))}</b></span>`).join("");
+    $("#local-block").hidden = false;
+  }
+  $("#local-range").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-range]");
+    if (!b || b.dataset.range === localRange) return;
+    localRange = b.dataset.range;
+    try { localStorage.setItem("cam-local-range", localRange); } catch (_) {}
+    renderLocal(); loadLocal();
+  });
 
   // ---- 隐私与数据源
   const KEYS = [  // [字段, 名字, 说明, 已配置字段, 没配时的提示]
@@ -1234,6 +1317,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     const re = e.target.closest("[data-act=recheck]");
     if (re) { runEnvCheck(); return; }
     if (e.target.closest("[data-act=env-fold]")) { envChecks = null; render(); return; }
+    const pb = e.target.closest("button[data-pref]");
+    if (pb) { setPref(pb.dataset.pref, pb.dataset.pref === "mask" ? !pref.mask : pb.dataset.v === "1"); render(); renderLocal(); return; }
     const b = e.target.closest("button[data-act]");
     if (!b || b.disabled) return;
     if (accountBusy && b.dataset.act !== "select") return;

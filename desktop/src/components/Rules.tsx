@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../api";
+import { maskMail, usePrefs } from "../prefs";
 import type { Account } from "../types";
 
 interface Rule {
@@ -43,6 +44,7 @@ export function Rules({
   stamp: string;
   toast: (m: string, bad?: boolean) => void;
 }) {
+  const { mask } = usePrefs();
   const [view, setView] = useState<RulesView | null>(null);
   const [type, setType] = useState<"time" | "dir">("time");
   const [path, setPath] = useState("");
@@ -67,7 +69,7 @@ export function Rules({
   }, [code, acc]);
 
   if (!view || !code.length) return null;
-  const names = Object.fromEntries(accounts.map((a) => [a.id, a.label || a.email || a.id]));
+  const names = Object.fromEntries(accounts.map((a) => [a.id, maskMail(a.label || a.email || a.id, mask)]));
   const live = view.rules.find((r) => inWindow(r));
 
   const save = async (body: Partial<{ rules: unknown[]; alert_threshold: number }>, msg: string) => {
@@ -147,7 +149,7 @@ export function Rules({
             <select id="r-acc" value={acc} onChange={(e) => setAcc(e.target.value)}>
               {code.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.label || a.email}
+                  {maskMail(a.label || a.email, mask)}
                 </option>
               ))}
             </select>

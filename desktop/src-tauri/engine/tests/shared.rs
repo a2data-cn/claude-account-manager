@@ -4,7 +4,7 @@ use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::store::{accounts, find_index, parse_day, s};
-use cam_engine::usage::roll_renewals_at;
+use cam_engine::usage::{message_cost, parse_usage_body, roll_renewals_at};
 use serde_json::{json, Value};
 
 fn fixture(name: &str) -> Value {
@@ -104,5 +104,21 @@ fn manual_cases() {
     for c in cases(&fx, "days_left") {
         let today = chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
         assert_eq!(days_left_at(&c["account"], today), c["expect"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn usage_cases() {
+    let fx = fixture("usage.json");
+    for c in cases(&fx, "parse") {
+        let got = parse_usage_body(&c["body"], c["source"].as_str().unwrap());
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "cost") {
+        let got = message_cost(c["model"].as_str().unwrap(), &c["usage"]);
+        match c["expect"].as_f64() {
+            None => assert_eq!(got, None, "{}", c["name"]),
+            Some(want) => assert!((got.unwrap() - want).abs() < 1e-9, "{}：{:?} != {}", c["name"], got, want),
+        }
     }
 }

@@ -5,7 +5,10 @@
 import http.server
 import importlib
 import base64
+import contextlib
+import datetime as dt
 import io
+import signal
 import json
 import os
 import shutil
@@ -219,6 +222,7 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
         os.environ["CAM_TEST_ROUTE_IF"] = ""
         os.environ["CAM_NO_KEYCHAIN"] = "1"
+        os.environ["CAM_NO_NOTIFY"] = "1"  # 不弹真的系统通知；要测的地方单独换掉
         os.environ["NO_COLOR"] = "1"
         for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
             os.environ.pop(k, None)
@@ -363,6 +367,85 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.run_cam("rm", "a@x.com"), 1)
         self.assertEqual(self.run_cam("rm", "W"), 0)
 
+    # ---- 切换前核对目标账号的登录、只换凭据里的 Claude 登录
+
+    def test_switch_renews_expired_target_first(self):
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())  # A 保存的 access token 已过期，当前是 B
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        live, cj = self.live()
+        self.assertEqual((live["accessToken"], live["refreshToken"]), ("at-A2", "rt-A2"))
+        self.assertEqual(cj["oauthAccount"]["emailAddress"], "a@x.com")
+        self.assertEqual(self.cam.Store().load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")
+        self.assertEqual([c for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"],
+                         [("POST", "/v1/oauth/token", "rt-A1")])  # 当前登录（B）从不替它续
+
+    def test_switch_to_dead_login_keeps_live_login(self):
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())  # 假接口不认 rt-A1：A 的 refresh token 已作废
+        store = self.cam.Store()
+
+        def live_files():
+            with open(self.creds_path, "rb") as f, open(self.cj_path, "rb") as g:
+                return f.read(), g.read()
+
+        before = live_files()
+        # 有会话在跑时登记了等它切到 A；会话退出后切不过去，登记作废，不会一直重试
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.cam.api_switch(store, a_id, "wait")
+        self.cam.running_claude_processes = lambda: []
+        with self.assertRaises(self.cam.CamError) as cm:
+            self.cam.apply_pending_switch(store)
+        self.assertIn("已失效", str(cm.exception))
+        self.assertIn("当前登录没有动", str(cm.exception))
+        self.assertNotIn("pending_switch", self.data())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_cam("switch", "A"), 1)
+        self.assertIn("cam login", err.getvalue())
+        self.assertEqual(live_files(), before)
+        self.assertEqual(self.data()["active"]["claude_code"], b_id)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp, ".claude-accounts", "backups")))
+        # 连不上 token 接口：同样不切
+        urls = self.cam.TOKEN_URLS
+        self.cam.TOKEN_URLS = ["http://127.0.0.1:1/v1/oauth/token"]
+        try:
+            with self.assertRaises(self.cam.CamError) as cm:
+                self.cam.switch_code_account(store, "A")
+        finally:
+            self.cam.TOKEN_URLS = urls
+        self.assertIn("续登录失败", str(cm.exception))
+        self.assertIn("当前登录没有动", str(cm.exception))
+        self.assertEqual(live_files(), before)
+
+    def test_switch_replaces_only_the_claude_login_in_credentials(self):
+        def add(**extra):
+            with open(self.creds_path) as f:
+                c = json.load(f)
+            c.update(extra)
+            with open(self.creds_path, "w") as f:
+                json.dump(c, f)
+
+        def creds_now():
+            with open(self.creds_path) as f:
+                return json.load(f)
+
+        # A 导入时凭据里有一份 MCP 服务器的登录；后来（B 在用时）MCP 重新登录过，还多了别的字段
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        add(mcpOAuth={"srv": {"accessToken": "mcp-old"}})
+        self.run_cam("import", "--label", "A")
+        self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
+        self.run_cam("import", "--label", "B")
+        add(mcpOAuth={"srv": {"accessToken": "mcp-new"}}, otherKey=1)
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        c = creds_now()
+        self.assertEqual(c["claudeAiOauth"]["refreshToken"], "rt-A1")
+        self.assertEqual(c["mcpOAuth"], {"srv": {"accessToken": "mcp-new"}})  # 不退回 A 当初那份
+        self.assertEqual(c["otherKey"], 1)
+        self.assertEqual(self.run_cam("switch", "B"), 0)
+        c = creds_now()
+        self.assertEqual(c["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual((c["mcpOAuth"], c["otherKey"]), ({"srv": {"accessToken": "mcp-new"}}, 1))
+
     def test_usage_refresh_active_and_inactive(self):
         past = int((time.time() - 60) * 1000)
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
@@ -471,6 +554,45 @@ class CamTest(unittest.TestCase):
         self.assertEqual(by.get("bbbb"), 7)
         self.assertEqual(by.get("unattributed"), 1000)
 
+    def test_local_window_usage(self):
+        """当前窗口里本机用了多少：按切换记录归属、按窗口起点截断、按模型的周额度只算那个模型。"""
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        d = self.data()
+        a_id = d["accounts"][0]["id"]
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def ev(mid, hours_ago, model, out, cache_read=0):
+            return json.dumps({"type": "assistant", "requestId": "r" + mid,
+                               "timestamp": (now - dt.timedelta(hours=hours_ago)).isoformat().replace("+00:00", "Z"),
+                               "message": {"id": mid, "model": model,
+                                           "usage": {"input_tokens": 10, "output_tokens": out, "cache_read_input_tokens": cache_read}}})
+        p = os.path.join(self.tmp, ".claude", "projects", "proj1", "w.jsonl")
+        with open(p, "w") as f:
+            f.write("\n".join([ev("m1", 1, "claude-opus-5-5", 1000, 100000), ev("m1", 1, "claude-opus-5-5", 1000, 100000),
+                               ev("m2", 2, "claude-fable-5-1", 2000), ev("m3", 30, "claude-fable-5-1", 500),
+                               ev("m4", 200, "claude-opus-5-5", 9999)]) + "\n")
+        usage = {"five_hour": {"utilization": 20, "resets_at": (now + dt.timedelta(hours=2.5)).isoformat()},
+                 "seven_day": {"utilization": 10, "resets_at": (now + dt.timedelta(days=5)).isoformat()},
+                 "models": [{"name": "Fable", "utilization": 8, "resets_at": (now + dt.timedelta(days=5)).isoformat()}]}
+        # 没有切换记录：都算当前账号
+        d["switch_log"] = []
+        got = self.cam.local_window_usage(d, {a_id: usage}, now)[a_id]["windows"]
+        self.assertEqual(got["five_hour"]["messages"], 2)          # m1（去重）、m2；m3 在 5 小时窗口之前
+        self.assertEqual(got["five_hour"]["tokens"], 3020)
+        self.assertAlmostEqual(got["five_hour"]["cost_usd"], (10 * 4 + 1000 * 20 + 100000 * 0.2 + 10 * 10 + 2000 * 50) / 1e6, places=4)
+        self.assertEqual(got["seven_day"]["messages"], 3)          # m4 在 7 天窗口之前
+        self.assertEqual(got["Fable"]["messages"], 2)              # 只算 Fable 的
+        self.assertEqual(got["Fable"]["tokens"], 2520)
+        # 一小时前切到了别的号：之后的消息不算 A 的，最早一次切换之前的算不出来
+        d["switch_log"] = [{"id": a_id, "at": (now - dt.timedelta(hours=10)).isoformat()},
+                           {"id": "bbbb", "at": (now - dt.timedelta(hours=1.5)).isoformat()}]
+        got = self.cam.local_window_usage(d, {a_id: usage}, now)[a_id]["windows"]
+        self.assertEqual(got["five_hour"]["messages"], 1)          # 只有 m2
+        self.assertEqual(got["seven_day"]["messages"], 1)          # m3 在第一次切换之前
+        self.assertEqual(self.cam.local_window_usage(d, {a_id: {"five_hour": None}}, now), {})
+
     def test_auto_import_on_ls(self):
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
         self.assertEqual(self.run_cam("ls"), 0)
@@ -492,8 +614,8 @@ class CamTest(unittest.TestCase):
         import calendar
         self.assertEqual(d.day, min(31, calendar.monthrange(d.year, d.month)[1]))
 
-    def _two_accounts(self):
-        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+    def _two_accounts(self, a_expires=None):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=a_expires)
         self.run_cam("import", "--label", "A")
         self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
         self.run_cam("import", "--label", "B")
@@ -707,6 +829,123 @@ class CamTest(unittest.TestCase):
         self.assertIsNone(cam_menu.background_work(store).get("bg_owner"))
         self.assertEqual(len(self.data()["accounts"]), 1)
 
+    # ---- 通知：菜单栏点切换、cam serve 的后台任务
+
+    def _menu_plugin(self):
+        os.environ["CAM_MENU_NO_NOTIFY"] = "1"
+        os.environ["CAM_MENU_REFRESH_MIN"] = "0"
+        sys.path.insert(0, os.path.join(HERE, "..", "extras", "swiftbar"))
+        import cam_menu
+        cam_menu = importlib.reload(cam_menu)
+        cam_menu.cam = self.cam
+        return cam_menu
+
+    def test_menubar_switch_reports_result_by_notification(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        cam_menu = self._menu_plugin()
+        store = self.cam.Store()
+        sent = []
+        with mock.patch.object(self.cam, "notify", lambda t, b: sent.append((t, b))), \
+                mock.patch.dict(os.environ, {"CAM_MENU_NO_NOTIFY": ""}):
+            cam_menu.notify("标题", "正文")  # 插件和 cam serve 用同一个实现
+        self.assertEqual(sent, [("标题", "正文")])
+        told = []
+        cam_menu.notify = lambda title, body: told.append((title, body))
+        # 点切换跑的是插件自己的 switch 命令：SwiftBar 没有终端，cam 的输出没人看得到
+        lines = []
+        cam_menu.render(store, {}, out=lines.append)
+        clicks = [l for l in lines if 'param2="switch"' in l]
+        self.assertTrue(clicks and all(f'param1="{cam_menu.MENU_PY}"' in l for l in clicks), clicks)
+        # 有会话在跑：不打断，登记等待并通知
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.assertEqual(cam_menu.switch_from_menu(store, a_id), 0)
+        self.assertEqual(told[-1][0], "等会话结束后切换")
+        d = self.data()
+        self.assertEqual((d["active"]["claude_code"], d["pending_switch"]["account"]), (b_id, a_id))
+        # 会话退出后，插件下一轮切过去，再通知一次
+        self.cam.running_claude_processes = lambda: []
+        cam_menu.background_work(store)
+        self.assertEqual(told[-1][0], "已切换账号")
+        self.assertEqual(self.data()["active"]["claude_code"], a_id)
+        # 没有会话：直接切；出错也通知
+        self.assertEqual(cam_menu.switch_from_menu(store, b_id), 0)
+        self.assertEqual(told[-1][0], "已切换账号")
+        self.assertEqual(cam_menu.switch_from_menu(store, "nobody"), 1)
+        self.assertEqual(told[-1][0], "切换失败")
+        self.assertIn("找不到账号", told[-1][1])
+
+    def test_background_round_notifies_like_menubar(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        store = self.cam.Store()
+        told, st = [], {}
+
+        def tell(title, body):
+            told.append(title)
+
+        # 新登录的账号、额度超过阈值
+        MockAnthropic.tokens = {"at-C1": {"u5": 95.0, "u7": 1.0, "email": "c@x.com", "plan": "max"}}
+        self.login("at-C1", "rt-C1", "uuid-C", "c@x.com")
+        self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(told, ["发现新账号", "c@x.com 的 5 小时额度已用 95%"])
+        # 同一个额度窗口不重复提醒；等待中的切换完成了要说一声
+        told.clear()
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.cam.api_switch(store, a_id, "wait")
+        self.cam.running_claude_processes = lambda: []
+        st["last_refresh"] = 0
+        self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(told, ["已切换账号"])
+        # 等待中的切换切不过去（目标账号的登录作废了）：登记作废，告诉用户
+        told.clear()
+        sec = store.load_secret(b_id)
+        sec["claudeAiOauth"]["expiresAt"] = self._expired_ms()
+        store.save_secret(b_id, sec)
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.cam.api_switch(store, b_id, "wait")
+        self.cam.running_claude_processes = lambda: []
+        self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(told, ["等待中的切换没有完成"])
+        self.assertIn("已失效", st["last_error"])
+        self.assertNotIn("pending_switch", self.data())
+        # macOS：标题和正文作为参数交给 osascript，不拼进脚本
+        calls = []
+        with mock.patch.object(self.cam, "IS_MAC", True), mock.patch.dict(os.environ, {"CAM_NO_NOTIFY": ""}), \
+                mock.patch.object(self.cam.subprocess, "run", lambda cmd, **kw: calls.append(cmd)):
+            self.cam.notify('带"引号的标题', "正文")
+        self.assertEqual((calls[0][0], calls[0][-2:]), ("osascript", ['带"引号的标题', "正文"]))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "用假的 notify-send 验证，只在 Linux 上跑")
+    def test_serve_sends_system_notifications(self):
+        self._two_accounts()
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir)
+        sent = os.path.join(self.tmp, "notify.txt")
+        with open(os.path.join(bindir, "notify-send"), "w") as f:
+            f.write(f"#!/bin/sh\nprintf '%s|%s\\n' \"$1\" \"$2\" >> {sent}\n")
+        os.chmod(os.path.join(bindir, "notify-send"), 0o755)
+        # cam serve 拿着后台锁时菜单栏插件不再跑后台任务，通知要由 serve 自己弹出来
+        MockAnthropic.tokens = {"at-C1": {"u5": 1.0, "u7": 1.0, "email": "c@x.com", "plan": "max"}}
+        self.login("at-C1", "rt-C1", "uuid-C", "c@x.com")
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ.get("PATH", ""), PYTHONUNBUFFERED="1")
+        env.pop("CAM_NO_NOTIFY", None)
+        log = open(os.path.join(self.tmp, "serve.log"), "w")
+        p = subprocess.Popen([sys.executable, os.path.join(HERE, "cam.py"), "serve", "--port", "0", "--refresh-every", "0"],
+                             env=env, stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not os.path.exists(sent):
+                time.sleep(0.1)
+        finally:
+            p.terminate()
+            p.wait(10)
+            log.close()
+        with open(os.path.join(self.tmp, "serve.log")) as f:
+            out = f.read()
+        self.assertTrue(os.path.exists(sent), out)
+        with open(sent) as f:
+            self.assertEqual(f.read().splitlines(), ["发现新账号|已自动保存：c@x.com"])
+        self.assertIn("[通知] 发现新账号：已自动保存：c@x.com", out)
+
     # ---- 账号识别：凭据和 oauthAccount 对不上时不能把 token 存错账号
 
     def _switched_to_b(self):
@@ -835,6 +1074,67 @@ class CamTest(unittest.TestCase):
         self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A3")  # 换新后归到 A
         self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
 
+    # ---- cam login：先存好当前账号，再换号登录
+
+    def _fake_claude_login(self, fn):
+        """把 cam login 里的 claude auth login 换成 fn（模拟在浏览器里登录），claude 命令当作已安装。"""
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(self.cam, "claude_auth_login", fn))
+        stack.enter_context(mock.patch.object(self.cam.shutil, "which",
+                                              lambda name, *a, **k: "/fake/bin/claude" if name == "claude" else None))
+        return stack
+
+    def test_login_saves_current_login_before_adding_new(self):
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        a_id = self.data()["accounts"][0]["id"]
+        # import 之后 Claude Code 自己续过 A 的 token：cam 还只存着 rt-A1，它在服务端已经作废了
+        self.write_creds("at-A2", "rt-A2")
+        MockAnthropic.tokens = {t: {"u5": 1.0, "u7": 1.0, "email": e, "plan": "max"}
+                                for t, e in (("at-A2", "a@x.com"), ("at-B1", "b@x.com"), ("at-B2", "b@x.com"))}
+        logins = []
+
+        def login_b(exe):
+            logins.append(exe)
+            self.assertEqual(self.cam.Store().load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")  # 换号前已存好
+            self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")  # 浏览器里登录了 B，替换当前登录
+            return 0
+
+        out = io.StringIO()
+        with self._fake_claude_login(login_b), contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cam("login", "B"), 0)
+        self.assertEqual(logins, ["/fake/bin/claude"])
+        self.assertIn("已添加：B", out.getvalue())
+        d = self.data()
+        b = [a for a in d["accounts"] if a.get("email") == "b@x.com"][0]
+        self.assertEqual((b["label"], d["active"]["claude_code"]), ("B", b["id"]))
+        self.assertEqual(self.cam.Store().load_secret(b["id"])["claudeAiOauth"]["refreshToken"], "rt-B1")
+        # 切回 A 用的是续过的那份
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A2")
+        # 重新登录已有的账号：更新它，不重复添加
+        with self._fake_claude_login(lambda exe: self.login("at-B2", "rt-B2", "uuid-B", "b@x.com") or 0):
+            self.assertEqual(self.run_cam("login"), 0)
+        self.assertEqual(len(self.data()["accounts"]), 2)
+        self.assertEqual(self.cam.Store().load_secret(b["id"])["claudeAiOauth"]["refreshToken"], "rt-B2")
+        # claude auth login 没完成（取消、太旧没有这个命令）：报错，数据不动
+        with self._fake_claude_login(lambda exe: 1), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_cam("login"), 1)
+        self.assertEqual(len(self.data()["accounts"]), 2)
+
+    def test_login_refuses_when_current_login_cannot_be_verified(self):
+        a_id, b_id = self._switched_to_b()
+        # B 换过 token，access token 又过期了：认不出是谁的，这时换号登录就会把它丢掉
+        self.write_creds("at-B2", "rt-B2", expires_ms=self._expired_ms())
+        called = []
+        err = io.StringIO()
+        with self._fake_claude_login(lambda exe: called.append(exe) or 0), contextlib.redirect_stderr(err):
+            self.assertEqual(self.run_cam("login"), 1)
+        self.assertEqual(called, [])
+        self.assertIn("没有换号登录", err.getvalue())
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B2")
+        self.assertEqual(self.cam.Store().load_secret(self.cam.PENDING_ID)["claudeAiOauth"]["refreshToken"], "rt-B2")
+
     # ---- 等会话结束再切换
 
     def test_switch_waits_for_running_sessions(self):
@@ -928,6 +1228,83 @@ class CamTest(unittest.TestCase):
         res = self.cam.apply_pending_switch(store, tue10)
         self.assertEqual((res[0]["id"], res[2]), (a_id, "rule"))
         self.assertEqual(self.data()["active"]["claude_code"], a_id)
+
+    def test_switch_without_terminal_waits_instead(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO()), contextlib.redirect_stdout(out):  # 没有终端（菜单栏、脚本）
+            self.assertEqual(self.run_cam("switch", "A"), 0)
+        d = self.data()
+        self.assertEqual((d["active"]["claude_code"], d["pending_switch"]["account"]), (b_id, a_id))  # 没打断会话
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")
+        self.assertIn("等它们退出后会自动切换到 A", out.getvalue())
+        self.assertIn("cam switch --cancel-wait", out.getvalue())
+        # --now（同 -y）照常马上切
+        with mock.patch.object(sys, "stdin", io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cam("switch", "A", "--now"), 0)
+        d = self.data()
+        self.assertEqual(d["active"]["claude_code"], a_id)
+        self.assertNotIn("pending_switch", d)
+
+    def test_manual_pending_switch_expires_and_is_listed(self):
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.cam.api_switch(store, a_id, "wait")
+        # cam / cam ls 里看得到，并说明怎么取消
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cam("ls"), 0)
+        self.assertIn("自动切换到“A”", out.getvalue())
+        self.assertIn("cam switch --cancel-wait", out.getvalue())
+
+        def registered_hours_ago(h):
+            with store.lock():
+                d = store.load()
+                d["pending_switch"]["at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=h)).isoformat()
+                store.save(d)
+
+        # 放了 7 小时：不再显示；会话还在也马上清掉，之后不会再切
+        registered_hours_ago(7)
+        self.assertIsNone(self.cam.public_state(store, self.data())["pending_switch"])
+        self.assertIsNone(self.cam.apply_pending_switch(store))
+        self.assertNotIn("pending_switch", self.data())
+        self.cam.running_claude_processes = lambda: []
+        self.assertIsNone(self.cam.apply_pending_switch(store))
+        self.assertEqual(self.data()["active"]["claude_code"], b_id)
+        # 5 小时的照常等，会话退出后切过去
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        self.cam.api_switch(store, a_id, "wait")
+        registered_hours_ago(5)
+        self.assertEqual(self.cam.public_state(store, self.data())["pending_switch"]["account"], a_id)
+        self.cam.running_claude_processes = lambda: []
+        self.assertEqual(self.cam.apply_pending_switch(store)[0]["id"], a_id)
+        # 时间规则的登记跟着时间段作废，不按这个过期
+        self.assertFalse(self.cam.pending_switch_expired({"reason": "rule", "at": "2000-01-01T00:00:00+00:00"}))
+
+    @unittest.skipIf(os.name == "nt", "Windows 没有 SIGHUP")
+    def test_wait_is_cancelled_when_terminal_closes(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        self.cam.WAIT_POLL_SECS = 0
+        self.addCleanup(setattr, self.cam, "WAIT_POLL_SECS", 5)
+        handler = signal.getsignal(signal.SIGHUP)
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            seen = []
+
+            def procs():
+                seen.append(1)
+                if len(seen) == 3:  # 等了一会儿：终端被关掉（SIGHUP）/ 进程被 kill（SIGTERM）
+                    os.kill(os.getpid(), sig)
+                return [(4242, "claude")]
+
+            self.cam.running_claude_processes = procs
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.run_cam("switch", "A", "--wait"), 0)
+            d = self.data()
+            self.assertNotIn("pending_switch", d)  # 没留下一个看不见的登记
+            self.assertEqual(d["active"]["claude_code"], b_id)
+        self.assertEqual(signal.getsignal(signal.SIGHUP), handler)  # 等完恢复原来的处理
 
     # ---- 服务检查
 
@@ -2238,6 +2615,17 @@ class SharedFixtureTest(unittest.TestCase):
         for c in fx["days_left"]:
             got = self.cam.days_left(c["account"], dt.date.fromisoformat(c["today"]))
             self.assertEqual(got, c["expect"], c["name"])
+
+    def test_usage(self):
+        fx = shared("usage.json")
+        for c in fx["parse"]:
+            self.assertEqual(self.cam.parse_usage_body(c["body"], c["source"]), c["expect"], c["name"])
+        for c in fx["cost"]:
+            got = self.cam.message_cost(c["model"], c["usage"])
+            if c["expect"] is None:
+                self.assertIsNone(got, c["name"])
+            else:
+                self.assertAlmostEqual(got, c["expect"], places=9, msg=c["name"])
 
 
 

@@ -6,6 +6,7 @@
 
 常用命令：
   cam import [--label 名字]        把当前 Claude Code 登录的账号存进来
+  cam login [名字]                 登录另一个账号并存进来（先存好当前账号，再 claude auth login）
   cam ls                           列出所有账号和用量
   cam switch <账号>                切换 Claude Code 账号（id / 序号 / 名字 / 邮箱）
   cam usage                        刷新并显示用量
@@ -39,6 +40,7 @@ import platform
 import re
 import secrets as pysecrets
 import shutil
+import signal
 import socket
 import socketserver
 import ssl
@@ -48,6 +50,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -889,6 +892,17 @@ def repair_oauth_account(store, data, acc):
     return True
 
 
+SWITCH_RENEW_SECS = 300  # Claude Code 在 access token 过期前 5 分钟就自己续；切换前按同一个标准先替目标账号续好
+
+
+def switch_renew_error(label, err):
+    """切换前替目标账号续登录没成功时给用户看的话：说清楚没切、当前登录没动、怎么办。"""
+    if "登录已失效" in str(err):
+        return (f"没有切换：“{label}”保存的登录已失效（refresh token 被服务端拒绝），切过去 Claude Code 也用不了。"
+                "当前登录没有动。用这个账号重新登录一次再切换：运行 cam login（或在 claude 里 /login 后运行 cam import）")
+    return f"没有切换：“{label}”保存的登录过期了，切换前要先续一下，但{err}。当前登录没有动"
+
+
 def switch_code_account(store, key):
     with store.lock():
         data = store.load()
@@ -907,16 +921,28 @@ def switch_code_account(store, key):
         if not ob or not ob.get("refreshToken"):
             store.save(data)  # 快照可能刚导入了新账号，先存下
             raise CamError("该账号没有保存可用的凭据，请先用这个账号登录 Claude Code 后执行 cam import")
-        backup = backup_live(store, f"before-{target['id']}")  # 第 3 步
-        _, where = read_live_credentials()
-        raw = dict(secret.get("raw") or {})
-        raw["claudeAiOauth"] = ob
-        # 第 4 步：先写 ~/.claude.json 再写凭据，凭据写失败就把 oauthAccount 改回去。
+        if (ob.get("expiresAt") or 0) <= (time.time() + SWITCH_RENEW_SECS) * 1000:
+            # 第 3 步：目标账号保存的登录过期了，先用它自己的 refresh token 续上再切（它不是当前登录，没人跟它抢）。
+            # 续不上就不切，什么都不写：refresh token 作废了的话，切过去 Claude Code 也用不了，还把能用的当前登录换掉了
+            try:
+                ob = renew_saved_login(store, target)
+            except CamError as e:
+                if "登录已失效" in str(e) and (data.get("pending_switch") or {}).get("account") == target["id"]:
+                    data.pop("pending_switch", None)  # 等下去也切不过去，登记作废
+                store.save(data)  # 快照可能刚导入了新账号、回写了当前账号的 token，先存下
+                raise CamError(switch_renew_error(target["label"], e))
+        backup = backup_live(store, f"before-{target['id']}")  # 第 4 步
+        live, where = read_live_credentials()
+        # 只换 claudeAiOauth：凭据里的其它内容（例如 mcpOAuth，MCP 服务器的登录）保持现在的样子，
+        # 不拿目标账号当初保存的旧副本整个覆盖
+        creds = dict(live) if isinstance(live, dict) else {}
+        creds["claudeAiOauth"] = ob
+        # 第 5 步：先写 ~/.claude.json 再写凭据，凭据写失败就把 oauthAccount 改回去。
         # 万一中途崩溃，凭据还是原来那个号的，再切一次就能完成；反过来的话会被当成“已经是当前账号”。
         prev_oa = read_oauth_account()
         write_oauth_account(secret.get("oauthAccount"))
         try:
-            write_live_credentials(raw, where)
+            write_live_credentials(creds, where)
         except BaseException:
             try:
                 write_oauth_account(prev_oa)
@@ -926,7 +952,7 @@ def switch_code_account(store, key):
         data.pop("live_mismatch", None)  # 凭据和 oauthAccount 现在是同一个账号的
         data.pop("live_unverified", None)  # 现在生效的登录是我们刚写的，当然认识
         data.pop("pending_switch", None)  # 这次切换优先于之前登记的等待切换
-        data["active"]["claude_code"] = target["id"]  # 第 5 步
+        data["active"]["claude_code"] = target["id"]  # 第 6 步
         target["last_switched_at"] = now_iso()
         data["switch_log"].append({"id": target["id"], "at": now_iso()})
         note_account_region(data, target["id"], cached_region_loc(data))  # 给风险提示记一笔地区
@@ -1082,24 +1108,33 @@ def ensure_fresh_token(store, acc_id, allow_refresh=True):
         got = _usable_token(store, data, acc)  # 等锁期间可能已切成当前账号，或已被别的进程刷新
         if got:
             return got
-        secret = store.load_secret(acc_id)
-        ob = dict(secret.get("claudeAiOauth") or {})
-        if not ob.get("refreshToken"):
-            raise CamError("登录已过期且没有 refresh token")
-        tok = refresh_oauth(ob["refreshToken"])
-        ob["accessToken"] = tok["access_token"]
-        if tok.get("refresh_token"):
-            ob["refreshToken"] = tok["refresh_token"]
-        ob["expiresAt"] = int((time.time() + int(tok.get("expires_in", 28800))) * 1000)
-        secret["claudeAiOauth"] = ob
-        if isinstance(secret.get("raw"), dict):
-            secret["raw"]["claudeAiOauth"] = ob
-        secret["saved_at"] = now_iso()
-        store.save_secret(acc_id, secret)
-        if ob.get("refreshToken"):
-            acc["token_fp"] = token_fp(ob["refreshToken"])
-            store.save(data)
+        ob = renew_saved_login(store, acc)
+        store.save(data)
         return ob["accessToken"], ob
+
+
+def renew_saved_login(store, acc):
+    """用 acc 自己保存的 refresh token 换一个新的 access token，存回它名下，返回新的 oauth 块。
+
+    调用方持有数据锁，并且已经确认 acc 不是当前生效的登录（没有 Claude Code 跟它抢这个 refresh token），
+    还要负责保存 data（acc 的 token_fp 改了）。refresh token 已作废或连不上时抛 CamError（见 refresh_oauth）。
+    """
+    secret = store.load_secret(acc["id"])
+    ob = dict(secret.get("claudeAiOauth") or {})
+    if not ob.get("refreshToken"):
+        raise CamError("登录已过期且没有 refresh token")
+    tok = refresh_oauth(ob["refreshToken"])
+    ob["accessToken"] = tok["access_token"]
+    if tok.get("refresh_token"):
+        ob["refreshToken"] = tok["refresh_token"]
+    ob["expiresAt"] = int((time.time() + int(tok.get("expires_in", 28800))) * 1000)
+    secret["claudeAiOauth"] = ob
+    if isinstance(secret.get("raw"), dict):
+        secret["raw"]["claudeAiOauth"] = ob
+    secret["saved_at"] = now_iso()
+    store.save_secret(acc["id"], secret)
+    acc["token_fp"] = token_fp(ob["refreshToken"])
+    return ob
 
 
 def pick_window(body, key):
@@ -1110,6 +1145,87 @@ def pick_window(body, key):
     if u is None:
         return None
     return {"utilization": float(u), "resets_at": w.get("resets_at")}
+
+
+def scoped_windows(body):
+    """单独计算的周额度，例如“7 天 · Fable”。接口在 limits 里按模型（或产品）给出。"""
+    out = []
+    for lim in body.get("limits") or []:
+        if not isinstance(lim, dict) or lim.get("kind") != "weekly_scoped":
+            continue
+        scope = lim.get("scope") or {}
+        name = ((scope.get("model") or {}).get("display_name") or (scope.get("surface") or {}).get("display_name"))
+        pct = lim.get("percent")
+        if not name or isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            continue
+        out.append({"name": str(name), "utilization": float(pct), "resets_at": lim.get("resets_at")})
+    return out
+
+
+def week_breakdown(body):
+    """7 天额度花在了哪里：Claude Code / 网页聊天 / Cowork…，只留占比大于 0 的。"""
+    b = body.get("seven_day_breakdown")
+    out = []
+    for r in (b.get("rows") if isinstance(b, dict) else None) or []:
+        pct = r.get("percent") if isinstance(r, dict) else None
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)) or pct <= 0:
+            continue
+        out.append({"key": r.get("key"), "name": r.get("display_name") or r.get("key"), "percent": float(pct)})
+    return out
+
+
+def parse_usage_body(body, source):
+    """把 /api/oauth/usage（或 claude.ai 的 usage）响应整理成存下来的格式。"""
+    usage = {"source": source}
+    for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        usage[k] = pick_window(body, k)
+    models = scoped_windows(body)
+    if models:
+        usage["models"] = models
+        # 新接口里 Opus / Sonnet 的周额度也在 limits 里，别显示两遍
+        names = {m["name"].lower() for m in models}
+        for k, n in (("seven_day_opus", "opus"), ("seven_day_sonnet", "sonnet")):
+            if n in names:
+                usage[k] = None
+    parts = week_breakdown(body)
+    if parts:
+        usage["breakdown"] = parts
+    extra = body.get("extra_usage")
+    if isinstance(extra, dict) and extra.get("is_enabled"):
+        usage["extra_usage"] = {k: extra.get(k) for k in ("monthly_limit", "used_credits", "utilization")}
+    return usage
+
+
+# 按 API 标价折算的价格（美元 / 百万 token）：输入、输出、缓存读取。缓存写入是输入价的 1.25 倍（5 分钟）
+# 或 2 倍（1 小时）。订阅账号不按这个收费，这里只用来比较用量大小、推算额度窗口。按前缀匹配，长的在前。
+PRICES = (
+    ("fable-5-1", 10, 50, 0.25), ("mythos-5-1", 10, 50, 0.25), ("fable-5", 10, 50, 1.0), ("mythos-5", 10, 50, 1.0),
+    ("opus-5-5", 4, 20, 0.20), ("opus-5", 5, 25, 0.50), ("opus-4-8", 5, 25, 0.50), ("opus-4-7", 5, 25, 0.50),
+    ("opus-4-6", 5, 25, 0.50), ("opus-4-5", 5, 25, 0.50), ("opus-4", 15, 75, 1.50),
+    ("sonnet-5", 2, 10, 0.20), ("sonnet-4", 3, 15, 0.30), ("haiku-5-5", 0.10, 0.50, 0.01), ("haiku-4-5", 1, 5, 0.10),
+)
+
+
+def message_cost(model, u):
+    """一条消息按 API 价折算多少美元；不认识的模型返回 None。"""
+    m = (model or "").lower()
+    i = m.find("claude-")
+    m = m[i + 7:] if i >= 0 else m
+    rate = next((r for r in PRICES if m.startswith(r[0])), None)
+    if not rate:
+        return None
+    n = lambda k: int(u.get(k) or 0)
+    cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else None
+    if cc:
+        w5, w1 = int(cc.get("ephemeral_5m_input_tokens") or 0), int(cc.get("ephemeral_1h_input_tokens") or 0)
+    else:
+        w5, w1 = n("cache_creation_input_tokens"), 0
+    inp, out, cr = rate[1], rate[2], rate[3]
+    # Haiku 5.5 的提示超过 10 万 token 时整条按 5 倍价
+    if rate[0] == "haiku-5-5" and n("input_tokens") + n("cache_read_input_tokens") + w5 + w1 > 100_000:
+        inp, out, cr = inp * 5, out * 5, cr * 5
+    return (n("input_tokens") * inp + n("output_tokens") * out + n("cache_read_input_tokens") * cr
+            + w5 * inp * 1.25 + w1 * inp * 2) / 1e6
 
 
 def fetch_code_usage(store, acc, allow_refresh=True):
@@ -1124,12 +1240,7 @@ def fetch_code_usage(store, acc, allow_refresh=True):
     st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", headers=oauth_headers(token))
     if st != 200:
         raise CamError(err_msg(st, body))
-    usage = {"source": "oauth"}
-    for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-        usage[k] = pick_window(body, k)
-    extra = body.get("extra_usage")
-    if isinstance(extra, dict) and extra.get("is_enabled"):
-        usage["extra_usage"] = {k: extra.get(k) for k in ("monthly_limit", "used_credits", "utilization")}
+    usage = parse_usage_body(body, "oauth")
     # 账号资料（邮箱、套餐），失败不影响用量
     if st2 == 200 and isinstance(prof, dict):
         a = prof.get("account") or {}
@@ -1230,6 +1341,8 @@ def fetch_web_usage(store, acc):
     plan = plan_from_caps(org.get("capabilities"))
     if plan:
         acc["plan"] = plan
+    if org.get("rate_limit_tier"):
+        acc["rate_limit_tier"] = org["rate_limit_tier"]
 
     # 账号邮箱，失败不影响用量
     code_a, acct, _ = web_get("/api/account", sk)
@@ -1241,10 +1354,7 @@ def fetch_web_usage(store, acc):
     code, body, raw = web_get(f"/api/organizations/{org['uuid']}/usage", sk)
     if code != 200 or not isinstance(body, dict):
         raise CamError(web_error(code, body, raw))
-    usage = {"source": "claude.ai"}
-    for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
-        usage[k] = pick_window(body, k)
-    return usage
+    return parse_usage_body(body, "claude.ai")
 
 
 def month_start_utc():
@@ -1567,6 +1677,15 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
         t.start()
     for t in threads:
         t.join()
+    # 本机记录里每个 Claude Code 号当前窗口用了多少，和刚拉到的百分比对照着看
+    fetched = {aid: u for aid, (u, _) in results.items()
+               if not u.get("error") and next((a["kind"] for a in targets if a["id"] == aid), None) == "claude_code"}
+    try:
+        local = local_window_usage(data, fetched)
+    except Exception:  # 统计失败不影响用量本身
+        local = {}
+    for aid, u in fetched.items():
+        u["local"] = local.get(aid)
     with store.lock():
         fresh = store.load()
         for a in fresh["accounts"]:
@@ -1722,12 +1841,22 @@ def match_time_rule(data, when=None):
 
 
 WAIT_POLL_SECS = 5
+PENDING_SWITCH_HOURS = 6  # 手动登记的等待切换放多久：过了还没等到会话结束就作废，免得几小时后突然换号
+
+
+def pending_switch_expired(p, now=None):
+    """手动登记的等待切换放太久了。时间规则的登记跟着时间段作废，不看这个。"""
+    if p.get("reason") == "rule":
+        return False
+    at = parse_iso(p.get("at"))
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return at is None or now - at > dt.timedelta(hours=PENDING_SWITCH_HOURS)
 
 
 def pending_switch_view(data):
-    """登记中的“等会话结束再切换”，给界面显示用；没有或目标账号已删除则 None。"""
+    """登记中的“等会话结束再切换”，给界面显示用；没有、已过期或目标账号已删除则 None。"""
     p = data.get("pending_switch")
-    if not p:
+    if not p or pending_switch_expired(p):
         return None
     acc = next((a for a in data["accounts"] if a["id"] == p.get("account")), None)
     if not acc:
@@ -1753,14 +1882,15 @@ def cancel_pending_switch(store):
 def apply_pending_switch(store, when=None):
     """后台每轮调用：登记过的等待切换，在没有 claude 会话运行时执行。
 
-    返回 (账号, 备份目录, reason)，没切则 None。目标账号没了、已经是当前账号、或时间规则的时间段已经过了，
-    就作废。切换本身走 switch_code_account，它会清掉登记。
+    返回 (账号, 备份目录, reason)，没切则 None。目标账号没了、已经是当前账号、手动登记放了 PENDING_SWITCH_HOURS
+    小时还没等到、或时间规则的时间段已经过了，就作废（过期的不等会话退出，马上清掉）。
+    切换本身走 switch_code_account，它会清掉登记。
     """
     data = store.load()
     p = data.get("pending_switch")
     if not p:
         return None
-    if running_claude_processes():
+    if not pending_switch_expired(p) and running_claude_processes():
         return None
     with store.lock():
         data = store.load()
@@ -1768,7 +1898,7 @@ def apply_pending_switch(store, when=None):
         if not p:
             return None
         known = any(a["id"] == p.get("account") for a in data["accounts"])
-        drop = not known or data["active"].get("claude_code") == p["account"]
+        drop = not known or data["active"].get("claude_code") == p["account"] or pending_switch_expired(p)
         if not drop and p.get("reason") == "rule":
             r = match_time_rule(data, when)
             drop = not r or r["id"] != p.get("rule")  # 时间段已经过了，或规则变了
@@ -2067,13 +2197,10 @@ def run_claude(store, args):
 
 # --------------------------------------------------------------------------- 本地用量统计
 
-def local_usage(data, days=30):
+def local_events(since):
+    """本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)。同一条消息只算一次。"""
     root = os.path.join(claude_config_dir(), "projects")
-    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
-    log = sorted(((parse_iso(e["at"]), e["id"]) for e in data.get("switch_log", []) if parse_iso(e.get("at"))),
-                 key=lambda x: x[0])
     seen = set()
-    daily = {}  # (date, acc_id) -> dict
     for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
         try:
             if dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc) < since:
@@ -2100,23 +2227,87 @@ def local_usage(data, days=30):
                     if key in seen:
                         continue
                     seen.add(key)
-                owner = "unattributed"
-                for at, aid in log:
-                    if at <= ts:
-                        owner = aid
-                    else:
-                        break
-                u = msg["usage"]
-                day = ts.astimezone().date().isoformat()
-                rec = daily.setdefault((day, owner), {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
-                                                      "messages": 0})
-                rec["input"] += int(u.get("input_tokens") or 0)
-                rec["output"] += int(u.get("output_tokens") or 0)
-                rec["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
-                rec["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
-                rec["messages"] += 1
-    out = [{"date": d, "account_id": a, **v} for (d, a), v in sorted(daily.items())]
+                yield ts, msg.get("model") or "", msg["usage"]
+
+
+def owner_finder(data):
+    """按切换记录找某个时刻登录的是哪个号。从没切换过时都算当前账号；最早一次切换之前的算不出来，返回 None。"""
+    log = sorted(((parse_iso(e["at"]), e["id"]) for e in data.get("switch_log", []) if parse_iso(e.get("at"))),
+                 key=lambda x: x[0])
+    active = (data.get("active") or {}).get("claude_code")
+
+    def owner(ts):
+        if not log:
+            return active
+        found = None
+        for at, aid in log:
+            if at > ts:
+                break
+            found = aid
+        return found
+    return owner
+
+
+def local_usage(data, days=30):
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+    owner_of = owner_finder(data)
+    daily = {}  # (date, acc_id) -> dict
+    for ts, model, u in local_events(since):
+        owner = owner_of(ts) or "unattributed"
+        day = ts.astimezone().date().isoformat()
+        rec = daily.setdefault((day, owner), {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
+                                              "messages": 0, "cost_usd": 0.0})
+        rec["input"] += int(u.get("input_tokens") or 0)
+        rec["output"] += int(u.get("output_tokens") or 0)
+        rec["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
+        rec["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+        rec["messages"] += 1
+        rec["cost_usd"] += message_cost(model, u) or 0.0
+    out = [{"date": d, "account_id": a, **v, "cost_usd": round(v["cost_usd"], 4)} for (d, a), v in sorted(daily.items())]
     return {"days": days, "rows": out}
+
+
+WINDOW_SECS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+
+
+def local_window_usage(data, usages, now=None):
+    """每个 Claude Code 账号当前额度窗口里，本机记录到的用量和按 API 价折算的金额。
+
+    usages 是 {账号 id: 刚拉到的 usage}。窗口起点 = 重置时间 - 窗口长度（按模型的周额度也是 7 天）。
+    界面拿它和接口给的百分比对照，推算整个窗口大约能用多少。返回 {账号 id: {...}}。
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    spans = {}  # 账号 id -> [(名字, 模型名或 None, 起点)]
+    for aid, u in usages.items():
+        for key, secs in WINDOW_SECS.items():
+            r = parse_iso(((u or {}).get(key) or {}).get("resets_at"))
+            if r:
+                spans.setdefault(aid, []).append((key, None, r - dt.timedelta(seconds=secs)))
+        for m in (u or {}).get("models") or []:
+            r = parse_iso(m.get("resets_at"))
+            if r:
+                spans.setdefault(aid, []).append((m["name"], m["name"].lower(), r - dt.timedelta(days=7)))
+    if not spans:
+        return {}
+    owner_of = owner_finder(data)
+    out = {aid: {"at": now.isoformat(), "windows": {}} for aid in spans}
+    for ts, model, u in local_events(min(start for v in spans.values() for _, _, start in v)):
+        aid = owner_of(ts)
+        if aid not in spans or ts > now:
+            continue
+        cost = message_cost(model, u)
+        tokens = sum(int(u.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens"))
+        for name, family, start in spans[aid]:
+            if ts < start or (family and family not in model.lower()):
+                continue
+            w = out[aid]["windows"].setdefault(name, {"tokens": 0, "cost_usd": 0.0, "messages": 0})
+            w["tokens"] += tokens
+            w["cost_usd"] += cost or 0.0
+            w["messages"] += 1
+    for v in out.values():
+        for w in v["windows"].values():
+            w["cost_usd"] = round(w["cost_usd"], 4)
+    return out
 
 
 # --------------------------------------------------------------------------- 网页版账号
@@ -3063,6 +3254,91 @@ def api_switch(store, aid, mode=None):
             "backup": backup, "risks": risks}
 
 
+def notify(title, body):
+    """弹一条系统通知：macOS 用 osascript，其它系统有 notify-send 就用它，都没有就不弹。出错不影响调用方。
+
+    标题和正文作为参数传给脚本，不拼进 AppleScript 源码，引号、中文都不用转义。CAM_NO_NOTIFY=1 可关掉。
+    """
+    if os.environ.get("CAM_NO_NOTIFY"):
+        return
+    if IS_MAC:
+        cmd = ["osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+               "-e", "end run", title, body]
+    elif not IS_WIN and shutil.which("notify-send"):
+        cmd = ["notify-send", title, body]
+    else:
+        return
+    try:
+        subprocess.run(cmd, timeout=5, capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def background_round(store, st, refresh_min, tell, import_live=True):
+    """后台任务跑一轮：自动导入新登录、时间规则、等待切换、定时刷新用量和额度提醒。
+
+    菜单栏插件每次运行跑一轮，cam serve 每隔几秒跑一轮，两边弹的通知一样（tell(标题, 正文)）。
+    st 记两轮之间的状态（last_refresh、warned、last_error），调用方负责保存。任何一步出错都只记进
+    last_error，不影响后面的步骤。import_live=False 跳过自动导入（cam serve 在登录状态没变时用它省掉读钥匙串）。
+    """
+    if import_live:
+        try:
+            acc = auto_import(store)
+            if acc:
+                tell("发现新账号", f"已自动保存：{acc['label']}")
+                st["last_refresh"] = 0
+        except Exception as e:  # noqa: BLE001
+            st["last_error"] = f"自动导入：{e}"
+    try:
+        res = apply_time_rules(store)
+        if res and res[2]:
+            warn = running_warning(running_claude_processes()) or "正在运行的会话需要重启。"
+            tell("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}。{warn}")
+    except Exception as e:  # noqa: BLE001
+        st["last_error"] = f"时间规则：{e}"
+    try:
+        res = apply_pending_switch(store)
+        if res:
+            tell("已切换账号", f"claude 会话已退出，Claude Code 已切换到 {res[0]['label']}"
+                 + ("（时间规则）" if res[2] == "rule" else ""))
+    except Exception as e:  # noqa: BLE001
+        st["last_error"] = f"等待切换：{e}"
+        try:
+            if not store.load().get("pending_switch"):  # 登记已作废（目标账号的登录失效了），不会再试，告诉用户一声
+                tell("等待中的切换没有完成", str(e))
+        except Exception:  # noqa: BLE001
+            pass
+    now = time.time()
+    if refresh_min > 0 and now - float(st.get("last_refresh") or 0) >= refresh_min * 60:
+        st["last_refresh"] = now
+        try:
+            # 定时刷新不替不常用的账号续登录，见 refresh_usage
+            try:
+                check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
+            except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
+                st["last_error"] = f"环境检测：{e}"
+            data = refresh_usage(store, allow_token_refresh=False)
+            st.pop("last_error", None)
+            limit = rules_view(data)["alert_threshold"]
+            act = data["active"].get("claude_code")
+            warned = set(st.get("warned") or [])
+            # 当前 Claude Code 账号 + 所有有额度的网页账号，超过阈值都提醒一次（每个额度窗口一次）
+            for a in data["accounts"]:
+                if a["id"] != act and a["kind"] != "claude_web":
+                    continue
+                w = (a.get("usage") or {}).get("five_hour") or {}
+                if w.get("utilization") is None:
+                    continue
+                key = f"{a['id']}|{w.get('resets_at')}"
+                if w["utilization"] >= limit and key not in warned:
+                    warned.add(key)
+                    tell(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", fmt_reset(w.get("resets_at")))
+            st["warned"] = sorted(warned)[-50:]
+        except Exception as e:  # noqa: BLE001
+            st["last_error"] = f"刷新用量：{e}"
+    return st
+
+
 def serve(store, host, port, auto_refresh_min):
     token = server_token(store)
     srv = ThreadingServer((host, port), make_handler(store, token))
@@ -3072,17 +3348,22 @@ def serve(store, host, port, auto_refresh_min):
         for ip in lan_ips():
             print(f"  局域网：http://{ip}:{port}/?t={token}")
         print("  手机和电脑在同一网络下打开上面的地址即可；在外网访问建议用 Tailscale 等组网工具，不要直接暴露端口。")
+    def tell(title, body):
+        print(f"[通知] {title}：{body}")
+        notify(title, body)
+
     def watch():
         """后台：发现新登录自动导入；按间隔自动刷新用量；快用完时提醒。
 
         同一台电脑上只让一个进程做这些事（桌面版、cam serve、菜单栏插件谁先拿到后台锁谁做），
-        避免几个进程同时轮询、同时刷新。
+        避免几个进程同时轮询、同时刷新。拿到后台锁后菜单栏插件就不弹通知了，所以这里弹同样的系统通知
+        （和插件走同一个 background_round），不只是打印出来：从菜单栏“打开管理面板”起的 cam serve 没有终端。
         """
         lease = store.background_lock()
         told = False
         last_fp = None
-        last_refresh = 0.0
-        warned = set()
+        st = {}
+        last_err = None
         while True:
             try:
                 if lease.fd is None and not lease.try_acquire():
@@ -3095,35 +3376,12 @@ def serve(store, host, port, auto_refresh_min):
                     told = False
                     print("[后台] 已接手后台任务")
                 fp = live_fingerprint()
-                if fp != last_fp:
-                    last_fp = fp
-                    acc = auto_import(store)
-                    if acc:
-                        print(f"[自动] 发现新登录的账号，已保存：{acc['label']}")
-                        last_refresh = 0.0
-                res = apply_time_rules(store)
-                if res and res[2]:
-                    print(f"[规则] 进入时间段，已切换到 {res[0]['label']}。{running_warning(running_claude_processes())}")
-                res = apply_pending_switch(store)
-                if res:
-                    print(f"[等待切换] claude 会话已退出，已切换到 {res[0]['label']}" + ("（时间规则）" if res[2] == "rule" else ""))
-                if auto_refresh_min > 0 and time.time() - last_refresh >= auto_refresh_min * 60:
-                    last_refresh = time.time()
-                    try:
-                        check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
-                    except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
-                        print(f"[后台] 环境检测出错：{e}")
-                    data = refresh_usage(store, allow_token_refresh=False)
-                    limit = rules_view(data)["alert_threshold"]
-                    act = data["active"].get("claude_code")
-                    for a in data["accounts"]:
-                        if a["id"] != act:
-                            continue
-                        w = (a.get("usage") or {}).get("five_hour") or {}
-                        key = (a["id"], w.get("resets_at"))
-                        if (w.get("utilization") or 0) >= limit and key not in warned:
-                            warned.add(key)
-                            print(f"[提醒] {a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%，{fmt_reset(w.get('resets_at'))}")
+                background_round(store, st, auto_refresh_min, tell, import_live=fp != last_fp)
+                last_fp = fp
+                if st.get("last_error") != last_err:
+                    last_err = st.get("last_error")
+                    if last_err:
+                        print(f"[后台] {last_err}", file=sys.stderr)
             except Exception as e:
                 print("后台任务出错：", e, file=sys.stderr)
             time.sleep(30 if use_keychain() else 5)
@@ -3209,12 +3467,64 @@ def fmt_reset(s):
     if secs <= 0:
         return "已重置"
     h, m = divmod(secs // 60, 60)
+    local = d.astimezone()
     if h >= 24:
-        return f"{h // 24}天{h % 24}小时后重置"
-    return f"{h}小时{m}分后重置" if h else f"{m}分后重置"
+        return f"{h // 24}天{h % 24}小时后重置（{local.month}月{local.day}日 {local:%H:%M}）"
+    return (f"{h}小时{m}分后重置" if h else f"{m}分后重置") + f"（{local:%H:%M}）"
 
 
 KIND_NAME = {"claude_code": "Code", "claude_web": "网页", "claude_desktop": "桌面版", "api": "API"}
+BREAKDOWN_NAME = {"claude_code": "Claude Code", "chat": "网页聊天", "cowork": "Cowork", "other": "其它"}
+
+
+def plan_tier(acc):
+    """Max 的档位（5x / 20x），从接口给的 rate_limit_tier 里取；不是 Max 或拿不到时返回空。"""
+    m = re.search(r"max_(\d+)x", acc.get("rate_limit_tier") or "")
+    plan = acc.get("plan_display") or acc.get("plan") or (acc.get("manual") or {}).get("plan")
+    return f"{m.group(1)}x" if m and plan == "max" else ""
+
+
+def usage_windows(u):
+    """要显示的额度窗口：(名字, 窗口, 窗口秒数, 本机记录)。按模型的周额度排在 7 天后面。"""
+    local = ((u.get("local") or {}).get("windows")) or {}
+    out = []
+    for k, name in (("five_hour", "5小时"), ("seven_day", "7天"), ("seven_day_opus", "Opus"), ("seven_day_sonnet", "Sonnet")):
+        if u.get(k):
+            out.append((name, u[k], WINDOW_SECS.get(k, 7 * 86400), local.get(k)))
+        if k == "seven_day":
+            out += [(m["name"], m, 7 * 86400, local.get(m["name"])) for m in u.get("models") or []]
+    return out
+
+
+def window_pace(w, secs, now=None):
+    """已用百分比比窗口已过去的时间多出多少个百分点；窗口刚开始（过去不到 3%）时不算。"""
+    r = parse_iso(w.get("resets_at"))
+    if not r:
+        return None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    elapsed = 100 - (r - now).total_seconds() / secs * 100
+    if elapsed <= 3 or elapsed > 100:
+        return None
+    return w["utilization"] - elapsed
+
+
+def window_estimate(w, local):
+    """“整窗约 $1009 · 640 万 tokens”：本机这个窗口用掉的 ÷ 已用百分比。用得太少时不估。"""
+    if not local or not local.get("cost_usd"):
+        return ""
+    if w["utilization"] < 5:
+        return "整窗估算：用量还少，数据不足"
+    k = 100 / w["utilization"]
+    return f"整窗约 ${local['cost_usd'] * k:,.0f} · {fmt_count(local['tokens'] * k)} tokens（本机已用 ${local['cost_usd']:,.2f}，按 API 价折算）"
+
+
+def text_width(s):
+    """终端里占几列：中文等宽字符算两列。"""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+
+def fmt_count(n):
+    return f"{n / 1e8:.1f} 亿" if n >= 1e8 else f"{n / 1e4:.0f} 万" if n >= 1e5 else f"{n / 1e4:.1f} 万" if n >= 1e4 else f"{n:.0f}"
 
 
 def print_accounts(store, data):
@@ -3227,7 +3537,7 @@ def print_accounts(store, data):
         return
     for i, a in enumerate(st["accounts"], 1):
         mark = color("●", "g") if a["is_active"] else " "
-        plan = (a.get("plan_display") or "").upper()
+        plan = (a.get("plan_display") or "").upper() + (f" {plan_tier(a)}" if plan_tier(a) else "")
         head = f"{mark} {i}. {color(a['label'] or '-', 'b')}  [{KIND_NAME[a['kind']]}]"
         if plan:
             head += f" {color(plan, 'c')}"
@@ -3252,11 +3562,18 @@ def print_accounts(store, data):
             print("     " + color(f"{source} · 记录时间 {record}{old}", "d"))
             if u.get("notice"):
                 print("     " + color(u["notice"], "d"))
-        for k, name in (("five_hour", "5小时"), ("seven_day", "7天  "), ("seven_day_opus", "Opus "),
-                        ("seven_day_sonnet", "Sonnet")):
-            w = u.get(k)
-            if w:
-                print(f"     {name} {bar(w['utilization'])} {w['utilization']:5.1f}%  {color(fmt_reset(w.get('resets_at')), 'd')}")
+        for name, w, secs, local in usage_windows(u):
+            pace = window_pace(w, secs) if a["kind"] != "claude_desktop" else None
+            tail = fmt_reset(w.get("resets_at"))
+            if pace is not None and abs(pace) >= 1:
+                tail += f" · 配速 {pace:+.0f}%"
+            print(f"     {name}{' ' * max(1, 7 - text_width(name))}{bar(w['utilization'])} {w['utilization']:5.1f}%  {color(tail, 'y' if (pace or 0) >= 15 else 'd')}")
+            est = window_estimate(w, local)
+            if est:
+                print("            " + color(est, "d"))
+        if u.get("breakdown"):
+            print("     " + color("7 天构成：" + " · ".join(f"{BREAKDOWN_NAME.get(b['key'], b['name'])} {b['percent']:.0f}%"
+                                                         for b in u["breakdown"]), "d"))
         if u.get("cost_month_usd") is not None:
             print(f"     本月花费 ${u['cost_month_usd']:.2f}")
         if a["kind"] == "api" and a.get("api_key_hint"):
@@ -3269,6 +3586,10 @@ def print_accounts(store, data):
             print("     " + color("备注：" + a["manual"]["note"], "d"))
     if st.get("warning"):
         print("\n" + color("⚠ " + st["warning"], "y"))
+    pend = st.get("pending_switch")
+    if pend:
+        tail = "" if pend.get("reason") == "rule" else f"；{PENDING_SWITCH_HOURS} 小时内没等到就作废"
+        print("\n" + color(f"⏳ {pend['message']}（cam switch --cancel-wait 取消{tail}）", "c"))
     risks = [r for r in st.get("risks") or [] if r["level"] in ("warn", "bad")]
     for i, r in enumerate(risks):
         print(("\n" if i == 0 else "") + color(f"! {r['text']}。{r['advice']}", "y"))
@@ -3330,7 +3651,46 @@ def add_account(store, kind, label, email=None, session_key=None, api_key=None, 
 def cmd_import(store, args):
     acc = import_current(store, args.label)
     print(f"已保存：{acc['label']}（{acc.get('email') or '-'}）id={acc['id']}")
-    print("要添加另一个账号：在 claude 里执行 /login 换号登录，然后再运行一次 cam import。之前的账号已保存，不会丢。")
+    print("要添加另一个账号：运行 cam login 名字。它会先把当前账号最新的登录存好，再打开浏览器登录新账号，之前的账号不会丢。")
+
+
+def claude_auth_login(exe):
+    """在当前终端里运行 claude auth login（浏览器登录，替换 Claude Code 当前的登录）。返回退出码。"""
+    return subprocess.call([exe, "auth", "login"])
+
+
+def cmd_login(store, args):
+    """登录一个 Claude Code 账号并存进来：先把当前登录存回它的账号，再 claude auth login，最后导入新登录。
+
+    直接在 claude 里 /login 的话，当前账号在上次保存之后续过的 token 还没存进来，换号后就丢了，这个号就得重新登录。
+    """
+    exe = shutil.which("claude")
+    if not exe:
+        raise CamError("找不到 claude 命令，请先安装 Claude Code（cam env install）")
+    with store.lock():
+        data = store.load()
+        before = {a["id"] for a in data["accounts"]}
+        cur = snapshot_live(store, data)  # 和运行 cam 时一样：最新 token 存回它的账号，没见过的号自动导入
+        unverified = data.get("live_unverified")
+        store.save(data)
+    if unverified:
+        raise CamError(unverified["message"] + "为了不丢掉它，这次没有换号登录，处理好后再运行 cam login。")
+    if cur:
+        print(("已保存当前登录：" if cur["id"] in before else "当前登录的是新账号，已保存：")
+              + f"{cur['label']}（{cur.get('email') or '-'}）")
+    print("正在运行 claude auth login，按提示在浏览器里登录要添加的账号…", flush=True)
+    rc = claude_auth_login(exe)
+    if rc != 0:
+        raise CamError(f"claude auth login 没有完成（退出码 {rc}），之前的账号都已保存。"
+                       "Claude Code 太旧没有这个命令的话，先运行 claude update")
+    before = {a["id"] for a in store.load()["accounts"]}
+    acc = import_current(store, args.label)
+    print(color(f"✓ {'已添加' if acc['id'] not in before else '已更新'}：{acc['label']}（{acc.get('email') or '-'}）"
+                f"id={acc['id']}", "g"))
+    print("  Claude Code 现在登录的就是这个账号；cam switch <账号> 可以切回其它账号")
+    warn = running_warning(running_claude_processes())
+    if warn:
+        print(color("  ⚠ " + warn, "y"))
 
 
 def cmd_add_web(store, args):
@@ -3369,16 +3729,32 @@ def ask_choice(options, default):
             return ans
 
 
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 def wait_and_switch(store, target, procs):
     """登记等待切换，然后在这里等到 claude 会话都退出再切。
-    桌面版 / cam serve / 菜单栏插件也在跑的话，谁先发现会话退出谁切，这里只是报告结果。"""
-    with store.lock():
-        data = store.load()
-        defer_switch(data, target["id"], "manual")
-        store.save(data)
-    print(f"等 {len(procs)} 个 claude 会话退出后自动切换到 {target['label']}…（Ctrl-C 取消）")
-    shown = len(procs)
+    桌面版 / cam serve / 菜单栏插件也在跑的话，谁先发现会话退出谁切，这里只是报告结果。
+
+    Ctrl-C、关掉终端（SIGHUP）、被 kill（SIGTERM）都撤掉登记：这里等着的人走了，不该留一个看不见的登记，
+    几小时后突然把号换掉。出错时也撤掉。
+    """
+    old = {}
+    for name in ("SIGHUP", "SIGTERM", "SIGBREAK"):  # SIGBREAK 是 Windows 上的 Ctrl-Break
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            try:
+                old[sig] = signal.signal(sig, _interrupt)
+            except (ValueError, OSError):  # 不在主线程里设不了，只能靠 Ctrl-C
+                pass
     try:
+        with store.lock():
+            data = store.load()
+            defer_switch(data, target["id"], "manual")
+            store.save(data)
+        print(f"等 {len(procs)} 个 claude 会话退出后自动切换到 {target['label']}…（Ctrl-C 或关掉终端都会取消）")
+        shown = len(procs)
         while True:
             res = apply_pending_switch(store)
             if res:
@@ -3391,7 +3767,7 @@ def wait_and_switch(store, target, procs):
                 if data["active"].get("claude_code") == target["id"]:
                     print(color(f"✓ 已切换到 {target['label']}", "g"))
                 else:
-                    print("等待已被取消，没有切换")
+                    print(f"等待已被取消（或超过 {PENDING_SWITCH_HOURS} 小时作废），没有切换")
                 return
             n = len(running_claude_processes())
             if n != shown:
@@ -3400,7 +3776,16 @@ def wait_and_switch(store, target, procs):
             time.sleep(WAIT_POLL_SECS)
     except KeyboardInterrupt:
         cancel_pending_switch(store)
-        print("\n已取消，没有切换")
+        try:
+            print("\n已取消，没有切换")
+        except OSError:  # 终端已经关了
+            pass
+    except CamError:
+        cancel_pending_switch(store)  # 这次没切成：登记一起撤掉，免得后台过一会儿又悄悄去切
+        raise
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
 
 
 def cmd_switch(store, args):
@@ -3417,7 +3802,13 @@ def cmd_switch(store, args):
     procs = running_claude_processes() if target["id"] != data["active"].get("claude_code") else []
     wait = args.wait
     asked = False
-    if procs and not wait and not args.yes and sys.stdin.isatty():
+    if procs and not wait and not args.yes and not sys.stdin.isatty():
+        # 没有终端可问（菜单栏、脚本）：不打断正在跑的会话，和面板里选“等”一样，登记后马上返回，
+        # 由桌面版、cam serve 或菜单栏插件在会话都退出后切换
+        r = api_switch(store, target["id"], "wait")
+        print(r["message"] + ("（cam switch --cancel-wait 可取消）" if r.get("deferred") else ""))
+        return
+    if procs and not wait and not args.yes:
         asked = True
         print(color("⚠ " + running_summary(procs) + "。等它们结束后再切不会打断正在跑的任务；现在就切的话它们需要重开。", "y"))
         choice = ask_choice([("w", "等它们结束后再切换"), ("y", "现在就切换"), ("n", "取消")], "w")
@@ -4937,12 +5328,15 @@ def main(argv=None):
 
     s = sub.add_parser("import", help="保存当前 Claude Code 登录的账号")
     s.add_argument("--label")
+    s = sub.add_parser("login", help="登录另一个 Claude Code 账号并保存（先存好当前账号，再 claude auth login）")
+    s.add_argument("label", nargs="?", help="给新账号起的名字（可选）")
     sub.add_parser("ls", aliases=["list"], help="列出账号（不联网）")
     s = sub.add_parser("usage", help="刷新用量并列出")
     s.add_argument("account", nargs="?")
     s = sub.add_parser("switch", aliases=["use"], help="切换 Claude Code 账号")
     s.add_argument("account", nargs="?")
-    s.add_argument("-y", "--yes", action="store_true", help="有 claude 正在运行时也不再确认，直接切")
+    s.add_argument("-y", "--yes", "--now", action="store_true",
+                   help="有 claude 正在运行时也不再确认，直接切（不加时：终端里会问；没有终端时登记成等它们退出后再切）")
     s.add_argument("-w", "--wait", action="store_true", help="有 claude 正在运行时等它们都退出后再切（本命令会一直等）")
     s.add_argument("--cancel-wait", action="store_true", help="取消登记中的等待切换")
     sub.add_parser("current", aliases=["whoami"], help="显示当前 Claude Code 账号")
@@ -5057,6 +5451,8 @@ def main(argv=None):
             print(color("\n提示：cam usage 刷新用量，cam switch <账号> 切换，cam -h 查看全部命令", "d"))
         elif c == "import":
             cmd_import(store, args)
+        elif c == "login":
+            cmd_login(store, args)
         elif c in ("ls", "list"):
             print_accounts(store, store.load())
         elif c == "usage":
@@ -5104,7 +5500,9 @@ def main(argv=None):
                 tot = r["input"] + r["output"] + r["cache_write"]
                 print(f"{r['date']}  {names.get(r['account_id'], '未归属'):<16} 消息 {r['messages']:>5}  "
                       f"输入 {r['input']:>10,}  输出 {r['output']:>9,}  缓存写 {r['cache_write']:>10,}  "
-                      f"缓存读 {r['cache_read']:>12,}  合计(不含缓存读) {tot:>11,}")
+                      f"缓存读 {r['cache_read']:>12,}  合计(不含缓存读) {tot:>11,}  ≈ ${r['cost_usd']:,.2f}")
+            if rep["rows"]:
+                print(color(f"合计 ≈ ${sum(r['cost_usd'] for r in rep['rows']):,.2f}（按 API 价折算，订阅不按这个收费，只用来比较用量）", "d"))
         elif c == "serve":
             serve(store, "0.0.0.0" if args.lan else "127.0.0.1", args.port, args.refresh_every)
         elif c == "panel":

@@ -12,6 +12,7 @@ import {
   type SwitchChoice,
 } from "./components/Dialogs";
 import { LocalUsage } from "./components/LocalUsage";
+import { setPref, usePrefs } from "./prefs";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Privacy } from "./components/Privacy";
 import { ThemeToggle } from "./components/ThemeToggle";
@@ -214,6 +215,7 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const toastTimer = useRef<number>();
   const [, tick] = useState(0);
+  const prefs = usePrefs();
 
   const toast = useCallback((text: string, bad = false) => {
     setToastMsg({ text, bad });
@@ -474,6 +476,23 @@ export default function App() {
                   点账号卡看详情
                 </span>
                 <span className="sec-acts">
+                  <span className="seg-mini" role="group" aria-label="额度显示">
+                    <button type="button" aria-pressed={!prefs.remain} onClick={() => setPref("remain", false)}>
+                      已用
+                    </button>
+                    <button type="button" aria-pressed={prefs.remain} onClick={() => setPref("remain", true)}>
+                      剩余
+                    </button>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn quiet"
+                    aria-pressed={prefs.mask}
+                    title="截图分享时把邮箱显示成 ch***@y***.com"
+                    onClick={() => setPref("mask", !prefs.mask)}
+                  >
+                    {prefs.mask ? "显示邮箱" : "邮箱打码"}
+                  </button>
                   <button
                     className="btn quiet"
                     disabled={!!busy}

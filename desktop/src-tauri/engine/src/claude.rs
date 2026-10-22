@@ -630,6 +630,21 @@ pub struct SwitchResult {
     pub backup: Option<PathBuf>,
 }
 
+/// Claude Code 在 access token 过期前 5 分钟就自己续；切换前按同一个标准先替目标账号续好。与 cam.py 一致。
+const SWITCH_RENEW_SECS: i64 = 300;
+
+/// 切换前替目标账号续登录没成功时给用户看的话：说清楚没切、当前登录没动、怎么办。
+fn switch_renew_error(label: &str, err: &str) -> String {
+    if err.contains("登录已失效") {
+        format!(
+            "没有切换：“{}”保存的登录已失效（refresh token 被服务端拒绝），切过去 Claude Code 也用不了。当前登录没有动。用这个账号重新登录 Claude Code 后点“导入当前登录”，再切换",
+            label
+        )
+    } else {
+        format!("没有切换：“{}”保存的登录过期了，切换前要先续一下，但{}。当前登录没有动", label, err)
+    }
+}
+
 pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     let _g = store.lock()?;
     let mut data = store.load()?;
@@ -659,26 +674,42 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     }
     adopt_pending_for(store, &mut data, &tid)?; // 暂存的登录要是 target 的，先核对并存进去，下面就能用上
     let secret = store.load_secret(&tid);
-    let ob = secret.get("claudeAiOauth").cloned().unwrap_or(Value::Null);
+    let mut ob = secret.get("claudeAiOauth").cloned().unwrap_or(Value::Null);
     if s(&ob, "refreshToken").is_none() {
         // 快照可能新增了账号，先保存
         store.save(&mut data)?;
         return Err("该账号没有保存可用的凭据，请先用这个账号登录 Claude Code 后再导入".into());
     }
-    // 3：备份
+    let expires = ob.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+    if expires <= chrono::Utc::now().timestamp_millis() + SWITCH_RENEW_SECS * 1000 {
+        // 3：目标账号保存的登录过期了，先用它自己的 refresh token 续上再切（它不是当前登录，没人跟它抢）。
+        // 续不上就不切，什么都不写：refresh token 作废了的话，切过去 Claude Code 也用不了，还把能用的当前登录换掉了
+        match super::usage::renew_saved_login(store, &mut data, &tid) {
+            Ok(v) => ob = v,
+            Err(e) => {
+                let pending_here = data.get("pending_switch").and_then(|p| s(p, "account")) == Some(tid.as_str());
+                if e.contains("登录已失效") && pending_here {
+                    if let Some(o) = data.as_object_mut() {
+                        o.remove("pending_switch"); // 等下去也切不过去，登记作废
+                    }
+                }
+                store.save(&mut data)?; // 快照可能刚导入了新账号、回写了当前账号的 token，先存下
+                return Err(switch_renew_error(&label, &e));
+            }
+        }
+    }
+    // 4：备份
     let backup = backup_live(store, &format!("before-{}", tid))?;
-    // 4：先写 ~/.claude.json 再写凭据，凭据写失败就把 oauthAccount 改回去。
+    let (live, where_) = read_live()?;
+    // 只换 claudeAiOauth：凭据里的其它内容（例如 mcpOAuth，MCP 服务器的登录）保持现在的样子，
+    // 不拿目标账号当初保存的旧副本整个覆盖
+    let mut creds = live.filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
+    creds["claudeAiOauth"] = ob;
+    // 5：先写 ~/.claude.json 再写凭据，凭据写失败就把 oauthAccount 改回去。
     // 万一中途崩溃，凭据还是原来那个号的，再切一次就能完成；反过来的话会被当成“已经是当前账号”。
-    let (_, where_) = read_live()?;
-    let mut raw = secret
-        .get("raw")
-        .cloned()
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| json!({}));
-    raw["claudeAiOauth"] = ob;
     let prev_oa = read_oauth_account()?;
     write_oauth_account(secret.get("oauthAccount").unwrap_or(&Value::Null))?;
-    if let Err(e) = write_live(&raw, where_) {
+    if let Err(e) = write_live(&creds, where_) {
         let _ = write_oauth_account(&prev_oa); // 回滚失败时保留原来的错误
         return Err(e);
     }
@@ -687,7 +718,7 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
         o.remove("live_unverified"); // 现在生效的登录是我们刚写的，当然认识
         o.remove("pending_switch"); // 这次切换优先于之前登记的等待切换
     }
-    // 5：记录
+    // 6：记录
     set_active_code(&mut data, Some(&tid));
     accounts_mut(&mut data)[ti]["last_switched_at"] = json!(now_iso());
     push_switch_log(&mut data, &tid);
@@ -884,9 +915,26 @@ pub fn running_warning(procs: &[(u32, String)]) -> Option<String> {
 
 // ---------------------------------------------------------------- 等会话结束再切换
 
-/// 登记中的“等会话结束再切换”，给界面显示用；没有或目标账号已删除则 Null。与 cam.py 一致。
+/// 手动登记的等待切换放多久：过了还没等到会话结束就作废，免得几小时后突然换号。与 cam.py 一致。
+pub const PENDING_SWITCH_HOURS: i64 = 6;
+
+/// 手动登记的等待切换放太久了。时间规则的登记跟着时间段作废，不看这个。
+fn pending_switch_expired(p: &Value) -> bool {
+    if s(p, "reason") == Some("rule") {
+        return false;
+    }
+    match s(p, "at").and_then(parse_time) {
+        Some(at) => chrono::Utc::now().signed_duration_since(at) > chrono::Duration::hours(PENDING_SWITCH_HOURS),
+        None => true,
+    }
+}
+
+/// 登记中的“等会话结束再切换”，给界面显示用；没有、已过期或目标账号已删除则 Null。与 cam.py 一致。
 pub fn pending_switch_view(data: &Value) -> Value {
-    let Some(p) = data.get("pending_switch").filter(|p| p.is_object()) else {
+    let Some(p) = data
+        .get("pending_switch")
+        .filter(|p| p.is_object() && !pending_switch_expired(p))
+    else {
         return Value::Null;
     };
     let Some(acc) = accounts(data).iter().find(|a| s(a, "id") == s(p, "account")) else {
@@ -926,14 +974,15 @@ pub fn apply_pending_switch(store: &Store) -> R<Option<(SwitchResult, String)>> 
 }
 
 /// 后台每轮调用：登记过的等待切换，在没有 claude 会话运行时执行。返回 (切换结果, reason)。
-/// 目标账号没了、已经是当前账号、或时间规则的时间段已经过了，就作废。切换本身走 switch_account，
-/// 它会清掉登记。与 cam.py 的 apply_pending_switch 一致。
+/// 目标账号没了、已经是当前账号、手动登记放了 PENDING_SWITCH_HOURS 小时还没等到、或时间规则的时间段已经过了，
+/// 就作废（过期的不等会话退出，马上清掉）。切换本身走 switch_account，它会清掉登记。
+/// 与 cam.py 的 apply_pending_switch 一致。
 pub fn apply_pending_switch_at(store: &Store, now: chrono::NaiveDateTime) -> R<Option<(SwitchResult, String)>> {
     let data = store.load()?;
-    if !data.get("pending_switch").map(|p| p.is_object()).unwrap_or(false) {
+    let Some(p) = data.get("pending_switch").filter(|p| p.is_object()) else {
         return Ok(None);
-    }
-    if !running_claude_processes().is_empty() {
+    };
+    if !pending_switch_expired(p) && !running_claude_processes().is_empty() {
         return Ok(None);
     }
     let (target, reason) = {
@@ -944,7 +993,8 @@ pub fn apply_pending_switch_at(store: &Store, now: chrono::NaiveDateTime) -> R<O
         };
         let target = s(&p, "account").unwrap_or_default().to_string();
         let known = accounts(&data).iter().any(|a| s(a, "id") == Some(target.as_str()));
-        let mut drop = !known || active_code_id(&data).as_deref() == Some(target.as_str());
+        let mut drop =
+            !known || active_code_id(&data).as_deref() == Some(target.as_str()) || pending_switch_expired(&p);
         if !drop && s(&p, "reason") == Some("rule") {
             let r = super::rules::match_time_rule(&data, now);
             drop = r.as_ref().and_then(|r| s(r, "id")) != s(&p, "rule"); // 时间段已经过了，或规则变了

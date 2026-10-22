@@ -36,6 +36,7 @@
       "label": "工作号",
       "email": "me@example.com",
       "plan": "max",                          // 自动获取，失败时用 manual.plan
+      "rate_limit_tier": "default_claude_max_20x", // 自动获取，界面据此显示 Max 5x / 20x
       "org_name": "…",
       "account_uuid": "…",
       "token_fp": "…",                        // refresh token 的 SHA-256 前 16 位，用来认出当前登录是哪个号
@@ -49,7 +50,12 @@
         "fetched_at": "…", "source": "oauth",
         "five_hour": { "utilization": 37.0, "resets_at": "…" },
         "seven_day": { "utilization": 12.0, "resets_at": "…" },
-        "seven_day_opus": null, "seven_day_sonnet": null,
+        "seven_day_opus": null, "seven_day_sonnet": null,   // 新接口里同名的按模型额度已在 models 里时置空
+        "models": [ { "name": "Fable", "utilization": 19.0, "resets_at": "…" } ], // 按模型单独计的周额度（limits 里的 weekly_scoped）
+        "breakdown": [ { "key": "claude_code", "name": "Claude Code", "percent": 80.0 } ], // 7 天额度花在了哪里，只留大于 0 的
+        "local": {                            // 拉用量时顺便统计：本机记录里当前各窗口用了多少（只有 Claude Code 号）
+          "at": "…", "windows": { "five_hour": { "tokens": 0, "cost_usd": 0.0, "messages": 0 }, "seven_day": {…}, "Fable": {…} }
+        },                                    // tokens 不含缓存读取；cost_usd 按 API 价折算（message_cost），界面用它推算整窗
         "cost_month_usd": null,               // API 账号（需要 Admin Key）
         "error": null
       },
@@ -139,15 +145,18 @@ macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows
 
 1. **先快照**：读取当前正在生效的凭据（Linux/Windows 读 `~/.claude/.credentials.json`；macOS 读钥匙串 `Claude Code-credentials`，没有再读文件）以及 `~/.claude.json` 里的 `oauthAccount`。
 2. **回写**：认出它属于哪个已保存账号（见下一节），把最新 token 写回该账号（Claude Code 运行时会刷新 token，不回写的话旧 token 会失效）。如果是没见过的账号，自动导入为新账号，绝不丢弃。认不出是谁的（见下一节的“暂存”）就不写，切换到候选账号前会先核对一次。
-3. **备份**：把凭据文件和 `~/.claude.json` 复制到 `backups/<时间戳>/`。
-4. **写入**：原子写入目标账号的凭据，`~/.claude.json` 只替换 `oauthAccount` 字段，其它字段原样保留（合并方式见“并发与锁”）。
-5. **记录**：更新 `active` 和 `switch_log`，清掉 `live_mismatch`、`live_unverified` 和 `pending_switch`。
+3. **核对目标**：目标账号保存的 access token 已过期或 5 分钟内过期（`SWITCH_RENEW_SECS`，和 Claude Code 自己续的时机一样）时，先用它自己的 refresh token 换新并存回它名下（它不是当前登录，没人跟它抢）。换不了就整个切换作罢，下面的步骤一步都不做，当前登录原样不动：token 接口返回 400/401（refresh token 已作废）时提示用这个号重新登录（`cam login`）后再切，并作废指向它的 `pending_switch`，免得后台一直重试；连不上时提示稍后再试，登记留着。
+4. **备份**：把凭据文件和 `~/.claude.json` 复制到 `backups/<时间戳>/`。
+5. **写入**：读出当前的凭据，只把 `claudeAiOauth` 换成目标账号的，其它键（例如 MCP 服务器的登录 `mcpOAuth`）保持现在的样子，不拿目标账号当初保存的旧副本整个覆盖；原子写入（macOS 写钥匙串，同时有文件时文件也一起更新）。`~/.claude.json` 只替换 `oauthAccount` 字段，其它字段原样保留（合并方式见“并发与锁”）。
+6. **记录**：更新 `active` 和 `switch_log`，清掉 `live_mismatch`、`live_unverified` 和 `pending_switch`。
 
 不动的东西：`~/.claude/projects/`（会话记录）、`settings.json`、`CLAUDE.md`、MCP 配置、插件。所以切换后 `claude --continue` / `--resume` 照常可用。
 
 正在运行的 `claude` 进程内存里还是旧 token，切换后需要重启这些会话；不重启的话，它刷新 token 后还会把旧账号写回凭据文件。所以切换后会扫一遍进程（Linux 读 `/proc`，macOS 用 `ps`，Windows 用 `Win32_Process`），认得出原生安装版和 npm 版的 Claude Code，不算 Claude 桌面 App。有的话在返回消息、系统通知、终端输出里提示进程数和 pid；`cam switch` 在交互终端里会在切换前先问一句。
 
-**等会话结束再切**：切换前发现有会话在跑时，可以不打断它——把目标记在 `accounts.json` 的 `pending_switch`（`{"account", "reason": "manual"|"rule", "rule", "at"}`）里，由持有后台租约的那个进程（桌面版、`cam serve`、菜单栏插件）每轮检查：没有 `claude` 进程了就执行切换并清掉登记。目标账号被删、已经是当前账号、或时间规则的时间段已经过了，登记作废。手动切换会覆盖登记。`cam switch --wait` 自己也会轮询等待。面板 / 桌面版的切换接口在没指定 `mode` 且有会话在跑时返回 `choice_required`，由前端弹三选一。
+**等会话结束再切**：切换前发现有会话在跑时，可以不打断它——把目标记在 `accounts.json` 的 `pending_switch`（`{"account", "reason": "manual"|"rule", "rule", "at"}`）里，由持有后台租约的那个进程（桌面版、`cam serve`、菜单栏插件）每轮检查：没有 `claude` 进程了就执行切换并清掉登记。目标账号被删、已经是当前账号、手动登记放了 6 小时（`PENDING_SWITCH_HOURS`，按 `at` 算）还没等到、或时间规则的时间段已经过了，登记作废；过期的不等会话退出就清掉，界面上也不再显示。手动切换会覆盖登记。`cam switch --wait` 自己也会轮询等待，Ctrl-C、SIGHUP（关掉终端）、SIGTERM 都会撤掉登记，切换出错也撤掉，不留一个看不见的登记。面板 / 桌面版的切换接口在没指定 `mode` 且有会话在跑时返回 `choice_required`，由前端弹三选一；`cam switch` 没有终端（脚本、菜单栏插件）且没加 `-y` / `--now` / `--wait` 时按 `mode=wait` 处理。`cam`、`cam ls`、`cam doctor` 都会显示登记中的等待切换和取消方法（`cam switch --cancel-wait`）。
+
+菜单栏插件点切换时运行的是插件自己的 `switch` 命令（`api_switch(mode=wait)`），结果和出错都弹系统通知。后台任务一轮做的事（自动导入、时间规则、等待切换、定时刷新和额度提醒）写在 `cam.background_round` 里，菜单栏插件和 `cam serve` 共用，通知也一样（macOS 用 `osascript`，其它系统有 `notify-send` 就用它）：`cam serve` 拿着后台锁时插件不跑后台任务，通知由 serve 弹。等待中的切换因为目标登录失效被作废时也通知一次。
 
 ## 认出当前登录
 
@@ -168,7 +177,10 @@ macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows
   - 只有用户主动刷新（`cam usage`、面板 / 桌面版的“刷新”、`POST /api/refresh`）才会换新。后台定时刷新（`cam serve`、桌面版、菜单栏插件）不换，过期的号显示“登录已过期”，这样少一些和 Claude Code 抢 refresh token 的机会。
   - 换新在数据锁里进行，拿到锁后再确认一次这个号仍然不是当前账号、也没被别的进程刷新过，所以和切换互斥：不会出现刚切过去、Claude Code 和这里拿着同一个 refresh token 各刷一次，把号弄成需要重新登录的情况。锁里的请求超时 8 秒。
   - token 接口返回 400/401 说明 refresh token 已失效，提示用这个号重新登录 Claude Code 后 `cam import`；其它错误提示稍后再试。
+  - 切换到一个 access token 过期的号时，切换前在同一把锁里先换新（见“切换流程”第 3 步），换不了就不切。
 - **拉用量前先核对**：先请求 `/api/oauth/profile`，返回的 uuid / 邮箱和账号记录的不一致（凭据被旧会话覆盖了），就不拿这份凭据查用量，直接报错。
+
+**添加账号（`cam login`）**：先像 `cam` 一样把当前登录存回它的账号（没见过的号自动导入），再运行 `claude auth login` 换号登录，最后导入新登录（已有的号就更新）。直接 `/login` 的话，当前账号在上次保存之后续过的 token 还没存进来，换号后就作废了。当前登录认不出是谁的（会被暂存，见“暂存认不出主人的登录”）时不换号，免得丢掉它。
 
 ## 并发与锁
 
