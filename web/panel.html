@@ -276,7 +276,7 @@ details.src[open] summary::before { content: "▾"; }
 .env-facts div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .env-facts .k { display: inline-block; min-width: 3em; color: var(--muted); }
 .env-facts .bad { color: var(--hot); font-weight: 600; }
-.env-acts { grid-area: acts; display: flex; gap: 8px; }
+.env-acts { grid-area: acts; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .env-risks, .env-checks { grid-area: risks; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); }
 .env-risks { list-style: none; font-size: 13px; display: grid; gap: 6px; }
 .env-risks > li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
@@ -472,6 +472,15 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
       <div class="keys" id="pv-keys"></div>
       <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details>
       <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div>
+    </div>
+  </section>
+
+  <section class="block" id="update-block" hidden>
+    <h2>软件更新</h2>
+    <div class="panel">
+      <p class="hint">只在点“检查更新”时联网看一眼代码仓库，不会自动更新。更新只做快进，更新后自检没过会自动退回原来的版本；账号数据不受影响。桌面版是单独的安装包，不跟着更新。</p>
+      <div id="up-result"></div>
+      <div class="pv-foot"><span id="up-when"></span><span class="key-acts"><button class="btn" type="button" id="up-check">检查更新</button><button class="btn primary" type="button" id="up-apply" hidden>更新</button></span></div>
     </div>
   </section>
 
@@ -854,15 +863,48 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   // “重新检测”的完整结果直接展开在环境状态卡里（和桌面版一样），重绘时保留
   let envChecks = null, envChecking = false;
   const CHECK_TIP = "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
+  // “全面体检”（同 cam doctor）只有脚本版 cam serve 有：桌面版内置的服务返回 404，按钮不显示。结果展开在同一个位置
+  let checkup = null, checkupBusy = false, checkupAvail = false, checkupProbed = false;
+  const CHECKUP_TIP = "逐项检查每个账号的登录还能不能续（不在用的号快过期了会替它续一次，当前登录不碰）、到期日和用量，Claude 服务和官方状态页，本机 Claude Code 的版本和正在运行的会话，cam 的后台任务、更新和文件校验，装了的话还有聊天机器人。要等十几秒。";
   function envButton(label) {
-    const fold = envChecks && !envChecking ? `<button class="btn quiet" data-act="env-fold">收起</button>` : "";
-    return `<div class="env-acts">${fold}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></div>`;
+    const fold = (envChecks || checkup) && !envChecking && !checkupBusy ? `<button class="btn quiet" data-act="env-fold">收起</button>` : "";
+    const full = checkupAvail ? `<button class="btn" data-act="checkup" title="${CHECKUP_TIP}"${checkupBusy ? " disabled" : ""}>${checkupBusy ? "体检中，要等十几秒…" : "全面体检"}</button>` : "";
+    return `<div class="env-acts">${fold}${full}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></div>`;
   }
-  const envChecksHtml = () => envChecks ? `<div class="env-checks check-groups">${renderChecks(envChecks)}</div>` : "";
+  function renderCheckup(r) {  // 分区一个标题；账号的条目前面先列账号名
+    const s = r.summary || {};
+    const head = { level: s.bad ? "bad" : s.warn ? "warn" : "ok", text: `全面体检：${s.text}${s.bad || s.warn ? "" : "，一切正常"}`,
+                   advice: s.first ? mail(s.first) : "" };
+    let html = `<ul class="checks">${checkItem(head, "summary")}</ul>`;
+    for (const sec of r.sections || []) {
+      let rows = "", group = null;
+      for (const it of sec.items || []) {
+        if (it.group && it.group !== group) { group = it.group; rows += `<li class="info"><span class="mark"></span><b>${esc(mail(group))}</b></li>`; }
+        rows += checkItem({ ...it, text: mail(it.text) });
+      }
+      html += `<h4>${esc(sec.title)}</h4><ul class="checks">${rows}</ul>`;
+    }
+    return html;
+  }
+  const envChecksHtml = () => checkup ? `<div class="env-checks check-groups">${renderCheckup(checkup)}</div>`
+    : envChecks ? `<div class="env-checks check-groups">${renderChecks(envChecks)}</div>` : "";
+  async function runCheckup() {
+    if (checkupBusy) return;
+    checkupBusy = true; render();
+    try { checkup = await api("GET", "/api/checkup"); envChecks = null; }
+    catch (err) { toast(err.message, true); }
+    finally { checkupBusy = false; }
+    load(); // 体检会续登录、刷新用量和环境缓存
+  }
+  async function probeCheckup() {
+    checkupProbed = true;
+    try { await api("GET", "/api/checkup?probe=1"); checkupAvail = true; } catch (_) { checkupAvail = false; }
+    if (checkupAvail && state) render();
+  }
   async function runEnvCheck() {
     if (envChecking) return;
     envChecking = true; render();
-    try { envChecks = (await api("GET", "/api/service-check")).items || []; }
+    try { envChecks = (await api("GET", "/api/service-check")).items || []; checkup = null; }
     catch (err) { toast(err.message, true); }
     finally { envChecking = false; }
     load(); // 检测会刷新后台缓存，分数跟着更新
@@ -888,14 +930,14 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
         <div><span class="k">检测</span>${ago(reg.checked_at)} · 后台每隔几分钟自动检测</div>
       </div>
       ${envButton("重新检测")}
-      ${envChecks ? envChecksHtml() : risks.length ? `<ul class="env-risks">${risks.map((r) => `<li class="${esc(r.level)}">${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</li>`).join("")}</ul>` : ""}
+      ${envChecks || checkup ? envChecksHtml() : risks.length ? `<ul class="env-risks">${risks.map((r) => `<li class="${esc(r.level)}">${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</li>`).join("")}</ul>` : ""}
     </section>`;
   }
 
   // ---- 渲染
   let state = null, accountBusy = false;
   function syncAccountBusy() {
-    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="env-fold"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
+    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="checkup"]):not([data-act="env-fold"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
       .forEach((button) => { button.disabled = accountBusy; });
   }
   function render() {
@@ -1074,10 +1116,57 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
     next.focus(); next.click();
   });
 
+  // ---- 软件更新：只有脚本版 cam serve 有这个接口，桌面版内置的服务返回 404，整块不显示
+  let upd = null, updDone = null, updErr = "";
+  function renderUpdate() {
+    const r = upd || {}, commits = r.commits || [], blocked = r.ahead || (r.dirty || []).length;
+    const out = [];
+    if (updDone) out.push(`<div class="notice pending"><span class="n-text">${esc(updDone.message)}${(updDone.restart || []).map((t) => `<span class="n-advice">${esc(t)}</span>`).join("")}</span></div>`);
+    if (updErr) out.push(`<div class="notice bad">${esc(updErr).replace(/\n/g, "<br>")}</div>`);
+    else if (r.failed) out.push(`<div class="notice bad">上次更新后自检没过，已经退回原来的版本：${esc(r.failed)}</div>`);
+    if (r.checked_at && r.checkout === false) out.push(`<div class="notice">${esc(r.message)}</div>`);
+    else if (r.behind) {
+      out.push(`<p>${esc(r.upstream)} 上有 ${r.behind} 个新改动${r.behind > commits.length ? `，下面是最近 ${commits.length} 个` : ""}：</p><ul class="rules">${commits.map((c) =>
+        `<li><span class="r-kind"><code>${esc(c.hash)}</code></span><span class="r-what">${esc(c.subject)}</span><span class="hint">${esc((c.date || "").slice(0, 10))}</span></li>`).join("")}</ul>`);
+      if (blocked) out.push(`<div class="notice">${esc(r.message)}</div>`);
+    } else if (r.checked_at && !updDone) out.push(`<p class="hint">✓ ${esc(r.message)}</p>`);
+    $("#up-result").innerHTML = out.join("");
+    $("#up-apply").hidden = !r.behind || !!blocked || r.checkout === false;
+    $("#up-apply").textContent = `更新（${r.behind || 0} 个新改动）`;
+    $("#up-when").textContent = (r.checked_at ? `上次检查：${new Date(r.checked_at).toLocaleString()}` : "还没检查过") + (r.version ? ` · 当前版本 ${r.version}` : "");
+    $("#update-block").hidden = false;
+  }
+  async function loadUpdate() {
+    try { upd = await api("GET", "/api/update?saved=1"); renderUpdate(); }
+    catch (_) { $("#update-block").hidden = true; }
+  }
+  $("#up-check").onclick = async () => {
+    const btn = $("#up-check");
+    btn.disabled = true; btn.textContent = "正在检查…";
+    try { upd = await api("GET", "/api/update"); updDone = null; updErr = ""; renderUpdate(); toast(upd.message); }
+    catch (e) { updErr = e.message; renderUpdate(); toast(e.message, true); }
+    finally { btn.disabled = false; btn.textContent = "检查更新"; }
+  };
+  $("#up-apply").onclick = async () => {
+    if (!upd || !confirm(`更新到最新版本（${upd.behind} 个新改动）？\n只做快进；更新后自检没过会自动退回原来的版本。账号数据不受影响。`)) return;
+    const btn = $("#up-apply");
+    btn.disabled = true; btn.textContent = "正在更新…";
+    try {
+      const r = await api("POST", "/api/update");
+      updErr = "";
+      if (r.updated) { updDone = r; upd = { ...r, behind: 0, commits: [], failed: null }; } else upd = r;
+      renderUpdate(); toast(r.message);
+    } catch (e) {
+      updErr = e.message; toast(e.message, true);
+      await loadUpdate();
+    } finally { btn.disabled = false; renderUpdate(); }
+  };
+
   async function load() {
     try {
       state = await api("GET", "/api/state");
-      render(); loadLocal(); loadRules(); loadPrivacy();
+      render(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate();
+      if (!checkupProbed) probeCheckup();
     } catch (e) {
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
       else $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`;
@@ -1316,7 +1405,8 @@ dialog h3 { margin: 0 0 12px; font-family: var(--serif); font-size: 18px; font-w
   document.addEventListener("click", async (e) => {
     const re = e.target.closest("[data-act=recheck]");
     if (re) { runEnvCheck(); return; }
-    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; render(); return; }
+    if (e.target.closest("[data-act=checkup]")) { runCheckup(); return; }
+    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; checkup = null; render(); return; }
     const pb = e.target.closest("button[data-pref]");
     if (pb) { setPref(pb.dataset.pref, pb.dataset.pref === "mask" ? !pref.mask : pb.dataset.v === "1"); render(); renderLocal(); return; }
     const b = e.target.closest("button[data-act]");

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
-  echo "菜单栏小工具只支持 macOS。Windows 请用桌面版（托盘图标）。"
+  echo "菜单栏小工具只支持 macOS。Windows 运行 安装.cmd 装托盘小工具，或者用桌面版。"
   exit 1
 fi
 

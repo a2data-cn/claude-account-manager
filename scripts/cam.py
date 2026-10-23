@@ -19,6 +19,9 @@
   cam local [--days 30]          本地 Claude Code token 消耗统计
   cam env install                  用官方安装器安装 Claude Code
   cam env clean [--logout|--purge] 清理 Claude Code 环境（默认只预演，加 --apply 执行）
+  cam update [--check]             手动更新（git 快进；更新后自检不过就退回原来的版本）
+  cam verify                       按 SHA256SUMS 校验代码文件是否完整
+  cam doctor [--json] [--offline]  全面体检：账号登录、Claude 服务、本机 Claude Code、cam 自己、聊天机器人
 """
 from __future__ import annotations
 
@@ -3144,6 +3147,18 @@ def make_handler(store, token):
                     return self._send(200, public_state(store, store.load()))
                 if method == "GET" and parts == ["service-check"]:
                     return self._send(200, {"items": service_check(store)})
+                if method == "GET" and parts == ["checkup"]:  # 全面体检，同 cam doctor --json。只有脚本版有：桌面版返回 404，面板据此隐藏按钮
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if (q.get("probe") or [""])[0]:
+                        return self._send(200, {"ok": True})
+                    return self._send(200, full_checkup(store, offline=bool((q.get("offline") or [""])[0])))
+                if method == "GET" and parts == ["update"]:  # 只有脚本版有：桌面版的服务返回 404，面板据此隐藏“检查更新”
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if (q.get("saved") or [""])[0]:
+                        return self._send(200, saved_update_check() or {"checked_at": None, "version": VERSION})
+                    return self._send(200, update_check())
+                if method == "POST" and parts == ["update"]:
+                    return self._send(200, apply_update(restart_later=True))
                 if method == "GET" and parts == ["privacy"]:
                     return self._send(200, privacy_view(store))
                 if method == "PUT" and parts == ["privacy"]:
@@ -3339,6 +3354,17 @@ def background_round(store, st, refresh_min, tell, import_live=True):
     return st
 
 
+def save_serve_state(store, st, refresh_min):
+    """cam serve 后台的心跳（至多一分钟写一次）：cam doctor 据此说上一轮是多久前、有没有出错。不含密钥。"""
+    lr = st.get("last_refresh")
+    try:
+        write_json_atomic(os.path.join(store.root, SERVE_STATE), {
+            "pid": os.getpid(), "at": now_iso(), "refresh_min": refresh_min, "last_error": st.get("last_error"),
+            "last_refresh": dt.datetime.fromtimestamp(lr, dt.timezone.utc).replace(microsecond=0).isoformat() if lr else None})
+    except OSError:
+        pass
+
+
 def serve(store, host, port, auto_refresh_min):
     token = server_token(store)
     srv = ThreadingServer((host, port), make_handler(store, token))
@@ -3364,6 +3390,7 @@ def serve(store, host, port, auto_refresh_min):
         last_fp = None
         st = {}
         last_err = None
+        beat, beat_key = 0.0, None
         while True:
             try:
                 if lease.fd is None and not lease.try_acquire():
@@ -3378,6 +3405,9 @@ def serve(store, host, port, auto_refresh_min):
                 fp = live_fingerprint()
                 background_round(store, st, auto_refresh_min, tell, import_live=fp != last_fp)
                 last_fp = fp
+                if time.time() - beat >= 60 or (st.get("last_refresh"), st.get("last_error")) != beat_key:
+                    beat, beat_key = time.time(), (st.get("last_refresh"), st.get("last_error"))
+                    save_serve_state(store, st, auto_refresh_min)
                 if st.get("last_error") != last_err:
                     last_err = st.get("last_error")
                     if last_err:
@@ -5110,6 +5140,8 @@ def service_check(store=None):
         add("api", "bad", f"{api_host}：服务端错误（HTTP {st}）", "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com")
     else:
         add("api", "warn", f"{api_host}：HTTP {st}（{msg or '-'}，{ms} ms）", "少见的返回，稍后重试；持续出现请把这一行发给作者")
+    if st:
+        out[-1]["ms"] = ms  # 延迟，cam doctor 单列一行
     # claude.ai：不带登录，看可达性和有没有被网络管控拦截
     t0 = time.time()
     code, body, raw = web_get("/api/organizations", "", timeout=10)
@@ -5128,6 +5160,8 @@ def service_check(store=None):
         add("web", "bad", f"{web_host}：服务端错误（HTTP {code}）", "稍后再试")
     else:
         add("web", "warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
+    if code:
+        out[-1]["ms"] = ms
     # 代理：环境变量 + 系统设置；VPN：默认路由
     env = r.get("env") if isinstance(r.get("env"), dict) and "proxy" in r.get("env", {}) else local_env()
     out.extend(proxy_vpn_items(env))
@@ -5168,71 +5202,1203 @@ def service_check(store=None):
     return out
 
 
-def cmd_doctor(store):
-    """逐项检查，不打印任何密钥。"""
-    ok, bad, info, warn = color("✓", "g"), color("✗", "r"), color("·", "d"), color("!", "y")
-    print(f"cam {VERSION}，Python {platform.python_version()}，{platform.system()} {platform.release()}")
+# --------------------------------------------------------------------------- 全面体检（cam doctor）
+
+STATUS_SUMMARY_URLS = [u for u in os.environ.get(
+    "CAM_STATUS_SUMMARY_URLS",
+    "https://status.claude.com/api/v2/summary.json,https://status.anthropic.com/api/v2/summary.json",
+).split(",") if u]
+# 官方原生安装器取版本号的地方（claude.ai/install.sh 里的 DOWNLOAD_BASE_URL），<渠道> 文件里就是版本号；空字符串表示不查
+CLAUDE_RELEASES_URL = os.environ.get("CAM_CLAUDE_RELEASES_URL", "https://downloads.claude.ai/claude-code-releases")
+# 状态页里和这里有关的组件：Claude Code、API、claude.ai，再加上续登录用的 Console（platform.claude.com）
+STATUS_COMPONENT_WORDS = ("claude code", "api", "claude.ai", "console")
+INCIDENT_STATUS = {"investigating": "调查中", "identified": "已找到原因", "monitoring": "已修复，观察中",
+                   "scheduled": "已安排", "in_progress": "进行中", "verifying": "验证中"}
+COMPONENT_STATUS = {"degraded_performance": "性能下降", "partial_outage": "部分故障", "major_outage": "严重故障",
+                    "under_maintenance": "维护中"}
+BOT_CLIS = (("claude-discord", "discord"), ("claude-feishu", "feishu"), ("claude-dingtalk", "dingtalk"))  # claude-channels 装在 ~/.local/bin
+BOT_NAMES = {"discord": "Discord", "feishu": "飞书", "dingtalk": "钉钉"}
+BOT_DOCTOR_TIMEOUT = 60
+USAGE_STALE_SECS = 1800  # 有后台在跑时，用量多久没更新算“没在刷新”
+MENUBAR_STATE = ".menubar-state.json"  # 菜单栏插件每轮跑完存的状态（extras/swiftbar/cam_menu.py，Windows 托盘也用它）
+MENU_TOOL = "托盘小工具" if IS_WIN else "菜单栏插件"  # macOS 的菜单栏插件和 Windows 的托盘小工具跑的是同一份后台任务
+SERVE_STATE = ".serve-state.json"  # cam serve 后台每分钟记一次心跳
+SESSION_SECRET_ENV = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")  # 只看有没有，不读值
+SESSION_INFO_ENV = ("TMUX", "FEISHU_SESSION", "DINGTALK_SESSION", "DISCORD_STATE_DIR", "CLAUDE_CONFIG_DIR")
+LOGIN_TEXT = {"machine": "本机登录，切号会跟着换", "own_token": "用自己的号（CLAUDE_CODE_OAUTH_TOKEN），切号不影响",
+              "api_key": "用 API Key（环境变量），不走订阅登录，切号不影响",
+              "config_dir": "用单独的配置目录（CLAUDE_CONFIG_DIR），切号不影响",
+              "unknown": "读不到它的环境变量，看不出用的哪个登录"}
+PLAN_NAME = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
+KIND_LONG = {"claude_code": "Claude Code", "claude_web": "网页版", "claude_desktop": "桌面版", "api": "API"}
+HEALTH_TO_CHECK = {"error": "bad", "warn": "warn", "info": "info", "ok": "ok"}
+CHECK_MARKS = {"ok": ("✓", "g"), "warn": ("!", "y"), "bad": ("✗", "r"), "info": ("·", "d")}
+
+
+def ck(level, text, advice="", **extra):
+    """体检的一条结果。level：ok ✓ / warn ! / bad ✗ / info ·；advice 是出了问题时的“→ 怎么办”。"""
+    return {"level": level, "text": text, "advice": advice or "", **extra}
+
+
+def fmt_span(secs):
+    """一段时长：“2 天 3 小时”“3 小时 12 分”“12 分钟”。"""
+    m = max(0, int(secs)) // 60
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d:
+        return f"{d} 天 {h} 小时" if h else f"{d} 天"
+    if h:
+        return f"{h} 小时 {m} 分" if m else f"{h} 小时"
+    return f"{m} 分钟" if m else "不到 1 分钟"
+
+
+def _version_key(v):
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", v or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def latest_claude_version(timeout=6):
+    """官方原生安装器给的最新版本：(渠道, 版本号)，按 settings.json 的 autoUpdatesChannel（默认 latest）。查不到返回 None。"""
+    if not CLAUDE_RELEASES_URL:
+        return None
+    try:
+        s = read_json(os.path.join(claude_config_dir(), "settings.json"), {}) or {}
+    except CamError:
+        s = {}
+    ch = "stable" if isinstance(s, dict) and s.get("autoUpdatesChannel") == "stable" else "latest"
+    st, txt = http_text(f"{CLAUDE_RELEASES_URL.rstrip('/')}/{ch}", timeout)
+    v = txt.strip() if st == 200 else ""
+    return (ch, v) if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", v) else None
+
+
+def parse_status_summary(j):
+    """Statuspage 的 summary.json → {indicator, description, incidents: [{name, status}], components: [{name, status}]}。
+
+    只留没解决的事件和不正常的相关组件（Claude Code / API / claude.ai / Console）。格式不对返回 None。
+    """
+    st = j.get("status") if isinstance(j, dict) else None
+    if not isinstance(st, dict) or not st.get("indicator"):
+        return None
+    incidents = [{"name": str(i.get("name") or "?"), "status": str(i.get("status") or "")}
+                 for i in j.get("incidents") or [] if isinstance(i, dict) and i.get("status") not in ("resolved", "postmortem")]
+    comps = [{"name": str(c["name"]), "status": str(c["status"])}
+             for c in j.get("components") or [] if isinstance(c, dict) and c.get("name") and c.get("status")
+             and c["status"] != "operational" and any(w in str(c["name"]).lower() for w in STATUS_COMPONENT_WORDS)]
+    return {"indicator": str(st["indicator"]), "description": str(st.get("description") or ""),
+            "incidents": incidents, "components": comps}
+
+
+def fetch_status_summary(timeout=6):
+    """官方状态页的摘要：先 status.claude.com，连不上再 status.anthropic.com。都不行返回 None。"""
+    for url in STATUS_SUMMARY_URLS:
+        st, txt = http_text(url, timeout)
+        if st != 200:
+            continue
+        try:
+            s = parse_status_summary(json.loads(txt))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if s:
+            return dict(s, page=urllib.parse.urlparse(url).hostname or url)
+    return None
+
+
+def status_summary_items(s):
+    if s is None:
+        hosts = "、".join(dict.fromkeys(urllib.parse.urlparse(u).hostname or u for u in STATUS_SUMMARY_URLS))
+        return [ck("warn", f"官方状态页连不上（{hosts}）", "不影响别的检查；需要时在浏览器里打开 status.claude.com 看")]
+    ind = s["indicator"]
+    out = [ck("ok", f"官方状态页：全部正常（{s['page']}）") if ind == "none" else
+           ck("bad" if ind in ("major", "critical") else "warn", f"官方状态页：{s['description'] or ind}（{ind}）",
+              f"这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 {s['page']}")]
+    for i in s["incidents"]:
+        out.append(ck("info", f"没解决的事件：{i['name']}（{INCIDENT_STATUS.get(i['status'], i['status'])}）"))
+    for c in s["components"]:  # 总体正常时组件出问题也要提醒；总体已经报了就只列出来
+        out.append(ck("warn" if ind == "none" else "info", f"{c['name']}：{COMPONENT_STATUS.get(c['status'], c['status'])}",
+                      f"详情见 {s['page']}" if ind == "none" else ""))
+    return out
+
+
+def proc_root():
+    """Linux 的 /proc（测试用 CAM_TEST_PROC_ROOT 指向一个假的）；别的系统返回 None。"""
+    root = os.environ.get("CAM_TEST_PROC_ROOT")
+    if root:
+        return root
+    return "/proc" if os.path.isdir("/proc/self") else None
+
+
+def _proc_file(root, pid, name):
+    try:
+        with open(os.path.join(root, str(pid), name), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def process_table():
+    """本机进程 [(pid, 命令行)]，查不到时返回空列表。用来认出 cam serve、桌面版。"""
+    root = proc_root()
+    out = []
+    if root:
+        try:
+            pids = [p for p in os.listdir(root) if p.isdigit()]
+        except OSError:
+            return []
+        for pid in pids:
+            argv = [a.decode("utf-8", "replace") for a in (_proc_file(root, pid, "cmdline") or b"").split(b"\0") if a]
+            if argv:
+                out.append((int(pid), " ".join(argv)))
+        return out
+    try:
+        if IS_WIN:
+            ps = "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+            txt = decode_output(subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20).stdout)
+        else:
+            txt = subprocess.run(["ps", "-A", "-o", "pid=,args="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in txt.splitlines():
+        pid, _, cmd = line.strip().replace("\t", " ", 1).partition(" ")
+        if pid.isdigit() and cmd.strip():
+            out.append((int(pid), cmd.strip()))
+    return out
+
+
+def _is_cam_serve(cmd):
+    return bool(re.search(r"cam\.py[\"']?\s+serve(\s|$)", cmd))
+
+
+def _is_cam_desktop(cmd):
+    low = cmd.replace("\\", "/").lower()
+    return "/claude accounts.app/" in low or bool(re.search(r"(^|/)(claude-accounts|claude accounts)(\.exe)?([\s\"]|$)", low))
+
+
+def session_bot(env):
+    """会话是不是聊天机器人的：(discord / feishu / dingtalk, 会话名) 或 None。
+
+    先看机器人启动脚本设的 FEISHU_SESSION / DINGTALK_SESSION / DISCORD_STATE_DIR，再看 tmux 的 socket 名（claude-discord-<名称>）。
+    """
+    for key, bot in (("FEISHU_SESSION", "feishu"), ("DINGTALK_SESSION", "dingtalk")):
+        if env.get(key):
+            return bot, env[key]
+    base = os.path.basename((env.get("DISCORD_STATE_DIR") or "").rstrip("/"))
+    if base == "discord" or base.startswith("discord-"):
+        return "discord", base[8:] or "main"
+    sock = os.path.basename((env.get("TMUX") or "").split(",")[0])
+    m = re.fullmatch(r"claude-(discord|feishu|dingtalk)(?:-([\w.-]+))?", sock)
+    return (m.group(1), m.group(2) or "main") if m else None
+
+
+def bot_name(bot):
+    """“Discord 机器人”“飞书机器人”。"""
+    return BOT_NAMES[bot] + (" " if BOT_NAMES[bot].isascii() else "") + "机器人"
+
+
+def bot_label(bot, name):
+    """“Discord 机器人主会话”“飞书机器人 shop”。"""
+    return bot_name(bot) + ("主会话" if name == "main" else f" {name}")
+
+
+def _session_env(raw):
+    """从 environ 里只挑要用的：机器人标记留原值，CLAUDE_CODE_OAUTH_TOKEN 这类只记有没有，值当场丢掉。"""
+    env, has = {}, set()
+    for kv in (raw or b"").split(b"\0"):
+        k, _, v = kv.partition(b"=")
+        k = k.decode("utf-8", "replace")
+        if k in SESSION_SECRET_ENV:
+            if v:
+                has.add(k)
+        elif k in SESSION_INFO_ENV:
+            env[k] = v.decode("utf-8", "replace")
+    return env, has
+
+
+def claude_sessions():
+    """正在运行的 Claude Code 会话（读 /proc，只有 Linux）：[{"pid", "cwd", "secs", "bot", "login"}]；别的系统返回 None。
+
+    login 是 LOGIN_TEXT 里的一种。环境变量只看有没有，不读出值；CLAUDE_CONFIG_DIR 的值只用来和本机的配置目录比，不显示。
+    """
+    root = proc_root()
+    if not root:
+        return None
+    try:
+        with open(os.path.join(root, "uptime")) as f:
+            uptime = float(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        uptime = None
+    ticks = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+    mine = os.path.realpath(claude_config_dir())
+    out = []
+    try:
+        pids = sorted(int(p) for p in os.listdir(root) if p.isdigit())
+    except OSError:
+        return []
+    for pid in pids:
+        if pid == os.getpid():
+            continue
+        argv = [a.decode("utf-8", "replace") for a in (_proc_file(root, pid, "cmdline") or b"").split(b"\0") if a]
+        if not argv or not _is_claude_cmd(argv[0], " ".join(argv)):
+            continue
+        raw = _proc_file(root, pid, "environ")
+        env, has = _session_env(raw)
+        if raw is None:
+            login = "unknown"
+        elif "CLAUDE_CODE_OAUTH_TOKEN" in has:
+            login = "own_token"
+        elif has:
+            login = "api_key"
+        elif env.get("CLAUDE_CONFIG_DIR") and os.path.realpath(os.path.expanduser(env["CLAUDE_CONFIG_DIR"])) != mine:
+            login = "config_dir"
+        else:
+            login = "machine"
+        try:
+            cwd = os.readlink(os.path.join(root, str(pid), "cwd"))
+        except OSError:
+            cwd = None
+        secs, stat = None, _proc_file(root, pid, "stat")
+        if uptime is not None and stat:
+            try:  # 第 22 项是开机后多少个时钟周期启动的；进程名里可能有空格，从最后一个 ) 后面数
+                secs = max(0.0, uptime - int(stat.rsplit(b")", 1)[1].split()[19]) / ticks)
+            except (IndexError, ValueError):
+                pass
+        out.append({"pid": pid, "cwd": cwd, "secs": secs, "bot": session_bot(env), "login": login})
+    return out
+
+
+def _ps_etimes(pids):
+    """macOS 等：ps 给的运行时长（[[天-]时:]分:秒）。"""
+    if not pids or IS_WIN:
+        return {}
+    try:
+        txt = subprocess.run(["ps", "-o", "pid=,etime=", "-p", ",".join(str(p) for p in pids)],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return {int(p[0]): p[1] for p in (l.split() for l in txt.splitlines()) if len(p) == 2 and p[0].isdigit()}
+
+
+def session_items():
+    sessions = claude_sessions()
+    if sessions is None:  # macOS / Windows：列出 ps 给的东西，看不出用的哪个登录
+        procs = running_claude_processes()
+        out = [ck("info", f"正在运行的 claude 会话：{len(procs)} 个" + ("（切换账号后需要重开）" if procs else ""))]
+        etimes = _ps_etimes([p for p, _ in procs])
+        for pid, cmd in procs[:20]:
+            out.append(ck("info", f"pid {pid}" + (f" · 已运行 {etimes[pid]}" if pid in etimes else "") + f" · {cmd[:120]}",
+                          "用的哪个登录看不出来（只有 Linux 能读到会话的环境变量）"))
+        return out
+    machine = sum(1 for s in sessions if s["login"] == "machine")
+    out = [ck("info", f"正在运行的 claude 会话：{len(sessions)} 个"
+              + (f"（{machine} 个用本机登录：切换账号后它们还拿着旧账号的 token，要重开）" if machine else ""))]
+    for s in sessions:
+        parts = [f"pid {s['pid']}"]
+        if s["bot"]:
+            parts.append(bot_label(*s["bot"]))
+        parts.append(s["cwd"] or "工作目录读不到")
+        if s["secs"] is not None:
+            parts.append(f"已运行 {fmt_span(s['secs'])}")
+        parts.append(LOGIN_TEXT[s["login"]])
+        advice = ""
+        if s["bot"] and s["login"] == "machine":
+            bot, name = s["bot"]
+            advice = f"想让它一直用同一个号、不跟着切换：在聊天里发 /account（没有别的号先 /account add 接入一个），或在电脑上运行 claude-{bot} account {name} set"
+        out.append(ck("info", " · ".join(parts), advice))
+    return out
+
+
+# ---- 1. 账号
+
+def _account_group(p):
+    """账号小标题：名字、邮箱（和 cam ls 一样，名字就是邮箱时不重复）、类型、套餐、当前登录。"""
+    bits = [KIND_LONG.get(p["kind"], p["kind"])]
+    plan = p.get("plan_display")
+    if plan:
+        bits.append(PLAN_NAME.get(plan, plan) + (f" {plan_tier(p)}" if plan_tier(p) else ""))
+    elif p["kind"] in ("claude_code", "claude_web"):
+        bits.append("套餐未知")
+    if p.get("is_active"):
+        bits.append("上次打开" if p["kind"] == "claude_desktop" else "当前登录")
+    email = f" {p['email']}" if p.get("email") and p["email"] != p.get("label") else ""
+    return f"{p.get('label') or p['id']}{email}（{'，'.join(bits)}）"
+
+
+def _usage_brief(u):
+    return "，".join(f"{n}已用 {u[k]['utilization']:.0f}%" for k, n in (("five_hour", "5 小时"), ("seven_day", "7 天"))
+                    if isinstance(u.get(k), dict) and u[k].get("utilization") is not None)
+
+
+def checkup_account(store, p, live_ob, before_exp, offline):
+    """一个账号：登录还能不能续、到期日、用量（上次出错）、健康状态。p 是 public_state 里的账号。"""
+    out = []
+    label, kind, u = p.get("label") or p["id"], p["kind"], p.get("usage") or {}
+    err = u.get("error")
+    covered = {"expired"}  # 下面单独写过的问题，健康状态里不再重复
+    relogin = f"cam login {label}（在浏览器里重新登录这个账号，登录完自动保存）"
+    when = f"（{fmt_ago(u['fetched_at'])}）" if offline and u.get("fetched_at") else ""
+    left = 0
+    if kind == "claude_code":
+        ob = live_ob or store.load_secret(p["id"]).get("claudeAiOauth") or {}
+        left = (ob.get("expiresAt") or 0) / 1000 - time.time()
+        if not ob.get("refreshToken"):
+            covered.add("no_credentials")
+            out.append(ck("bad", "没有保存可用的凭据，切换到它也用不了", relogin))
+        elif p.get("is_active"):  # 当前登录从不替它续，交给 Claude Code
+            out.append(ck("ok", f"当前登录：access token {fmt_span(left)}后过期，Claude Code 会自己续") if left > 0 else
+                       ck("info", "当前登录：access token 已过期，Claude Code 下次运行时会自己续（cam 从不替当前登录续）"))
+        elif err and ("登录已失效" in err or "没有 refresh token" in err):
+            covered.add("login_invalid")
+            out.append(ck("bad", "登录已失效：保存的 refresh token 被服务端拒绝，切换到它也用不了", relogin))
+        elif err and "续登录失败" in err:
+            covered.add("network")
+            out.append(ck("warn", f"保存的登录过期了，替它续一次没成功：{err}", "多半是网络问题，稍后再运行 cam doctor"))
+        elif offline:
+            out.append(ck("info", f"保存的登录：access token {fmt_span(left)}后过期") if left > 120 else
+                       ck("info", "保存的 access token 已过期：刷新用量或切换到它时会用它自己的 refresh token 续（离线没测能不能续）"))
+        elif before_exp is not None and (ob.get("expiresAt") or 0) > before_exp:
+            out.append(ck("ok", f"保存的登录还能续：刚用它自己的 refresh token 续了一次，新的 access token {fmt_span(left)}后过期"))
+        elif not err:
+            out.append(ck("ok", f"保存的登录有效：access token {fmt_span(left)}后过期"))
+    # 用量：网页号就是 sessionKey 能不能用，API 号是 Key 能不能用
+    hk = _health_kind_of_error(kind, err) if err else None
+    if kind == "claude_desktop":
+        if u.get("cache_status") == "ok":
+            out.append(ck("ok" if not u.get("cache_stale") else "info", f"本地额度：记录于 {fmt_ago(u.get('fetched_at'))}"
+                          + ("（超过 30 分钟的旧快照）" if u.get("cache_stale") else "")))
+        else:
+            out.append(ck("info", u.get("notice") or "还没有桌面版的本地额度记录"))
+    elif kind == "claude_web" and not p.get("has_session_key"):
+        out.append(ck("info", "没填 sessionKey，不自动读取用量（只记到期日也可以）"))
+    elif err and hk not in covered:
+        covered.add(hk)
+        if "HTTP 429" in err:
+            out.append(ck("warn", f"用量接口限流（HTTP 429）{when}", "过几分钟再刷新；和账号本身无关，不影响切换"))
+        elif "HTTP 401" in err and kind == "claude_code":
+            if p.get("is_active") and left <= 0:
+                out.append(ck("info", "用量接口返回 401：access token 过期了，等 Claude Code 自己续"))
+            else:
+                out.append(ck("warn", f"用量接口不认这个登录（HTTP 401）{when}",
+                              "在 claude 里发一句话让它续一次；还不行就 /login 重新登录" if p.get("is_active")
+                              else "切换过去时 Claude Code 会试着续；续不上就 " + relogin))
+        elif hk:
+            level, _, advice = HEALTH_TEXT[hk]
+            out.append(ck(HEALTH_TO_CHECK[level], f"{'上次' if offline else ''}取用量出错{when}：{err}",
+                          relogin if hk in ("login_invalid", "wrong_owner") else advice))
+    elif kind == "api":
+        kv = u.get("key_valid")
+        if kv is False:
+            covered.add("key_invalid")
+            out.append(ck("bad", f"API Key 无效{when}：{u.get('key_error') or ''}", f"cam set {label} --api-key 新的 Key"))
+        elif kv is True:
+            out.append(ck("ok", f"API Key 有效{when}"))
+        if u.get("cost_month_usd") is not None:
+            out.append(ck("info", f"本月花费 ${u['cost_month_usd']:.2f}"))
+    elif u.get("fetched_at"):
+        brief = _usage_brief(u)
+        head = ("sessionKey 有效，" if kind == "claude_web" else "") + (f"用量上次刷新 {fmt_ago(u['fetched_at'])}" if offline else "用量接口正常")
+        out.append(ck("ok", head + (f"：{brief}" if brief else "")))
+    else:
+        out.append(ck("info", "还没取过用量" + ("（离线模式没测）" if offline else "")))
+    # 到期日：7 天内提醒，过了算要处理；自动续期的只是告诉一声
+    d = p.get("days_left")
+    if d is not None:
+        m = p.get("manual") or {}
+        date = f"（{m['expires_at']}）" if m.get("expires_at") else ""
+        auto = m.get("auto_renew") is True
+        if d < 0:
+            out.append(ck("bad", f"订阅已过期 {-d} 天{date}",
+                          f"续费后运行 cam set {label} --expires 新的到期日；没续的话这个号可能已经降级为免费版"))
+        elif d <= 7 and not auto:
+            out.append(ck("warn", ("今天到期" if d == 0 else f"{d} 天后到期") + date,
+                          f"要续的话记得续费；续了以后 cam set {label} --expires 新的到期日（每月自动扣费的加 --auto-renew）"))
+        else:
+            out.append(ck("info", f"{d} 天后{'自动续期' if auto else '到期'}{date}"))
+    h = p.get("health") or {}
+    for i in h.get("issues") or []:
+        if i["kind"] not in covered:
+            out.append(ck(HEALTH_TO_CHECK[i["level"]], i["text"], i["advice"]))
+    out.append(ck("ok", "账号状态：正常") if h.get("level") in (None, "ok", "info")
+               else ck("info", f"账号状态：{h['label']}（见上面几条）"))
+    return out
+
+
+def checkup_accounts(store, before_exp, offline, refresh_error=None):
+    data = store.load()
+    st = public_state(store, data)
+    out = []
+    if refresh_error:
+        out.append(ck("warn", f"刷新用量没有完成：{refresh_error}", "稍后再运行 cam doctor"))
+    if not st["accounts"]:
+        out.append(ck("info", "还没有保存账号", "Claude Code：cam login 名字（每个账号各登录一次）；网页版：cam add-web --label 名字"))
+        return out
+    try:
+        creds, _ = read_live_credentials()
+        live = identify_code_account(data, read_oauth_account(), creds) if creds else None
+    except CamError:  # 文件损坏：第 3 节会报，这里当作认不出当前登录
+        creds, live = None, None
+    for p in st["accounts"]:
+        group = _account_group(p)
+        live_ob = oauth_block(creds) if live and live["id"] == p["id"] and p.get("is_active") else None
+        for it in checkup_account(store, p, live_ob, before_exp.get(p["id"]), offline):
+            it["group"] = group
+            out.append(it)
+    return out
+
+
+# ---- 2. Claude 服务
+
+def checkup_service(store, offline, svc=None, summary=None):
+    if offline:  # 不联网：用后台上次检测的缓存
+        data = store.load()
+        reg = region_view(data)
+        out = [ck("info", "离线模式：没有实测 Claude 服务，下面是后台上次检测的结果"
+                  + (f"（{fmt_ago(reg['checked_at'])}）" if reg.get("checked_at") else "（还没检测过）"))]
+        if reg.get("status"):
+            ok = reg["status"] == "supported"
+            out.append(ck("ok" if ok else "warn", reg["message"], "" if ok else reg["advice"], kind="region"))
+        out += [ck(r["level"], r["text"], r["advice"], kind=r["kind"]) for r in risk_items(data)]
+        if SSL_CA_FALLBACK:
+            out.append(ck("info", f"证书：本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}（证书照常校验）"))
+        return out
+    items = [dict(i) for i in svc or []]
+    if summary is not None:  # 下面有状态页的完整摘要，服务检查里那一行就不重复了
+        items = [i for i in items if i.get("kind") != "status"]
+    hosts = {"api": urllib.parse.urlparse(API_BASE).hostname or API_BASE,
+             "web": urllib.parse.urlparse(CLAUDE_WEB_BASE).hostname or CLAUDE_WEB_BASE}
+    lat = [(hosts[i["kind"]], i["ms"]) for i in items if i.get("kind") in hosts and i.get("ms") is not None]
+    if lat:  # 放在 api / web 两行后面
+        slow = max(ms for _, ms in lat) >= 3000
+        at = max(n for n, i in enumerate(items) if i.get("kind") in hosts) + 1
+        items.insert(at, ck("warn" if slow else "ok", "延迟：" + "，".join(f"{h} {ms} ms" for h, ms in lat),
+                            "超过 3 秒多半是网络或代理慢，Claude Code 会觉得卡" if slow else "", kind="latency"))
+    return items + status_summary_items(summary)
+
+
+# ---- 3. 本机 Claude Code
+
+def checkup_local_claude(store, latest=None):
+    out = []
     found = claude_installs()
     if found:
         p, real, kind = found[0]
-        print(f"{ok} Claude Code 命令：{p}（{kind}，{claude_version(p) or '版本未知'}）")
-        print_install_conflicts(found)
+        ver = claude_version(p)
+        out.append(ck("ok", f"Claude Code 命令：{p}（{kind}，{ver or '版本未知'}）"))
+        if len(found) > 1:
+            out.append(ck("warn", f"PATH 里有 {len(found)} 份 claude，实际运行的是第一个："
+                          + "；".join(f"{q}（{k}）" + (f" → {r}" if r != q else "") for q, r, k in found),
+                          "多份并存容易出现“升级了却没生效”。保留一份即可，npm 版可用 npm uninstall -g @anthropic-ai/claude-code 卸载"))
+        cur = re.search(r"\d+\.\d+\.\d+", ver or "")
+        if latest and cur and _version_key(latest[1]) and _version_key(cur.group(0)):
+            if _version_key(latest[1]) > _version_key(cur.group(0)):
+                out.append(ck("warn", f"Claude Code 有新版本 {latest[1]}（现在是 {cur.group(0)}，{latest[0]} 渠道）",
+                              "brew upgrade claude-code" if kind == "Homebrew" else "运行 claude update 更新"))
+            else:
+                out.append(ck("ok", f"Claude Code 已是最新版本（{latest[0]} 渠道 {latest[1]}）"))
     else:
-        print(f"{bad} Claude Code 命令：没找到。运行 cam env install 用官方安装器安装")
+        out.append(ck("bad", "Claude Code 命令：没找到", "运行 cam env install 用官方安装器安装"))
     for f in override_findings():
-        print(f"{warn} {f}：它会优先于订阅登录，切换账号可能不生效")
-    procs = running_claude_processes()
-    print(f"{info} 正在运行的 claude 进程：{len(procs)} 个" + ("（切换账号后需要重开）" if procs else ""))
-    print(f"{info} 配置目录：{claude_config_dir()}" + ("" if os.path.isdir(claude_config_dir()) else "（不存在）"))
+        out.append(ck("warn", f"{f}：它会优先于订阅登录，切换账号可能不生效", "不需要的话去掉它"))
+    cfg = claude_config_dir()
+    out.append(ck("info", f"配置目录：{cfg}" + ("" if os.path.isdir(cfg) else "（不存在）")))
     f = claude_credentials_file()
     if os.path.exists(f):
-        has = bool(oauth_block(read_json(f, {}) or {}).get("refreshToken"))
-        print(f"{ok if has else bad} 凭据文件：{f}" + ("" if has else "（里面没有登录信息）"))
+        try:
+            has = bool(oauth_block(read_json(f, {}) or {}).get("refreshToken"))
+            out.append(ck("ok" if has else "bad", f"凭据文件：{f}" + ("" if has else "（里面没有登录信息）"),
+                          "" if has else "运行 claude 登录一次"))
+        except CamError as e:
+            out.append(ck("bad", str(e), "在 claude 里 /login 重新登录一次会重写这个文件"))
+        try:
+            mode = os.stat(f).st_mode & 0o777
+        except OSError:
+            mode = 0
+        if not IS_WIN and mode & 0o077:
+            out.append(ck("warn", f"凭据文件的权限是 0{mode:o}，同一台电脑上的其他用户可能读得到", f"chmod 600 {f}"))
     else:
-        print(f"{info} 凭据文件：不存在" + ("（macOS 一般存在钥匙串里，正常）" if IS_MAC else ""))
+        out.append(ck("info", "凭据文件：不存在" + ("（macOS 一般存在钥匙串里，正常）" if IS_MAC else "")))
     if IS_MAC:
         if not use_keychain():
-            print(f"{info} 钥匙串：已跳过（设置了 CLAUDE_CONFIG_DIR 或 CAM_NO_KEYCHAIN）")
+            out.append(ck("info", "钥匙串：已跳过（设置了 CLAUDE_CONFIG_DIR 或 CAM_NO_KEYCHAIN）"))
         else:
             kc = keychain_read()
             if kc and oauth_block(kc).get("refreshToken"):
-                print(f"{ok} 钥匙串：有 Claude Code 登录信息")
+                out.append(ck("ok", "钥匙串：有 Claude Code 登录信息"))
             elif kc:
-                print(f"{bad} 钥匙串：有条目但没有登录信息")
+                out.append(ck("bad", "钥匙串：有条目但没有登录信息", "运行 claude 登录一次"))
+            elif keychain_exists():
+                out.append(ck("bad", "钥匙串：条目存在但读取被拒绝", "重新运行时如果弹窗，请点“始终允许”"))
             else:
-                r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE],
-                                   capture_output=True, text=True)
-                if r.returncode == 0:
-                    print(f"{bad} 钥匙串：条目存在但读取被拒绝。重新运行时如果弹窗，请点“始终允许”")
-                else:
-                    print(f"{bad} 钥匙串：没有 Claude Code 登录信息")
-    creds, where = read_live_credentials()
-    oa = read_oauth_account() or {}
-    print(f"{ok if oa.get('emailAddress') else bad} 当前登录邮箱："
-          + (oa.get("emailAddress") or "无（Claude Code 还没登录，运行 claude 登录一次）"))
+                out.append(ck("bad", "钥匙串：没有 Claude Code 登录信息", "运行 claude 登录一次"))
+    try:
+        creds = read_live_credentials()[0]
+    except CamError:
+        creds = None  # 上面已经报过凭据文件损坏
+    try:
+        oa = read_oauth_account() or {}
+    except CamError as e:
+        oa = {}
+        out.append(ck("bad", str(e), "这个文件是 Claude Code 写的；在 claude 里 /login 一次通常会修好"))
+    out.append(ck("ok", f"当前登录邮箱：{oa['emailAddress']}") if oa.get("emailAddress") else
+               ck("bad", "当前登录邮箱：无（Claude Code 还没登录）", "运行 claude 登录一次"))
     data = store.load()
-    acc = identify_code_account(data, oa, creds) if creds else None
-    print(f"{info} 数据目录：{store.root}，已保存 {len(data['accounts'])} 个账号")
     if creds and oauth_block(creds).get("accessToken"):
-        print(f"{ok if acc else bad} 当前登录" + (f"已保存为“{acc['label']}”" if acc else "还没保存，运行 cam 会自动保存"))
-    if (data.get("live_mismatch") or {}).get("message"):
-        print(f"{warn} {data['live_mismatch']['message']}")
-    exp = oauth_block(creds).get("expiresAt") if creds else None
-    if exp:
-        left = exp / 1000 - dt.datetime.now().timestamp()
-        print(f"{info} access token " + (f"{int(left // 60)} 分钟后过期（Claude Code 会自动续）" if left > 0 else "已过期（Claude Code 下次运行时会自动续）"))
+        acc = identify_code_account(data, oa, creds)
+        out.append(ck("ok", f"当前登录已保存为“{acc['label']}”") if acc else
+                   ck("bad", "当前登录还没保存", "运行 cam（或 cam import）会自动保存"))
+    for key in ("live_mismatch", "live_unverified"):
+        if (data.get(key) or {}).get("message"):
+            out.append(ck("warn", data[key]["message"]))
+    return out + session_items()
+
+
+# ---- 4. cam 自己
+
+def _read_json_quiet(path):
+    try:
+        j = read_json(path, {})
+    except CamError:
+        return {}
+    return j if isinstance(j, dict) else {}
+
+
+def background_status(store, data):
+    """谁在做后台任务（桌面版 / cam serve / 菜单栏插件）、上一轮什么时候。返回 (是否有人在做, 刷新间隔分钟或 None, 条目)。
+
+    后台锁（background.lock）被拿着就是有人在做；不拿锁试一下就看不出来，试完马上放掉。
+    """
+    lease = store.background_lock()
+    held = not lease.try_acquire()
+    if not held:
+        lease.release()
+    procs = process_table()
+    serve = [pid for pid, cmd in procs if _is_cam_serve(cmd)]
+    desk = [pid for pid, cmd in procs if _is_cam_desktop(cmd)]
+    sv = _read_json_quiet(os.path.join(store.root, SERVE_STATE))
+    mb_path = os.path.join(store.root, MENUBAR_STATE)
+    try:
+        mb_age = time.time() - os.path.getmtime(mb_path)
+    except OSError:
+        mb_age = None
+    mb = _read_json_quiet(mb_path) if mb_age is not None else {}
+    beat = parse_iso(sv.get("at")) if sv.get("pid") in serve else None
+    out, refresh_min, err = [], None, None
+    if held and beat:
+        refresh_min, err = sv.get("refresh_min"), sv.get("last_error")
+        age = (dt.datetime.now(dt.timezone.utc) - beat).total_seconds()
+        out.append(ck("ok" if age < 300 else "warn", f"后台任务：cam serve 在做（pid {sv['pid']}），上一轮 {fmt_span(age)}前",
+                      "" if age < 300 else "后台好几分钟没跑一轮了，可能卡住了；重启 cam serve 试试"))
+    elif held and desk:
+        out.append(ck("ok", f"后台任务：桌面版在做（pid {'、'.join(map(str, desk))}）",
+                      "桌面版不记每一轮的时间，看下面各账号的用量刷新时间"))
+    elif held and serve:
+        out.append(ck("ok", f"后台任务：cam serve 在做（pid {'、'.join(map(str, serve))}）"))
+    elif mb_age is not None and mb_age < 180:
+        err = mb.get("last_error")  # 刷新间隔是插件自己的设置（默认 10 分钟），这里不知道，按 30 分钟判断
+        out.append(ck("ok", f"后台任务：{MENU_TOOL}每分钟做一轮，上一轮 {fmt_span(mb_age)}前"))
+    elif held:
+        out.append(ck("ok", "后台任务：有程序拿着后台锁在做（没认出是哪个）"))
+    else:
+        busy = data.get("pending_switch") or any(r.get("type") == "time" for r in data.get("rules") or [])
+        how = ("重新运行 安装.cmd 可以装托盘小工具" if IS_WIN else "装菜单栏小工具：bash extras/swiftbar/install.sh" if IS_MAC
+               else "重新运行 install.sh 可以装成后台服务")
+        out.append(ck("warn" if busy else "info", f"后台任务：没有程序在做（桌面版、cam serve、{MENU_TOOL}都没在运行）"
+                      + ("，时间规则和等待中的切换没人执行" if busy else ""),
+                      f"不会自动保存新登录、定时刷新用量、执行时间规则。需要时运行 cam serve 或 cam panel；{how}"))
+    if not IS_WIN and not IS_MAC and os.path.exists(serve_unit_file()) and not serve:
+        out.append(ck("warn", f"装了后台服务 {SERVE_UNIT}，但它没在运行",
+                      f"systemctl --user restart {SERVE_UNIT}；看报错：journalctl --user -u {SERVE_UNIT} -n 50"))
+    if err:
+        out.append(ck("warn", f"后台上一轮出错：{err}", "偶尔一次不要紧；一直出现的话按错误信息处理"))
+    return bool(held or (mb_age is not None and mb_age < 180)), refresh_min, out
+
+
+def usage_freshness(data, running, refresh_min):
+    """各账号上次刷新用量是什么时候（体检之前的，不算这次体检自己刷新的）。有后台在跑时超过 30 分钟算没在刷新。"""
+    if refresh_min == 0:
+        return [ck("info", "后台没开定时刷新用量（刷新间隔设成了 0）")]
+    limit = max(USAGE_STALE_SECS, (refresh_min or 0) * 120)
+    now = dt.datetime.now(dt.timezone.utc)
+    out = []
+    for a in data["accounts"]:
+        u = a.get("usage") or {}
+        if a["kind"] == "claude_web" and (not u or "未填写 sessionKey" in (u.get("error") or "")):
+            continue  # 没填 sessionKey 的网页号本来就不读用量
+        t = parse_iso(u.get("checked_at") if a["kind"] == "claude_desktop" else u.get("fetched_at"))
+        name = a.get("label") or a["id"]
+        if t is None:
+            out.append(ck("info", f"{name}：还没刷新过用量"))
+        elif running and (now - t).total_seconds() > limit:
+            out.append(ck("warn", f"{name}：用量上次刷新 {fmt_ago(t.isoformat())}，后台没在刷新它",
+                          "有后台在跑时一般每 10 分钟左右刷新一次；看看上面后台任务有没有出错，手动刷新：cam usage"))
+        else:
+            out.append(ck("ok" if running else "info", f"{name}：用量上次刷新 {fmt_ago(t.isoformat())}"))
+    return out
+
+
+def checkup_cam(store, data):
+    out = [ck("info", f"数据目录：{store.root}，已保存 {len(data['accounts'])} 个账号")]
+    running, refresh_min, items = background_status(store, data)
+    out += items + usage_freshness(data, running, refresh_min)
     pend = pending_switch_view(data)
     if pend:
-        print(f"{info} {pend['message']}（cam switch --cancel-wait 可取消）")
-    print("\n服务检查")
-    marks = {"ok": ok, "bad": bad, "warn": warn, "info": info}
-    items = service_check(store)
-    for it in items:
-        print(f"{marks[it['level']]} {it['text']}")
-        if it["advice"]:
-            print(color(f"    → {it['advice']}", "d"))
-    if SSL_CA_FALLBACK:
-        print(color(f"    · 本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}（证书照常校验）", "d"))
+        out.append(ck("info", pend["message"], "cam switch --cancel-wait 可取消"))
+    upd = saved_update_check()
+    if upd is None:
+        out.append(ck("info", "还没检查过更新", "cam update --check 联网看看有没有新版本（菜单栏、面板里也能点）"))
+    elif not upd.get("checkout"):
+        out.append(ck("info", "这份代码不是用 git 下载的，没法用 cam update 更新", upd.get("message") or ""))
+    else:
+        ago = fmt_ago(upd.get("checked_at"))
+        if upd.get("failed"):
+            out.append(ck("warn", f"上次更新后自检没过，已经退回原来的版本：{upd['failed']}"))
+        if upd.get("behind"):
+            blocked = upd.get("ahead") or upd.get("dirty")
+            out.append(ck("warn", f"有 {upd['behind']} 个新改动可以更新（{ago}检查的）",
+                          upd.get("message", "") if blocked else "cam update（先 cam update --check 看改了什么）"))
+        else:
+            out.append(ck("ok", f"更新：{upd.get('message') or '已经是最新版本'}（{ago}检查的）"))
+        if upd.get("dirty"):
+            out.append(ck("info", f"代码目录里有 {len(upd['dirty'])} 个文件改过没提交（检查更新时看到的）",
+                          "有新版本时要先提交或撤销这些改动才能 cam update"))
+    try:
+        n, bad = verify_sums()
+        out.append(ck("bad", f"{len(bad)} 个文件和 {SUMS_FILE} 对不上：" + "、".join(bad[:3]) + ("…" if len(bad) > 3 else ""),
+                      "代码不完整或被改过：重新下载一份完整的代码；确认是自己改的，在项目目录运行 python3 scripts/gen-sums.py")
+                   if bad else ck("ok", f"代码文件完整：{n} 个文件都和 {SUMS_FILE} 一致"))
+    except CamError as e:
+        out.append(ck("warn", str(e)))
+    out += permission_items(store)
+    return out + backup_items(store)
+
+
+def permission_items(store):
+    """数据目录和密钥文件只能自己读：目录 0700，secrets 里的文件和 server-token 0600。"""
+    if IS_WIN:
+        return []
+    paths = [(store.root, 0o700), (store.secrets_dir, 0o700), (os.path.join(store.root, "server-token"), 0o600)]
+    paths += [(p, 0o600) for p in sorted(glob.glob(os.path.join(store.secrets_dir, "*.json")))]
+    bad = []
+    for path, want in paths:
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            continue
+        if mode & ~want:
+            bad.append((path, mode, want))
+    if not bad:
+        return [ck("ok", "数据目录权限正常：目录只有自己能进（0700），密钥文件只有自己能读（0600）")]
+    out = [ck("warn", f"{path} 的权限是 0{mode:o}，同一台电脑上的其他用户可能读得到", f"chmod {want:o} {path}")
+           for path, mode, want in bad[:5]]
+    if len(bad) > 5:
+        out.append(ck("warn", f"还有 {len(bad) - 5} 个文件权限也太宽", f"chmod 600 {store.secrets_dir}/*.json"))
+    return out
+
+
+def backup_items(store):
+    try:
+        names = [n for n in os.listdir(store.backups_dir) if os.path.isdir(os.path.join(store.backups_dir, n))]
+    except OSError:
+        names = []
+    if not names:
+        return [ck("info", "备份：还没有（每次切换前会自动备份当前登录）")]
+    newest = max(names, key=lambda n: os.path.getmtime(os.path.join(store.backups_dir, n)))
+    at = dt.datetime.fromtimestamp(os.path.getmtime(os.path.join(store.backups_dir, newest)))
+    return [ck("info", f"备份：{len(names)} 份，最新 {at:%Y-%m-%d %H:%M}（{newest}），共 {human_size(path_size(store.backups_dir))}",
+               f"在 {store.backups_dir}；切换前的现场备份只留最近 {BACKUP_KEEP} 份，删除账号、退出登录留下的不会自动清理")]
+
+
+# ---- 5. 聊天机器人（claude-channels 装的 claude-discord / claude-feishu / claude-dingtalk）
+
+def installed_bots():
+    out = []
+    for cli, bot in BOT_CLIS:
+        path = os.path.join(home(), ".local", "bin", cli)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            out.append((cli, bot, path))
+    return out
+
+
+def run_bot_doctor(path):
+    """运行 <机器人命令> doctor，返回 (退出码, 输出)；超时退出码是 None。"""
+    try:
+        r = subprocess.run([path, "doctor"], capture_output=True, timeout=BOT_DOCTOR_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, ""
+    except OSError as e:
+        return -1, str(e)
+    return r.returncode, decode_output(r.stdout) + decode_output(r.stderr)
+
+
+def bot_doctor_items(cli, bot, rc, text):
+    """从机器人自检的输出里挑出 ✗ 的行（下一行“→ …”是怎么办）；没有就是全部正常。"""
+    name = bot_name(bot)
+    lines = [re.sub(r"\x1b\[[0-9;]*m", "", l).strip() for l in (text or "").splitlines()]
+    out = []
+    for i, line in enumerate(lines):
+        if line.startswith("✗"):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            out.append(ck("bad", f"{name}：{line[1:].strip()}", nxt[1:].strip() if nxt.startswith("→") else f"运行 {cli} doctor 看详情"))
+    if rc is None:
+        out.append(ck("warn", f"{name}：{cli} doctor 超过 {BOT_DOCTOR_TIMEOUT} 秒没跑完", f"手动运行 {cli} doctor 看看卡在哪"))
+    elif not out and rc != 0:
+        out.append(ck("warn", f"{name}：{cli} doctor 出错（退出码 {rc}）：{brief(text, last=True)}", f"手动运行 {cli} doctor 看完整输出"))
+    elif not out:
+        out.append(ck("ok", f"{name}：全部正常（{cli} doctor）"))
+    return out
+
+
+def checkup_bots(offline, results):
+    bots = installed_bots()
+    if not bots:
+        return None  # 没装就不显示这一节
+    out = []
+    for cli, bot, _ in bots:
+        if offline:
+            out.append(ck("info", f"{bot_name(bot)}：离线模式没有运行 {cli} doctor（它要联网）"))
+        else:
+            out += bot_doctor_items(cli, bot, *results.get(cli, (-1, "没有运行")))
+    return out
+
+
+# ---- 汇总
+
+def _quiet(fn, *args):
+    """在线程里跑一项检查：出错时返回 (None, 错误)，不让一项拖垮整个体检。"""
+    try:
+        return fn(*args), None
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}" if not isinstance(e, CamError) else str(e)
+
+
+def full_checkup(store, offline=False):
+    """cam doctor：全面体检。返回 {"version", "generated_at", "offline", "header", "sections": [{"key", "title", "items"}],
+    "summary": {"bad", "warn", "text", "first"}}，每条 {"level", "text", "advice"}（账号的条目多一个 "group"）。不含任何密钥。
+
+    联网时（不加 --offline）几件事并行：刷新所有账号的用量（和 cam usage 一样，不在用的 Claude Code 号 access token
+    快过期了就用它自己的 refresh token 续一次，续不上就是登录失效了；当前登录从不替它续，交给 Claude Code）、
+    实测 Claude 服务、官方状态页、查 Claude Code 新版本、运行聊天机器人的自检。
+    """
+    before = store.load()  # 体检之前的样子：看后台有没有在刷新、哪个号是这次续的
+    active = before["active"].get("claude_code")
+    before_exp = {a["id"]: ((_quiet(store.load_secret, a["id"])[0] or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
+                  for a in before["accounts"] if a["kind"] == "claude_code" and a["id"] != active}
+    svc = summary = latest = refresh_error = None
+    bot_results = {}
+    if not offline:
+        bots = installed_bots()
+        with ThreadPoolExecutor(max_workers=4 + len(bots)) as ex:
+            f_ref = ex.submit(_quiet, refresh_usage, store)
+            f_svc = ex.submit(_quiet, service_check, store)
+            f_sum = ex.submit(_quiet, fetch_status_summary)
+            f_rel = ex.submit(_quiet, latest_claude_version)
+            f_bots = {cli: ex.submit(run_bot_doctor, path) for cli, _, path in bots}
+            refresh_error = f_ref.result()[1]
+            svc, svc_err = f_svc.result()
+            if svc_err:
+                svc = [ck("bad", f"服务检查出错：{svc_err}", "稍后再运行 cam doctor")]
+            summary, latest = f_sum.result()[0], f_rel.result()[0]
+            bot_results = {cli: f.result() for cli, f in f_bots.items()}
+
+    def section(key, title, fn, *args):  # 一节出错只影响这一节
+        items, err = _quiet(fn, *args)
+        return {"key": key, "title": title, "items": items if err is None else [ck("bad", f"这一节没查完：{err}", "把这一行发给作者")]}
+
+    sections = [section("accounts", "账号", checkup_accounts, store, before_exp, offline, refresh_error),
+                section("service", "Claude 服务", checkup_service, store, offline, svc, summary),
+                section("claude_code", "本机 Claude Code", checkup_local_claude, store, latest),
+                section("cam", "cam 自己", checkup_cam, store, before)]
+    bots = checkup_bots(offline, bot_results)
+    if bots is not None:
+        sections.append({"key": "bots", "title": "聊天机器人", "items": bots})
+    counted = [i for s in sections for i in s["items"] if i.get("kind") != "summary"]  # 服务检查的总体结论是重复的，不计数
+    bad = [i for i in counted if i["level"] == "bad"]
+    warn = [i for i in counted if i["level"] == "warn"]
+    first = (bad or warn or [None])[0]  # 菜单栏通知里说的“第一项”，带上账号名
+    return {"version": VERSION, "generated_at": now_iso(), "offline": bool(offline),
+            "header": checkup_header(),
+            "sections": sections,
+            "summary": {"bad": len(bad), "warn": len(warn), "text": f"{len(bad)} 项要处理，{len(warn)} 项留意",
+                        "first": ((f"{first['group']}：" if first.get("group") else "") + first["text"]) if first else None}}
+
+
+def checkup_header():
+    return f"cam {VERSION}，Python {platform.python_version()}，{platform.system()} {platform.release()}"
+
+
+def checkup_brief(summary):
+    """一句话结论（菜单栏通知用）：一切正常 / N 项要处理：第一项 / M 项留意：第一项。"""
+    if summary["bad"]:
+        return f"{summary['bad']} 项要处理：{summary['first']}"
+    if summary["warn"]:
+        return f"{summary['warn']} 项留意：{summary['first']}"
+    return "一切正常"
+
+
+def print_checkup(res):
+    for n, sec in enumerate(res["sections"], 1):
+        print("\n" + color(f"{n}. {sec['title']}", "b"))
+        group = None
+        for it in sec["items"]:
+            if it.get("group") and it["group"] != group:
+                group = it["group"]
+                print(color(f"[{group}]", "c"))
+            mark, c = CHECK_MARKS[it["level"]]
+            print(f"{color(mark, c)} {it['text']}")  # 标记顶格：install.sh 按 ^(✗|!) 挑出要留意的行
+            if it.get("advice"):
+                print(color(f"    → {it['advice']}", "d"))
+    s = res["summary"]
+    print("\n" + color(f"总结：{s['text']}" + ("，一切正常" if not s["bad"] and not s["warn"] else ""),
+                       "r" if s["bad"] else "y" if s["warn"] else "g"))
+
+
+def cmd_doctor(store, as_json=False, offline=False):
+    """全面体检，逐项列出 ✓ / ! / ✗ / ·，有问题的带一句怎么办。不打印任何密钥。"""
+    if as_json:
+        print(json.dumps(full_checkup(store, offline), ensure_ascii=False, indent=2))
+        return 0
+    print(checkup_header())  # 第一行：install.sh 安装完会把它显示出来
+    if not offline:
+        print(color("正在体检：刷新各账号的用量（不在用的号快过期了会替它续一次）、实测 Claude 服务，要十几秒…", "d"), flush=True)
+    print_checkup(full_checkup(store, offline))
+    return 0
+
+
+# --------------------------------------------------------------------------- 文件校验与手动更新
+
+SUMS_FILE = "SHA256SUMS"  # 项目根目录的校验清单，scripts/gen-sums.py 生成，sha256sum -c / shasum -a 256 -c 也能直接用
+UPDATE_CHECK_FILE = "update-check.json"  # 数据目录里存上次检查更新的结果，菜单栏和面板据它显示“更新（N 个新改动）”
+FETCH_TIMEOUT = 60
+SERVE_UNIT = "cam-serve.service"  # install.sh 在 Linux 上装的后台 cam serve（systemd 用户服务）
+NOT_CHECKOUT = ("这份代码不是用 git 下载的（没有 .git 目录），没法用 cam update 更新。下载新版本的完整代码，解压后重新运行"
+                "里面的安装脚本（macOS 双击“安装.command”，Linux 运行 bash install.sh，Windows 双击“安装.cmd”），"
+                "cam 命令会改用新目录；账号数据在 ~/.claude-accounts，不受影响。")
+
+
+def code_root():
+    """cam.py 所在的项目目录（scripts 的上一级）。install.sh 装的 cam 命令、菜单栏插件、cam serve 用的都是这份代码。"""
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_sums(root=None):
+    """按项目根目录的 SHA256SUMS 逐个核对文件。
+
+    返回 (核对了几个文件, [对不上的文件和原因])。只核对清单里列出的文件，多出来的不管；没有 SHA256SUMS 抛 CamError。
+    """
+    root = root or code_root()
+    try:
+        with open(os.path.join(root, SUMS_FILE), "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        raise CamError(f"没找到 {SUMS_FILE}，没法校验。代码可能不完整，重新下载一份")
+    n, bad = 0, []
+    for line in lines:
+        if not line.strip():
+            continue
+        m = re.match(r"([0-9a-fA-F]{64}) [ *](.+)$", line)
+        parts = m.group(2).split("/") if m else []
+        if not m or not parts[0] or ":" in parts[0] or ".." in parts or "\\" in m.group(2):  # 只认项目里的相对路径
+            bad.append(f"{SUMS_FILE} 里有一行看不懂：{line[:80]}")
+            continue
+        n += 1
+        try:
+            same = file_sha256(os.path.join(root, *parts)) == m.group(1).lower()
+        except FileNotFoundError:
+            bad.append(f"{m.group(2)}（缺少这个文件）")
+            continue
+        except OSError as e:
+            bad.append(f"{m.group(2)}（读不了：{e.strerror or e}）")
+            continue
+        if not same:
+            bad.append(f"{m.group(2)}（内容不一致）")
+    return n, bad
+
+
+def cmd_verify():
+    n, bad = verify_sums()
+    if bad:
+        print(color(f"✗ 有 {len(bad)} 个文件和 {SUMS_FILE} 对不上：", "r"))
+        for b in bad:
+            print(f"    {b}")
+        print("  代码不完整或被改过：重新下载一份完整的代码。确认是你自己改的，在项目目录运行 python3 scripts/gen-sums.py 重新生成")
+        return 1
+    print(color("✓", "g") + f" {n} 个文件都和 {SUMS_FILE} 一致")
+    return 0
+
+
+def brief(text, last=False):
+    """报错里最有用的一行：git 的看开头（ssh / fatal 那行），Python 的看最后一行（异常类型和说明）。"""
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip() and not l.strip().startswith("hint:")]
+    if not lines:
+        return "没有输出"
+    return (lines[-1] if last else lines[0])[:300]
+
+
+def git(root, *args, timeout=30):
+    """在代码目录里跑 git。不弹账号密码输入（没有终端时直接失败），超时抛 CamError。"""
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        return subprocess.run(["git", "-C", root, "-c", "core.quotepath=false", *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+    except OSError:
+        raise CamError("没找到 git 命令，先安装 git 再试")
+    except subprocess.TimeoutExpired:
+        raise CamError(f"git {args[0]} 超过 {timeout} 秒没完成，检查网络后重试")
+
+
+def git_out(root, *args, timeout=30):
+    r = git(root, *args, timeout=timeout)
+    if r.returncode != 0:
+        raise CamError(f"git {args[0]} 失败：{brief(r.stderr or r.stdout)}")
+    return r.stdout.rstrip()
+
+
+def is_git_checkout(root):
+    """root 是不是一个 git 仓库的根目录（git clone 下来的代码）。下载的压缩包没有 .git，不算。"""
+    if not os.path.exists(os.path.join(root, ".git")):
+        return False
+    r = git(root, "rev-parse", "--show-toplevel")
+    return r.returncode == 0 and os.path.normcase(os.path.realpath(r.stdout.strip())) == os.path.normcase(os.path.realpath(root))
+
+
+def local_changes(root):
+    """代码目录里没提交的改动，git status 的格式。只看 git 管理的文件：新建的文件不影响快进，也不会被退回时删掉。"""
+    return [l for l in git_out(root, "status", "--porcelain", "--untracked-files=no").splitlines() if l.strip()]
+
+
+def update_state_path():
+    return os.path.join(cam_home(), UPDATE_CHECK_FILE)
+
+
+def save_update_check(res):
+    try:
+        write_json_atomic(update_state_path(), res)
+    except OSError:
+        pass
+    return res
+
+
+def saved_update_check(root=None):
+    """上次检查更新的结果，不联网。代码已经不是检查时那个版本（比如自己 git pull 过）时，不再说“有新改动”。"""
+    root = root or code_root()
+    try:
+        res = read_json(update_state_path(), None)
+    except CamError:
+        return None
+    if not isinstance(res, dict) or res.get("root") != root:
+        return None
+    if res.get("behind"):
+        try:
+            head = git_out(root, "rev-parse", "HEAD")
+        except CamError:
+            head = None
+        if head != res.get("head"):
+            res = dict(res, behind=0, commits=[], stale=True, message="代码在检查之后变过了，重新检查一下")
+    return res
+
+
+def update_check(root=None):
+    """联网检查有没有新版本（git fetch，最多等 FETCH_TIMEOUT 秒），只看不改。
+
+    返回并保存 {"checkout", "upstream", "head", "behind", "ahead", "commits": [{"hash", "date", "subject"}], "dirty", "message"}。
+    不是 git 仓库时 checkout=False，message 说明怎么换新版本；没有上游、fetch 失败抛 CamError。
+    """
+    root = root or code_root()
+    res = {"checked_at": now_iso(), "version": VERSION, "root": root, "checkout": False, "behind": 0, "ahead": 0,
+           "commits": [], "dirty": []}
+    if not is_git_checkout(root):
+        res["message"] = NOT_CHECKOUT
+        return save_update_check(res)
+    res["checkout"] = True
+    r = git(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if r.returncode != 0:
+        raise CamError("当前分支没有对应的远程分支，没法检查更新。在代码目录运行 git branch -u origin/main 设好后再试")
+    res["upstream"] = r.stdout.strip()
+    r = git(root, "fetch", "--quiet", timeout=FETCH_TIMEOUT)
+    if r.returncode != 0:
+        raise CamError(f"git fetch 失败，没连上代码仓库：{brief(r.stderr or r.stdout)}")
+    res["head"] = git_out(root, "rev-parse", "HEAD")
+    res["behind"] = int(git_out(root, "rev-list", "--count", "HEAD..@{u}") or 0)
+    res["ahead"] = int(git_out(root, "rev-list", "--count", "@{u}..HEAD") or 0)
+    log = git_out(root, "log", "-n", "50", "--format=%h%x1f%cI%x1f%s", "HEAD..@{u}")
+    res["commits"] = [dict(zip(("hash", "date", "subject"), l.split("\x1f", 2))) for l in log.splitlines() if l]
+    res["dirty"] = local_changes(root)
+    if not res["behind"]:
+        res["message"] = f"已经是最新版本（{res['upstream']}，{res['head'][:7]}）"
+    elif res["ahead"]:
+        res["message"] = (f"有 {res['behind']} 个新改动，但本地有 {res['ahead']} 个提交不在 {res['upstream']} 上，没法直接快进。"
+                          "在代码目录自己合并（git pull --rebase）")
+    elif res["dirty"]:
+        res["message"] = f"有 {res['behind']} 个新改动；代码目录里有没提交的改动，先提交或撤销才能更新"
+    else:
+        res["message"] = f"有 {res['behind']} 个新改动可以更新"
+    return save_update_check(res)
+
+
+def update_self_check(root):
+    """更新后的自检，不碰真实数据。返回没通过的原因，通过返回 None。
+
+    1. 文件和 SHA256SUMS 一致；2. scripts/*.py 都能编译；3. 用临时的 HOME、数据目录、Claude 配置目录跑 cam --help 和 cam ls。
+    """
+    try:
+        _, bad = verify_sums(root)
+    except CamError as e:
+        return str(e)
+    if bad:
+        return f"{len(bad)} 个文件和 {SUMS_FILE} 对不上：" + "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")
+    for path in sorted(glob.glob(os.path.join(root, "scripts", "*.py"))):
+        try:
+            with open(path, "rb") as f:
+                compile(f.read(), path, "exec", dont_inherit=True)
+        except (SyntaxError, ValueError) as e:
+            return f"scripts/{os.path.basename(path)} 编译不过：{e}"
+    tmp = tempfile.mkdtemp(prefix="cam-selfcheck-")
+    try:
+        env = dict(os.environ, HOME=tmp, USERPROFILE=tmp, CAM_HOME=os.path.join(tmp, "cam"),
+                   CLAUDE_CONFIG_DIR=os.path.join(tmp, "claude"), CAM_NO_KEYCHAIN="1", CAM_NO_NOTIFY="1",
+                   CAM_NO_BG_CHECK="1", NO_COLOR="1", PYTHONIOENCODING="utf-8", PYTHONDONTWRITEBYTECODE="1")
+        for args in (["--help"], ["ls"]):
+            shown = "cam " + " ".join(args)
+            try:
+                r = subprocess.run([sys.executable, os.path.join(root, "scripts", "cam.py"), *args], env=env, cwd=tmp,
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                                   stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as e:
+                return f"{shown} 没能运行：{e}"
+            if r.returncode != 0:
+                return f"{shown} 出错（退出码 {r.returncode}）：{brief(r.stderr or r.stdout, last=True)}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return None
+
+
+def serve_unit_file():
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(home(), ".config"), "systemd", "user", SERVE_UNIT)
+
+
+def restart_serve_service(later=False):
+    """重启 install.sh 装的后台 cam serve，让它用上新代码。没在运行就不动它。
+
+    later=True：发起更新的可能就是这个服务自己（面板里点的更新），先把结果返回给页面，一秒后再请 systemd 重启。
+    """
+    env = dict(os.environ)  # 延后执行时也用现在的环境
+
+    def run(*args, timeout=30):
+        try:
+            return subprocess.run(["systemctl", "--user", *args], capture_output=True, timeout=timeout, env=env).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    if not run("is-active", "--quiet", SERVE_UNIT, timeout=10):
+        return "后台的 cam serve 服务没在运行，下次启动时就是新版本"
+    if later:
+        threading.Timer(1.0, run, ("--no-block", "try-restart", SERVE_UNIT)).start()
+        return "后台的 cam serve 服务马上重启，几秒后刷新页面就是新版本"
+    if run("try-restart", SERVE_UNIT):
+        return "已重启后台的 cam serve 服务"
+    return f"后台的 cam serve 服务没能重启，手动运行 systemctl --user restart {SERVE_UNIT}"
+
+
+def update_restart_notes(later=False):
+    """更新后哪些正在运行的东西要重开才用上新版本。"""
+    notes = []
+    if not IS_WIN and not IS_MAC and os.path.exists(serve_unit_file()) and shutil.which("systemctl"):
+        notes.append(restart_serve_service(later))
+    if IS_MAC:
+        notes.append("菜单栏小工具下次刷新（一分钟内）就是新版本")
+    notes.append("自己开着的 cam serve（包括 cam panel 在后台起的）要关掉重开才是新版本")
+    notes.append("桌面版是单独的安装包，不跟着更新，要更新就重新编译安装")
+    return notes
+
+
+def apply_update(root=None, restart_later=False):
+    """cam update：快进到远程分支的最新版本，自检通过才算数，不通过就退回原来的版本。
+
+    只在代码目录没有未提交的改动时才动手，所以退回用 git reset --hard 不会丢东西。不碰数据目录。
+    同一时间只让一个更新在跑（命令行、菜单栏、面板都可能发起）。
+    """
+    root = root or code_root()
+    lease = FileLock(os.path.join(cam_home(), "update.lock"))
+    if not lease.try_acquire():
+        raise CamError("另一个更新正在进行，稍后再试")
+    try:
+        return _apply_update(root, restart_later)
+    finally:
+        lease.release()
+
+
+def _apply_update(root, restart_later):
+    if not is_git_checkout(root):
+        raise CamError(NOT_CHECKOUT)
+    dirty = local_changes(root)
+    if dirty:
+        raise CamError("代码目录里有没提交的改动，没有更新，什么都没改：\n    " + "\n    ".join(dirty[:20])
+                       + ("\n    …" if len(dirty) > 20 else "")
+                       + f"\n  先在 {root} 里提交或撤销这些改动（git stash 可以先收起来），再更新")
+    res = update_check(root)
+    if not res["behind"]:
+        return dict(res, updated=False, restart=[])
+    if res["ahead"]:
+        raise CamError(res["message"] + "。什么都没改")
+    old = res["head"]
+    r = git(root, "merge", "--ff-only", "--quiet", "@{u}", timeout=120)
+    if r.returncode != 0:
+        raise CamError(f"快进合并没成功，什么都没改：{brief(r.stderr or r.stdout)}")
+    problem = update_self_check(root)
+    if problem:
+        r = git(root, "reset", "--hard", "--quiet", old)
+        if r.returncode != 0:
+            raise CamError(f"更新后自检没过（{problem}），退回原来的版本也失败了：{brief(r.stderr)}。"
+                           f"在 {root} 里运行 git reset --hard {old[:12]} 手动退回")
+        save_update_check(dict(res, failed=problem))
+        raise CamError(f"更新后自检没过，已经退回原来的版本：{problem}")
+    new = git_out(root, "rev-parse", "HEAD")
+    save_update_check(dict(res, checked_at=now_iso(), head=new, behind=0, commits=[],
+                           message=f"已经是最新版本（{res['upstream']}，{new[:7]}）"))
+    return dict(res, updated=True, old=old, new=new, restart=update_restart_notes(restart_later),
+                message=f"已更新到 {new[:7]}（原来是 {old[:7]}），{res['behind']} 个新改动，自检通过")
+
+
+def print_commits(res):
+    for c in res["commits"]:
+        print(f"    {color(c['hash'], 'c')} {c['date'][:10]}  {c['subject']}")
+    if res["behind"] > len(res["commits"]):
+        print(f"    …还有 {res['behind'] - len(res['commits'])} 个")
+
+
+def cmd_update(args):
+    """cam update [--check] [--json]。只在用户运行时联网，从不自动更新。"""
+    if args.json:
+        try:
+            res = update_check() if args.check else apply_update()
+        except CamError as e:
+            print(json.dumps({"error": str(e)}, ensure_ascii=False, indent=2))
+            return 1
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0 if res["checkout"] else 1
+    print(color("正在检查更新（git fetch）…", "d"), flush=True)
+    res = update_check() if args.check else apply_update()
+    if not res["checkout"]:
+        print(res["message"])
+        return 1
+    if not res["behind"]:
+        print(color("✓", "g") + f" {res['message']}")
+    elif args.check:
+        print(f"{res['upstream']} 上有 {res['behind']} 个新改动：")
+        print_commits(res)
+        print(color(res["message"], "y") if res["ahead"] or res["dirty"]
+              else "运行 cam update 更新（只做快进；更新后自检没过会自动退回原来的版本）")
+    else:
+        print(color("✓", "g") + f" {res['message']}。这次的改动：")
+        print_commits(res)
+        for note in res["restart"]:
+            print(color(f"  · {note}", "d"))
+    return 0
 
 
 def cmd_vault(store, args):
@@ -5380,10 +6546,18 @@ def main(argv=None):
     s.add_argument("--port", type=int, default=8787)
     s = sub.add_parser("json", help="输出账号状态 JSON（给其它脚本用）")
     sub.add_parser("claude", help="按目录规则切号后启动 claude（参数原样透传）")
-    sub.add_parser("doctor", help="检查环境，排查找不到账号等问题（不显示密钥）")
+    s = sub.add_parser("doctor", help="全面体检：账号登录、Claude 服务、本机 Claude Code、cam 自己、聊天机器人（不显示密钥）")
+    s.add_argument("--json", action="store_true", help="输出 JSON（给菜单栏、脚本用）：分区 → 每条 {level, text, advice}")
+    s.add_argument("--offline", action="store_true", help="不联网：不续登录、不刷新用量、不测服务，只看本机和上次的结果")
+    s = sub.add_parser("update", help="手动更新 cam：git 快进到最新版本，更新后自检不过就退回（从不自动更新）")
+    s.add_argument("--check", action="store_true", help="只检查有没有新版本，列出新改动，不更新")
+    s.add_argument("--json", action="store_true", help="输出 JSON（给菜单栏、脚本用）")
+    sub.add_parser("verify", help="按 SHA256SUMS 校验代码文件是否完整（安装和更新时会自动做）")
     s = sub.add_parser("env", help="Claude Code 环境：检查 / 安装 / 清理")
     esub = s.add_subparsers(dest="env_cmd")
-    esub.add_parser("doctor", aliases=["check"], help="同 cam doctor：检查环境和 Claude 服务")
+    e = esub.add_parser("doctor", aliases=["check"], help="同 cam doctor：全面体检")
+    e.add_argument("--json", action="store_true", help="输出 JSON")
+    e.add_argument("--offline", action="store_true", help="不联网")
     e = esub.add_parser("install", help="用 Anthropic 官方安装器安装 Claude Code")
     e.add_argument("--npm", action="store_true", help="改用 npm 全局安装")
     e.add_argument("--force", action="store_true", help="已经装了也重新安装（可用来升级）")
@@ -5432,6 +6606,12 @@ def main(argv=None):
             print(color("错误：", "r") + str(e), file=sys.stderr)
             return 1
     args = p.parse_args(argv)
+    if args.cmd == "verify":  # 只读代码目录，不建数据目录
+        try:
+            return cmd_verify()
+        except CamError as e:
+            print(color("错误：", "r") + str(e), file=sys.stderr)
+            return 1
     store = Store()
     try:
         c = args.cmd
@@ -5508,7 +6688,7 @@ def main(argv=None):
         elif c == "panel":
             print(f"已在浏览器打开管理面板：{open_panel(store, args.port)}")
         elif c == "doctor" or (c == "env" and args.env_cmd in (None, "doctor", "check")):
-            cmd_doctor(store)
+            return cmd_doctor(store, getattr(args, "json", False), getattr(args, "offline", False))
         elif c == "env" and args.env_cmd == "install":
             cmd_env_install(store, args)
         elif c == "env" and args.env_cmd == "clean":
@@ -5519,6 +6699,8 @@ def main(argv=None):
             cmd_risk(store, args)
         elif c == "json":
             print(json.dumps(public_state(store, store.load()), ensure_ascii=False, indent=2))
+        elif c == "update":
+            return cmd_update(args)
         return 0
     except CamError as e:
         print(color("错误：", "r") + str(e), file=sys.stderr)

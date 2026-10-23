@@ -1,0 +1,2 @@
+# 不做换行符转换：SHA256SUMS 按仓库里的原样内容计算，Windows 上 git 默认把换行改成 CRLF 的话校验就对不上了
+* -text

@@ -4,13 +4,14 @@ mod server;
 use crate::engine::{
     api, claude, health, rules,
     store::{accounts, active_code_id, read_json, s, write_json_atomic, Store},
-    usage,
+    tray, usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -81,11 +82,22 @@ fn usage_brief(a: &Value) -> String {
     }
 }
 
-fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, Option<String>)> {
+/// 托盘上显示的当前账号额度：macOS 菜单栏上的文字、鼠标悬停的提示、图标上圆点的颜色
+struct TrayHead {
+    title: Option<String>,
+    tooltip: String,
+    five_hour: Option<f64>,
+}
+
+fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, TrayHead)> {
     let data = Store::new().load().unwrap_or_else(|_| json!({}));
     let active = active_code_id(&data);
     let menu = Menu::new(app)?;
-    let mut title = None;
+    let mut head = TrayHead {
+        title: None,
+        tooltip: tray::tooltip(None, None, None),
+        five_hour: None,
+    };
 
     let code: Vec<&Value> = accounts(&data)
         .iter()
@@ -111,7 +123,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, Option<String
         let id = s(a, "id").unwrap_or_default();
         let is_active = active.as_deref() == Some(id);
         if is_active {
-            title = pct(a, "five_hour").map(|p| format!("{:.0}%", p));
+            let five = pct(a, "five_hour");
+            head = TrayHead {
+                title: five.map(|p| format!("{:.0}%", p)),
+                tooltip: tray::tooltip(s(a, "label").or(s(a, "email")), five, pct(a, "seven_day")),
+                five_hour: five,
+            };
         }
         let text = format!(
             "{}{}",
@@ -160,16 +177,29 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, Option<String
     menu.append(&MenuItem::with_id(app, "refresh", "刷新用量", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
-    Ok((menu, title))
+    Ok((menu, head))
+}
+
+/// 托盘图标：应用图标右下角加一个额度圆点（颜色见 engine::tray），没有额度数据时就是应用图标
+fn tray_icon(app: &AppHandle, five_hour: Option<f64>) -> Option<Image<'static>> {
+    let base = app.default_window_icon()?;
+    let rgba = match tray::quota_color(five_hour) {
+        Some(c) => tray::with_dot(base.rgba(), base.width(), base.height(), c),
+        None => base.rgba().to_vec(),
+    };
+    Some(Image::new_owned(rgba, base.width(), base.height()))
 }
 
 fn rebuild_tray(app: &AppHandle) -> tauri::Result<()> {
-    let (menu, title) = build_menu(app)?;
-    if let Some(tray) = app.tray_by_id("main") {
-        tray.set_menu(Some(menu))?;
-        // macOS 菜单栏上直接显示当前账号 5 小时额度
-        tray.set_title(title)?;
-        tray.set_tooltip(Some("Claude 账号管理"))?;
+    let (menu, head) = build_menu(app)?;
+    if let Some(icon) = app.tray_by_id("main") {
+        icon.set_menu(Some(menu))?;
+        // macOS 菜单栏上直接显示当前账号 5 小时额度；Windows 托盘不显示文字，看圆点颜色和鼠标悬停的提示
+        icon.set_title(head.title)?;
+        icon.set_tooltip(Some(&head.tooltip))?;
+        if let Some(img) = tray_icon(app, head.five_hour) {
+            icon.set_icon(Some(img))?;
+        }
     }
     Ok(())
 }
@@ -495,16 +525,16 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            let (menu, title) = build_menu(&handle)?;
-            let mut tray = TrayIconBuilder::with_id("main")
+            let (menu, head) = build_menu(&handle)?;
+            let mut builder = TrayIconBuilder::with_id("main")
                 .menu(&menu)
-                .tooltip("Claude 账号管理")
+                .tooltip(&head.tooltip)
                 .on_menu_event(|app, event| on_menu(app, event.id().as_ref()));
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
+            if let Some(img) = tray_icon(&handle, head.five_hour) {
+                builder = builder.icon(img);
             }
-            let tray = tray.build(app)?;
-            let _ = tray.set_title(title);
+            let icon = builder.build(app)?;
+            let _ = icon.set_title(head.title);
 
             let state = app.state::<AppState>();
             let cfg = state.settings.lock().unwrap().clone();

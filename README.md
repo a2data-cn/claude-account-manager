@@ -20,6 +20,50 @@
 | 目录规则自动切号 | `cam claude` | 可设置（通过 `cam claude` 生效） | 可设置 |
 | 额度提醒 | 终端输出 | 系统通知 | — |
 
+## 安装
+
+先把代码拿到本机：推荐 `git clone`（以后一条命令就能更新），也可以下载压缩包解压。然后：
+
+- **macOS**：在访达里双击 `安装.command`（从网上下载的压缩包第一次可能提示无法打开：到“系统设置 → 隐私与安全性”最下面点“仍要打开”），或者在终端运行 `bash install.sh`
+- **Linux**：终端运行 `bash install.sh`
+- **Windows**：双击 `安装.cmd`（就是运行 `powershell -ExecutionPolicy Bypass -File install.ps1`）
+
+安装脚本按顺序做这几件事，每一步都会说清楚做了什么：
+
+1. 检查 Python 3.8 以上（cam 只用 Python 自带的标准库）。Windows 上没有的话问一句，用系统自带的 winget 装 Python 官方的 3.13 版（只装给当前用户，不用管理员权限）
+2. 按 `SHA256SUMS` 校验每个文件，有对不上的就列出来并停下，什么都不改
+3. 装 `cam` 命令：macOS / Linux 在 `~/.local/bin/cam` 建一个指向代码目录的软链接（代码更新后不用重装），`~/.local/bin` 不在 PATH 里时在 `~/.zshrc` 或 `~/.bashrc`（macOS 上的 bash 是 `~/.bash_profile`）末尾加一行；Windows 把 `scripts` 目录加进用户 PATH
+4. 没装 Claude Code 时问要不要用官方安装器装（默认不装，以后可以 `cam env install`）
+5. macOS 问要不要装菜单栏小工具（默认装）。Linux 问要不要把 `cam serve` 装成只限本机访问的后台服务（systemd 用户服务 `cam-serve`，默认不装）：装了以后不开桌面版也会自动保存新登录、执行时间规则、刷新用量、额度快用完时提醒。Windows 问要不要装托盘小工具（默认装，见下面“托盘小工具（Windows）”），它也做这些后台任务
+6. 运行 `cam doctor`，列出要留意的地方和下一步
+
+可以重复运行，装好的部分会跳过。参数：
+- `--yes`：不提问，全部按默认选择（Windows 写 `-Yes`）
+- `--skip-verify`：跳过文件校验，自己改过代码时用（Windows 写 `-SkipVerify`）
+- `--uninstall`：卸载，去掉 `cam` 命令、加进 shell 配置的那一行、菜单栏插件和后台服务（Windows 写 `-Uninstall`，把 `scripts` 从 PATH 里去掉，删掉托盘小工具）
+
+安装和卸载都不碰账号数据（`~/.claude-accounts`）和 Claude Code 的配置（`~/.claude`）。装好后，每个账号在浏览器里登录一次：`cam login 工作号`，见下面“第一次使用”。
+
+**文件校验**：项目根目录的 `SHA256SUMS` 记着每个文件的 SHA-256，安装和更新时自动核对，也可以随时运行 `cam verify`，或者用系统自带的工具在项目目录核对：`shasum -a 256 -c SHA256SUMS`（macOS）、`sha256sum -c SHA256SUMS`（Linux）。改了代码要提交时，运行 `python3 scripts/gen-sums.py` 重新生成（测试会检查它是不是最新的）。桌面版的编译脚本也会在安装包旁边写一份 `SHA256SUMS`。
+
+## 更新
+
+不会自动更新，也不会自己定时去查，只在你要的时候更新：
+
+- **命令行**：`cam update --check` 看有没有新版本、列出新改动；`cam update` 更新
+- **macOS 菜单栏**：点“检查更新”，有新版本时菜单里多一项“更新（N 个新改动）”，点了才更新，结果用系统通知告诉你
+- **网页面板**（`cam serve` / `cam panel` 打开的）：底部“软件更新”里点“检查更新”，看过改动列表再点“更新”
+
+更新只对 `git clone` 下来的代码有效，过程是：
+- 代码目录里有没提交的改动就不更新，列出是哪些文件，什么都不改
+- 用 `git merge --ff-only` 快进到远程分支的最新版本，不做合并
+- 自检：核对 `SHA256SUMS`、编译所有脚本、在临时目录里跑一遍 `cam --help` 和 `cam ls`（不碰真实账号数据）。自检没过就退回原来的版本，并说明原因
+- 更新成功后，Linux 上装了后台服务的会自动重启它；菜单栏小工具一分钟内就用新版本；自己开着的 `cam serve`（包括 `cam panel` 在后台起的）要关掉重开
+
+下载压缩包装的没法这样更新：下载新版本解压，重新运行里面的安装脚本，`cam` 命令会改用新目录，账号数据不受影响。
+
+桌面版是单独的安装包，不跟着 `cam update` 更新：重新编译安装（见下面“桌面版”），或者下载新的安装包覆盖安装，数据目录共用，不受影响。桌面版内置的面板里没有“软件更新”这一块。
+
 ## 界面一览
 
 桌面版和手机面板是同一套界面，按"选账号 → 看详情 → 操作"组织。配色是暖色米白和赭橙强调，有明亮和暗黑两套，顶栏右边的 ◐ 按钮在"跟随系统 → 明亮 → 暗黑"之间切换（只记在这台设备上）：
@@ -63,10 +107,10 @@
 
 菜单栏常驻显示当前账号和 5 小时额度，例如“工作号 64%”，图标颜色跟着额度变：70% 以下绿、70–89% 黄、90% 以上红。点开能看到每个号的 5 小时额度进度条（▰▰▰▰▱▱▱▱▱▱ 42%）和 7 天额度，当前在用的号前面打勾、有问题的号标黄 / 红三角；子菜单里是重置时间和到期日，点一下就能切换（有 `claude` 会话在跑时先登记，等它们退出再切），切换结果和出错都用系统通知告诉你。按住 Option 键，账号名换成邮箱显示。
 
-菜单底部的“打开管理面板”会在浏览器打开网页面板（改名、到期日、切号规则、隐私设置都在里面）。本机已经有面板在跑（桌面版或 `cam serve`）就直接用；没有就在后台启动一个只限本机访问的 `cam serve`，一直运行到注销或重启。
+菜单底部的“打开管理面板”会在浏览器打开网页面板（改名、到期日、切号规则、隐私设置都在里面），“检查更新”见上面“更新”。“全面体检”在后台跑 `cam doctor`，用系统通知告诉你结论（“一切正常”或“N 项要处理：第一项”），“在终端看完整体检结果”打开终端显示全部内容。本机已经有面板在跑（桌面版或 `cam serve`）就直接用；没有就在后台启动一个只限本机访问的 `cam serve`，一直运行到注销或重启。
 
 ```bash
-bash extras/swiftbar/install.sh
+bash extras/swiftbar/install.sh    # 一键安装时选了装菜单栏小工具，就不用再运行
 ```
 
 脚本会自动安装 [SwiftBar](https://github.com/swiftbar/SwiftBar)（需要 Homebrew；没有的话会告诉你去哪下载），并把插件装好。插件每分钟运行一次，同时负责：
@@ -76,6 +120,17 @@ bash extras/swiftbar/install.sh
 - 额度超过阈值时弹系统通知
 
 所以装了它，不开桌面版也是全自动的。桌面版或 `cam serve` 同时在运行时，后台任务交给它们做，插件只负责显示菜单（菜单底部会写“自动刷新由桌面版或 cam serve 负责”），不会几个程序同时轮询。`cam serve` 接手时弹同样的系统通知（新账号、切换结果、额度提醒；Linux 上有 `notify-send` 就用它），所以从菜单“打开管理面板”之后提醒也不会断。
+
+## 托盘小工具（Windows）
+
+任务栏右下角常驻一个图标，上面写着当前账号 5 小时额度用了百分之几，底色跟着额度变：70% 以下绿、70–89% 黄、90% 以上红，用满了写“满”；鼠标放上去显示是哪个号。左键或右键点开，菜单和 macOS 菜单栏小工具是同一份：每个号的额度进度条和 7 天额度，当前在用的打勾，有问题的标出原因；子菜单里是重置时间、到期日和“切换到这个账号”（有 `claude` 会话在跑时先登记，等它们退出再切）；底部是打开管理面板、刷新用量、全面体检、检查更新。切换结果、额度提醒都用系统通知告诉你。
+
+一键安装（`安装.cmd`）时问到“装托盘小工具吗”回答是（默认）就装好了：放进“启动”文件夹，登录 Windows 后自动在后台运行，不弹黑窗口。和菜单栏小工具一样每分钟顺带做后台任务：自动保存新登录的账号、执行时间规则、每 10 分钟刷新用量、额度超过阈值时提醒（桌面版或 `cam serve` 在运行时由它们做）。
+
+- 看不到图标：点任务栏右下角的 ^ 展开，可以把图标拖到任务栏上常驻
+- 菜单最下面“退出托盘小工具”只退出这一次，下次登录 Windows 还会运行；不要了就运行 `安装.cmd -Uninstall`
+- `cam update` 更新代码后，托盘小工具一分钟内自己换成新版本
+- 只需要 Python（一键安装会帮你装），图标和菜单用的是 Windows 自带的 PowerShell，不用另装别的程序
 
 ## 第一次使用（每个账号做一次）
 
@@ -115,8 +170,7 @@ bash extras/swiftbar/install.sh
 ## 脚本版
 
 ```bash
-# macOS / Linux：把 scripts 加入 PATH（或者直接 python3 scripts/cam.py）
-export PATH="$PATH:/path/to/claude-account-manager/scripts"
+# 一键安装后就有 cam 命令（见上面“安装”）；不想装也可以直接 python3 scripts/cam.py
 
 cam                       # 列出所有账号；顺便自动保存新登录的账号
 cam login 个人号           # 登录另一个账号并保存（先存好当前账号，再 claude auth login）
@@ -127,25 +181,34 @@ cam set 工作号 --expires 2026-11-03 --auto-renew --price '$100/月'
 cam serve --lan           # 启动 Web 面板，手机扫链接即可访问
 cam panel                 # 在浏览器打开 Web 面板（没在运行就在后台启动，只限本机访问）
 cam local --days 7        # 本机每天消耗了多少 token、记在哪个号上、按 API 价折算约多少钱
-cam doctor                # 逐项检查环境，并实测 Claude 服务是否正常（出口地区、api.anthropic.com、claude.ai）；不显示密钥
+cam doctor                # 全面体检：账号登录还能不能续、Claude 服务、本机 Claude Code、cam 自己、聊天机器人；不显示密钥
+cam doctor --offline      # 不联网：不续登录、不刷新、不测服务，只看本机和上次的结果（--json 给脚本用）
 cam env install           # 用 Anthropic 官方安装器安装 Claude Code
 cam env clean             # 清理 Claude Code 缓存（默认只预演，加 --apply 才执行）
+cam update --check        # 看有没有新版本；cam update 更新（见上面“更新”）
+cam verify                # 按 SHA256SUMS 校验代码文件
 ```
 
-Windows 用 `scripts\cam.cmd`，用法相同。
+Windows 用 `scripts\cam.cmd`（一键安装后直接 `cam`），用法相同。
 
 ### Claude Code 环境：检查、安装、清理
 
-`cam doctor`（也可以写成 `cam env doctor` / `cam env check`）除了检查登录和数据目录，还会查出几类常见的“切换了却不生效”。
+`cam doctor`（也可以写成 `cam env doctor` / `cam env check`）是全面体检，分五节逐项列出，每行 ✓ 正常、! 留意、✗ 要处理、· 说明，有问题的下一行是“→ 怎么办”，最后一行是“N 项要处理，M 项留意”。不显示任何密钥；`--json` 输出同样的内容给脚本用，`--offline` 不联网。
+
+1. **账号**：每个号一段。Claude Code 号看保存的登录还能不能续：不在用的号 access token 过期或快过期时，用它自己的 refresh token 续一次（和刷新用量走同一条路），续不上就是“✗ 登录已失效 → cam login 名字”，不用等到切换时才发现。**当前登录从不替它续**（交给 Claude Code），只说多久过期、用量接口能不能用。另外每个号列出套餐、到期日（7 天内提醒，过了算要处理）、上次取用量的错误（比如 429 限流、401）和健康状态；网页号看 sessionKey 能不能用，API 号看 Key 能不能用
+2. **Claude 服务**：下面“服务检查”的全部内容，加上 api.anthropic.com 和 claude.ai 的延迟，以及官方状态页（status.claude.com，连不上再试 status.anthropic.com）的总体状态、没解决的事件、不正常的组件（Claude Code、API、claude.ai、Console）。状态页连不上只算留意
+3. **本机 Claude Code**：装在哪、版本、有没有新版本（查官方原生安装器的版本号，查不到就不显示）、下面几类“切换了却不生效”、凭据文件（权限不是 600 会提醒 chmod 600）、当前登录；还有正在运行的 `claude` 会话，每个一行：pid、工作目录、运行了多久、用的哪个登录。Linux 上读 `/proc/<pid>/environ` 里有没有 `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `CLAUDE_CONFIG_DIR`（只看有没有，不读出值），用本机登录的标“切号会跟着换”，用自己 token 的标“用自己的号，切号不影响”；Discord / 飞书 / 钉钉机器人的会话按 tmux 名和启动时设的环境变量认出来，写成“Discord 机器人主会话”“飞书机器人 shop”。macOS / Windows 只列出 `ps` 看到的，说明看不出用的哪个登录
+4. **cam 自己**：后台任务谁在做（桌面版 / `cam serve` / 菜单栏插件）、上一轮是什么时候；各账号上次刷新用量的时间（有后台在跑却超过 30 分钟没刷新会提醒）；上次检查更新的结果（不联网）；`SHA256SUMS` 校验；数据目录和密钥文件的权限（700 / 600）；备份有几份、最新的是哪份、一共多大
+5. **聊天机器人**：装了 `~/.local/bin/claude-discord`、`claude-feishu`、`claude-dingtalk` 的，分别运行它们的 `doctor`（最多等 60 秒），列出 ✗ 的项，没有就是“全部正常”；没装就不显示这一节
 
 python.org 装的 Python（macOS 上常见）默认不带根证书，https 请求会报 `CERTIFICATE_VERIFY_FAILED`。脚本版发现默认证书一张都没加载到时，会自动改用 `SSL_CERT_FILE`、certifi（装了的话）或系统自带的证书文件（macOS 是 `/etc/ssl/cert.pem`），证书照常校验，`cam doctor` 会写明用的是哪个文件。
 
-常见的“切换了却不生效”：
+第 3 节查出的常见“切换了却不生效”：
 - PATH 里有好几份 `claude`（比如 npm 版和原生版并存），会列出来并标明实际运行的是哪个
 - 设置了 `ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN` 等环境变量，或者 `settings.json` 里配了 `apiKeyHelper`、`~/.claude.json` 里存着 `primaryApiKey`。这些都优先于订阅登录，切换账号就没有效果
 - 当前有几个 `claude` 进程在运行
 
-最后一段"服务检查"实测 Claude 服务本身是否正常，并把使用环境里的风险点逐项列出来，排查"是网络问题、环境问题还是账号问题"。第一行是总体结论：环境评分（满分 100，越高越安全，每个风险点按轻重扣分）加档位——90 分以上"风险低，可以使用"，70–89"有风险，建议先处理提醒项再使用"，70 以下"风险高，不建议在当前环境使用；是否继续由你决定"——再带上最严重的那一条。评分只汇总本机能看到的信号，满分也不代表一定合规。下面每一项都附"→ 这意味着什么、建议怎么做"。**全部只提醒，不拦任何操作**，是否继续由用户自己决定：
+第 2 节里的"服务检查"实测 Claude 服务本身是否正常，并把使用环境里的风险点逐项列出来，排查"是网络问题、环境问题还是账号问题"。第一行是总体结论：环境评分（满分 100，越高越安全，每个风险点按轻重扣分）加档位——90 分以上"风险低，可以使用"，70–89"有风险，建议先处理提醒项再使用"，70 以下"风险高，不建议在当前环境使用；是否继续由你决定"——再带上最严重的那一条。评分只汇总本机能看到的信号，满分也不代表一定合规。下面每一项都附"→ 这意味着什么、建议怎么做"。**全部只提醒，不拦任何操作**，是否继续由用户自己决定：
 - DNS：`api.anthropic.com`、`claude.ai` 解析到哪里
 - 出口地区：从 Cloudflare 看到的国家、城市、IP 和节点，并对照 Anthropic 官网公布的支持国家/地区名单（美国、英国、日本等 180 多个；中国大陆、香港、澳门、俄罗斯等不在内）。不在名单内会醒目提醒：按 Anthropic 政策该地区不提供服务，继续使用可能导致账号被限制或封禁，建议换到支持地区的网络出口。在名单内也会说明：这只是 IP 这一项没问题，Anthropic 结合 IP 和其他信号综合判断所在地。名单会变，以官网为准
 - 网络服务商和 IP 类型：出口 IP 属于哪个运营商（ASN），数据库判定它是家庭 / 公司宽带、机房 / 云服务器、代理 / VPN 出口、Tor 出口节点还是手机网络。机房、代理、Tor 都会提醒：这类出口通常被当作 VPN / 代理流量看待。数据源见下面"隐私与数据源"，默认都可以商用；没有类型标记时按运营商名里的关键字判断
@@ -168,10 +231,10 @@ python.org 装的 Python（macOS 上常见）默认不带根证书，https 请�
 - 账号数：本机保存了几个 Claude Code 账号，并提示账号不能给别人用（消费者条款第 2 条）
 - 检测范围：最后一条说明本工具只能看到本机和网络层面的信号，账号侧的信号看不到，所以"没有发现风险点"不等于一定合规
 
-桌面版和手机面板的环境卡上点"重新检测"会展开同样的检测结果。另外桌面版、`cam serve`、菜单栏插件会随用量刷新每隔几分钟记一次出口地区、WARP、时钟偏差和官方状态页，面板和桌面版顶部常显"出口 US ✓"和据缓存算的"环境 92"徽章（越高越安全）（实测的分数以 `cam doctor` 为准）；上面这些风险点里级别为"提醒"或"故障"的（出口不在名单、出口变化、时区指向不支持地区、时钟偏差、官方故障、账号多地区）会常显在页面顶部、菜单栏和 `cam` 列表里，`cam switch` 和面板切换前也会再提醒一次，但照样切。
+桌面版和手机面板的环境卡上点"重新检测"会展开同样的检测结果；`cam serve` 提供的面板旁边还有"全面体检"按钮，展开的是 `cam doctor` 的完整五节（桌面版内置的面板没有这个按钮）。另外桌面版、`cam serve`、菜单栏插件会随用量刷新每隔几分钟记一次出口地区、WARP、时钟偏差和官方状态页，面板和桌面版顶部常显"出口 US ✓"和据缓存算的"环境 92"徽章（越高越安全）（实测的分数以 `cam doctor` 为准）；上面这些风险点里级别为"提醒"或"故障"的（出口不在名单、出口变化、时区指向不支持地区、时钟偏差、官方故障、账号多地区）会常显在页面顶部、菜单栏和 `cam` 列表里，`cam switch` 和面板切换前也会再提醒一次，但照样切。
 
 ```bash
-cam env install            # 没装就用官方原生安装器装（curl -fsSL https://claude.ai/install.sh | bash，Windows 用 install.ps1）
+cam env install            # 没装就用官方原生安装器装（curl -fsSL https://claude.ai/install.sh | bash，Windows 用 Anthropic 官方的 install.ps1）
 cam env install --npm      # 改用 npm install -g @anthropic-ai/claude-code
 cam env install --force    # 已经装了也重装，可用来升级
 ```
@@ -352,14 +415,14 @@ npm run tauri build    # 打包，产物在 src-tauri/target/release/bundle/
 
 **一键编译安装**：`bash scripts/build-desktop-mac.sh`（Windows：`powershell -ExecutionPolicy Bypass -File scripts\build-desktop-windows.ps1`）。脚本会自动安装缺少的 Rust，编译后把 App 装进“应用程序”。如果失败，把生成的 `build.log` 发给作者。
 
-**不想本地编译**：把项目推到 GitHub，`.github/workflows/build.yml` 会自动编译 macOS（通用版）、Windows、Linux 三个平台的安装包，在 Actions 页面下载。推送 `v1.0.0` 这样的标签会生成 Release 草稿。
+**不想本地编译**：把项目推到 GitHub，`.github/workflows/build.yml` 每次推送都会跑测试；推送 `v1.0.0` 这样的标签时自动编译 macOS（通用版）、Windows、Linux 三个平台的安装包，生成 Release 草稿（到仓库的 Releases 页面检查后发布）。不打标签也想编一次：到 Actions 页面选 build → Run workflow，安装包在这次运行的 Artifacts 里。
 
 桌面版功能：
-- 关闭窗口后缩到托盘继续运行。托盘菜单列出所有账号和额度，点一下即可切换。macOS 菜单栏直接显示当前账号的 5 小时用量百分比。
+- 关闭窗口后缩到托盘继续运行。托盘菜单列出所有账号和额度，点一下即可切换。托盘图标右下角有一个额度圆点（当前账号 5 小时额度 70% 以下绿、70–89% 黄、90% 以上红），鼠标放上去显示当前账号和 5 小时、7 天额度；macOS 菜单栏上还直接显示 5 小时用量百分比。
 - 后台自动发现新登录的账号、执行时间规则、刷新用量，额度超过阈值时弹系统通知。同一台电脑上桌面版、`cam serve`、菜单栏插件只有一个在做这些事，谁先启动谁做，其它的只同步显示。
 - 在"手机与设置"里开启 Web 面板后，手机扫二维码就能查看和切换。
 
-macOS 首次打开未签名应用时，需要右键选择"打开"。
+安装包没有签名：macOS 第一次打开会提示无法验证开发者，到"系统设置 → 隐私与安全性"最下面点"仍要打开"（较早的 macOS 也可以右键选"打开"）；Windows 第一次运行安装包会提示"Windows 已保护你的电脑"，点"更多信息 → 仍要运行"。
 
 ## 手机访问
 
@@ -370,7 +433,7 @@ macOS 首次打开未签名应用时，需要右键选择"打开"。
 ## 数据与安全
 
 - 所有数据存在 `~/.claude-accounts/`（可用 `CAM_HOME` 改位置），目录权限 700、凭据文件权限 600，不上传任何地方
-- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查和后台的出口地区记录另外会访问哪些服务，见上面"隐私与数据源"，可以关闭；这些请求只带出口 IP，不带任何账号信息。账号的使用地区记录只存在本机 `accounts.json` 里，`cam risk --clear-history` 可清除。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装
+- 网络请求只发往 `api.anthropic.com`（用量、资料）、`platform.claude.com` / `console.anthropic.com`（续登录），以及你主动填了 sessionKey 时的 `claude.ai`。服务检查和后台的出口地区记录另外会访问哪些服务，见上面"隐私与数据源"，可以关闭；这些请求只带出口 IP，不带任何账号信息。账号的使用地区记录只存在本机 `accounts.json` 里，`cam risk --clear-history` 可清除。`cam env install` 会运行 Anthropic 官方安装器（从 `claude.ai` 下载），或者用 npm 安装。`cam update` 只在你运行（或在菜单栏、面板里点）时访问代码仓库（`git fetch`）。`cam doctor` 另外会读官方状态页（`status.claude.com` / `status.anthropic.com`）和 Claude Code 官方安装器的版本号（`downloads.claude.ai`），不带任何账号信息；`--offline` 时都不访问
 - 用量和资料接口是 Claude Code 自己在用的接口，并非公开 API，Anthropic 改动后可能需要更新本工具；拿不到数据时界面会显示原因，不影响切换
 - 删除账号时凭据会移到 backups 目录，不直接销毁
 - 只有确认了"当前这份登录是谁的"才会存进对应账号：refresh token 和某个账号保存的一致，或者联网核对过。离线、或者 access token 已过期又换过 refresh token 时核对不了，就先暂存（`secrets/_pending-live.json`），不往任何账号里写，界面上会提示；联网后或切换时核对清楚再归档。这样旧会话写回的别人的 token 不会被存错账号
@@ -378,10 +441,15 @@ macOS 首次打开未签名应用时，需要右键选择"打开"。
 ## 目录结构
 
 ```
+install.sh            一键安装（macOS / Linux），双击用 安装.command
+install.ps1           一键安装（Windows），双击用 安装.cmd
+SHA256SUMS            所有文件的校验值，scripts/gen-sums.py 生成
+AGENTS.md             给 AI 助手看的安装、验证和开发规矩
 scripts/cam.py        脚本版（单文件，可单独拷走使用）
 scripts/test_cam.py   脚本版端到端测试（伪造 HOME 和接口，不碰真实账号）
 scripts/build-desktop-*  桌面版一键编译脚本
 extras/swiftbar/      macOS 菜单栏小工具
+extras/windows-tray/  Windows 托盘小工具（PowerShell 画图标和菜单，菜单内容和菜单栏小工具同一份）
 web/panel.html        Web 面板（手机 / 浏览器），脚本版和桌面版共用
 desktop/              Tauri 桌面版
 desktop/src-tauri/engine/  核心逻辑 crate cam-engine，与 cam.py 对应的 Rust 实现，不依赖 Tauri
@@ -396,4 +464,4 @@ python3 -m unittest discover -s scripts -p 'test_*.py' # 脚本、账号库、�
 cd desktop/src-tauri && cargo test -p cam-engine    # Rust 核心逻辑，不需要 Tauri 的系统依赖
 ```
 
-两边都会跑 `tests/shared/` 里的同一份数据，改规则时两边要一起改，否则测试会失败。
+两边都会跑 `tests/shared/` 里的同一份数据，改规则时两边要一起改，否则测试会失败。改完任何文件、提交之前运行 `python3 scripts/gen-sums.py` 更新 `SHA256SUMS`，不然测试也会失败。

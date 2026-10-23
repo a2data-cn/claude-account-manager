@@ -42,6 +42,9 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     rdap_country = "US"  # /rdap/<ip> 返回的注册国，None 表示记录没写
     trace6_loc = None  # /trace6 的地区，None 表示 IPv6 不可用
     status_indicator = "none"  # 官方状态页：none / minor / major / critical
+    status_summary = "operational"  # 状态页摘要 /summary.json：operational / incident；/summary-down.json 总是 503
+    usage_code = None  # 设了就让 /api/oauth/usage 返回这个状态码（比如 429 限流）
+    release_latest = "2.1.0"  # /releases/latest：Claude Code 原生安装器的最新版本号
 
     def log_message(self, *a):
         pass
@@ -147,6 +150,23 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
             desc = {"none": "All Systems Operational", "minor": "Degraded Performance", "major": "Partial System Outage",
                     "critical": "Major System Outage"}[self.status_indicator]
             return self._send(200, {"status": {"indicator": self.status_indicator, "description": desc}})
+        if self.path == "/summary.json":
+            comps = [{"name": n, "status": "operational"} for n in
+                     ("claude.ai", "Claude API (api.anthropic.com)", "Claude Code", "Claude Cowork")]
+            status, incidents = {"indicator": "none", "description": "All Systems Operational"}, []
+            if self.status_summary == "incident":
+                comps[2]["status"] = "partial_outage"
+                comps[3]["status"] = "major_outage"  # 和这里无关的组件，不列出来
+                status = {"indicator": "major", "description": "Partial System Outage"}
+                incidents = [{"name": "Elevated errors on Claude Code", "status": "identified", "impact": "major"},
+                             {"name": "Earlier issue", "status": "resolved", "impact": "minor"}]
+            return self._send(200, {"page": {"name": "Claude"}, "status": status, "components": comps, "incidents": incidents})
+        if self.path == "/summary-down.json":
+            return self._send(503, {"error": "down"})
+        if self.path in ("/releases/latest", "/releases/stable"):
+            return self._send_html(200, self.release_latest + "\n")
+        if self.path == "/api/oauth/usage" and self.usage_code:
+            return self._send(self.usage_code, {"error": {"message": "rate limited"}})
         if self.path == "/api/oauth/usage":
             who = self.tokens.get(auth)
             if not who:
@@ -205,6 +225,8 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_CLAUDE_WEB_BASE"] = base
         os.environ["CAM_TOKEN_URLS"] = base + "/v1/oauth/token"
         os.environ["CAM_STATUS_URL"] = base + "/status.json"
+        os.environ["CAM_STATUS_SUMMARY_URLS"] = base + "/summary.json"
+        os.environ["CAM_CLAUDE_RELEASES_URL"] = base + "/releases"
         os.environ["CAM_CF_META_URL"] = base + "/meta"
         os.environ["CAM_IPAPI_URL"] = base + "/ipapi"
         os.environ["CAM_IPAPI_IS_URL"] = base + "/ipapiis"
@@ -255,15 +277,20 @@ class CamTest(unittest.TestCase):
         MockAnthropic.trace_warp = False
         MockAnthropic.trace_ts_offset = 0
         MockAnthropic.status_indicator = "none"
+        MockAnthropic.status_summary = "operational"
+        MockAnthropic.usage_code = None
+        MockAnthropic.release_latest = "2.1.0"
         MockAnthropic.meta_org = "Comcast Cable Communications, LLC"
         MockAnthropic.meta_country = None
         MockAnthropic.ipapi_type = "residential"
         MockAnthropic.rdap_country = "US"
         MockAnthropic.trace6_loc = None
         MockAnthropic.trace_ip = "1.2.3.4"
-        # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有
+        # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有；cam doctor 读的 /proc 换成一个空的假目录
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
+        os.environ["CAM_TEST_PROC_ROOT"] = os.path.join(self.tmp, "proc")
+        os.makedirs(os.environ["CAM_TEST_PROC_ROOT"])
 
     def tearDown(self):
         self.cam.running_claude_processes = self._real_procs
@@ -874,6 +901,84 @@ class CamTest(unittest.TestCase):
         self.assertEqual(told[-1][0], "切换失败")
         self.assertIn("找不到账号", told[-1][1])
 
+    # ---- Windows 托盘小工具（extras/windows-tray）：菜单和 macOS 菜单栏小工具是同一份
+
+    def _tray(self):
+        self._menu_plugin()
+        sys.path.insert(0, os.path.join(HERE, "..", "extras", "windows-tray"))
+        import cam_tray
+        return importlib.reload(cam_tray)
+
+    def test_windows_tray_menu_matches_menubar(self):
+        tray = self._tray()
+        store = self.cam.Store()
+        out = tray.menu(store, tray.Notes())
+        self.assertEqual((out["badge"], out["level"]), ("!", "gray"))  # 还没有账号
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        self.assertEqual(self.run_cam("usage"), 0)
+        out = tray.menu(store, tray.Notes())
+        dumped = json.dumps(out, ensure_ascii=False)  # 原样交给 cam-tray.ps1
+        # 图标：当前账号 5 小时额度的数字，70–89% 黄底
+        self.assertEqual((out["badge"], out["level"]), ("75", "yellow"))
+        self.assertIn("B", out["tip"])
+        self.assertIn("75%", out["tip"])
+        rows = [i for i in out["items"] if i.get("children")]
+        a_row = next(r for r in rows if r["text"].startswith("A"))
+        b_row = next(r for r in rows if r["text"].startswith("B"))
+        self.assertTrue(b_row.get("checked"))
+        self.assertFalse(a_row.get("checked"))
+        self.assertEqual([i["text"] for i in out["items"] if i.get("checked")], [b_row["text"]])  # 只勾当前账号
+        self.assertIn("■", a_row["text"])  # 进度条换成雅黑里一定有的字符
+        self.assertNotIn("▰", dumped)
+        # 切换在子菜单里，交给菜单栏小工具自己的 switch（结果用通知告诉用户），切完刷新菜单
+        self.assertIn({"text": "切换到这个账号", "run": ["menu", "switch", a_id], "refresh": True}, a_row["children"])
+        # 按住 Option 才显示的邮箱行没带过来；分隔线不连着、不在末尾
+        self.assertFalse(any(i.get("text", "").startswith("a@x.com") for i in out["items"]))
+        seps = [n for n, i in enumerate(out["items"]) if i.get("sep")]
+        self.assertTrue(seps and all(b - a > 1 for a, b in zip(seps, seps[1:])), seps)
+        self.assertFalse(out["items"][-1].get("sep"))
+        acts = {i["text"]: i["run"] for i in out["items"] if i.get("run")}
+        self.assertEqual(acts["打开管理面板"], ["cam", "panel"])
+        self.assertEqual(acts["刷新全部用量"], ["cam", "usage"])
+        self.assertEqual(acts["全面体检"], ["menu", "checkup"])
+        self.assertEqual(acts["在终端看完整体检结果"], ["terminal", "doctor"])
+        # 90% 以上红底，用满写“满”；后台定时刷新发现超过提醒阈值，通知交给托盘弹
+        MockAnthropic.tokens["at-B1"]["u5"] = 100.0
+        tray.cam_menu.REFRESH_MIN = 10
+        out = tray.menu(store, tray.Notes())
+        self.assertEqual((out["badge"], out["level"]), ("满", "red"))
+        self.assertTrue(out["notes"])
+        self.assertEqual(tray.parse_params('bash="/a b/py" param1="x \\"y\\"" refresh=true'),
+                         {"bash": "/a b/py", "param1": 'x "y"', "refresh": "true"})
+
+    def test_windows_tray_actions(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        tray = self._tray()
+        store = self.cam.Store()
+        notes = tray.Notes()
+        self.assertEqual(tray.do(store, "menu", ["switch", a_id], notes), 0)
+        self.assertEqual(notes.items[-1]["title"], "已切换账号")
+        self.assertEqual(self.data()["active"]["claude_code"], a_id)
+        self.assertEqual(tray.do(store, "menu", ["switch"], notes), 2)
+        self.assertEqual(tray.do(store, "nothing", [], notes), 2)
+        # cam 命令出错：最后一行报错写进通知
+        self.assertEqual(tray.do(store, "cam", ["open", "nobody"], notes), 1)
+        self.assertEqual(notes.items[-1]["title"], "没有完成")
+        self.assertIn("nobody", notes.items[-1]["body"])
+        # 新开终端：cmd /k 后面整串再包一层引号，路径里有空格也不会被拆开
+        with mock.patch.object(tray.subprocess, "Popen") as popen:
+            self.assertEqual(tray.do(store, "terminal", ["doctor"], notes), 0)
+        line = popen.call_args[0][0]
+        self.assertTrue(line.startswith('cmd.exe /k "') and line.endswith(' doctor"'), line)
+        self.assertEqual(popen.call_args[1]["creationflags"], tray.CREATE_NEW_CONSOLE)
+        # 命令行入口：输出一行 JSON
+        buf = io.StringIO()
+        with mock.patch.object(sys, "stdout", buf):
+            self.assertEqual(tray.main(["do", "menu", "switch", b_id]), 0)
+        self.assertEqual(json.loads(buf.getvalue())["notes"][-1]["title"], "已切换账号")
+
     def test_background_round_notifies_like_menubar(self):
         a_id, b_id = self._two_accounts()  # 当前是 B
         store = self.cam.Store()
@@ -1318,7 +1423,8 @@ class CamTest(unittest.TestCase):
         self.assertIn("出口地区 US（美国） 在 Anthropic 支持名单内", text)
         self.assertIn("服务正常，当前登录可用", text)
         self.assertIn("可达", text)
-        self.assertTrue(all(set(i) == {"kind", "level", "text", "advice"} for i in items[1:]))
+        self.assertTrue(all(set(i) - {"ms"} == {"kind", "level", "text", "advice"} for i in items[1:]))
+        self.assertTrue(all(isinstance(i["ms"], int) for i in items if i["kind"] in ("api", "web")))  # 延迟，cam doctor 单列
         self.assertEqual(set(items[0]), {"kind", "level", "text", "advice", "score", "grade"})
         # 不在支持名单内：提醒并给建议，总体结论跟着变
         self.assertEqual((items[0]["score"], items[0]["grade"]), (100, "low"))
@@ -2012,6 +2118,405 @@ class CamTest(unittest.TestCase):
         self.assertIn("已经装好了", out)
         self.assertNotIn("sk-ant-x", out)
 
+    # ---- 全面体检（cam doctor）
+
+    def _stub_claude(self, version="2.1.0"):
+        """PATH 里放一个假的 claude，不运行本机真装的那个。"""
+        bindir = os.path.join(self.tmp, "stub-bin")
+        stub(bindir, "claude", f'echo "{version} (Claude Code)"')
+        patcher = mock.patch.dict(os.environ, {"PATH": os.pathsep.join([bindir, "/usr/bin", "/bin"])})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _checkup(self, offline=False):
+        self._stub_claude()
+        return self.cam.full_checkup(self.cam.Store(), offline)
+
+    @staticmethod
+    def _section(res, key):
+        return next(s["items"] for s in res["sections"] if s["key"] == key)
+
+    @staticmethod
+    def _group(items, label):
+        return [i for i in items if (i.get("group") or "").startswith((label + " ", label + "（"))]
+
+    def _fake_proc(self, pid, argv, env=None, cwd=None, age=None):
+        """在假的 /proc 里放一个进程：命令行、环境变量、工作目录、启动了多久（秒）。"""
+        root = os.environ["CAM_TEST_PROC_ROOT"]
+        d = os.path.join(root, str(pid))
+        os.makedirs(d)
+        with open(os.path.join(d, "cmdline"), "wb") as f:
+            f.write(b"\0".join(a.encode() for a in argv) + b"\0")
+        if env is not None:
+            with open(os.path.join(d, "environ"), "wb") as f:
+                f.write(b"\0".join(f"{k}={v}".encode() for k, v in env.items()) + b"\0")
+        if cwd:
+            os.symlink(cwd, os.path.join(d, "cwd"))
+        if age is not None:
+            ticks = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+            write(os.path.join(root, "uptime"), "100000.00 50.00\n")
+            fields = ["S"] + ["0"] * 18 + [str(int((100000 - age) * ticks)), "0", "0"]
+            write(os.path.join(d, "stat"), f"{pid} (claude code) " + " ".join(fields) + "\n")
+
+    def test_checkup_renews_saved_login_but_never_the_live_one(self):
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())  # A 不在用，保存的 access token 过期了；B 是当前登录
+        self.write_creds("at-B1", "rt-B1", self._expired_ms())  # 当前登录的 access token 也过期了
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2"), "rt-B1": ("at-B2", "rt-B2")}
+        MockAnthropic.tokens = {"at-A2": {"u5": 12.0, "u7": 40.0, "email": "a@x.com", "plan": "max"}}
+        acc = self._section(self._checkup(), "accounts")
+        a, b = self._group(acc, "A"), self._group(acc, "B")
+        self.assertTrue(a and b, acc)
+        self.assertEqual(a[0]["level"], "ok")
+        self.assertIn("刚用它自己的 refresh token 续了一次", a[0]["text"])
+        self.assertIn("用量接口正常：5 小时已用 12%，7 天已用 40%", [i["text"] for i in a])
+        self.assertEqual(a[-1]["text"], "账号状态：正常")
+        self.assertEqual(self.cam.Store().load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")
+        # 当前登录从不替它续：只说过期了，用量接口的 401 也只是提示
+        self.assertEqual([c for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"], [("POST", "/v1/oauth/token", "rt-A1")])
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")
+        self.assertIn("（Claude Code，Max，当前登录）", b[0]["group"])
+        self.assertIn("当前登录：access token 已过期", b[0]["text"])
+        self.assertIn("用量接口返回 401：access token 过期了，等 Claude Code 自己续", [i["text"] for i in b])
+        self.assertTrue(all(i["level"] in ("ok", "info") for i in b), b)
+
+    def test_checkup_flags_revoked_saved_login(self):
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())  # 假接口不认 rt-A1：A 的登录已作废
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 2.0, "email": "b@x.com", "plan": "max"}}
+        res = self._checkup()
+        acc = self._section(res, "accounts")
+        a = self._group(acc, "A")
+        bad = [i for i in a if i["level"] == "bad"]
+        self.assertEqual(len(bad), 1, a)  # 只报一次，健康状态里不重复
+        self.assertIn("登录已失效", bad[0]["text"])
+        self.assertTrue(bad[0]["advice"].startswith("cam login A"), bad[0])
+        self.assertEqual(a[-1]["text"], "账号状态：异常（见上面几条）")
+        self.assertTrue(res["summary"]["first"].startswith("A a@x.com"), res["summary"])
+        self.assertTrue(self.cam.checkup_brief(res["summary"]).startswith(f"{res['summary']['bad']} 项要处理：A a@x.com"))
+        b = self._group(acc, "B")
+        self.assertEqual(b[0]["level"], "ok")
+        self.assertIn("当前登录：access token", b[0]["text"])
+        self.assertIn("用量接口正常：5 小时已用 1%，7 天已用 2%", [i["text"] for i in b])
+        self.assertNotIn(("POST", "/v1/oauth/token", "rt-B1"), MockAnthropic.calls)
+        self.assertEqual(self.cam.checkup_brief({"bad": 0, "warn": 0, "first": None}), "一切正常")
+        self.assertEqual(self.cam.checkup_brief({"bad": 0, "warn": 3, "first": "x"}), "3 项留意：x")
+
+    def test_checkup_expiry_rate_limit_web_and_api(self):
+        a_id, b_id = self._two_accounts()
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 2.0, "email": "b@x.com", "plan": "max"}}  # 不认 A 的 access token
+        today = dt.date.today()
+        self.run_cam("set", "A", "--expires", (today + dt.timedelta(days=3)).isoformat())
+        self.run_cam("set", "B", "--expires", (today - dt.timedelta(days=2)).isoformat())
+        self.run_cam("add-web", "--label", "W", "--session-key", "sk-web-secret")
+        self.run_cam("add-web", "--label", "W2")
+        self.run_cam("add-api", "--label", "K", "--key", "sk-ant-api-badkey1234567890")
+        MockAnthropic.web_keys = {"sk-web-secret": {"email": "w@x.com", "plan": "pro", "u5": 5.0, "u7": 6.0}}
+        acc = self._section(self._checkup(), "accounts")
+        pick = lambda label: [(i["level"], i["text"]) for i in self._group(acc, label)]
+        a, b = pick("A"), pick("B")
+        self.assertIn(("warn", "用量接口不认这个登录（HTTP 401）"), a)
+        self.assertIn(("warn", f"3 天后到期（{(today + dt.timedelta(days=3)).isoformat()}）"), a)
+        self.assertIn(("bad", f"订阅已过期 2 天（{(today - dt.timedelta(days=2)).isoformat()}）"), b)
+        self.assertEqual(sum(1 for _, t in b if "订阅已过期" in t), 1)  # 健康状态里不重复
+        self.assertIn(("ok", "sessionKey 有效，用量接口正常：5 小时已用 5%，7 天已用 6%"), pick("W"))
+        self.assertIn(("info", "没填 sessionKey，不自动读取用量（只记到期日也可以）"), pick("W2"))
+        k = self._group(acc, "K")
+        self.assertEqual((k[0]["level"], k[0]["advice"]), ("bad", "cam set K --api-key 新的 Key"))
+        self.assertIn("API Key 无效", k[0]["text"])
+        # 用量接口限流：只是留意，健康状态不重复报
+        MockAnthropic.usage_code = 429
+        b = [i for i in self._group(self._section(self._checkup(), "accounts"), "B") if "429" in i["text"]]
+        self.assertEqual([(i["level"], i["text"]) for i in b], [("warn", "用量接口限流（HTTP 429）")])
+
+    def test_checkup_status_page(self):
+        base = os.environ["CAM_API_BASE"]
+        items = self.cam.status_summary_items(self.cam.fetch_status_summary())
+        self.assertEqual([(i["level"], i["text"]) for i in items], [("ok", "官方状态页：全部正常（127.0.0.1）")])
+        MockAnthropic.status_summary = "incident"
+        s = self.cam.fetch_status_summary()
+        self.assertEqual(s["incidents"], [{"name": "Elevated errors on Claude Code", "status": "identified"}])  # 已解决的不列
+        self.assertEqual(s["components"], [{"name": "Claude Code", "status": "partial_outage"}])  # Cowork 和这里无关
+        items = self.cam.status_summary_items(s)
+        self.assertEqual([(i["level"], i["text"]) for i in items], [
+            ("bad", "官方状态页：Partial System Outage（major）"),
+            ("info", "没解决的事件：Elevated errors on Claude Code（已找到原因）"),
+            ("info", "Claude Code：部分故障")])
+        self.assertIsNone(self.cam.parse_status_summary({"status": {}}))
+        self.assertIsNone(self.cam.parse_status_summary(["x"]))
+        # 第一个地址连不上就换下一个；都连不上只是“留意”，不算要处理
+        with mock.patch.object(self.cam, "STATUS_SUMMARY_URLS", [base + "/summary-down.json", base + "/summary.json"]):
+            self.assertEqual(self.cam.fetch_status_summary()["indicator"], "major")
+        with mock.patch.object(self.cam, "STATUS_SUMMARY_URLS", [base + "/summary-down.json"]):
+            items = self.cam.status_summary_items(self.cam.fetch_status_summary())
+        self.assertEqual(items[0]["level"], "warn")
+        self.assertIn("官方状态页连不上", items[0]["text"])
+        # 体检里：状态页的完整摘要代替服务检查里那一行；api / web 后面有一行延迟
+        MockAnthropic.status_indicator = "major"
+        svc = self._section(self._checkup(), "service")
+        self.assertEqual([i for i in svc if i.get("kind") == "status"], [])
+        self.assertIn("没解决的事件：Elevated errors on Claude Code（已找到原因）", [i["text"] for i in svc])
+        lat = [i for i in svc if i.get("kind") == "latency"]
+        self.assertRegex(lat[0]["text"], r"^延迟：127\.0\.0\.1 \d+ ms，127\.0\.0\.1 \d+ ms$")
+        self.assertEqual(svc[[i.get("kind") for i in svc].index("latency") - 1]["kind"], "web")
+
+    def test_checkup_lists_sessions_and_which_login_they_use(self):
+        self._fake_proc(101, ["claude", "--session-id", "s1", "--channels", "plugin:discord"],
+                        {"TMUX": "/tmp/tmux-1000/claude-discord,99,0", "PATH": "/bin"}, "/work/main", 7500)
+        self._fake_proc(102, ["/home/u/.local/share/claude/versions/2.1.0", "--resume", "s2"],
+                        {"FEISHU_SESSION": "shop", "FEISHU_STATE_DIR": "/h/.claude/channels/feishu-shop",
+                         "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-SECRETVALUE"}, "/work/shop", 90)
+        self._fake_proc(103, ["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"],
+                        {"DISCORD_STATE_DIR": "/h/.claude/channels/discord-ops"}, "/work/ops", 3 * 86400 + 3600)
+        self._fake_proc(104, ["claude"], {"TMUX": "/tmp/tmux-1000/claude-dingtalk-hr,5,0", "ANTHROPIC_API_KEY": "sk-ant-api-SECRET2"})
+        self._fake_proc(105, ["claude"], {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "other-claude")})
+        self._fake_proc(106, ["claude"], {"CLAUDE_CONFIG_DIR": os.path.join(self.tmp, ".claude")})  # 就是本机的配置目录
+        self._fake_proc(107, ["claude"])  # 别的用户的进程：读不到环境变量
+        self._fake_proc(108, ["python3", "x.py"], {"CLAUDE_CODE_OAUTH_TOKEN": "nope"})  # 不是 claude
+        sessions = {s["pid"]: s for s in self.cam.claude_sessions()}
+        self.assertEqual(sorted(sessions), [101, 102, 103, 104, 105, 106, 107])
+        self.assertEqual({p: s["login"] for p, s in sessions.items()},
+                         {101: "machine", 102: "own_token", 103: "machine", 104: "api_key", 105: "config_dir",
+                          106: "machine", 107: "unknown"})
+        self.assertEqual({p: s["bot"] for p, s in sessions.items()},
+                         {101: ("discord", "main"), 102: ("feishu", "shop"), 103: ("discord", "ops"),
+                          104: ("dingtalk", "hr"), 105: None, 106: None, 107: None})
+        items = self.cam.session_items()
+        texts = [i["text"] for i in items]
+        self.assertEqual(texts[0], "正在运行的 claude 会话：7 个（3 个用本机登录：切换账号后它们还拿着旧账号的 token，要重开）")
+        self.assertEqual(texts[1], "pid 101 · Discord 机器人主会话 · /work/main · 已运行 2 小时 5 分 · 本机登录，切号会跟着换")
+        self.assertEqual(items[1]["advice"], "想让它一直用同一个号、不跟着切换：在聊天里发 /account（没有别的号先 /account add 接入一个），或在电脑上运行 claude-discord account main set")
+        self.assertEqual(texts[2], "pid 102 · 飞书机器人 shop · /work/shop · 已运行 1 分钟 · 用自己的号（CLAUDE_CODE_OAUTH_TOKEN），切号不影响")
+        self.assertEqual(items[2]["advice"], "")
+        self.assertIn("pid 103 · Discord 机器人 ops · /work/ops · 已运行 3 天 1 小时 · 本机登录", texts[3])
+        self.assertIn("钉钉机器人 hr", texts[4])
+        self.assertIn("用 API Key", texts[4])
+        self.assertIn("用单独的配置目录", texts[5])
+        self.assertIn("读不到它的环境变量", texts[7])
+        dump = json.dumps(self._checkup(offline=True), ensure_ascii=False)
+        self.assertIn("飞书机器人 shop", dump)
+        for secret in ("SECRETVALUE", "SECRET2", "nope", "other-claude"):  # 只看有没有，不读出值
+            self.assertNotIn(secret, dump)
+        # 别的系统：列出 ps 给的东西，说看不出用的哪个登录
+        with mock.patch.object(self.cam, "proc_root", lambda: None), \
+                mock.patch.object(self.cam, "_ps_etimes", lambda pids: {7: "01:02:03"}):
+            self.cam.running_claude_processes = lambda: [(7, "claude --resume x")]
+            items = self.cam.session_items()
+        self.assertEqual(items[1]["text"], "pid 7 · 已运行 01:02:03 · claude --resume x")
+        self.assertIn("看不出来", items[1]["advice"])
+
+    def test_checkup_cam_section(self):
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat()
+        with store.lock():
+            d = store.load()
+            for a in d["accounts"]:
+                a["usage"] = {"fetched_at": old, "error": None}
+            store.save(d)
+        texts = lambda items: [(i["level"], i["text"]) for i in items]
+        items = texts(self.cam.checkup_cam(store, store.load()))
+        self.assertIn(("info", "后台任务：没有程序在做（桌面版、cam serve、菜单栏插件都没在运行）"), items)
+        self.assertIn(("info", "A：用量上次刷新 2 小时前"), items)  # 没有后台在跑，不算没在刷新
+        # cam serve 拿着后台锁，心跳记在数据目录里
+        self._fake_proc(110, ["python3", "/x/scripts/cam.py", "serve", "--port", "8787"])
+        write(os.path.join(store.root, ".serve-state.json"), json.dumps(
+            {"pid": 110, "at": self.cam.now_iso(), "refresh_min": 10, "last_error": "刷新用量：boom"}))
+        lease = store.background_lock()
+        self.assertTrue(lease.try_acquire())
+        try:
+            items = texts(self.cam.checkup_cam(store, store.load()))
+        finally:
+            lease.release()
+        self.assertTrue(any(lv == "ok" and t.startswith("后台任务：cam serve 在做（pid 110），上一轮") for lv, t in items), items)
+        self.assertIn(("warn", "后台上一轮出错：刷新用量：boom"), items)
+        self.assertIn(("warn", "A：用量上次刷新 2 小时前，后台没在刷新它"), items)
+        # 菜单栏插件：每分钟跑一轮，看它的状态文件
+        write(os.path.join(store.root, ".menubar-state.json"), "{}")
+        self.assertTrue(any(t.startswith("后台任务：菜单栏插件每分钟做一轮") for _, t in texts(self.cam.checkup_cam(store, store.load()))))
+        # 有新版本、代码目录有改动、文件对不上
+        upd = {"checkout": True, "behind": 2, "ahead": 0, "dirty": [" M README.md"], "checked_at": self.cam.now_iso(), "message": "x"}
+        with mock.patch.object(self.cam, "saved_update_check", lambda: upd), \
+                mock.patch.object(self.cam, "verify_sums", lambda: (5, ["x.py（内容不一致）"])):
+            items = self.cam.checkup_cam(store, store.load())
+        got = texts(items)
+        self.assertIn(("warn", "有 2 个新改动可以更新（刚刚检查的）"), got)
+        self.assertIn(("info", "代码目录里有 1 个文件改过没提交（检查更新时看到的）"), got)
+        self.assertIn(("bad", "1 个文件和 SHA256SUMS 对不上：x.py（内容不一致）"), got)
+        # 备份：切换一次就有一份
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        self.assertTrue(any(t.startswith("备份：1 份，最新") for _, t in texts(self.cam.backup_items(store))))
+        if os.name == "nt":
+            return
+        # 权限：目录 0700，密钥文件 0600；凭据文件 0600
+        self.assertEqual(texts(self.cam.permission_items(store))[0][0], "ok")
+        os.chmod(store.secrets_dir, 0o755)
+        os.chmod(store.secret_path(a_id), 0o644)
+        perm = self.cam.permission_items(store)
+        self.assertEqual([(i["level"], i["advice"]) for i in perm],
+                         [("warn", f"chmod 700 {store.secrets_dir}"), ("warn", f"chmod 600 {store.secret_path(a_id)}")])
+        self.assertIn("的权限是 0755", perm[0]["text"])
+        os.chmod(self.creds_path, 0o644)
+        self._stub_claude()
+        local = self.cam.checkup_local_claude(store)
+        self.assertIn(("warn", f"chmod 600 {self.creds_path}"), [(i["level"], i["advice"]) for i in local])
+
+    def test_checkup_survives_corrupt_files(self):
+        self._two_accounts()
+        with open(self.creds_path, "w") as f:
+            f.write("{坏了")
+        res = self._checkup(offline=True)
+        local = [(i["level"], i["text"]) for i in self._section(res, "claude_code")]
+        self.assertEqual(sum(1 for lv, t in local if "文件损坏" in t), 1, local)  # 报一次，其它几节照常
+        self.assertTrue(self._group(self._section(res, "accounts"), "A"))
+        # 一节出错只影响这一节
+        with mock.patch.object(self.cam, "verify_sums", mock.Mock(side_effect=RuntimeError("炸了"))):
+            res = self._checkup(offline=True)
+        self.assertEqual([(i["level"], i["text"]) for i in self._section(res, "cam")], [("bad", "这一节没查完：RuntimeError: 炸了")])
+        self.assertTrue(self._section(res, "accounts"))
+
+    def test_checkup_runs_chat_bot_doctors(self):
+        bindir = os.path.join(self.tmp, ".local", "bin")
+        ran = os.path.join(self.tmp, "ran.txt")
+        stub(bindir, "claude-discord", f"""echo "discord $*" >> "{ran}"
+cat <<'OUT'
+工具
+  ✓ claude
+  ✗ 没有机器人 token
+    → 在 Claude Code 里运行 /discord:configure <token>
+  ✗ 还没配对 Discord 账号
+    → 私信机器人任意一句话
+OUT
+exit 2""")
+        stub(bindir, "claude-feishu", f'echo "feishu $*" >> "{ran}"\necho "  ✓ 全部正常"')
+        stub(bindir, "claude-dingtalk", f'echo "dingtalk $*" >> "{ran}"\nexec sleep 5')
+        with mock.patch.object(self.cam, "BOT_DOCTOR_TIMEOUT", 1):
+            bots = self._section(self._checkup(), "bots")
+        self.assertEqual([(i["level"], i["text"], i["advice"]) for i in bots], [
+            ("bad", "Discord 机器人：没有机器人 token", "在 Claude Code 里运行 /discord:configure <token>"),
+            ("bad", "Discord 机器人：还没配对 Discord 账号", "私信机器人任意一句话"),
+            ("ok", "飞书机器人：全部正常（claude-feishu doctor）", ""),
+            ("warn", "钉钉机器人：claude-dingtalk doctor 超过 1 秒没跑完", "手动运行 claude-dingtalk doctor 看看卡在哪"),
+        ])
+        with open(ran) as f:
+            self.assertEqual(sorted(f.read().split("\n")[:-1]), ["dingtalk doctor", "discord doctor", "feishu doctor"])
+        # 离线不跑（它们要联网）；一个都没装就没有这一节
+        os.remove(ran)
+        bots = self._section(self._checkup(offline=True), "bots")
+        self.assertEqual(bots[0]["text"], "Discord 机器人：离线模式没有运行 claude-discord doctor（它要联网）")
+        self.assertFalse(os.path.exists(ran))
+        shutil.rmtree(bindir)
+        self.assertNotIn("bots", [s["key"] for s in self._checkup(offline=True)["sections"]])
+
+    def test_doctor_json_and_offline(self):
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        MockAnthropic.tokens = {"at-A2": {"u5": 1.0, "u7": 2.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 3.0, "u7": 4.0, "email": "b@x.com", "plan": "max"}}
+        self.run_cam("add-api", "--label", "K", "--key", "sk-ant-api-supersecretvalue1234")
+        self.run_cam("add-web", "--label", "W", "--session-key", "sk-web-secret")
+        self._stub_claude()
+        ran = os.path.join(self.tmp, "ran.txt")
+        stub(os.path.join(self.tmp, ".local", "bin"), "claude-feishu", f'echo ran >> "{ran}"')
+
+        def doctor(*args):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(self.run_cam("doctor", *args), 0)
+            txt = out.getvalue()
+            for secret in ("rt-A1", "rt-A2", "at-A2", "at-B1", "rt-B1", "supersecretvalue", "sk-web-secret"):
+                self.assertNotIn(secret, txt)
+            return txt
+
+        # 离线：不续登录、不联网、不跑机器人自检
+        MockAnthropic.calls = []
+        res = json.loads(doctor("--offline", "--json"))
+        self.assertTrue(res["offline"])
+        self.assertEqual(MockAnthropic.calls, [])
+        self.assertFalse(os.path.exists(ran))
+        a = self._group(self._section(res, "accounts"), "A")
+        self.assertIn("离线没测能不能续", a[0]["text"])
+        self.assertTrue(self._section(res, "service")[0]["text"].startswith("离线模式"))
+        self.assertEqual(self.cam.Store().load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A1")
+        # 联网
+        res = json.loads(doctor("--json"))
+        self.assertEqual(set(res), {"version", "generated_at", "offline", "header", "sections", "summary"})
+        self.assertFalse(res["offline"])
+        self.assertEqual([s["key"] for s in res["sections"]], ["accounts", "service", "claude_code", "cam", "bots"])
+        self.assertEqual([s["title"] for s in res["sections"]], ["账号", "Claude 服务", "本机 Claude Code", "cam 自己", "聊天机器人"])
+        for sec in res["sections"]:
+            self.assertEqual(set(sec), {"key", "title", "items"})
+            for it in sec["items"]:
+                self.assertIn(it["level"], ("ok", "warn", "bad", "info"))
+                self.assertTrue(isinstance(it["text"], str) and it["text"] and isinstance(it["advice"], str), it)
+                self.assertLessEqual(set(it), {"level", "text", "advice", "group", "kind", "score", "grade", "ms"})
+        s = res["summary"]
+        self.assertEqual(set(s), {"bad", "warn", "text", "first"})
+        items = [i for sec in res["sections"] for i in sec["items"] if i.get("kind") != "summary"]
+        self.assertEqual((s["bad"], s["warn"]), (sum(i["level"] == "bad" for i in items), sum(i["level"] == "warn" for i in items)))
+        self.assertEqual(s["text"], f"{s['bad']} 项要处理，{s['warn']} 项留意")
+        self.assertTrue(os.path.exists(ran))
+        # 文字版：标记顶格（install.sh 按 ^(✗|!) 挑出要留意的行），第一行是版本，最后一行是总结
+        lines = doctor().splitlines()
+        self.assertTrue(lines[0].startswith("cam "))
+        self.assertTrue(lines[-1].startswith("总结："))
+        self.assertIn("1. 账号", lines)
+        self.assertTrue(any(l.startswith("[A a@x.com（Claude Code") for l in lines))
+        self.assertTrue(any(l[:2] in ("✓ ", "! ", "✗ ", "· ") for l in lines))
+        self.assertTrue(all(l.startswith("    → ") for l in lines if l.lstrip().startswith("→")), lines)
+
+    def test_checkup_http_api_and_menu(self):
+        self._two_accounts()
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 2.0, "email": "b@x.com", "plan": "max"}}
+        self._stub_claude()
+        store = self.cam.Store()
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(path, tok=token):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", headers={"Authorization": f"Bearer {tok}"})
+            try:
+                with opener.open(req, timeout=60) as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, e.read().decode()
+
+        try:
+            self.assertEqual(call("/api/checkup?probe=1", tok="wrong")[0], 401)
+            self.assertEqual(call("/api/checkup", tok="")[0], 401)
+            self.assertEqual(call("/api/checkup?probe=1"), (200, '{"ok": true}'))  # 面板据此显示“全面体检”按钮
+            st, txt = call("/api/checkup?offline=1")
+            self.assertEqual(st, 200)
+            self.assertTrue(json.loads(txt)["offline"])
+            st, txt = call("/api/checkup")
+            self.assertEqual(st, 200, txt)
+            res = json.loads(txt)
+            self.assertFalse(res["offline"])
+            self.assertEqual(res["sections"][0]["key"], "accounts")
+            for secret in ("rt-A1", "at-B1", "rt-B1"):
+                self.assertNotIn(secret, txt)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        # 菜单栏：“全面体检”在后台跑 cam doctor --json 并通知；另一项在终端里看完整结果
+        cam_menu = self._menu_plugin()
+        told = []
+        cam_menu.notify = lambda title, body: told.append((title, body))
+        lines = []
+        cam_menu.render(store, {}, out=lines.append)
+        item = next(l for l in lines if l.startswith("全面体检 |"))
+        self.assertIn(f'param1="{cam_menu.MENU_PY}" param2="checkup"', item)
+        self.assertIn("terminal=false", item)
+        term = next(l for l in lines if l.startswith("在终端看完整体检结果 |"))
+        self.assertIn(f'param1="{cam_menu.CAM_PY}" param2="doctor" terminal=true', term)
+        self.assertEqual(cam_menu.checkup_from_menu(), 0)
+        self.assertEqual(told[-1][0], "全面体检")
+        self.assertRegex(told[-1][1], r"^(一切正常|\d+ 项要处理：.+|\d+ 项留意：.+)$")
+        with mock.patch.object(cam_menu, "CAM_PY", os.path.join(self.tmp, "nope.py")):
+            self.assertEqual(cam_menu.checkup_from_menu(), 1)
+        self.assertEqual(told[-1][0], "全面体检没有完成")
+
     def test_http_api(self):
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
         self.run_cam("import", "--label", "A")
@@ -2666,6 +3171,410 @@ class KeychainTest(unittest.TestCase):
             self.cam.keychain_delete()
         with self.fake_security(OSError("security not found")), self.assertRaises(self.cam.CamError):
             self.cam.keychain_delete()
+
+
+ROOT = os.path.dirname(HERE)
+OFFLINE = "http://127.0.0.1:9"  # 没有服务的端口：cam doctor 的联网检测马上失败，不访问外网
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def stub(bindir, name, body):
+    """在 bindir 里放一个假命令（shell 脚本），放到 PATH 最前面就能顶替真的。"""
+    write(os.path.join(bindir, name), "#!/bin/sh\n" + body + "\n")
+    os.chmod(os.path.join(bindir, name), 0o755)
+
+
+class SumsTest(unittest.TestCase):
+    """SHA256SUMS：仓库里的清单必须是最新的；cam verify 能查出改过、缺少的文件。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, HERE)
+        import cam
+        cls.cam = cam
+
+    @unittest.skipUnless(shutil.which("git") and os.path.exists(os.path.join(ROOT, ".git")), "不是 git 仓库")
+    def test_sums_file_is_current(self):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "gen-sums.py"), "--check"], capture_output=True,
+                           text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, "SHA256SUMS 不是最新的：改完代码后运行 python3 scripts/gen-sums.py 重新生成\n" + r.stderr)
+
+    def test_verify(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        write(os.path.join(tmp, "a.txt"), "甲\n")
+        write(os.path.join(tmp, "安装.cmd"), "@echo off\r\n")
+        write(os.path.join(tmp, "sub", "b.py"), "print(1)\n")
+        lines = [f"{self.cam.file_sha256(os.path.join(tmp, *n.split('/')))}  {n}" for n in ("a.txt", "sub/b.py", "安装.cmd")]
+        write(os.path.join(tmp, "SHA256SUMS"), "\n".join(lines) + "\n")
+        self.assertEqual(self.cam.verify_sums(tmp), (3, []))
+        if shutil.which("sha256sum"):  # 格式和 sha256sum -c 兼容
+            self.assertEqual(subprocess.run(["sha256sum", "-c", "--quiet", "SHA256SUMS"], cwd=tmp).returncode, 0)
+        write(os.path.join(tmp, "sub", "b.py"), "print(2)\n")
+        os.remove(os.path.join(tmp, "a.txt"))
+        n, bad = self.cam.verify_sums(tmp)
+        self.assertEqual(n, 3)
+        self.assertEqual(bad, ["a.txt（缺少这个文件）", "sub/b.py（内容不一致）"])
+        # 清单里的路径只能在项目里面
+        write(os.path.join(tmp, "SHA256SUMS"), "0" * 64 + "  ../outside\n" + "0" * 64 + "  /etc/passwd\n")
+        self.assertEqual(len(self.cam.verify_sums(tmp)[1]), 2)
+        os.remove(os.path.join(tmp, "SHA256SUMS"))
+        with self.assertRaises(self.cam.CamError):
+            self.cam.verify_sums(tmp)
+        # cam verify：对不上时退出码 1，列出文件
+        write(os.path.join(tmp, "SHA256SUMS"), "\n".join(lines) + "\n")
+        out = io.StringIO()
+        with mock.patch.object(self.cam, "code_root", lambda: tmp), contextlib.redirect_stdout(out):
+            self.assertEqual(self.cam.main(["verify"]), 1)
+        self.assertIn("sub/b.py（内容不一致）", out.getvalue())
+
+
+class UpdateTest(unittest.TestCase):
+    """cam update：用临时的 git 仓库（一个裸仓库当 origin，一个开发用的克隆往里推，一个用户的克隆）测检查、快进、拒绝、退回。"""
+
+    @classmethod
+    def setUpClass(cls):
+        if not shutil.which("git"):
+            raise unittest.SkipTest("没有 git")
+        sys.path.insert(0, HERE)
+        import cam
+        cls.cam = cam
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bindir = os.path.join(self.tmp, "bin")
+        self.calls = os.path.join(self.tmp, "systemctl.txt")
+        stub(self.bindir, "systemctl", f'echo "$*" >> "{self.calls}"')
+        env = {"HOME": os.path.join(self.tmp, "home"), "USERPROFILE": os.path.join(self.tmp, "home"),
+               "CAM_HOME": os.path.join(self.tmp, "cam"), "XDG_CONFIG_HOME": os.path.join(self.tmp, "config"),
+               "CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "claude"), "CAM_NO_KEYCHAIN": "1", "CAM_NO_NOTIFY": "1",
+               "CAM_MENU_NO_NOTIFY": "", "NO_COLOR": "1", "GIT_CONFIG_NOSYSTEM": "1",
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+               "PATH": self.bindir + os.pathsep + os.environ.get("PATH", "")}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        os.makedirs(env["HOME"])
+        self.origin = os.path.join(self.tmp, "origin.git")
+        self.dev = os.path.join(self.tmp, "dev")
+        self.clone = os.path.join(self.tmp, "clone")
+        self.git(self.tmp, "init", "-q", "--bare", self.origin)
+        self.git(self.origin, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.git(self.tmp, "init", "-q", self.dev)
+        self.git(self.dev, "checkout", "-q", "-b", "main")
+        self.git(self.dev, "remote", "add", "origin", self.origin)
+        os.makedirs(os.path.join(self.dev, "scripts"))
+        for name in ("cam.py", "cam", "gen-sums.py"):
+            shutil.copy(os.path.join(HERE, name), os.path.join(self.dev, "scripts", name))
+        self.push("初始版本", {"README.md": "v1\n"})
+        self.git(self.tmp, "clone", "-q", self.origin, self.clone)
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    def push(self, subject, files, sums=True):
+        """在开发用的克隆里改文件、（默认）重新生成 SHA256SUMS、提交并推到 origin。"""
+        for name, text in files.items():
+            write(os.path.join(self.dev, *name.split("/")), text)
+        if sums:
+            subprocess.run([sys.executable, os.path.join(self.dev, "scripts", "gen-sums.py")], check=True, capture_output=True)
+        self.git(self.dev, "add", "-A")
+        self.git(self.dev, "commit", "-q", "-m", subject)
+        self.git(self.dev, "push", "-q", "origin", "main")
+        return self.git(self.dev, "rev-parse", "HEAD")
+
+    def head(self):
+        return self.git(self.clone, "rev-parse", "HEAD")
+
+    def read(self, name):
+        with open(os.path.join(self.clone, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_check_lists_new_commits(self):
+        res = self.cam.update_check(self.clone)
+        self.assertEqual((res["checkout"], res["behind"]), (True, 0))
+        self.assertIn("已经是最新版本", res["message"])
+        before = self.head()
+        self.push("加一个功能", {"README.md": "v2\n"})
+        self.push("修一个问题", {"README.md": "v3\n"})
+        res = self.cam.update_check(self.clone)
+        self.assertEqual(res["behind"], 2)
+        self.assertEqual([c["subject"] for c in res["commits"]], ["修一个问题", "加一个功能"])
+        self.assertEqual(res["upstream"], "origin/main")
+        self.assertEqual(self.head(), before)  # 只看不改
+        self.assertEqual(self.read("README.md"), "v1\n")
+        saved = self.cam.saved_update_check(self.clone)
+        self.assertEqual((saved["behind"], len(saved["commits"])), (2, 2))
+        # 自己 git pull 过以后，上次的“有 2 个新改动”不再算数
+        self.git(self.clone, "pull", "-q", "--ff-only")
+        self.assertEqual(self.cam.saved_update_check(self.clone)["behind"], 0)
+        # 另一份代码目录的检查结果不拿来用
+        self.assertIsNone(self.cam.saved_update_check(self.dev))
+
+    def test_update_fast_forwards(self):
+        old = self.head()
+        new = self.push("加一个功能", {"README.md": "v2\n", "scripts/extra.py": "X = 1\n"})
+        # 装了后台服务（install.sh 在 Linux 上装的 cam-serve）的话，更新后重启它
+        write(self.cam.serve_unit_file(), "[Service]\n")
+        res = self.cam.apply_update(self.clone)
+        self.assertTrue(res["updated"])
+        self.assertEqual((res["old"], res["new"], self.head()), (old, new, new))
+        self.assertEqual(self.read("README.md"), "v2\n")
+        self.assertEqual([c["subject"] for c in res["commits"]], ["加一个功能"])
+        if sys.platform.startswith("linux"):
+            with open(self.calls) as f:
+                self.assertEqual(f.read().splitlines(), ["--user is-active --quiet cam-serve.service",
+                                                         "--user try-restart cam-serve.service"])
+            self.assertIn("已重启后台的 cam serve 服务", res["restart"])
+        self.assertEqual(self.cam.saved_update_check(self.clone)["behind"], 0)
+        again = self.cam.apply_update(self.clone)
+        self.assertFalse(again["updated"])
+        self.assertIn("已经是最新版本", again["message"])
+        # 命令行：--check --json 给脚本用
+        out = io.StringIO()
+        with mock.patch.object(self.cam, "code_root", lambda: self.clone), contextlib.redirect_stdout(out):
+            self.assertEqual(self.cam.main(["update", "--check", "--json"]), 0)
+        self.assertEqual(json.loads(out.getvalue())["behind"], 0)
+
+    def test_dirty_tree_refused(self):
+        old = self.head()
+        self.push("加一个功能", {"README.md": "v2\n"})
+        write(os.path.join(self.clone, "README.md"), "我自己改的\n")
+        with self.assertRaises(self.cam.CamError) as ctx:
+            self.cam.apply_update(self.clone)
+        self.assertIn("README.md", str(ctx.exception))
+        self.assertIn("什么都没改", str(ctx.exception))
+        self.assertEqual(self.head(), old)
+        self.assertEqual(self.read("README.md"), "我自己改的\n")
+        # 新建的文件不算改动，也不会被动到
+        self.git(self.clone, "checkout", "-q", "README.md")
+        write(os.path.join(self.clone, "notes.txt"), "笔记\n")
+        self.assertTrue(self.cam.apply_update(self.clone)["updated"])
+        self.assertEqual(self.read("notes.txt"), "笔记\n")
+
+    def test_failed_self_check_rolls_back(self):
+        old = self.head()
+        cam_py = os.path.join(self.dev, "scripts", "cam.py")
+        with open(cam_py, encoding="utf-8") as f:
+            good = f.read()
+        cases = [
+            ({"scripts/cam.py": good + "\ndef broken(:\n"}, True, "编译不过"),
+            ({"scripts/cam.py": good.replace('\nif __name__ == "__main__":', '\nraise RuntimeError("坏了")\n\nif __name__ == "__main__":')},
+             True, "坏了"),
+            ({"README.md": "忘了重新生成校验清单\n"}, False, "README.md（内容不一致）"),
+        ]
+        for files, sums, reason in cases:
+            self.push("有问题的版本", files, sums=sums)
+            with self.assertRaises(self.cam.CamError) as ctx:
+                self.cam.apply_update(self.clone)
+            self.assertIn("更新后自检没过，已经退回原来的版本", str(ctx.exception))
+            self.assertIn(reason, str(ctx.exception))
+            self.assertEqual(self.head(), old)
+            self.assertEqual(self.git(self.clone, "status", "--porcelain"), "")
+            saved = self.cam.saved_update_check(self.clone)
+            self.assertIn(reason, saved["failed"])
+            self.assertGreater(saved["behind"], 0)
+            self.push("修好了", {"scripts/cam.py": good, "README.md": "v1\n"})
+        self.assertTrue(self.cam.apply_update(self.clone)["updated"])
+
+    def test_not_a_checkout(self):
+        plain = os.path.join(self.tmp, "download")
+        shutil.copytree(os.path.join(self.clone, "scripts"), os.path.join(plain, "scripts"))
+        res = self.cam.update_check(plain)
+        self.assertFalse(res["checkout"])
+        self.assertIn("安装脚本", res["message"])
+        with self.assertRaises(self.cam.CamError) as ctx:
+            self.cam.apply_update(plain)
+        self.assertIn("不是用 git 下载的", str(ctx.exception))
+        with mock.patch.object(self.cam, "code_root", lambda: plain), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.cam.main(["update", "--check"]), 1)
+
+    def test_http_api_and_menu(self):
+        store = self.cam.Store()
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(method, path, tok=token):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", method=method,
+                                         headers={"Authorization": f"Bearer {tok}"})
+            try:
+                with opener.open(req) as r:
+                    return r.status, json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read().decode())
+
+        sys.path.insert(0, os.path.join(ROOT, "extras", "swiftbar"))
+        import cam_menu
+        told = []
+
+        def menu():
+            lines = []
+            cam_menu.render(store, {}, out=lines.append)
+            return [l for l in lines if "检查更新" in l or "更新（" in l]
+
+        with mock.patch.object(self.cam, "code_root", lambda: self.clone), \
+                mock.patch.object(cam_menu, "notify", lambda title, body: told.append((title, body))):
+            self.assertEqual(call("GET", "/api/update?saved=1", tok="wrong")[0], 401)
+            self.assertEqual(call("GET", "/api/update?saved=1"), (200, {"checked_at": None, "version": self.cam.VERSION}))
+            self.assertEqual(len(menu()), 1)  # 只有“检查更新”
+            self.push("加一个功能", {"README.md": "v2\n"})
+            st, res = call("GET", "/api/update")
+            self.assertEqual((st, res["behind"], res["commits"][0]["subject"]), (200, 1, "加一个功能"))
+            self.assertEqual(call("GET", "/api/update?saved=1")[1]["behind"], 1)
+            self.assertIn("更新（1 个新改动）", menu()[0])
+            self.assertIn('param2="update"', menu()[0])
+            self.push("再加一个", {"README.md": "v3\n"})
+            self.assertEqual(cam_menu.check_update_from_menu(), 0)
+            self.assertEqual(told[-1][0], "有 2 个新改动")
+            self.assertIn("再加一个", told[-1][1])
+            self.assertEqual(cam_menu.update_from_menu(), 0)
+            self.assertEqual(told[-1][0], "已更新")
+            self.assertEqual(self.read("README.md"), "v3\n")
+            self.assertEqual(len(menu()), 1)
+            self.push("第三个", {"README.md": "v4\n"})
+            write(os.path.join(self.clone, "README.md"), "改过\n")
+            st, res = call("POST", "/api/update")
+            self.assertEqual(st, 400)
+            self.assertIn("什么都没改", res["error"])
+            self.git(self.clone, "checkout", "-q", "README.md")
+            write(self.cam.serve_unit_file(), "[Service]\n")
+            st, res = call("POST", "/api/update")
+            self.assertEqual((st, res["updated"]), (200, True))
+            self.assertEqual(self.read("README.md"), "v4\n")
+        if sys.platform.startswith("linux"):
+            # 面板里点的更新：处理请求的可能就是那个后台服务自己，先回复页面，一秒后再让 systemd 重启
+            self.assertIn("后台的 cam serve 服务马上重启，几秒后刷新页面就是新版本", res["restart"])
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and "--user --no-block try-restart cam-serve.service" not in self._calls():
+                time.sleep(0.1)
+            self.assertEqual(self._calls(), ["--user is-active --quiet cam-serve.service",
+                                             "--user --no-block try-restart cam-serve.service"])
+
+    def _calls(self):
+        try:
+            with open(self.calls) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+
+@unittest.skipIf(os.name == "nt", "install.sh 只用在 macOS / Linux")
+class InstallTest(unittest.TestCase):
+    """install.sh：临时 HOME，假的 systemctl / claude，不碰真实的家目录和服务。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        self.bindir = os.path.join(self.tmp, "bin")
+        self.plugins = os.path.join(self.tmp, "swiftbar")
+        self.calls = os.path.join(self.tmp, "calls.txt")
+        os.makedirs(self.home)
+        stub(self.bindir, "systemctl", f'echo "systemctl $*" >> "{self.calls}"')
+        stub(self.bindir, "claude", 'echo "2.1.0 (Claude Code)"')
+        stub(self.bindir, "open", f'echo "open $*" >> "{self.calls}"')
+        stub(self.bindir, "defaults", "exit 1")
+        os.symlink(sys.executable, os.path.join(self.bindir, "python3"))  # PATH 里不放 Python 所在的目录，免得那里正好有 claude
+        self.env = {"HOME": self.home, "SHELL": "/bin/bash", "USER": "tester", "CAM_SWIFTBAR_DIR": self.plugins,
+                    "PATH": os.pathsep.join([self.bindir, "/usr/bin", "/bin"]),
+                    "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1", "CAM_NO_KEYCHAIN": "1", "CAM_NO_NOTIFY": "1",
+                    "CAM_NO_BG_CHECK": "1", "CAM_IP_LOOKUP": "off", "CAM_RDAP_URL": "",
+                    "CAM_TEST_LOCALE": "en_US", "CAM_TEST_DNS": "192.168.1.1", "CAM_TEST_PROXY": "",
+                    "CAM_TEST_TZ": "America/New_York=US", "CAM_TEST_ROUTE_IF": ""}
+        for k in ("CAM_API_BASE", "CAM_CLAUDE_WEB_BASE", "CAM_STATUS_URL", "CAM_CF_META_URL", "CAM_IPINFO_URL",
+                  "CAM_IPAPI_URL", "CAM_IPAPI_IS_URL", "CAM_CF_TRACE4_URL", "CAM_CF_TRACE6_URL", "CAM_CLAUDE_RELEASES_URL"):
+            self.env[k] = OFFLINE
+        self.env["CAM_TOKEN_URLS"] = OFFLINE + "/v1/oauth/token"
+        self.env["CAM_STATUS_SUMMARY_URLS"] = OFFLINE + "/summary.json"
+        self.env["CAM_TEST_PROC_ROOT"] = os.path.join(self.tmp, "proc")  # cam doctor 不读本机真实的进程
+        os.makedirs(self.env["CAM_TEST_PROC_ROOT"])
+        self.rc = os.path.join(self.home, ".bash_profile" if sys.platform == "darwin" else ".bashrc")
+        self.link = os.path.join(self.home, ".local", "bin", "cam")
+        self.unit = os.path.join(self.home, ".config", "systemd", "user", "cam-serve.service")
+
+    def install(self, *args, answers="", root=ROOT):
+        r = subprocess.run(["bash", os.path.join(root, "install.sh"), *args], env=self.env, input=answers,
+                           capture_output=True, text=True, encoding="utf-8", timeout=120)
+        return r.returncode, r.stdout + r.stderr
+
+    def calls_made(self):
+        try:
+            with open(self.calls) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def test_install_twice_then_uninstall(self):
+        write(self.rc, "alias ll='ls -l'")  # 最后一行没换行
+        write(os.path.join(self.home, ".claude-accounts", "accounts.json"), "{}\n")
+        write(os.path.join(self.home, ".claude", "settings.json"), "{}\n")
+        menu_py = os.path.join(ROOT, "extras", "swiftbar", "cam_menu.py")
+        if sys.platform == "darwin":  # 菜单栏插件已经装好：不再跑 SwiftBar 的安装（会用 Homebrew）
+            write(os.path.join(self.plugins, "claude-accounts.1m.sh"), f'exec python3 "{menu_py}"\n')
+        for i in range(2):
+            code, out = self.install("--yes", "--skip-verify")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(os.readlink(self.link), os.path.join(ROOT, "scripts", "cam"))
+            with open(self.rc) as f:
+                rc = f.read()
+            self.assertTrue(rc.startswith("alias ll='ls -l'\nexport PATH=\"$HOME/.local/bin:$PATH\"  # cam："), rc)
+            self.assertEqual(rc.count("install.sh 添加"), 1, rc)
+            self.assertIn("安装完成", out)
+            self.assertIn("cam login", out)
+            self.assertIn("已经装好了：" if i else "末尾加了一行", out)
+        self.assertFalse(os.path.exists(self.unit))  # 后台服务默认不装
+        self.assertEqual(self.calls_made(), [])
+        if sys.platform.startswith("linux"):
+            code, out = self.install("--skip-verify", answers="y\n")  # 问到“要装成后台服务吗”时回答 y
+            self.assertEqual(code, 0, out)
+            with open(self.unit) as f:
+                unit = f.read()
+            self.assertIn(f'"{os.path.join(ROOT, "scripts", "cam.py")}" serve\n', unit)
+            self.assertNotIn("--lan", unit)
+            self.assertEqual(self.calls_made(), ["systemctl --user daemon-reload", "systemctl --user enable --now cam-serve.service"])
+        code, out = self.install("--uninstall")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(os.path.lexists(self.link))
+        with open(self.rc) as f:
+            self.assertEqual(f.read(), "alias ll='ls -l'\n")
+        self.assertFalse(os.path.exists(self.unit))
+        if sys.platform.startswith("linux"):
+            self.assertIn("systemctl --user disable --now cam-serve.service", self.calls_made())
+        if sys.platform == "darwin":
+            self.assertFalse(os.path.exists(os.path.join(self.plugins, "claude-accounts.1m.sh")))
+        for kept in (".claude-accounts/accounts.json", ".claude/settings.json"):  # 账号数据和 Claude Code 配置不动
+            self.assertTrue(os.path.exists(os.path.join(self.home, kept)), kept)
+
+    def test_verify_failure_stops_install(self):
+        root = os.path.join(self.tmp, "code")
+        os.makedirs(os.path.join(root, "scripts"))
+        shutil.copy(os.path.join(ROOT, "install.sh"), root)
+        for name in ("cam.py", "cam"):
+            shutil.copy(os.path.join(HERE, name), os.path.join(root, "scripts", name))
+        write(os.path.join(root, "SHA256SUMS"), "0" * 64 + "  scripts/cam.py\n")
+        code, out = self.install("--yes", root=root)
+        self.assertEqual(code, 1, out)
+        self.assertIn("scripts/cam.py（内容不一致）", out)
+        self.assertIn("文件校验没通过", out)
+        self.assertFalse(os.path.lexists(self.link))
+        # 没有 claude 时问要不要装，默认不装
+        os.remove(os.path.join(self.bindir, "claude"))
+        code, out = self.install("--yes", "--skip-verify", root=root)
+        self.assertEqual(code, 0, out)
+        self.assertIn("现在用 Anthropic 官方安装器装 Claude Code 吗？ → 否", out)
+        self.assertEqual(os.readlink(self.link), os.path.join(root, "scripts", "cam"))
 
 
 if __name__ == "__main__":

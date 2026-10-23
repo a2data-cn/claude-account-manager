@@ -41,5 +41,13 @@ if ((Run "编译（第一次较慢）" { npm run tauri build }) -ne 0) { Fail "�
 $Installer = Get-ChildItem "src-tauri\target\release\bundle" -Recurse -Include *.msi, *-setup.exe -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $Installer) { Fail "编译没有成功，请把 build.log 发给我" }
 
+# 安装包旁边写一份 SHA256SUMS（和 sha256sum 的格式一样，路径相对 bundle 目录），拷给别人时可以一起带上核对
+$Bundle = (Resolve-Path "src-tauri\target\release\bundle").Path
+$Sums = Get-ChildItem $Bundle -Recurse -File -Include *.msi, *-setup.exe | Sort-Object FullName | ForEach-Object {
+  "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.FullName.Substring($Bundle.Length + 1).Replace("\", "/")
+}
+[IO.File]::WriteAllText((Join-Path $Bundle "SHA256SUMS"), (($Sums -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+
 Write-Host "`n✓ 安装包：$($Installer.FullName)" -ForegroundColor Green
+Write-Host "  校验文件：$(Join-Path $Bundle 'SHA256SUMS')"
 Start-Process $Installer.FullName

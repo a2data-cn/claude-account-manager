@@ -266,7 +266,7 @@ details.src[open] summary::before { content: "▾"; }
 .env-facts div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .env-facts .k { display: inline-block; min-width: 3em; color: var(--muted); }
 .env-facts .bad { color: var(--hot); font-weight: 600; }
-.env-acts { grid-area: acts; display: flex; gap: 8px; }
+.env-acts { grid-area: acts; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .env-risks, .env-checks { grid-area: risks; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); }
 .env-risks { list-style: none; font-size: 13px; display: grid; gap: 6px; }
 .env-risks > li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }

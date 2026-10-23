@@ -12,5 +12,6 @@ pub mod identity;
 pub mod mailbox;
 pub mod rules;
 pub mod store;
+pub mod tray;
 pub mod usage;
 pub mod vault;

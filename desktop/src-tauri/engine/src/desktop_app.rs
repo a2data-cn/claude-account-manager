@@ -131,13 +131,12 @@ fn unix_desktop_command<'a>(cmd: &'a str, candidates: &[PathBuf]) -> Option<&'a 
                 .strip_prefix('"')
         });
         if let Some(rest) = rest {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                if !rest
+            if (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                && !rest
                     .split_whitespace()
                     .any(|a| a == "--type" || a.starts_with("--type="))
-                {
-                    return Some(rest);
-                }
+            {
+                return Some(rest);
             }
         }
     }
@@ -180,6 +179,8 @@ fn command_profile(cmd: &str) -> Option<PathBuf> {
     None
 }
 
+// 只有 macOS 用 lsof 查打开的文件；别的系统上只在测试里用到
+#[cfg(any(target_os = "macos", test))]
 fn profile_from_open_files(text: &str) -> Option<PathBuf> {
     let mut found: Option<PathBuf> = None;
     for name in text.lines().filter_map(|l| l.strip_prefix('n')) {
@@ -289,21 +290,26 @@ impl DesktopRuntime for SystemRuntime {
                 let pid = pid
                     .parse::<u32>()
                     .map_err(|e| format!("无效桌面版进程编号：{e}"))?;
-                let mut profile = command_profile(args);
+                let profile = command_profile(args);
                 #[cfg(target_os = "macos")]
-                if profile.is_none() {
-                    // 默认从 Dock 打开的实例没有 user-data-dir 参数。以打开的登录数据库
-                    // 验证真实目录，不能把缓存 active 或“缺少参数”当成默认目录。
-                    let out = Command::new("lsof")
-                        .args(["-a", "-p", &pid.to_string(), "-Fn"])
-                        .output()
-                        .map_err(|e| format!("无法确认 Claude 桌面版的数据目录：{e}"))?;
-                    if out.status.success() {
-                        profile = profile_from_open_files(&String::from_utf8_lossy(&out.stdout));
-                    } else if out.status.code() != Some(1) {
-                        return Err("无法确认 Claude 桌面版的数据目录（lsof 查询失败）".into());
+                let profile = match profile {
+                    Some(p) => Some(p),
+                    None => {
+                        // 默认从 Dock 打开的实例没有 user-data-dir 参数。以打开的登录数据库
+                        // 验证真实目录，不能把缓存 active 或“缺少参数”当成默认目录。
+                        let out = Command::new("lsof")
+                            .args(["-a", "-p", &pid.to_string(), "-Fn"])
+                            .output()
+                            .map_err(|e| format!("无法确认 Claude 桌面版的数据目录：{e}"))?;
+                        if out.status.success() {
+                            profile_from_open_files(&String::from_utf8_lossy(&out.stdout))
+                        } else if out.status.code() != Some(1) {
+                            return Err("无法确认 Claude 桌面版的数据目录（lsof 查询失败）".into());
+                        } else {
+                            None
+                        }
                     }
-                }
+                };
                 found.push(DesktopProcess { pid, profile });
             }
         }

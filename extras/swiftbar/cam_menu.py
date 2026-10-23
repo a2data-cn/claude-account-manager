@@ -12,11 +12,18 @@
 
 菜单里点切换时，有 claude 会话在跑就先登记、等它们退出再切；结果和出错都用系统通知告诉你。
 
+“检查更新”只在点的时候联网（git fetch），查到新版本后菜单里多一项“更新（N 个新改动）”，
+点了才更新（cam update：快进、自检，不过就退回）。不会自己定时检查，也不会自动更新。
+
+“全面体检”在后台跑 cam doctor --json，用通知说结论；“在终端看完整体检结果”打开终端运行 cam doctor。
+
 由 install.sh 生成的启动脚本调用，不需要手动运行。
+Windows 托盘小工具（extras/windows-tray/cam_tray.py）也用这里的 render 和各个命令，改菜单时两边一起生效。
 """
 import datetime as dt
 import json
 import os
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -120,7 +127,7 @@ def short(label, n=8):
 
 
 def state_path(store):
-    return os.path.join(store.root, ".menubar-state.json")
+    return os.path.join(store.root, cam.MENUBAR_STATE)  # cam doctor 据它的修改时间看插件上一轮是什么时候
 
 
 def load_state(store):
@@ -157,6 +164,51 @@ def switch_from_menu(store, key):
         return 1
     title = "等会话结束后切换" if r.get("deferred") else "已切换账号" if r.get("changed") else "没有切换"
     notify(title, r["message"])
+    return 0
+
+
+def check_update_from_menu():
+    """菜单里点了“检查更新”：联网查一次，用通知告诉结果。查到新改动后菜单里会出现“更新（N 个新改动）”。"""
+    try:
+        r = cam.update_check()
+    except Exception as e:  # noqa: BLE001
+        notify("检查更新失败", str(e))
+        return 1
+    if not r["checkout"]:
+        notify("没法自动更新", r["message"])
+    elif r["behind"]:
+        subjects = "；".join(c["subject"] for c in r["commits"][:3]) + ("…" if r["behind"] > 3 else "")
+        tail = "点菜单里的“更新”安装" if not r["ahead"] and not r["dirty"] else r["message"]
+        notify(f"有 {r['behind']} 个新改动", f"{subjects}。{tail}")
+    else:
+        notify("已经是最新版本", r["message"])
+    return 0
+
+
+def update_from_menu():
+    """菜单里点了“更新（N 个新改动）”：运行 cam update，用通知告诉结果（成功、已经最新、自检没过已退回、没法更新的原因）。"""
+    try:
+        r = cam.apply_update()
+    except Exception as e:  # noqa: BLE001
+        notify("更新没有完成", str(e))
+        return 1
+    notify("已更新" if r.get("updated") else "已经是最新版本", r["message"])
+    return 0
+
+
+def checkup_from_menu():
+    """菜单里点了“全面体检”：在后台跑 cam doctor --json，用通知说结论（一切正常 / N 项要处理：第一项）。
+
+    体检要联网十几秒；完整结果点“在终端看完整体检结果”。
+    """
+    try:
+        r = subprocess.run([PY, CAM_PY, "doctor", "--json"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300, stdin=subprocess.DEVNULL)
+        res = json.loads(r.stdout)
+    except Exception as e:  # noqa: BLE001  超时、输出不是 JSON：都要让用户看到
+        notify("全面体检没有完成", str(e) or type(e).__name__)
+        return 1
+    notify("全面体检", cam.checkup_brief(res["summary"]))
     return 0
 
 
@@ -356,6 +408,15 @@ def render(store, st, out=print):
     out(f"打开管理面板 | {action('panel', refresh=False)} sfimage=macwindow")  # 改名、规则、隐私设置都在面板里
     out(f"刷新全部用量 | {action('usage')} sfimage=arrow.clockwise")
     out(f"打开终端查看 | {action(terminal=True, refresh=False)} sfimage=terminal")
+    out(f"全面体检 | {action('checkup', script=MENU_PY)} sfimage=stethoscope")  # 体检会续登录、刷新用量，跑完刷新菜单
+    out(f"在终端看完整体检结果 | {action('doctor', terminal=True, refresh=False)} sfimage=list.bullet.clipboard")
+    try:
+        upd = cam.saved_update_check()  # 上次点“检查更新”的结果，不联网
+    except Exception:  # noqa: BLE001
+        upd = None
+    if upd and upd.get("behind"):
+        out(f"更新（{upd['behind']} 个新改动） | {action('update', script=MENU_PY)} sfimage=arrow.down.circle")
+    out(f"检查更新 | {action('update-check', script=MENU_PY)} sfimage=arrow.triangle.2.circlepath")
     if st.get("bg_owner") == "other":
         out("自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
     elif st.get("last_refresh"):
@@ -387,6 +448,12 @@ def main():
     store = cam.Store()
     if sys.argv[1:2] == ["switch"] and len(sys.argv) > 2:  # 菜单里点了切换，见 switch_action
         sys.exit(switch_from_menu(store, sys.argv[2]))
+    if sys.argv[1:2] == ["update-check"]:
+        sys.exit(check_update_from_menu())
+    if sys.argv[1:2] == ["update"]:
+        sys.exit(update_from_menu())
+    if sys.argv[1:2] == ["checkup"]:
+        sys.exit(checkup_from_menu())
     st = {}
     try:
         st = background_work(store)

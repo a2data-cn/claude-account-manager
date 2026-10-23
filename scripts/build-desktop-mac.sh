@@ -47,6 +47,13 @@ npm run tauri build -- --bundles app 2>&1 | tee -a "$LOG" | grep -E "^(error|war
 APP="$(ls -d src-tauri/target/release/bundle/macos/*.app 2>/dev/null | head -1)"
 [[ -n "$APP" ]] || fail "编译没有成功，请把 build.log 发给我"
 
+step "生成校验文件 SHA256SUMS"
+BUNDLE="$(dirname "$APP")"
+# .app 是个目录，逐个文件算；路径相对 bundle/macos，在那里运行 shasum -a 256 -c SHA256SUMS 就能核对
+( cd "$BUNDLE" && find "$(basename "$APP")" -type f | LC_ALL=C sort | while IFS= read -r f; do shasum -a 256 "$f"; done ) \
+  > "$BUNDLE/SHA256SUMS" || fail "生成 SHA256SUMS 失败"
+echo "  $BUNDLE/SHA256SUMS"
+
 step "安装到“应用程序”"
 NAME="$(basename "$APP")"
 # 关掉窗口后 App 还在菜单栏里跑着，先退出旧的，否则替换后打开的仍是旧版本

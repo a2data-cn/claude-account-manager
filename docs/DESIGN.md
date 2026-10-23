@@ -20,6 +20,8 @@
 ├── env-backups/<时间戳>/  # cam env clean --purge 移走的整个 Claude Code 配置
 ├── accounts.lock          # 数据锁，见“并发与锁”
 ├── background.lock        # 后台任务锁，见“并发与锁”
+├── update-check.json      # 上次 cam update --check 的结果（菜单栏、面板据它显示“更新（N 个新改动）”）
+├── update.lock            # 同一时间只让一个 cam update 在跑
 └── server-token           # Web 面板访问令牌
 ```
 
@@ -156,6 +158,8 @@ macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows
 
 **等会话结束再切**：切换前发现有会话在跑时，可以不打断它——把目标记在 `accounts.json` 的 `pending_switch`（`{"account", "reason": "manual"|"rule", "rule", "at"}`）里，由持有后台租约的那个进程（桌面版、`cam serve`、菜单栏插件）每轮检查：没有 `claude` 进程了就执行切换并清掉登记。目标账号被删、已经是当前账号、手动登记放了 6 小时（`PENDING_SWITCH_HOURS`，按 `at` 算）还没等到、或时间规则的时间段已经过了，登记作废；过期的不等会话退出就清掉，界面上也不再显示。手动切换会覆盖登记。`cam switch --wait` 自己也会轮询等待，Ctrl-C、SIGHUP（关掉终端）、SIGTERM 都会撤掉登记，切换出错也撤掉，不留一个看不见的登记。面板 / 桌面版的切换接口在没指定 `mode` 且有会话在跑时返回 `choice_required`，由前端弹三选一；`cam switch` 没有终端（脚本、菜单栏插件）且没加 `-y` / `--now` / `--wait` 时按 `mode=wait` 处理。`cam`、`cam ls`、`cam doctor` 都会显示登记中的等待切换和取消方法（`cam switch --cancel-wait`）。
 
+Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py` 调用菜单栏插件的 `render`，把 SwiftBar 格式的菜单行转成 JSON（`{"tip", "badge", "level", "items", "notes"}`），`cam-tray.ps1` 用 WinForms 的 NotifyIcon 画图标和菜单，点了哪一项再交回 `cam_tray.py do`；后台任务、状态文件 `.menubar-state.json`、通知内容都和菜单栏插件一样，只是通知由托盘的气泡弹出。
+
 菜单栏插件点切换时运行的是插件自己的 `switch` 命令（`api_switch(mode=wait)`），结果和出错都弹系统通知。后台任务一轮做的事（自动导入、时间规则、等待切换、定时刷新和额度提醒）写在 `cam.background_round` 里，菜单栏插件和 `cam serve` 共用，通知也一样（macOS 用 `osascript`，其它系统有 `notify-send` 就用它）：`cam serve` 拿着后台锁时插件不跑后台任务，通知由 serve 弹。等待中的切换因为目标登录失效被作废时也通知一次。
 
 ## 认出当前登录
@@ -191,6 +195,15 @@ macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows
 - **`~/.claude.json`**：读出来改完，写之前再读一次，内容变了（Claude Code 刚写过）就基于新内容重新改；写完再读回确认 `oauthAccount` 是想要的值。最多重试 5 次，还不行就提示先退出正在运行的 claude。
 - **符号链接**：`~/.claude.json` 等文件是符号链接（比如用 dotfiles 管理）时，写到链接指向的文件，保留链接本身。
 
+## 全面体检（cam doctor）
+
+`full_checkup(store, offline)` 返回 `{"version", "generated_at", "offline", "header", "sections": [{"key", "title", "items"}], "summary": {"bad", "warn", "text", "first"}}`，每条 `{"level": "ok"|"warn"|"bad"|"info", "text", "advice"}`（账号那一节多一个 `group`：账号小标题；来自服务检查的条目保留 `kind`）。`cam doctor` 打印它（标记顶格，`install.sh` 按 `^(✗|!) ` 挑出要留意的行），`--json` 原样输出，`GET /api/checkup` 给面板，菜单栏插件跑 `cam doctor --json` 取 `summary` 发通知。`summary` 不数 `info` 和服务检查的总体结论（`kind: summary`，它重复了最严重的那条）。不含任何密钥。
+
+- 联网时几件事并行：`refresh_usage(store)`（和 `cam usage` 一样：不在用的 Claude Code 号 access token 两分钟内过期就由 `ensure_fresh_token` → `renew_saved_login` 用它自己的 refresh token 续，当前登录从不续）、`service_check`、官方状态页 `summary.json`（`STATUS_SUMMARY_URLS`，先 status.claude.com 再 status.anthropic.com）、`downloads.claude.ai/claude-code-releases/<渠道>` 的版本号、聊天机器人的 `doctor`（60 秒超时）。续没续看续之前保存的 `expiresAt` 有没有变大；续不上（`登录已失效`）记 ✗ 并给 `cam login 名字`
+- `--offline`：上面这些都不做，账号用上次的用量和保存的 `expiresAt`，服务一节用后台缓存（`region_view` + `risk_items`）
+- 会话（只有 Linux）：`/proc/<pid>/cmdline` 认出 claude（同 `running_claude_processes`），`environ` 里 `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` 只记有没有，`CLAUDE_CONFIG_DIR` 的值只和本机配置目录比；`FEISHU_SESSION` / `DINGTALK_SESSION` / `DISCORD_STATE_DIR`、tmux socket（`claude-discord[-名称]` 等，从 `TMUX` 取）认出机器人会话；运行时长按 `stat` 第 22 项和 `uptime` 算。测试用 `CAM_TEST_PROC_ROOT` 指向假的 `/proc`
+- 后台：`background.lock` 拿不到就是有人在做；`cam serve` 每分钟写 `.serve-state.json`（pid、时间、刷新间隔、上次出错），菜单栏插件每轮写 `.menubar-state.json`（看修改时间），桌面版不记，按进程名认。各账号用量的新旧用体检之前的 `fetched_at` 判断（桌面版账号用 `checked_at`）
+
 ## 服务检查与环境风险提示（只提示，不拦）
 
 `cam doctor` / `GET /api/service-check` 实测服务，并把使用环境里的风险点逐项列出，每项带 `kind`、`level`、`text`、`advice`。所有判断只用来提示，**不拦任何操作**，是否继续由用户决定。
@@ -217,6 +230,7 @@ macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows
 | GET | `/api/privacy` | 外部 IP 查询设置：`ip_lookup`（auto / ip-api / off）、`modes`、`env_override`、`has_ipapi_key`、`has_ipinfo_token`（不返回 key 本身）、`meta_ttl_hours`、`sources`（当前设置下会访问的服务和各发了什么）、`history` |
 | PUT | `/api/privacy` | body 可带 `ip_lookup`、`ipapi_key`、`ipinfo_token`（空字符串删除），返回同 GET |
 | DELETE | `/api/privacy/history` | 清除缓存的出口信息和各账号的使用地区记录，返回同 GET |
+| GET | `/api/checkup` | 全面体检，同 `cam doctor --json`（格式见“全面体检”），要十几秒；`?offline=1` 不联网；`?probe=1` 只回 `{"ok": true}`，面板据此显示按钮。只有脚本版有，桌面版返回 404 |
 | GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`，带 `score`、`grade`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。只检测和提示，不干预任何操作 |
 | POST | `/api/accounts/{id}/open` | 打开该网页账号的独立浏览器，或退出并重新打开目标 Claude Desktop 配置 |
 | POST | `/api/accounts/{id}/identify` | 尝试从对应登录资料补全邮箱，Desktop 会核对当前账号 UUID |
@@ -226,5 +240,7 @@ macOS 通过 `open -n -a Claude.app --args --user-data-dir=…` 启动。Windows
 | GET | `/api/local-usage?days=30` | 按天、按账号汇总本地 token 消耗 |
 | GET | `/api/rules` | `{"rules": [...], "alert_threshold": 90}` |
 | PUT | `/api/rules` | 整体替换规则 / 设置提醒阈值，服务端校验 |
+| GET | `/api/update` | **只有脚本版有**（桌面版返回 404，面板据此隐藏“软件更新”）。联网检查新版本（`git fetch`，最多 60 秒），返回 `checkout`（是不是 git 仓库）、`upstream`、`head`、`behind`、`ahead`、`commits`（[{`hash`, `date`, `subject`}]，最多 50 个）、`dirty`（没提交的改动）、`message`，同时存进 `update-check.json`。`?saved=1` 不联网，只返回上次的结果（代码在那之后变过就把 `behind` 当 0）；从没检查过时返回 `{"checked_at": null, "version"}` |
+| POST | `/api/update` | 同 `cam update`：有未提交改动时拒绝（400，什么都不改）；`git merge --ff-only @{u}`；自检（`SHA256SUMS`、编译 `scripts/*.py`、临时 HOME 下跑 `cam --help` / `cam ls`），没过就 `git reset --hard` 回原来的提交并返回 400。成功返回 `updated`、`old`、`new`、`commits`、`message`、`restart`（哪些要重开；装了 `cam-serve` 服务会在回复之后一秒请 systemd 重启它） |
 
 返回统一为 JSON；错误为 `{"error": "…"}` 加相应状态码。
