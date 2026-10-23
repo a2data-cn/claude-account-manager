@@ -14,29 +14,60 @@ use std::time::Instant;
 /// Anthropic 官方公布的支持国家/地区（https://www.anthropic.com/supported-countries，2026-10 抓取），
 /// ISO 3166-1 alpha-2。名单会变，变了改这里。
 pub const SUPPORTED_REGIONS: &[&str] = &[
-    "AL", "DZ", "AD", "AO", "AG", "AR", "AM", "AU", "AT", "AZ", "BS", "BH", "BD", "BB", "BE", "BZ", "BJ", "BT", "BO",
-    "BA", "BW", "BR", "BN", "BG", "BF", "BI", "CV", "KH", "CM", "CA", "CF", "TD", "CL", "CO", "KM", "CG", "CD", "CR",
-    "CI", "HR", "CY", "CZ", "DK", "DJ", "DM", "DO", "EC", "EG", "SV", "GQ", "ER", "EE", "SZ", "ET", "FJ", "FI", "FR",
-    "GA", "GM", "GE", "DE", "GH", "GR", "GD", "GT", "GN", "GW", "GY", "HT", "HN", "HU", "IS", "IN", "ID", "IQ", "IE",
-    "IL", "IT", "JM", "JP", "JO", "KZ", "KE", "KI", "KW", "KG", "LA", "LV", "LB", "LS", "LR", "LY", "LI", "LT", "LU",
-    "MG", "MW", "MY", "MV", "ML", "MT", "MH", "MR", "MU", "MX", "FM", "MD", "MC", "MN", "ME", "MA", "MZ", "NA", "NR",
-    "NP", "NL", "NZ", "NI", "NE", "NG", "MK", "NO", "OM", "PK", "PW", "PS", "PA", "PG", "PY", "PE", "PH", "PL", "PT",
-    "QA", "RO", "RW", "KN", "LC", "VC", "WS", "SM", "ST", "SA", "SN", "RS", "SC", "SL", "SG", "SK", "SI", "SO", "SB",
-    "ZA", "KR", "SS", "ES", "LK", "SD", "SR", "SE", "CH", "TW", "TJ", "TZ", "TH", "TL", "TG", "TO", "TT", "TN", "TR",
-    "TM", "TV", "UG", "UA", "AE", "GB", "US", "UY", "UZ", "VU", "VA", "VN", "ZM", "ZW",
+    "AL", "DZ", "AD", "AO", "AG", "AR", "AM", "AU", "AT", "AZ", "BS", "BH", "BD", "BB", "BE", "BZ",
+    "BJ", "BT", "BO", "BA", "BW", "BR", "BN", "BG", "BF", "BI", "CV", "KH", "CM", "CA", "CF", "TD",
+    "CL", "CO", "KM", "CG", "CD", "CR", "CI", "HR", "CY", "CZ", "DK", "DJ", "DM", "DO", "EC", "EG",
+    "SV", "GQ", "ER", "EE", "SZ", "ET", "FJ", "FI", "FR", "GA", "GM", "GE", "DE", "GH", "GR", "GD",
+    "GT", "GN", "GW", "GY", "HT", "HN", "HU", "IS", "IN", "ID", "IQ", "IE", "IL", "IT", "JM", "JP",
+    "JO", "KZ", "KE", "KI", "KW", "KG", "LA", "LV", "LB", "LS", "LR", "LY", "LI", "LT", "LU", "MG",
+    "MW", "MY", "MV", "ML", "MT", "MH", "MR", "MU", "MX", "FM", "MD", "MC", "MN", "ME", "MA", "MZ",
+    "NA", "NR", "NP", "NL", "NZ", "NI", "NE", "NG", "MK", "NO", "OM", "PK", "PW", "PS", "PA", "PG",
+    "PY", "PE", "PH", "PL", "PT", "QA", "RO", "RW", "KN", "LC", "VC", "WS", "SM", "ST", "SA", "SN",
+    "RS", "SC", "SL", "SG", "SK", "SI", "SO", "SB", "ZA", "KR", "SS", "ES", "LK", "SD", "SR", "SE",
+    "CH", "TW", "TJ", "TZ", "TH", "TL", "TG", "TO", "TT", "TN", "TR", "TM", "TV", "UG", "UA", "AE",
+    "GB", "US", "UY", "UZ", "VU", "VA", "VN", "ZM", "ZW",
 ];
 /// 官方名单写的是国家；这些属地按所属国家看待（美国、英国、法国、荷兰、丹麦、芬兰、挪威、新西兰、澳大利亚）
 pub const REGION_DEPENDENCIES: &[&str] = &[
-    "PR", "GU", "VI", "AS", "MP", "GI", "IM", "JE", "GG", "BM", "KY", "FK", "VG", "RE", "GP", "MQ", "GF", "YT", "NC",
-    "PF", "PM", "WF", "BL", "MF", "AW", "CW", "SX", "BQ", "GL", "FO", "AX", "SJ", "CK", "NU", "TK", "CX", "CC", "NF",
+    "PR", "GU", "VI", "AS", "MP", "GI", "IM", "JE", "GG", "BM", "KY", "FK", "VG", "RE", "GP", "MQ",
+    "GF", "YT", "NC", "PF", "PM", "WF", "BL", "MF", "AW", "CW", "SX", "BQ", "GL", "FO", "AX", "SJ",
+    "CK", "NU", "TK", "CX", "CC", "NF",
 ];
 /// 给提示用的中文名，只收常见的
 pub const REGION_NAMES: &[(&str, &str)] = &[
-    ("CN", "中国大陆"), ("HK", "香港"), ("MO", "澳门"), ("RU", "俄罗斯"), ("IR", "伊朗"), ("KP", "朝鲜"), ("SY", "叙利亚"),
-    ("CU", "古巴"), ("BY", "白俄罗斯"), ("VE", "委内瑞拉"), ("AF", "阿富汗"), ("MM", "缅甸"), ("YE", "也门"),
-    ("T1", "Tor 出口"), ("US", "美国"), ("JP", "日本"), ("SG", "新加坡"), ("TW", "台湾"), ("KR", "韩国"), ("GB", "英国"),
-    ("DE", "德国"), ("FR", "法国"), ("NL", "荷兰"), ("CA", "加拿大"), ("AU", "澳大利亚"), ("MY", "马来西亚"), ("TH", "泰国"),
-    ("VN", "越南"), ("ID", "印尼"), ("PH", "菲律宾"), ("IN", "印度"), ("AE", "阿联酋"), ("TR", "土耳其"),
+    ("CN", "中国大陆"),
+    ("HK", "香港"),
+    ("MO", "澳门"),
+    ("RU", "俄罗斯"),
+    ("IR", "伊朗"),
+    ("KP", "朝鲜"),
+    ("SY", "叙利亚"),
+    ("CU", "古巴"),
+    ("BY", "白俄罗斯"),
+    ("VE", "委内瑞拉"),
+    ("AF", "阿富汗"),
+    ("MM", "缅甸"),
+    ("YE", "也门"),
+    ("T1", "Tor 出口"),
+    ("US", "美国"),
+    ("JP", "日本"),
+    ("SG", "新加坡"),
+    ("TW", "台湾"),
+    ("KR", "韩国"),
+    ("GB", "英国"),
+    ("DE", "德国"),
+    ("FR", "法国"),
+    ("NL", "荷兰"),
+    ("CA", "加拿大"),
+    ("AU", "澳大利亚"),
+    ("MY", "马来西亚"),
+    ("TH", "泰国"),
+    ("VN", "越南"),
+    ("ID", "印尼"),
+    ("PH", "菲律宾"),
+    ("IN", "印度"),
+    ("AE", "阿联酋"),
+    ("TR", "土耳其"),
 ];
 
 /// 出口地区变了以后，提醒保留多久（小时）
@@ -51,17 +82,54 @@ pub const CLOCK_SKEW_WARN: i64 = 120;
 pub const REGION_FRESH_SECS: i64 = 3600;
 /// 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
 const TUNNEL_PREFIXES: &[&str] = &[
-    "utun", "tun", "tap", "wg", "ppp", "ipsec", "tailscale", "zt", "nebula", "proton", "nordlynx", "mullvad", "clash",
-    "mihomo", "sing", "hysteria", "surge",
+    "utun",
+    "tun",
+    "tap",
+    "wg",
+    "ppp",
+    "ipsec",
+    "tailscale",
+    "zt",
+    "nebula",
+    "proton",
+    "nordlynx",
+    "mullvad",
+    "clash",
+    "mihomo",
+    "sing",
+    "hysteria",
+    "surge",
 ];
 const TUNNEL_WORDS: &[&str] = &[
-    "tap", "tun", "wintun", "wireguard", "vpn", "tunnel", "nordlynx", "clash", "mihomo", "sing-box", "surge",
-    "shadowsocks", "v2ray", "hysteria", "tailscale", "zerotier", "anyconnect", "fortinet", "globalprotect",
-    "pulse secure", "openvpn", "expressvpn", "mullvad", "proton",
+    "tap",
+    "tun",
+    "wintun",
+    "wireguard",
+    "vpn",
+    "tunnel",
+    "nordlynx",
+    "clash",
+    "mihomo",
+    "sing-box",
+    "surge",
+    "shadowsocks",
+    "v2ray",
+    "hysteria",
+    "tailscale",
+    "zerotier",
+    "anyconnect",
+    "fortinet",
+    "globalprotect",
+    "pulse secure",
+    "openvpn",
+    "expressvpn",
+    "mullvad",
+    "proton",
 ];
 
 fn status_url() -> String {
-    std::env::var("CAM_STATUS_URL").unwrap_or_else(|_| "https://status.anthropic.com/api/v2/status.json".into())
+    std::env::var("CAM_STATUS_URL")
+        .unwrap_or_else(|_| "https://status.anthropic.com/api/v2/status.json".into())
 }
 
 /// 出口 IP 的运营商、城市（Cloudflare 的另一个接口，用来交叉核对和判断是不是机房出口）
@@ -79,24 +147,57 @@ fn ipapi_is_url() -> String {
 }
 /// 外部 IP 查询的三种设置。规则和 cam.py 的 IP_LOOKUP_MODES 一致
 pub const IP_LOOKUP_MODES: &[(&str, &str)] = &[
-    ("auto", "自动：ipapi.is → ipinfo.io → Cloudflare（都可以商用）"),
-    ("ip-api", "自动，并优先用 ip-api.com（带机房 / 代理标记；仅限非商业用途，只有 http）"),
-    ("off", "关闭：只查 claude.ai 自己的出口信息和 Anthropic 状态页，不查运营商和 IP 类型"),
+    (
+        "auto",
+        "自动：ipapi.is → ipinfo.io → Cloudflare（都可以商用）",
+    ),
+    (
+        "ip-api",
+        "自动，并优先用 ip-api.com（带机房 / 代理标记；仅限非商业用途，只有 http）",
+    ),
+    (
+        "off",
+        "关闭：只查 claude.ai 自己的出口信息和 Anthropic 状态页，不查运营商和 IP 类型",
+    ),
 ];
 /// 界面上的短标题和一句话说明，和 cam.py 的 IP_LOOKUP_TITLES 一致
 pub const IP_LOOKUP_TITLES: &[(&str, &str, &str)] = &[
-    ("auto", "自动（推荐）", "ipapi.is → ipinfo.io → Cloudflare，都可以商用"),
-    ("ip-api", "加上 ip-api.com", "多一个带机房 / 代理标记的来源；仅限非商业用途，只有 http"),
-    ("off", "关闭", "只看出口国家和官方状态，不查运营商和 IP 类型"),
+    (
+        "auto",
+        "自动（推荐）",
+        "ipapi.is → ipinfo.io → Cloudflare，都可以商用",
+    ),
+    (
+        "ip-api",
+        "加上 ip-api.com",
+        "多一个带机房 / 代理标记的来源；仅限非商业用途，只有 http",
+    ),
+    (
+        "off",
+        "关闭",
+        "只看出口国家和官方状态，不查运营商和 IP 类型",
+    ),
 ];
 /// ipapi.is 的 key、ipinfo 的 token 存在 secrets 目录，不进 accounts.json
 pub const LOOKUP_SECRET_ID: &str = "_ip-lookup";
-const META_FIELDS: &[&str] = &["asn", "org", "city", "meta_loc", "ip_type", "reg_loc", "meta_source", "meta_at"];
+const META_FIELDS: &[&str] = &[
+    "asn",
+    "org",
+    "city",
+    "meta_loc",
+    "ip_type",
+    "reg_loc",
+    "meta_source",
+    "meta_at",
+];
 const STACK_FIELDS: &[&str] = &["v4_ip", "v4_loc", "v6_ip", "v6_loc"];
 
 /// 出口 IP 没变时，运营商 / 类型 / 注册国多久重查一次（秒）
 fn meta_ttl() -> i64 {
-    std::env::var("CAM_META_TTL").ok().and_then(|v| v.parse().ok()).unwrap_or(86400)
+    std::env::var("CAM_META_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(86400)
 }
 
 #[derive(Clone, Debug)]
@@ -126,7 +227,11 @@ pub fn ip_lookup_config(store: Option<&Store>) -> LookupConfig {
     if !IP_LOOKUP_MODES.iter().any(|(m, _)| *m == mode) {
         mode = "auto".into();
     }
-    LookupConfig { mode, ipapi_key: env("CAM_IPAPI_IS_KEY").unwrap_or(key), ipinfo_token: env("CAM_IPINFO_TOKEN").unwrap_or(tok) }
+    LookupConfig {
+        mode,
+        ipapi_key: env("CAM_IPAPI_IS_KEY").unwrap_or(key),
+        ipinfo_token: env("CAM_IPINFO_TOKEN").unwrap_or(tok),
+    }
 }
 
 fn with_param(url: &str, name: &str, value: &str) -> String {
@@ -135,9 +240,21 @@ fn with_param(url: &str, name: &str, value: &str) -> String {
     }
     let enc: String = value
         .bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{:02X}", b) })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{:02X}", b)
+            }
+        })
         .collect();
-    format!("{}{}{}={}", url, if url.contains('?') { "&" } else { "?" }, name, enc)
+    format!(
+        "{}{}{}={}",
+        url,
+        if url.contains('?') { "&" } else { "?" },
+        name,
+        enc
+    )
 }
 
 /// 按顺序要问的运营商数据源 [(名字, 地址)]；off 时为空。
@@ -149,8 +266,14 @@ pub fn meta_sources(cfg: &LookupConfig) -> Vec<(&'static str, String)> {
     if cfg.mode == "ip-api" {
         out.push(("ip-api.com", ipapi_url()));
     }
-    out.push(("ipapi.is", with_param(&ipapi_is_url(), "key", &cfg.ipapi_key)));
-    out.push(("ipinfo.io", with_param(&ipinfo_url(), "token", &cfg.ipinfo_token)));
+    out.push((
+        "ipapi.is",
+        with_param(&ipapi_is_url(), "key", &cfg.ipapi_key),
+    ));
+    out.push((
+        "ipinfo.io",
+        with_param(&ipinfo_url(), "token", &cfg.ipinfo_token),
+    ));
     out.push(("Cloudflare", cf_meta_url()));
     out
 }
@@ -168,7 +291,8 @@ fn cf_trace4_url() -> String {
     std::env::var("CAM_CF_TRACE4_URL").unwrap_or_else(|_| "https://1.1.1.1/cdn-cgi/trace".into())
 }
 fn cf_trace6_url() -> String {
-    std::env::var("CAM_CF_TRACE6_URL").unwrap_or_else(|_| "https://[2606:4700:4700::1111]/cdn-cgi/trace".into())
+    std::env::var("CAM_CF_TRACE6_URL")
+        .unwrap_or_else(|_| "https://[2606:4700:4700::1111]/cdn-cgi/trace".into())
 }
 
 pub fn ip_type_name(t: &str) -> &'static str {
@@ -184,26 +308,90 @@ pub fn ip_type_name(t: &str) -> &'static str {
 
 /// 公共 DNS → (名称, 国家)。Google / Cloudflare / Quad9 这类任播的全球都有节点，国家记空，不拿来判断位置
 const KNOWN_DNS: &[(&str, &str, &str)] = &[
-    ("8.8.8.8", "Google", ""), ("8.8.4.4", "Google", ""), ("2001:4860:4860::8888", "Google", ""),
-    ("2001:4860:4860::8844", "Google", ""), ("1.1.1.1", "Cloudflare", ""), ("1.0.0.1", "Cloudflare", ""),
-    ("2606:4700:4700::1111", "Cloudflare", ""), ("2606:4700:4700::1001", "Cloudflare", ""), ("9.9.9.9", "Quad9", ""),
-    ("149.112.112.112", "Quad9", ""), ("208.67.222.222", "OpenDNS", ""), ("208.67.220.220", "OpenDNS", ""),
-    ("223.5.5.5", "阿里 DNS", "CN"), ("223.6.6.6", "阿里 DNS", "CN"), ("2400:3200::1", "阿里 DNS", "CN"),
-    ("2400:3200:baba::1", "阿里 DNS", "CN"), ("119.29.29.29", "腾讯 DNSPod", "CN"), ("182.254.116.116", "腾讯 DNSPod", "CN"),
-    ("114.114.114.114", "114DNS", "CN"), ("114.114.115.115", "114DNS", "CN"), ("180.76.76.76", "百度 DNS", "CN"),
-    ("1.2.4.8", "CNNIC", "CN"), ("210.2.4.8", "CNNIC", "CN"), ("168.95.1.1", "中华电信 HiNet", "TW"),
-    ("168.95.192.1", "中华电信 HiNet", "TW"), ("168.126.63.1", "KT", "KR"), ("168.126.63.2", "KT", "KR"),
-    ("77.88.8.8", "Yandex", "RU"), ("77.88.8.1", "Yandex", "RU"),
+    ("8.8.8.8", "Google", ""),
+    ("8.8.4.4", "Google", ""),
+    ("2001:4860:4860::8888", "Google", ""),
+    ("2001:4860:4860::8844", "Google", ""),
+    ("1.1.1.1", "Cloudflare", ""),
+    ("1.0.0.1", "Cloudflare", ""),
+    ("2606:4700:4700::1111", "Cloudflare", ""),
+    ("2606:4700:4700::1001", "Cloudflare", ""),
+    ("9.9.9.9", "Quad9", ""),
+    ("149.112.112.112", "Quad9", ""),
+    ("208.67.222.222", "OpenDNS", ""),
+    ("208.67.220.220", "OpenDNS", ""),
+    ("223.5.5.5", "阿里 DNS", "CN"),
+    ("223.6.6.6", "阿里 DNS", "CN"),
+    ("2400:3200::1", "阿里 DNS", "CN"),
+    ("2400:3200:baba::1", "阿里 DNS", "CN"),
+    ("119.29.29.29", "腾讯 DNSPod", "CN"),
+    ("182.254.116.116", "腾讯 DNSPod", "CN"),
+    ("114.114.114.114", "114DNS", "CN"),
+    ("114.114.115.115", "114DNS", "CN"),
+    ("180.76.76.76", "百度 DNS", "CN"),
+    ("1.2.4.8", "CNNIC", "CN"),
+    ("210.2.4.8", "CNNIC", "CN"),
+    ("168.95.1.1", "中华电信 HiNet", "TW"),
+    ("168.95.192.1", "中华电信 HiNet", "TW"),
+    ("168.126.63.1", "KT", "KR"),
+    ("168.126.63.2", "KT", "KR"),
+    ("77.88.8.8", "Yandex", "RU"),
+    ("77.88.8.1", "Yandex", "RU"),
 ];
 
 /// 出口 IP 的运营商名里有这些就当作云服务商 / 机房（不是家庭或公司宽带）
 const HOSTING_WORDS: &[&str] = &[
-    "hosting", "cloud", "data center", "datacenter", "server", "vps", "dedicated", "colocation", "amazon", "aws",
-    "google llc", "google cloud", "microsoft corporation", "azure", "digitalocean", "linode", "akamai", "vultr", "choopa",
-    "ovh", "hetzner", "alibaba", "aliyun", "tencent", "huawei", "oracle", "m247", "datacamp", "leaseweb", "contabo",
-    "scaleway", "upcloud", "hostinger", "psychz", "quadranet", "colocrossing", "zenlayer", "gcore", "g-core",
-    "cloudflare", "packethub", "clouvider", "performive", "bandwagon", "racknerd", "ucloud", "kamatera", "ionos",
-    "fly.io", "oneprovider", "hostpapa",
+    "hosting",
+    "cloud",
+    "data center",
+    "datacenter",
+    "server",
+    "vps",
+    "dedicated",
+    "colocation",
+    "amazon",
+    "aws",
+    "google llc",
+    "google cloud",
+    "microsoft corporation",
+    "azure",
+    "digitalocean",
+    "linode",
+    "akamai",
+    "vultr",
+    "choopa",
+    "ovh",
+    "hetzner",
+    "alibaba",
+    "aliyun",
+    "tencent",
+    "huawei",
+    "oracle",
+    "m247",
+    "datacamp",
+    "leaseweb",
+    "contabo",
+    "scaleway",
+    "upcloud",
+    "hostinger",
+    "psychz",
+    "quadranet",
+    "colocrossing",
+    "zenlayer",
+    "gcore",
+    "g-core",
+    "cloudflare",
+    "packethub",
+    "clouvider",
+    "performive",
+    "bandwagon",
+    "racknerd",
+    "ucloud",
+    "kamatera",
+    "ionos",
+    "fly.io",
+    "oneprovider",
+    "hostpapa",
 ];
 
 pub fn region_advice(status: &str) -> &'static str {
@@ -246,13 +434,22 @@ pub fn region_message(loc: Option<&str>, status: &str) -> String {
     format!(
         "出口地区 {} {}",
         region_label(loc),
-        if status == "supported" { "在 Anthropic 支持名单内" } else { "不在 Anthropic 支持名单内" }
+        if status == "supported" {
+            "在 Anthropic 支持名单内"
+        } else {
+            "不在 Anthropic 支持名单内"
+        }
     )
 }
 
 pub fn fmt_ago(s: &str) -> String {
-    let Some(d) = parse_time(s) else { return String::new() };
-    let secs = chrono::Utc::now().signed_duration_since(d).num_seconds().max(0);
+    let Some(d) = parse_time(s) else {
+        return String::new();
+    };
+    let secs = chrono::Utc::now()
+        .signed_duration_since(d)
+        .num_seconds()
+        .max(0);
     if secs < 60 {
         return "刚刚".into();
     }
@@ -280,8 +477,11 @@ pub fn parse_trace(txt: &str, t0: Instant) -> Value {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    let skew = get("ts").and_then(|t| t.parse::<f64>().ok()).map(|t| (now - t).round() as i64);
-    let warp = matches!(get("warp").as_deref(), Some("on") | Some("plus")) || get("gateway").as_deref() == Some("on");
+    let skew = get("ts")
+        .and_then(|t| t.parse::<f64>().ok())
+        .map(|t| (now - t).round() as i64);
+    let warp = matches!(get("warp").as_deref(), Some("on") | Some("plus"))
+        || get("gateway").as_deref() == Some("on");
     json!({
         "loc": get("loc").map(|l| l.to_uppercase()), "ip": get("ip"), "colo": get("colo"),
         "ms": t0.elapsed().as_millis() as u64, "warp": warp, "skew": skew
@@ -314,7 +514,9 @@ pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
         .and_then(parse_time)
         .map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < meta_ttl())
         .unwrap_or(false);
-    let reuse = s(prev, "ip") == Some(ip.as_str()) && s(prev, "lookup_mode") == Some(cfg.mode.as_str()) && fresh;
+    let reuse = s(prev, "ip") == Some(ip.as_str())
+        && s(prev, "lookup_mode") == Some(cfg.mode.as_str())
+        && fresh;
     let need_rdap = !reuse && cfg.ipapi_key.is_empty(); // 带 key 的 ipapi.is 自己会给注册国
     let (v4, v6, meta, rdap) = std::thread::scope(|sc| {
         let h4 = sc.spawn(|| trace_only(&cf_trace4_url()));
@@ -341,7 +543,11 @@ pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
             }
         }
         if s(&out, "reg_loc").is_none() {
-            out["reg_loc"] = json!(if need_rdap { rdap } else { fetch_ip_registration(&ip) });
+            out["reg_loc"] = json!(if need_rdap {
+                rdap
+            } else {
+                fetch_ip_registration(&ip)
+            });
         }
         if s(&out, "org").is_some() || s(&out, "meta_loc").is_some() {
             out["meta_at"] = json!(now_iso()); // 查到了才缓存；全失败的话下次重查
@@ -373,7 +579,10 @@ pub fn fetch_exit_meta(cfg: &LookupConfig) -> Option<Value> {
         if st != 200 {
             continue;
         }
-        if let Some(mut m) = serde_json::from_str::<Value>(&txt).ok().and_then(|j| parse_exit_meta(&j)) {
+        if let Some(mut m) = serde_json::from_str::<Value>(&txt)
+            .ok()
+            .and_then(|j| parse_exit_meta(&j))
+        {
             m["meta_source"] = json!(name);
             return Some(m);
         }
@@ -403,13 +612,22 @@ pub fn parse_exit_meta(j: &Value) -> Option<Value> {
         return None;
     }
     let truthy = |k: &str| j.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-    let (mut asn, mut org, ip_type, reg_loc): (Option<u64>, Option<String>, Option<&str>, Option<String>);
+    let (mut asn, mut org, ip_type, reg_loc): (
+        Option<u64>,
+        Option<String>,
+        Option<&str>,
+        Option<String>,
+    );
     let loc_src = j.get("location").filter(|l| l.is_object()).unwrap_or(j);
     if let Some(a) = j.get("asn").filter(|a| a.is_object()) {
         // ipapi.is
         asn = a.get("asn").and_then(|v| v.as_u64());
-        org = s(a, "org").or_else(|| j.get("company").and_then(|c| s(c, "name"))).map(String::from);
-        reg_loc = s(a, "country").map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty());
+        org = s(a, "org")
+            .or_else(|| j.get("company").and_then(|c| s(c, "name")))
+            .map(String::from);
+        reg_loc = s(a, "country")
+            .map(|c| c.trim().to_uppercase())
+            .filter(|c| !c.is_empty());
         let ctype = j.get("company").and_then(|c| s(c, "type"));
         ip_type = if truthy("is_tor") {
             Some("tor")
@@ -426,7 +644,9 @@ pub fn parse_exit_meta(j: &Value) -> Option<Value> {
         };
     } else {
         asn = j.get("asn").and_then(|v| v.as_u64());
-        org = s(j, "asOrganization").or_else(|| s(j, "isp")).map(String::from);
+        org = s(j, "asOrganization")
+            .or_else(|| s(j, "isp"))
+            .map(String::from);
         if let Some(v) = s(j, "as").or_else(|| s(j, "asn")) {
             parse_as_field(v, &mut asn, &mut org);
         } else if org.is_none() {
@@ -453,9 +673,19 @@ pub fn parse_exit_meta(j: &Value) -> Option<Value> {
         };
         reg_loc = None;
     }
-    let region = s(loc_src, "region").or_else(|| s(loc_src, "regionName")).or_else(|| s(loc_src, "state"));
-    let city = [s(loc_src, "city"), region].iter().flatten().cloned().collect::<Vec<_>>().join(", ");
-    let country = s(loc_src, "country_code").or_else(|| s(j, "countryCode")).or_else(|| s(loc_src, "country")).unwrap_or("");
+    let region = s(loc_src, "region")
+        .or_else(|| s(loc_src, "regionName"))
+        .or_else(|| s(loc_src, "state"));
+    let city = [s(loc_src, "city"), region]
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let country = s(loc_src, "country_code")
+        .or_else(|| s(j, "countryCode"))
+        .or_else(|| s(loc_src, "country"))
+        .unwrap_or("");
     let loc = Some(country.trim().to_uppercase()).filter(|c| c.len() == 2);
     if org.is_none() && loc.is_none() {
         return None;
@@ -478,7 +708,11 @@ pub fn fetch_ip_registration(ip: &str) -> Option<String> {
     }
     let j: Value = serde_json::from_str(&txt).ok()?;
     let c = s(&j, "country")?.trim().to_uppercase();
-    if c.len() == 2 { Some(c) } else { None }
+    if c.len() == 2 {
+        Some(c)
+    } else {
+        None
+    }
 }
 
 /// 只用某一个协议（IPv4 或 IPv6 的 IP 直连）访问 Cloudflare trace，返回 (ip, loc) 或 None（该协议不可用）。
@@ -504,7 +738,9 @@ pub fn is_private_ip(ip: &str) -> bool {
     match ip.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(a)) => a.is_private() || a.is_loopback() || a.is_link_local(),
         Ok(std::net::IpAddr::V6(a)) => {
-            a.is_loopback() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80
+            a.is_loopback()
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+                || (a.segments()[0] & 0xffc0) == 0xfe80
         }
         Err(_) => false,
     }
@@ -515,13 +751,21 @@ pub fn is_private_ip(ip: &str) -> bool {
 pub fn system_dns_servers() -> Vec<Value> {
     let mut ips: Vec<String> = Vec::new();
     if let Ok(t) = std::env::var("CAM_TEST_DNS") {
-        ips = t.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+        ips = t
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
     } else if cfg!(windows) {
         let out = run_text(
             "powershell",
             &["-NoProfile", "-Command", "Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }"],
         );
-        ips = out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        ips = out
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
     } else if cfg!(target_os = "macos") {
         for line in run_text("scutil", &["--dns"]).lines() {
             let line = line.trim();
@@ -585,15 +829,31 @@ pub fn local_env() -> Value {
     })
 }
 
-const PROXY_ENV_KEYS: &[&str] = &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"];
+const PROXY_ENV_KEYS: &[&str] = &[
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+];
 
 /// 当前生效的代理：环境变量 + 系统设置。与 cam.py 的 proxy_parts 一致。
 pub fn proxy_parts() -> Vec<String> {
     let mut parts: Vec<String> = PROXY_ENV_KEYS
         .iter()
-        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| format!("{}={}", k, v)))
+        .filter_map(|k| {
+            std::env::var(k)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| format!("{}={}", k, v))
+        })
         .collect();
-    parts.extend(system_proxy().into_iter().map(|p| format!("系统设置 {}", p)));
+    parts.extend(
+        system_proxy()
+            .into_iter()
+            .map(|p| format!("系统设置 {}", p)),
+    );
     parts
 }
 
@@ -602,7 +862,11 @@ pub fn proxy_vpn_items(env: &Value) -> Vec<Value> {
     let parts: Vec<String> = env
         .get("proxy")
         .and_then(|p| p.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let mut out = vec![if parts.is_empty() {
         json!({"kind": "proxy", "level": "ok", "text": "代理：无（直连）", "advice": "直连，出口地区就是本机网络的出口"})
@@ -610,7 +874,10 @@ pub fn proxy_vpn_items(env: &Value) -> Vec<Value> {
         json!({"kind": "proxy", "level": "info", "text": format!("代理：{}", parts.join("；")),
                "advice": "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口"})
     }];
-    let tun = env.get("tunnel").and_then(|t| t.as_array()).filter(|a| a.len() == 2);
+    let tun = env
+        .get("tunnel")
+        .and_then(|t| t.as_array())
+        .filter(|a| a.len() == 2);
     out.push(match tun {
         Some(t) => json!({"kind": "vpn", "level": "info",
                           "text": format!("VPN：默认路由走 {}（{}）", t[0].as_str().unwrap_or("?"), t[1].as_str().unwrap_or("")),
@@ -632,13 +899,31 @@ pub fn system_locale() -> Option<(String, Option<String>)> {
     let name = if let Ok(t) = std::env::var("CAM_TEST_LOCALE") {
         t
     } else if cfg!(target_os = "macos") {
-        run_text("defaults", &["read", "-g", "AppleLocale"]).trim().to_string()
+        run_text("defaults", &["read", "-g", "AppleLocale"])
+            .trim()
+            .to_string()
     } else if cfg!(windows) {
-        run_text("powershell", &["-NoProfile", "-Command", "(Get-Culture).Name"]).trim().to_string()
+        run_text(
+            "powershell",
+            &["-NoProfile", "-Command", "(Get-Culture).Name"],
+        )
+        .trim()
+        .to_string()
     } else {
-        ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())).unwrap_or_default()
+        ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+            .unwrap_or_default()
     };
-    let name = name.split('.').next().unwrap_or("").split('@').next().unwrap_or("").trim().to_string();
+    let name = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if name.is_empty() || name.eq_ignore_ascii_case("C") || name.eq_ignore_ascii_case("POSIX") {
         return None;
     }
@@ -678,8 +963,12 @@ fn run_text(cmd: &str, args: &[&str]) -> String {
 /// 跑系统命令，最多等 timeout；超时就结束它，返回已经读到的输出。卡住的命令不会拖住整轮检测。
 fn run_with_timeout(mut c: Command, timeout: std::time::Duration) -> String {
     use std::io::Read;
-    c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
-    let Ok(mut child) = c.spawn() else { return String::new() };
+    c.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let Ok(mut child) = c.spawn() else {
+        return String::new();
+    };
     let mut out = child.stdout.take();
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -692,7 +981,9 @@ fn run_with_timeout(mut c: Command, timeout: std::time::Duration) -> String {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(30)),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(30))
+            }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -711,9 +1002,18 @@ pub fn system_timezone() -> Option<(String, Vec<String>)> {
             return None;
         }
         let (zone, cc) = t.split_once('=').unwrap_or((t.as_str(), ""));
-        return Some((zone.to_string(), cc.split(',').filter(|c| !c.is_empty()).map(String::from).collect()));
+        return Some((
+            zone.to_string(),
+            cc.split(',')
+                .filter(|c| !c.is_empty())
+                .map(String::from)
+                .collect(),
+        ));
     }
-    let mut zone = std::env::var("TZ").unwrap_or_default().trim_start_matches(':').to_string();
+    let mut zone = std::env::var("TZ")
+        .unwrap_or_default()
+        .trim_start_matches(':')
+        .to_string();
     if zone.is_empty() && !cfg!(windows) {
         if let Ok(link) = std::fs::read_link("/etc/localtime") {
             if let Some((_, z)) = link.to_string_lossy().split_once("zoneinfo/") {
@@ -734,11 +1034,17 @@ pub fn system_timezone() -> Option<(String, Vec<String>)> {
         "/usr/share/zoneinfo/zone.tab",
         "/var/db/timezone/zoneinfo/zone.tab",
     ] {
-        let Ok(txt) = std::fs::read_to_string(tab) else { continue };
+        let Ok(txt) = std::fs::read_to_string(tab) else {
+            continue;
+        };
         for line in txt.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
             if !line.starts_with('#') && parts.len() >= 3 && parts[2] == zone {
-                countries = parts[0].split(',').filter(|c| !c.is_empty()).map(String::from).collect();
+                countries = parts[0]
+                    .split(',')
+                    .filter(|c| !c.is_empty())
+                    .map(String::from)
+                    .collect();
                 break;
             }
         }
@@ -753,7 +1059,11 @@ pub fn system_timezone() -> Option<(String, Vec<String>)> {
 pub fn system_proxy() -> Vec<String> {
     // 测试用 CAM_TEST_PROXY="HTTPS 127.0.0.1:7890"（空字符串表示没有）
     if let Ok(t) = std::env::var("CAM_TEST_PROXY") {
-        return t.split(',').filter(|x| !x.is_empty()).map(String::from).collect();
+        return t
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect();
     }
     let mut out = Vec::new();
     if cfg!(target_os = "macos") {
@@ -767,15 +1077,31 @@ pub fn system_proxy() -> Vec<String> {
         for (name, key) in [("HTTPS", "HTTPS"), ("HTTP", "HTTP"), ("SOCKS", "SOCKS")] {
             if on(&format!("{}Enable", key)) {
                 if let Some(h) = kv.get(&format!("{}Proxy", key)) {
-                    out.push(format!("{} {}:{}", name, h, kv.get(&format!("{}Port", key)).cloned().unwrap_or_default()));
+                    out.push(format!(
+                        "{} {}:{}",
+                        name,
+                        h,
+                        kv.get(&format!("{}Port", key)).cloned().unwrap_or_default()
+                    ));
                 }
             }
         }
         if on("ProxyAutoConfigEnable") {
-            out.push(format!("PAC {}", kv.get("ProxyAutoConfigURLString").cloned().unwrap_or_default()));
+            out.push(format!(
+                "PAC {}",
+                kv.get("ProxyAutoConfigURLString")
+                    .cloned()
+                    .unwrap_or_default()
+            ));
         }
     } else if cfg!(windows) {
-        let txt = run_text("reg", &["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"]);
+        let txt = run_text(
+            "reg",
+            &[
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            ],
+        );
         let mut kv: HashMap<String, String> = HashMap::new();
         for line in txt.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -783,7 +1109,10 @@ pub fn system_proxy() -> Vec<String> {
                 kv.insert(parts[0].to_string(), parts[2..].join(" "));
             }
         }
-        let enabled = kv.get("ProxyEnable").map(|v| v.to_lowercase() == "0x1" || v == "1").unwrap_or(false);
+        let enabled = kv
+            .get("ProxyEnable")
+            .map(|v| v.to_lowercase() == "0x1" || v == "1")
+            .unwrap_or(false);
         if enabled {
             if let Some(p) = kv.get("ProxyServer") {
                 out.push(format!("系统代理 {}", p));
@@ -793,14 +1122,26 @@ pub fn system_proxy() -> Vec<String> {
             out.push(format!("PAC {}", u));
         }
     } else {
-        let g = |args: &[&str]| run_text("gsettings", args).trim().trim_matches('\'').to_string();
+        let g = |args: &[&str]| {
+            run_text("gsettings", args)
+                .trim()
+                .trim_matches('\'')
+                .to_string()
+        };
         let mode = g(&["get", "org.gnome.system.proxy", "mode"]);
         if mode == "manual" {
             let host = g(&["get", "org.gnome.system.proxy.https", "host"]);
             let port = g(&["get", "org.gnome.system.proxy.https", "port"]);
-            out.push(if host.is_empty() { "系统代理（手动）".into() } else { format!("HTTPS {}:{}", host, port) });
+            out.push(if host.is_empty() {
+                "系统代理（手动）".into()
+            } else {
+                format!("HTTPS {}:{}", host, port)
+            });
         } else if mode == "auto" {
-            out.push(format!("PAC {}", g(&["get", "org.gnome.system.proxy", "autoconfig-url"])));
+            out.push(format!(
+                "PAC {}",
+                g(&["get", "org.gnome.system.proxy", "autoconfig-url"])
+            ));
         }
     }
     out
@@ -823,7 +1164,11 @@ pub fn tunnel_kind(name: &str, desc: &str) -> Option<&'static str> {
 /// 测试用 CAM_TEST_ROUTE_IF="utun4"（空字符串表示没有）。
 pub fn default_route_tunnel() -> Option<(String, &'static str)> {
     if let Ok(t) = std::env::var("CAM_TEST_ROUTE_IF") {
-        return if t.is_empty() { None } else { tunnel_kind(&t, "").map(|k| (t, k)) };
+        return if t.is_empty() {
+            None
+        } else {
+            tunnel_kind(&t, "").map(|k| (t, k))
+        };
     }
     let (mut name, mut desc) = (String::new(), String::new());
     if cfg!(windows) {
@@ -858,7 +1203,9 @@ pub fn default_route_tunnel() -> Option<(String, &'static str)> {
 
 /// 记一笔“这个账号在这个出口地区用过”，给风险提示用（每个账号只留最近几个地区）。
 pub fn note_account_region(data: &mut Value, acc_id: Option<&str>, loc: Option<&str>) {
-    let (Some(id), Some(loc)) = (acc_id, loc) else { return };
+    let (Some(id), Some(loc)) = (acc_id, loc) else {
+        return;
+    };
     for a in accounts_mut(data) {
         if s(a, "id") == Some(id) {
             let mut regs: Vec<Value> = a
@@ -912,7 +1259,11 @@ pub fn region_view(data: &Value) -> Value {
 /// 并给当前账号记一笔地区。max_age 秒内查过就跳过。只记录，不干预任何操作。
 pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     let data = store.load()?;
-    if let Some(at) = data.get("region").and_then(|c| s(c, "checked_at")).and_then(parse_time) {
+    if let Some(at) = data
+        .get("region")
+        .and_then(|c| s(c, "checked_at"))
+        .and_then(parse_time)
+    {
         if chrono::Utc::now().signed_duration_since(at).num_seconds() < max_age {
             return Ok(region_view(&data));
         }
@@ -944,7 +1295,9 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
         reg[*k] = r.get(*k).cloned().unwrap_or(Value::Null);
     }
     // 中间失败过一次也和最后一次知道的出口比，出口变化不漏报（与 cam.py 一致）
-    let last = s(&old, "loc").or_else(|| s(&old, "last_loc")).map(String::from);
+    let last = s(&old, "loc")
+        .or_else(|| s(&old, "last_loc"))
+        .map(String::from);
     reg["last_loc"] = json!(new_loc.clone().or_else(|| last.clone()));
     match (last.as_deref(), new_loc.as_deref()) {
         (Some(o), Some(n)) if o != n => {
@@ -975,7 +1328,11 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     if new_loc.is_some() {
         // 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
         let mut drop_all = false;
-        if let Some(items) = data.get_mut("service_status").and_then(|ss| ss.get_mut("items")).and_then(|i| i.as_array_mut()) {
+        if let Some(items) = data
+            .get_mut("service_status")
+            .and_then(|ss| ss.get_mut("items"))
+            .and_then(|i| i.as_array_mut())
+        {
             items.retain(|i| !resolved_by_trace(i));
             drop_all = items.is_empty();
         }
@@ -994,7 +1351,9 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
 fn resolved_by_trace(item: &Value) -> bool {
     match s(item, "kind") {
         Some("dns" | "tls") => true,
-        Some("web") => s(item, "text").map(|t| t.contains("连不上")).unwrap_or(false),
+        Some("web") => s(item, "text")
+            .map(|t| t.contains("连不上"))
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -1008,11 +1367,20 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     };
     let now = chrono::Utc::now();
     let reg = data.get("region").cloned().unwrap_or_else(|| json!({}));
-    let loc: Option<String> = if s(&reg, "checked_at").is_some() { s(&reg, "loc").map(String::from) } else { None };
+    let loc: Option<String> = if s(&reg, "checked_at").is_some() {
+        s(&reg, "loc").map(String::from)
+    } else {
+        None
+    };
     if include_region {
         if let Some(l) = loc.as_deref() {
             if region_status(Some(l)) == "unsupported" {
-                add("region", "warn", region_message(Some(l), "unsupported"), region_advice("unsupported"));
+                add(
+                    "region",
+                    "warn",
+                    region_message(Some(l), "unsupported"),
+                    region_advice("unsupported"),
+                );
             }
         } else if s(&reg, "checked_at").is_some() {
             add(
@@ -1044,7 +1412,12 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                 .map(|t| now.signed_duration_since(t).num_seconds() < 3600)
                 .unwrap_or(false);
             if fresh {
-                for it in ss.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default() {
+                for it in ss
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
                     add(
                         s(&it, "kind").unwrap_or(""),
                         s(&it, "level").unwrap_or("warn"),
@@ -1055,7 +1428,9 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             }
         }
     }
-    if let (Some(prev), Some(l), Some(changed)) = (s(&reg, "prev_loc"), loc.as_deref(), s(&reg, "changed_at")) {
+    if let (Some(prev), Some(l), Some(changed)) =
+        (s(&reg, "prev_loc"), loc.as_deref(), s(&reg, "changed_at"))
+    {
         if let Some(t) = parse_time(changed) {
             if now.signed_duration_since(t).num_seconds() < REGION_CHANGE_HOURS * 3600 {
                 add(
@@ -1080,7 +1455,11 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
         }
     }
     let org = s(&reg, "org").unwrap_or("?");
-    let asn = reg.get("asn").filter(|v| !v.is_null()).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
+    let asn = reg
+        .get("asn")
+        .filter(|v| !v.is_null())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "?".into());
     match s(&reg, "ip_type") {
         Some("tor") => add(
             "tor_exit",
@@ -1107,7 +1486,11 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             add(
                 "ip_origin",
                 "info",
-                format!("出口 IP 注册在 {}，定位在 {}（广播 IP）", region_label(Some(r)), region_label(Some(l))),
+                format!(
+                    "出口 IP 注册在 {}，定位在 {}（广播 IP）",
+                    region_label(Some(r)),
+                    region_label(Some(l))
+                ),
                 "不同地理库可能把它判到不同国家，服务端看到的国家不一定和这里一致。",
             );
         }
@@ -1131,7 +1514,12 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     // 旧版缓存没有这一段，就当作不知道；这里不现场跑系统命令
     let env: Option<Value> = reg.get("env").filter(|e| e.is_object()).cloned();
     if let (Some(e), Some(l)) = (&env, loc.as_deref()) {
-        for d in e.get("dns").and_then(|d| d.as_array()).cloned().unwrap_or_default() {
+        for d in e
+            .get("dns")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             let Some(c) = s(&d, "country") else { continue };
             if c == l {
                 continue;
@@ -1152,7 +1540,12 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                      如果人确实已经在支持地区，多半是以前手动填的 DNS 没改回来：系统网络设置里把 DNS 改回自动获取（或 1.1.1.1 / 8.8.8.8 这类任播 DNS）。",
                 );
             } else {
-                add("dns_resolver", "info", text, "出差或代理分流都会这样；人所在地在支持名单内就没问题。");
+                add(
+                    "dns_resolver",
+                    "info",
+                    text,
+                    "出差或代理分流都会这样；人所在地在支持名单内就没问题。",
+                );
             }
             break;
         }
@@ -1165,7 +1558,10 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             "上面的出口地区是 WARP 的出口，不是本机网络的真实出口；Anthropic 按使用者所在地判断。",
         );
     }
-    if let Some(skew) = reg.get("skew").and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))) {
+    if let Some(skew) = reg
+        .get("skew")
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+    {
         if skew.abs() > CLOCK_SKEW_WARN {
             add(
                 "clock",
@@ -1177,7 +1573,11 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     }
     if let Some(sp) = data.get("status_page") {
         if let Some(ind) = s(sp, "indicator").filter(|i| *i != "none") {
-            let level = if ind == "major" || ind == "critical" { "bad" } else { "warn" };
+            let level = if ind == "major" || ind == "critical" {
+                "bad"
+            } else {
+                "warn"
+            };
             let desc = s(sp, "description").unwrap_or(ind);
             add(
                 "status",
@@ -1193,7 +1593,11 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                 z.to_string(),
                 e.get("tz_cc")
                     .and_then(|c| c.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default(),
             )
         })
@@ -1201,7 +1605,12 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     if let (Some((zone, cc)), Some(l)) = (tz_cached, loc.as_deref()) {
         if !cc.is_empty() && !cc.iter().any(|c| c == l) {
             let home = cc[0].as_str();
-            let text = format!("系统时区 {} 指向 {}，与出口地区 {} 不一致", zone, region_label(Some(home)), region_label(Some(l)));
+            let text = format!(
+                "系统时区 {} 指向 {}，与出口地区 {} 不一致",
+                zone,
+                region_label(Some(home)),
+                region_label(Some(l))
+            );
             if region_status(Some(home)) == "unsupported" {
                 add(
                     "timezone",
@@ -1225,7 +1634,12 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
         .and_then(|e| s(e, "locale").map(|n| (n.to_string(), s(e, "locale_cc").map(String::from))));
     if let (Some((name, Some(home))), Some(l)) = (lc_cached, loc.as_deref()) {
         if home != l {
-            let text = format!("系统语言 / 区域 {} 指向 {}，与出口地区 {} 不一致", name, region_label(Some(&home)), region_label(Some(l)));
+            let text = format!(
+                "系统语言 / 区域 {} 指向 {}，与出口地区 {} 不一致",
+                name,
+                region_label(Some(&home)),
+                region_label(Some(l))
+            );
             // 语言设置只代表语言习惯（新加坡、美国很多人也用 zh_CN），不代表所在地：只做参考，扣 5 分
             add("locale", "info", text, LOCALE_ADVICE);
         }
@@ -1238,7 +1652,12 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             .and_then(|r| r.as_array())
             .map(|rs| {
                 rs.iter()
-                    .filter(|r| s(r, "at").and_then(parse_time).map(|t| t >= cutoff).unwrap_or(false))
+                    .filter(|r| {
+                        s(r, "at")
+                            .and_then(parse_time)
+                            .map(|t| t >= cutoff)
+                            .unwrap_or(false)
+                    })
                     .filter_map(|r| s(r, "loc").map(String::from))
                     .collect()
             })
@@ -1258,7 +1677,10 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             );
         }
     }
-    let n = accounts(data).iter().filter(|a| s(a, "kind") == Some("claude_code")).count();
+    let n = accounts(data)
+        .iter()
+        .filter(|a| s(a, "kind") == Some("claude_code"))
+        .count();
     if n >= 2 {
         add(
             "accounts",
@@ -1275,13 +1697,38 @@ const LOCALE_ADVICE: &str = "系统语言只代表语言习惯，不代表所在
 
 /// 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
 const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
-    ("region", "warn", 60), ("region_unknown", "warn", 30), ("tls", "bad", 0), ("account_regions", "warn", 20), ("region_change", "warn", 15), ("isp", "warn", 20),
-    ("region_mismatch", "warn", 15), ("timezone", "warn", 25), ("timezone", "info", 5),
-    ("locale", "info", 5), ("clock", "warn", 10), ("warp", "info", 5), ("vpn", "info", 10), ("proxy", "info", 5),
-    ("status", "bad", 30), ("status", "warn", 10), ("api", "bad", 40), ("api", "warn", 5), ("web", "bad", 10),
-    ("web", "warn", 5), ("dns", "bad", 20), ("accounts", "info", 0), ("device", "info", 0), ("scope", "info", 0),
-    ("tor_exit", "warn", 40), ("proxy_ip", "warn", 25), ("ipv6_mismatch", "warn", 15), ("dns_resolver", "warn", 15),
-    ("dns_resolver", "info", 3), ("ip_origin", "info", 5), ("ipv6", "info", 0), ("dns_servers", "info", 0),
+    ("region", "warn", 60),
+    ("region_unknown", "warn", 30),
+    ("tls", "bad", 0),
+    ("account_regions", "warn", 20),
+    ("region_change", "warn", 15),
+    ("isp", "warn", 20),
+    ("region_mismatch", "warn", 15),
+    ("timezone", "warn", 25),
+    ("timezone", "info", 5),
+    ("locale", "info", 5),
+    ("clock", "warn", 10),
+    ("warp", "info", 5),
+    ("vpn", "info", 10),
+    ("proxy", "info", 5),
+    ("status", "bad", 30),
+    ("status", "warn", 10),
+    ("api", "bad", 40),
+    ("api", "warn", 5),
+    ("web", "bad", 10),
+    ("web", "warn", 5),
+    ("dns", "bad", 20),
+    ("accounts", "info", 0),
+    ("device", "info", 0),
+    ("scope", "info", 0),
+    ("tor_exit", "warn", 40),
+    ("proxy_ip", "warn", 25),
+    ("ipv6_mismatch", "warn", 15),
+    ("dns_resolver", "warn", 15),
+    ("dns_resolver", "info", 3),
+    ("ip_origin", "info", 5),
+    ("ipv6", "info", 0),
+    ("dns_servers", "info", 0),
 ];
 /// (最低分, 档位, 说明)
 const RISK_GRADES: &[(i64, &str, &str)] = &[
@@ -1289,7 +1736,8 @@ const RISK_GRADES: &[(i64, &str, &str)] = &[
     (70, "medium", "有风险，建议先处理提醒项再使用"),
     (0, "high", "风险高，不建议在当前环境使用；是否继续由你决定"),
 ];
-const RISK_SCORE_ADVICE: &str = "评分只汇总本机能看到的信号，满分也不代表一定合规；低于 90 时逐条看提醒和建议。";
+const RISK_SCORE_ADVICE: &str =
+    "评分只汇总本机能看到的信号，满分也不代表一定合规；低于 90 时逐条看提醒和建议。";
 
 /// 把风险项汇总成 {score, grade, label, advice}。只用于提示。
 pub fn risk_score(items: &[Value]) -> Value {
@@ -1299,7 +1747,10 @@ pub fn risk_score(items: &[Value]) -> Value {
         if kind == "summary" {
             continue;
         }
-        score -= match RISK_WEIGHTS.iter().find(|(k, l, _)| *k == kind && *l == level) {
+        score -= match RISK_WEIGHTS
+            .iter()
+            .find(|(k, l, _)| *k == kind && *l == level)
+        {
             Some((_, _, w)) => *w,
             None => match level {
                 "warn" => 10,
@@ -1309,26 +1760,44 @@ pub fn risk_score(items: &[Value]) -> Value {
         };
     }
     let score = score.max(0);
-    let (_, grade, label) = RISK_GRADES.iter().find(|(floor, _, _)| score >= *floor).unwrap_or(&RISK_GRADES[2]);
+    let (_, grade, label) = RISK_GRADES
+        .iter()
+        .find(|(floor, _, _)| score >= *floor)
+        .unwrap_or(&RISK_GRADES[2]);
     json!({"score": score, "grade": grade, "label": label, "advice": RISK_SCORE_ADVICE})
 }
 
 fn region_denied(msg: &str) -> bool {
     let low = msg.to_lowercase();
-    ["region", "country", "not available", "unsupported", "not allowed", "地区"]
-        .iter()
-        .any(|k| low.contains(k))
+    [
+        "region",
+        "country",
+        "not available",
+        "unsupported",
+        "not allowed",
+        "地区",
+    ]
+    .iter()
+    .any(|k| low.contains(k))
 }
 
 pub fn is_cloudflare(raw: &str) -> bool {
     let low = raw.to_lowercase();
-    ["just a moment", "cf-chl", "cloudflare", "challenge-platform", "/cdn-cgi/"]
-        .iter()
-        .any(|k| low.contains(k))
+    [
+        "just a moment",
+        "cf-chl",
+        "cloudflare",
+        "challenge-platform",
+        "/cdn-cgi/",
+    ]
+    .iter()
+    .any(|k| low.contains(k))
 }
 
 fn host_of(url: &str) -> String {
-    let rest = url.trim_start_matches("https://").trim_start_matches("http://");
+    let rest = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     let hostport = rest.split('/').next().unwrap_or(rest);
     hostport.split(':').next().unwrap_or(hostport).to_string()
 }
@@ -1348,7 +1817,9 @@ fn os_release() -> String {
     } else if cfg!(windows) {
         run_text("cmd", &["/c", "ver"]).trim().to_string()
     } else {
-        std::fs::read_to_string("/proc/sys/kernel/osrelease").map(|s| s.trim().to_string()).unwrap_or_default()
+        std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -1369,10 +1840,22 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     let mut add = |kind: &str, level: &str, text: String, advice: &str| {
         out.push(json!({"kind": kind, "level": level, "text": text, "advice": advice}))
     };
-    let proxies: Vec<(String, String)> = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
-        .collect();
+    let proxies: Vec<(String, String)> = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ]
+    .iter()
+    .filter_map(|k| {
+        std::env::var(k)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| (k.to_string(), v))
+    })
+    .collect();
     let api_host = host_of(&api_base());
     let web_host = host_of(&web_base());
     let mut hosts = vec![api_host.clone()];
@@ -1385,13 +1868,26 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                 let mut ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
                 ips.sort();
                 ips.dedup();
-                add("dns", "ok", format!("DNS：{} → {}", host, ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ")), "");
+                add(
+                    "dns",
+                    "ok",
+                    format!(
+                        "DNS：{} → {}",
+                        host,
+                        ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                    "",
+                );
             }
             Err(e) => add(
                 "dns",
                 "bad",
                 format!("DNS：{} 解析失败（{}）", host, e),
-                if proxies.is_empty() { "检查本机 DNS 或代理设置" } else { "检查本机 DNS 或代理设置；设了代理的话通常由代理解析，可忽略" },
+                if proxies.is_empty() {
+                    "检查本机 DNS 或代理设置"
+                } else {
+                    "检查本机 DNS 或代理设置；设了代理的话通常由代理解析，可忽略"
+                },
             ),
         }
     }
@@ -1410,7 +1906,9 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                     "{}（IP {}{}，Cloudflare 节点 {}，{} ms）",
                     region_message(Some(l), status),
                     s(&r, "ip").unwrap_or("?"),
-                    s(&r, "city").map(|c| format!("，{}", c)).unwrap_or_default(),
+                    s(&r, "city")
+                        .map(|c| format!("，{}", c))
+                        .unwrap_or_default(),
                     s(&r, "colo").unwrap_or("?"),
                     r.get("ms").and_then(|v| v.as_u64()).unwrap_or(0)
                 ),
@@ -1424,8 +1922,14 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             region_advice("unknown"),
         ),
     }
-    let asn = r.get("asn").filter(|v| !v.is_null()).map(|v| v.to_string()).unwrap_or_else(|| "?".into());
-    let src_note = s(&r, "meta_source").map(|m| format!("（数据：{}）", m)).unwrap_or_default();
+    let asn = r
+        .get("asn")
+        .filter(|v| !v.is_null())
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "?".into());
+    let src_note = s(&r, "meta_source")
+        .map(|m| format!("（数据：{}）", m))
+        .unwrap_or_default();
     let off = s(&r, "lookup_mode") == Some("off");
     match (s(&r, "org"), s(&r, "ip_type")) {
         _ if off => add(
@@ -1451,9 +1955,15 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     }
     match (s(&r, "reg_loc"), s(&r, "loc")) {
         _ if off => {}
-        (Some(reg_loc), Some(l)) if reg_loc == l => {
-            add("ip_origin", "ok", format!("IP 归属：注册在 {}，与定位一致（原生 IP）", region_label(Some(reg_loc))), "")
-        }
+        (Some(reg_loc), Some(l)) if reg_loc == l => add(
+            "ip_origin",
+            "ok",
+            format!(
+                "IP 归属：注册在 {}，与定位一致（原生 IP）",
+                region_label(Some(reg_loc))
+            ),
+            "",
+        ),
         (None, Some(_)) => add(
             "ip_origin_unknown",
             "info",
@@ -1464,11 +1974,29 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     }
     match (s(&r, "v4_loc"), s(&r, "v6_loc"), s(&r, "loc")) {
         _ if off => {}
-        (Some(v4), Some(v6), _) if v4 == v6 => add("ipv6", "ok", format!("IPv6：可用，出口 {}，地区与 IPv4 一致", s(&r, "v6_ip").unwrap_or("?")), ""),
-        (_, None, Some(_)) => add("ipv6", "ok", "IPv6：不可用，只有 IPv4 出口".into(), "不会出现 IPv6 漏出真实出口的问题"),
+        (Some(v4), Some(v6), _) if v4 == v6 => add(
+            "ipv6",
+            "ok",
+            format!(
+                "IPv6：可用，出口 {}，地区与 IPv4 一致",
+                s(&r, "v6_ip").unwrap_or("?")
+            ),
+            "",
+        ),
+        (_, None, Some(_)) => add(
+            "ipv6",
+            "ok",
+            "IPv6：不可用，只有 IPv4 出口".into(),
+            "不会出现 IPv6 漏出真实出口的问题",
+        ),
         _ => {}
     }
-    if let Some(dns) = r.get("env").and_then(|e| e.get("dns")).and_then(|d| d.as_array()).filter(|d| !d.is_empty()) {
+    if let Some(dns) = r
+        .get("env")
+        .and_then(|e| e.get("dns"))
+        .and_then(|d| d.as_array())
+        .filter(|d| !d.is_empty())
+    {
         let parts: Vec<String> = dns
             .iter()
             .map(|d| {
@@ -1477,7 +2005,9 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                 } else {
                     s(d, "name").unwrap_or("公共 DNS").to_string()
                 };
-                let c = s(d, "country").map(|c| format!("，{}", region_label(Some(c)))).unwrap_or_default();
+                let c = s(d, "country")
+                    .map(|c| format!("，{}", region_label(Some(c))))
+                    .unwrap_or_default();
                 format!("{}（{}{}）", s(d, "ip").unwrap_or("?"), who, c)
             })
             .collect();
@@ -1497,25 +2027,69 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     let t0 = Instant::now();
     let (st, body) = match &at {
         Some(t) => get_oauth(t, "/api/oauth/profile", 10),
-        None => http_json_timeout("GET", &format!("{}/api/oauth/usage", api_base()), &[], None, 10),
+        None => http_json_timeout(
+            "GET",
+            &format!("{}/api/oauth/usage", api_base()),
+            &[],
+            None,
+            10,
+        ),
     };
     let ms = t0.elapsed().as_millis();
     let msg = err_message(&body);
     let region_hint = "通常是出口地区不在 Anthropic 支持范围，换一个出口后重试";
     if st == 0 {
-        add("api", "bad", format!("{}：连不上（{}）", api_host, msg), "检查网络或代理；公司网络可能屏蔽了这个域名");
+        add(
+            "api",
+            "bad",
+            format!("{}：连不上（{}）", api_host, msg),
+            "检查网络或代理；公司网络可能屏蔽了这个域名",
+        );
     } else if st == 403 || region_denied(&msg) {
-        add("api", "bad", format!("{}：拒绝访问（HTTP {}：{}）", api_host, st, or_dash(&msg)), region_hint);
+        add(
+            "api",
+            "bad",
+            format!("{}：拒绝访问（HTTP {}：{}）", api_host, st, or_dash(&msg)),
+            region_hint,
+        );
     } else if at.is_some() && st == 200 {
-        add("api", "ok", format!("{}：服务正常，当前登录可用（{} ms）", api_host, ms), "");
+        add(
+            "api",
+            "ok",
+            format!("{}：服务正常，当前登录可用（{} ms）", api_host, ms),
+            "",
+        );
     } else if at.is_some() && st == 401 {
-        add("api", "warn", format!("{}：服务可达，但当前登录已过期或无效（{} ms）", api_host, ms), "运行一次 claude 会自动续登录，不影响切换账号");
+        add(
+            "api",
+            "warn",
+            format!(
+                "{}：服务可达，但当前登录已过期或无效（{} ms）",
+                api_host, ms
+            ),
+            "运行一次 claude 会自动续登录，不影响切换账号",
+        );
     } else if st == 401 {
-        add("api", "ok", format!("{}：服务可达（未登录，{} ms）", api_host, ms), "");
+        add(
+            "api",
+            "ok",
+            format!("{}：服务可达（未登录，{} ms）", api_host, ms),
+            "",
+        );
     } else if st >= 500 {
-        add("api", "bad", format!("{}：服务端错误（HTTP {}）", api_host, st), "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com");
+        add(
+            "api",
+            "bad",
+            format!("{}：服务端错误（HTTP {}）", api_host, st),
+            "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com",
+        );
     } else {
-        add("api", "warn", format!("{}：HTTP {}（{}，{} ms）", api_host, st, or_dash(&msg), ms), "少见的返回，稍后重试；持续出现请把这一行发给作者");
+        add(
+            "api",
+            "warn",
+            format!("{}：HTTP {}（{}，{} ms）", api_host, st, or_dash(&msg), ms),
+            "少见的返回，稍后重试；持续出现请把这一行发给作者",
+        );
     }
     // claude.ai：不带登录，看可达性和有没有被网络管控拦截
     let t0 = Instant::now();
@@ -1526,7 +2100,12 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     let ms = t0.elapsed().as_millis();
     let msg = err_message(&body);
     if code == 0 {
-        add("web", "bad", format!("{}：连不上（{}）", web_host, msg), "检查网络或代理");
+        add(
+            "web",
+            "bad",
+            format!("{}：连不上（{}）", web_host, msg),
+            "检查网络或代理",
+        );
     } else if is_cloudflare(&msg) {
         add(
             "web",
@@ -1535,17 +2114,42 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             "公司网络或代理触发了 Cloudflare 人机验证；只影响网页账号读取额度，不影响 Claude Code 切换",
         );
     } else if region_denied(&msg) {
-        add("web", "bad", format!("{}：拒绝访问（HTTP {}：{}）", web_host, code, msg), region_hint);
+        add(
+            "web",
+            "bad",
+            format!("{}：拒绝访问（HTTP {}：{}）", web_host, code, msg),
+            region_hint,
+        );
     } else if code == 200 || code == 401 || code == 403 {
         add("web", "ok", format!("{}：可达（{} ms）", web_host, ms), "");
     } else if code >= 500 {
-        add("web", "bad", format!("{}：服务端错误（HTTP {}）", web_host, code), "稍后再试");
+        add(
+            "web",
+            "bad",
+            format!("{}：服务端错误（HTTP {}）", web_host, code),
+            "稍后再试",
+        );
     } else {
-        add("web", "warn", format!("{}：HTTP {}（{}，{} ms）", web_host, code, or_dash(&msg), ms), "少见的返回，稍后重试");
+        add(
+            "web",
+            "warn",
+            format!(
+                "{}：HTTP {}（{}，{} ms）",
+                web_host,
+                code,
+                or_dash(&msg),
+                ms
+            ),
+            "少见的返回，稍后重试",
+        );
     }
     // 代理：环境变量 + 系统设置；VPN：默认路由
     drop(add);
-    let env = r.get("env").filter(|e| e.get("proxy").is_some()).cloned().unwrap_or_else(local_env);
+    let env = r
+        .get("env")
+        .filter(|e| e.get("proxy").is_some())
+        .cloned()
+        .unwrap_or_else(local_env);
     out.extend(proxy_vpn_items(&env));
     out.extend(risk_items(&data, false));
     out.push(json!({
@@ -1572,7 +2176,11 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     } else {
         "ok"
     };
-    let head = format!("总体：{}/100，{}", sc["score"], s(&sc, "label").unwrap_or(""));
+    let head = format!(
+        "总体：{}/100，{}",
+        sc["score"],
+        s(&sc, "label").unwrap_or("")
+    );
     let summary = match &worst {
         Some(w) => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
                           "text": format!("{} —— {}", head, s(w, "text").unwrap_or("")), "advice": w["advice"]}),
@@ -1583,7 +2191,10 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     // 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
     let bad: Vec<Value> = out
         .iter()
-        .filter(|i| matches!(s(i, "kind"), Some("api" | "web" | "dns" | "tls")) && matches!(s(i, "level"), Some("warn" | "bad")))
+        .filter(|i| {
+            matches!(s(i, "kind"), Some("api" | "web" | "dns" | "tls"))
+                && matches!(s(i, "level"), Some("warn" | "bad"))
+        })
         .cloned()
         .collect();
     if let Ok(_g) = store.lock() {
@@ -1605,22 +2216,61 @@ pub fn service_check(store: &Store) -> Vec<Value> {
 pub fn privacy_sources(cfg: &LookupConfig) -> Vec<Value> {
     let src = |name: &str, what: &str, group: &str, warn: bool| json!({"name": name, "what": what, "group": group, "warn": warn});
     let mut out = vec![
-        src("claude.ai/cdn-cgi/trace", "出口国家、IP、时钟。访问 Claude 时它本来就看得到", "anthropic", false),
-        src("status.anthropic.com", "官方状态页，不带任何本机信息", "anthropic", false),
+        src(
+            "claude.ai/cdn-cgi/trace",
+            "出口国家、IP、时钟。访问 Claude 时它本来就看得到",
+            "anthropic",
+            false,
+        ),
+        src(
+            "status.anthropic.com",
+            "官方状态页，不带任何本机信息",
+            "anthropic",
+            false,
+        ),
     ];
     if cfg.mode == "off" {
         return out;
     }
     if cfg.mode == "ip-api" {
-        out.push(src("ip-api.com（http）", "运营商、城市、机房 / 代理标记。免费接口仅限非商业用途", "third", true));
+        out.push(src(
+            "ip-api.com（http）",
+            "运营商、城市、机房 / 代理标记。免费接口仅限非商业用途",
+            "third",
+            true,
+        ));
     }
-    let ipapi = if cfg.ipapi_key.is_empty() { "运营商、城市（没配 key：每天 30 次，不带类型标记）" } else { "运营商、城市、机房 / VPN / Tor 标记" };
+    let ipapi = if cfg.ipapi_key.is_empty() {
+        "运营商、城市（没配 key：每天 30 次，不带类型标记）"
+    } else {
+        "运营商、城市、机房 / VPN / Tor 标记"
+    };
     out.push(src("api.ipapi.is", ipapi, "third", false));
-    out.push(src("ipinfo.io", "上一家查不到时：运营商、城市", "third", false));
-    out.push(src("speed.cloudflare.com", "再查不到时：运营商、城市", "third", false));
+    out.push(src(
+        "ipinfo.io",
+        "上一家查不到时：运营商、城市",
+        "third",
+        false,
+    ));
+    out.push(src(
+        "speed.cloudflare.com",
+        "再查不到时：运营商、城市",
+        "third",
+        false,
+    ));
     out.push(src("rdap.org", "出口 IP 的注册国", "third", false));
-    out.push(src("1.1.1.1 / Cloudflare IPv6", "分别测 IPv4、IPv6 出口", "third", false));
-    out.push(src("www.cloudflare.com", "claude.ai 连不上时，代替它看出口国家", "third", false));
+    out.push(src(
+        "1.1.1.1 / Cloudflare IPv6",
+        "分别测 IPv4、IPv6 出口",
+        "third",
+        false,
+    ));
+    out.push(src(
+        "www.cloudflare.com",
+        "claude.ai 连不上时，代替它看出口国家",
+        "third",
+        false,
+    ));
     out
 }
 
@@ -1629,12 +2279,21 @@ pub fn privacy_view(store: &Store) -> R<Value> {
     let data = store.load()?;
     let n = accounts(&data)
         .iter()
-        .filter(|a| a.get("regions").and_then(|r| r.as_array()).map(|r| !r.is_empty()).unwrap_or(false))
+        .filter(|a| {
+            a.get("regions")
+                .and_then(|r| r.as_array())
+                .map(|r| !r.is_empty())
+                .unwrap_or(false)
+        })
         .count();
     let modes: Vec<Value> = IP_LOOKUP_MODES
         .iter()
         .map(|(v, l)| {
-            let (_, title, desc) = IP_LOOKUP_TITLES.iter().find(|(k, _, _)| k == v).copied().unwrap_or((v, v, ""));
+            let (_, title, desc) = IP_LOOKUP_TITLES
+                .iter()
+                .find(|(k, _, _)| k == v)
+                .copied()
+                .unwrap_or((v, v, ""));
             json!({"value": v, "label": l, "title": title, "desc": desc})
         })
         .collect();
@@ -1670,7 +2329,11 @@ pub fn save_privacy(store: &Store, body: &Value) -> R<Value> {
         let mut data = store.load()?;
         let mut changed = false;
         if let Some(m) = mode {
-            let cur = data.get("prefs").and_then(|p| s(p, "ip_lookup")).unwrap_or("auto").to_string();
+            let cur = data
+                .get("prefs")
+                .and_then(|p| s(p, "ip_lookup"))
+                .unwrap_or("auto")
+                .to_string();
             if m != cur {
                 if !data.get("prefs").map(|p| p.is_object()).unwrap_or(false) {
                     data["prefs"] = json!({});

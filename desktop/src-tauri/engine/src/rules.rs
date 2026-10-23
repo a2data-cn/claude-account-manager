@@ -32,7 +32,10 @@ fn parse_days(v: &Value) -> R<Vec<u32>> {
         }
         Value::Null => days.extend(1..=7),
         other => {
-            let txt = other.as_str().map(String::from).unwrap_or_else(|| other.to_string());
+            let txt = other
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| other.to_string());
             for part in txt.replace('，', ",").split(',') {
                 let part = part.trim();
                 if part.is_empty() {
@@ -131,7 +134,11 @@ pub fn save_rules(store: &Store, body: &Value) -> R<Value> {
     if let Some(r) = body.get("rules") {
         let v = validate(&data, r)?;
         data["rules"] = Value::Array(v);
-        if !data.get("rule_state").map(|x| x.is_object()).unwrap_or(false) {
+        if !data
+            .get("rule_state")
+            .map(|x| x.is_object())
+            .unwrap_or(false)
+        {
             data["rule_state"] = json!({});
         }
         data["rule_state"]["time_rule"] = Value::Null;
@@ -169,7 +176,11 @@ pub fn match_time_rule(data: &Value, now: chrono::NaiveDateTime) -> Option<Value
         let days: Vec<u32> = r
             .get("days")
             .and_then(|d| d.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64().map(|x| x as u32))
+                    .collect()
+            })
             .unwrap_or_default();
         let hit = if st < en {
             days.contains(&wd) && mins >= st && mins < en
@@ -197,11 +208,18 @@ pub fn apply_time_rules_at(store: &Store, now: chrono::NaiveDateTime) -> R<Optio
         let mut data = store.load()?;
         let rule = match_time_rule(&data, now);
         let rid = rule.as_ref().and_then(|r| s(r, "id")).map(String::from);
-        let last = data.get("rule_state").and_then(|x| s(x, "time_rule")).map(String::from);
+        let last = data
+            .get("rule_state")
+            .and_then(|x| s(x, "time_rule"))
+            .map(String::from);
         if last == rid {
             return Ok(None);
         }
-        if !data.get("rule_state").map(|x| x.is_object()).unwrap_or(false) {
+        if !data
+            .get("rule_state")
+            .map(|x| x.is_object())
+            .unwrap_or(false)
+        {
             data["rule_state"] = json!({});
         }
         data["rule_state"]["time_rule"] = json!(rid);

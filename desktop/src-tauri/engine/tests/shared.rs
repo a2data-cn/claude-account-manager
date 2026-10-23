@@ -8,8 +8,11 @@ use cam_engine::usage::{message_cost, parse_usage_body, roll_renewals_at};
 use serde_json::{json, Value};
 
 fn fixture(name: &str) -> Value {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tests/shared").join(name);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取 {} 失败：{}", path.display(), e));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/shared")
+        .join(name);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("读取 {} 失败：{}", path.display(), e));
     serde_json::from_str(&text).unwrap()
 }
 
@@ -26,7 +29,8 @@ fn identify_cases() {
             Some(rt) => json!({"claudeAiOauth": {"refreshToken": rt}}),
             None => json!({}),
         };
-        let got = identify(&data, &c["oauth_account"], &creds).map(|i| accounts(&data)[i]["id"].clone());
+        let got =
+            identify(&data, &c["oauth_account"], &creds).map(|i| accounts(&data)[i]["id"].clone());
         assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
     }
     for c in cases(&fx, "agrees") {
@@ -40,7 +44,9 @@ fn find_account_cases() {
     let fx = fixture("find_account.json");
     let data = json!({"accounts": fx["accounts"]});
     for c in cases(&fx, "cases") {
-        let got = find_index(&data, c["key"].as_str().unwrap()).ok().map(|i| accounts(&data)[i]["id"].clone());
+        let got = find_index(&data, c["key"].as_str().unwrap())
+            .ok()
+            .map(|i| accounts(&data)[i]["id"].clone());
         assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
     }
 }
@@ -55,7 +61,8 @@ fn rule_cases() {
     }
     data["rules"] = fx["match_rules"].clone();
     for c in cases(&fx, "match") {
-        let at = chrono::NaiveDateTime::parse_from_str(c["at"].as_str().unwrap(), "%Y-%m-%dT%H:%M").unwrap();
+        let at = chrono::NaiveDateTime::parse_from_str(c["at"].as_str().unwrap(), "%Y-%m-%dT%H:%M")
+            .unwrap();
         let got = match_time_rule(&data, at).and_then(|r| s(&r, "id").map(|x| json!(x)));
         assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
     }
@@ -64,8 +71,17 @@ fn rule_cases() {
 #[test]
 fn health_cases() {
     for c in cases(&fixture("health.json"), "cases") {
-        let h = account_health(&c["account"], c["has_creds"].as_bool().unwrap(), c["days_left"].as_i64());
-        let kinds: Vec<Value> = h["issues"].as_array().unwrap().iter().map(|i| i["kind"].clone()).collect();
+        let h = account_health(
+            &c["account"],
+            c["has_creds"].as_bool().unwrap(),
+            c["days_left"].as_i64(),
+        );
+        let kinds: Vec<Value> = h["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["kind"].clone())
+            .collect();
         let got = json!({"level": h["level"], "label": h["label"], "kinds": kinds});
         assert_eq!(got, c["expect"], "{}", c["name"]);
         for i in h["issues"].as_array().unwrap() {
@@ -78,7 +94,8 @@ fn health_cases() {
 fn renewal_cases() {
     for c in cases(&fixture("renewals.json"), "cases") {
         let mut data = json!({"accounts": [{"id": "x", "manual": c["manual"]}]});
-        let today = chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
+        let today =
+            chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
         roll_renewals_at(&mut data, today);
         assert_eq!(data["accounts"][0]["manual"], c["expect"], "{}", c["name"]);
     }
@@ -88,7 +105,8 @@ fn renewal_cases() {
 fn manual_cases() {
     let fx = fixture("manual.json");
     for c in cases(&fx, "parse_day") {
-        let got = parse_day(c["input"].as_str().unwrap()).map(|d| json!(d.format("%Y-%m-%d").to_string()));
+        let got = parse_day(c["input"].as_str().unwrap())
+            .map(|d| json!(d.format("%Y-%m-%d").to_string()));
         assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
     }
     for c in cases(&fx, "apply") {
@@ -102,8 +120,14 @@ fn manual_cases() {
         }
     }
     for c in cases(&fx, "days_left") {
-        let today = chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
-        assert_eq!(days_left_at(&c["account"], today), c["expect"], "{}", c["name"]);
+        let today =
+            chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
+        assert_eq!(
+            days_left_at(&c["account"], today),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
     }
 }
 
@@ -118,7 +142,13 @@ fn usage_cases() {
         let got = message_cost(c["model"].as_str().unwrap(), &c["usage"]);
         match c["expect"].as_f64() {
             None => assert_eq!(got, None, "{}", c["name"]),
-            Some(want) => assert!((got.unwrap() - want).abs() < 1e-9, "{}：{:?} != {}", c["name"], got, want),
+            Some(want) => assert!(
+                (got.unwrap() - want).abs() < 1e-9,
+                "{}：{:?} != {}",
+                c["name"],
+                got,
+                want
+            ),
         }
     }
 }

@@ -45,7 +45,11 @@ pub fn parse_day(v: &str) -> Option<chrono::NaiveDate> {
     if !(digits(0..4) && b[4] == b'-' && digits(5..7) && b[7] == b'-' && digits(8..10)) {
         return None;
     }
-    chrono::NaiveDate::from_ymd_opt(v[..4].parse().ok()?, v[5..7].parse().ok()?, v[8..10].parse().ok()?)
+    chrono::NaiveDate::from_ymd_opt(
+        v[..4].parse().ok()?,
+        v[5..7].parse().ok()?,
+        v[8..10].parse().ok()?,
+    )
 }
 
 pub fn new_id() -> String {
@@ -86,7 +90,13 @@ pub fn resolve_link(path: &Path) -> PathBuf {
     let mut p = path.to_path_buf();
     for _ in 0..16 {
         match fs::read_link(&p) {
-            Ok(t) => p = if t.is_absolute() { t } else { p.parent().map(|d| d.join(&t)).unwrap_or(t) },
+            Ok(t) => {
+                p = if t.is_absolute() {
+                    t
+                } else {
+                    p.parent().map(|d| d.join(&t)).unwrap_or(t)
+                }
+            }
             Err(_) => break,
         }
     }
@@ -106,7 +116,8 @@ pub fn write_json_atomic(path: &Path, data: &Value, private: bool) -> R<()> {
     let tmp = dir.join(format!(".tmp-{}", new_id()));
     let text = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
     {
-        let mut f = fs::File::create(&tmp).map_err(|e| format!("写入 {} 失败：{}", tmp.display(), e))?;
+        let mut f =
+            fs::File::create(&tmp).map_err(|e| format!("写入 {} 失败：{}", tmp.display(), e))?;
         f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
     }
@@ -116,7 +127,10 @@ pub fn write_json_atomic(path: &Path, data: &Value, private: bool) -> R<()> {
         if private {
             set_private(&tmp, false);
         } else if let Ok(meta) = fs::metadata(path) {
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(meta.permissions().mode() & 0o777));
+            let _ = fs::set_permissions(
+                &tmp,
+                fs::Permissions::from_mode(meta.permissions().mode() & 0o777),
+            );
         }
     }
     #[cfg(not(unix))]
@@ -138,11 +152,15 @@ pub fn update_json_file(
     for _ in 0..5 {
         let before = read_bytes(&real);
         let mut obj = match &before {
-            Some(b) if !b.iter().all(u8::is_ascii_whitespace) => match serde_json::from_slice::<Value>(b) {
-                Ok(Value::Object(m)) => m,
-                Ok(_) => Map::new(),
-                Err(e) => return Err(format!("文件损坏，无法解析：{}（{}）", path.display(), e)),
-            },
+            Some(b) if !b.iter().all(u8::is_ascii_whitespace) => {
+                match serde_json::from_slice::<Value>(b) {
+                    Ok(Value::Object(m)) => m,
+                    Ok(_) => Map::new(),
+                    Err(e) => {
+                        return Err(format!("文件损坏，无法解析：{}（{}）", path.display(), e))
+                    }
+                }
+            }
             _ => Map::new(),
         };
         mutate(&mut obj);
@@ -154,7 +172,10 @@ pub fn update_json_file(
             return Ok(());
         }
     }
-    Err(format!("{} 一直在被其它程序改写，请先退出正在运行的 claude 再试", path.display()))
+    Err(format!(
+        "{} 一直在被其它程序改写，请先退出正在运行的 claude 再试",
+        path.display()
+    ))
 }
 
 pub struct Store {
@@ -318,8 +339,13 @@ impl Store {
             let mut names: Vec<PathBuf> = rd
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| {
-                    let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    n.get(16..).map(|t| t.starts_with("before-")).unwrap_or(false)
+                    let n = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    n.get(16..)
+                        .map(|t| t.starts_with("before-"))
+                        .unwrap_or(false)
                 })
                 .collect();
             names.sort();
@@ -354,12 +380,16 @@ impl Store {
 // ---------------------------------------------------------------- Value 小工具
 
 pub fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
-    v.get(key).and_then(|x| x.as_str()).filter(|x| !x.is_empty())
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .filter(|x| !x.is_empty())
 }
 
 pub fn accounts(data: &Value) -> &Vec<Value> {
     static EMPTY: Vec<Value> = Vec::new();
-    data.get("accounts").and_then(|v| v.as_array()).unwrap_or(&EMPTY)
+    data.get("accounts")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&EMPTY)
 }
 
 pub fn accounts_mut(data: &mut Value) -> &mut Vec<Value> {
@@ -384,7 +414,11 @@ pub fn set_active_code(data: &mut Value, id: Option<&str>) {
 }
 
 pub fn push_switch_log(data: &mut Value, id: &str) {
-    if !data.get("switch_log").map(|v| v.is_array()).unwrap_or(false) {
+    if !data
+        .get("switch_log")
+        .map(|v| v.is_array())
+        .unwrap_or(false)
+    {
         data["switch_log"] = json!([]);
     }
     data["switch_log"]
@@ -407,7 +441,11 @@ pub fn find_index(data: &Value, key: &str) -> R<usize> {
         let hits: Vec<usize> = accs
             .iter()
             .enumerate()
-            .filter(|(_, a)| s(a, field).map(|x| x.to_lowercase() == lower).unwrap_or(false))
+            .filter(|(_, a)| {
+                s(a, field)
+                    .map(|x| x.to_lowercase() == lower)
+                    .unwrap_or(false)
+            })
             .map(|(i, _)| i)
             .collect();
         if hits.len() == 1 {

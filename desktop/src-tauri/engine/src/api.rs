@@ -14,7 +14,14 @@ fn mask(k: Option<&str>) -> Value {
         None => Value::Null,
         Some(k) if k.chars().count() > 16 => {
             let head: String = k.chars().take(10).collect();
-            let tail: String = k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: String = k
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             json!(format!("{}…{}", head, tail))
         }
         Some(_) => json!("…"),
@@ -23,7 +30,11 @@ fn mask(k: Option<&str>) -> Value {
 
 /// 手动填的到期日优先；没填时用接口返回的订阅到期时间（换算成本地日期）。与 cam.py 一致。
 pub fn days_left_at(acc: &Value, today: chrono::NaiveDate) -> Value {
-    let day = match acc.get("manual").and_then(|m| s(m, "expires_at")).filter(|m| !m.is_empty()) {
+    let day = match acc
+        .get("manual")
+        .and_then(|m| s(m, "expires_at"))
+        .filter(|m| !m.is_empty())
+    {
         Some(m) => parse_day(m),
         None => acc
             .get("auto")
@@ -74,7 +85,10 @@ fn health_kind_of_error(err: &str) -> Option<&'static str> {
         Some("key_invalid")
     } else if err.contains("后台不会替它续登录") {
         Some("stale")
-    } else if ["人机验证", "网络错误", "续登录失败", "HTTP 5", "HTTP 429"].iter().any(|k| err.contains(k)) {
+    } else if ["人机验证", "网络错误", "续登录失败", "HTTP 5", "HTTP 429"]
+        .iter()
+        .any(|k| err.contains(k))
+    {
         Some("network")
     } else {
         Some("usage_error")
@@ -96,7 +110,10 @@ pub fn account_health(acc: &Value, has_creds: bool, days: Option<i64>) -> Value 
             }
         }
     }
-    if kind == "api" && u.get("key_valid").and_then(|v| v.as_bool()) == Some(false) && !kinds.iter().any(|(x, _)| *x == "key_invalid") {
+    if kind == "api"
+        && u.get("key_valid").and_then(|v| v.as_bool()) == Some(false)
+        && !kinds.iter().any(|(x, _)| *x == "key_invalid")
+    {
         kinds.push(("key_invalid", s(&u, "key_error").map(String::from)));
     }
     if days.is_some_and(|d| d < 0) {
@@ -106,7 +123,11 @@ pub fn account_health(acc: &Value, has_creds: bool, days: Option<i64>) -> Value 
         .into_iter()
         .map(|(k, detail)| {
             let (level, text, advice) = health_text(k);
-            let text = if k == "expired" { format!("订阅已过期 {} 天", -days.unwrap_or(0)) } else { text.to_string() };
+            let text = if k == "expired" {
+                format!("订阅已过期 {} 天", -days.unwrap_or(0))
+            } else {
+                text.to_string()
+            };
             json!({"kind": k, "level": level, "text": text, "advice": advice, "detail": detail})
         })
         .collect();
@@ -158,7 +179,10 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             // 桌面版的登录独立保存，不能把旧版本误写的 API Key 错误当成账号异常。
             let mut health_account = a.clone();
             if s(a, "kind") == Some("claude_desktop")
-                && !matches!(a.get("usage").and_then(|u| s(u, "source")), Some("desktop_cache" | "desktop_history"))
+                && !matches!(
+                    a.get("usage").and_then(|u| s(u, "source")),
+                    Some("desktop_cache" | "desktop_history")
+                )
             {
                 p.insert("usage".into(), Value::Null);
                 health_account["usage"] = Value::Null;
@@ -172,8 +196,15 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             p.insert("is_active".into(), json!(is_active));
             let dl = days_left(a);
             let has_creds = s(a, "kind") == Some("claude_code")
-                && store.load_secret(id).get("claudeAiOauth").and_then(|o| s(o, "refreshToken")).is_some();
-            p.insert("health".into(), account_health(&health_account, has_creds, dl.as_i64()));
+                && store
+                    .load_secret(id)
+                    .get("claudeAiOauth")
+                    .and_then(|o| s(o, "refreshToken"))
+                    .is_some();
+            p.insert(
+                "health".into(),
+                account_health(&health_account, has_creds, dl.as_i64()),
+            );
             p.insert("days_left".into(), dl);
             let plan = s(a, "plan").or_else(|| a.get("manual").and_then(|m| s(m, "plan")));
             p.insert("plan_display".into(), json!(plan));
@@ -181,11 +212,17 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
                 Some("api") => {
                     let sec = store.load_secret(id);
                     p.insert("api_key_hint".into(), mask(s(&sec, "api_key")));
-                    p.insert("has_admin_key".into(), json!(s(&sec, "admin_key").is_some()));
+                    p.insert(
+                        "has_admin_key".into(),
+                        json!(s(&sec, "admin_key").is_some()),
+                    );
                 }
                 Some("claude_web") => {
                     let sec = store.load_secret(id);
-                    p.insert("has_session_key".into(), json!(s(&sec, "session_key").is_some()));
+                    p.insert(
+                        "has_session_key".into(),
+                        json!(s(&sec, "session_key").is_some()),
+                    );
                 }
                 _ => {}
             }
@@ -217,7 +254,9 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
 pub fn add_account(store: &Store, b: &Value) -> R<()> {
     let kind = s(b, "kind").unwrap_or("");
     if kind != "claude_web" && kind != "api" && kind != "claude_desktop" {
-        return Err("kind 只能是 claude_web、claude_desktop 或 api（Claude Code 账号请用导入）".into());
+        return Err(
+            "kind 只能是 claude_web、claude_desktop 或 api（Claude Code 账号请用导入）".into(),
+        );
     }
     let api_key = s(b, "api_key").map(str::trim).filter(|x| !x.is_empty());
     let admin_key = s(b, "admin_key").map(str::trim).filter(|x| !x.is_empty());
@@ -225,7 +264,12 @@ pub fn add_account(store: &Store, b: &Value) -> R<()> {
     if kind == "api" && api_key.is_none() && admin_key.is_none() {
         return Err("API 账号至少需要 API Key 或 Admin Key".into());
     }
-    let mut label: String = s(b, "label").unwrap_or("").trim().chars().take(60).collect();
+    let mut label: String = s(b, "label")
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(60)
+        .collect();
     if label.is_empty() {
         label = if kind == "api" {
             "API".into()
@@ -237,13 +281,17 @@ pub fn add_account(store: &Store, b: &Value) -> R<()> {
     }
     let _g = store.lock()?;
     let mut data = store.load()?;
-    let use_current = kind == "claude_desktop" && b.get("use_current").and_then(|v| v.as_bool()) == Some(true);
+    let use_current =
+        kind == "claude_desktop" && b.get("use_current").and_then(|v| v.as_bool()) == Some(true);
     if use_current
         && accounts(&data).iter().any(|a| {
             s(a, "kind") == Some("claude_desktop") && s(a, "desktop_profile") == Some("default")
         })
     {
-        return Err("已经有一个账号绑定了当前的 Claude 桌面版登录。其它号不要勾选，第一次打开时再登录。".into());
+        return Err(
+            "已经有一个账号绑定了当前的 Claude 桌面版登录。其它号不要勾选，第一次打开时再登录。"
+                .into(),
+        );
     }
     let id = new_id();
     let desktop_profile = if kind != "claude_desktop" {
@@ -295,7 +343,11 @@ const MANUAL_BOOL: [&str; 2] = ["auto_renew", "app_mode"];
 /// 只有到期日真的变了才清掉 renew_day，所以界面整份提交表单时不会把月底扣费日弄丢。
 pub fn apply_manual(acc: &mut Value, f: &Value) -> R<()> {
     let f = f.as_object().ok_or("请求体应为 JSON 对象")?;
-    let mut m = acc.get("manual").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let mut m = acc
+        .get("manual")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
     let mut label = acc.get("label").cloned().unwrap_or(Value::Null);
     match f.get("label") {
         None | Some(Value::Null) => {}
@@ -303,9 +355,17 @@ pub fn apply_manual(acc: &mut Value, f: &Value) -> R<()> {
         Some(Value::String(l)) => label = json!(l.trim().chars().take(60).collect::<String>()),
         Some(_) => return Err("名称应为文字".into()),
     }
-    for k in MANUAL_TEXT.iter().chain(MANUAL_BOOL.iter()).chain(["expires_at", "cycle"].iter()) {
+    for k in MANUAL_TEXT
+        .iter()
+        .chain(MANUAL_BOOL.iter())
+        .chain(["expires_at", "cycle"].iter())
+    {
         let Some(v) = f.get(*k) else { continue };
-        let mut v = if v.as_str() == Some("") { Value::Null } else { v.clone() };
+        let mut v = if v.as_str() == Some("") {
+            Value::Null
+        } else {
+            v.clone()
+        };
         if MANUAL_BOOL.contains(k) {
             if !v.is_null() && !v.is_boolean() {
                 return Err(format!("{} 应为 true 或 false", k));
@@ -452,7 +512,11 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
         }));
     }
     let r = switch_account(store, key)?;
-    let procs = if r.changed { running_claude_processes() } else { Vec::new() };
+    let procs = if r.changed {
+        running_claude_processes()
+    } else {
+        Vec::new()
+    };
     let message = if r.changed {
         format!(
             "已切换到 {}。{}",
@@ -479,13 +543,17 @@ pub fn identify_account(store: &Store, key: &str) -> R<Value> {
         let i = find_index(&fresh, id)?;
         // 核对读取期间登录没有被其它程序换掉。
         let verified = super::identity::desktop_identity(store, &accounts(&fresh)[i])?;
-        if found != verified { return Err("识别期间客户端登录发生变化，请重试".into()); }
+        if found != verified {
+            return Err("识别期间客户端登录发生变化，请重试".into());
+        }
         accounts_mut(&mut fresh)[i]["email"] = found["email"].clone();
         accounts_mut(&mut fresh)[i]["desktop_account_uuid"] = found["desktop_account_uuid"].clone();
         store.save(&mut fresh)?;
     } else if matches!(s(&account, "kind"), Some("claude_code" | "claude_web")) {
         refresh_usage(store, Some(id), false)?;
-    } else { return Err("这个账号类型的邮箱请手动填写".into()); }
+    } else {
+        return Err("这个账号类型的邮箱请手动填写".into());
+    }
     let data = store.load()?;
     let account = &accounts(&data)[find_index(&data, id)?];
     if s(account, "email").is_none_or(|email| email.is_empty()) {
@@ -499,7 +567,11 @@ pub fn identify_account(store: &Store, key: &str) -> R<Value> {
 /// 统一路由：返回 (HTTP 状态码, JSON)。
 pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
-    let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|p| !p.is_empty())
+        .collect();
     let parts: &[&str] = if parts.first() == Some(&"api") {
         &parts[1..]
     } else {
@@ -517,7 +589,9 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
         ("POST", ["vault", "entries", id, "connect"]) => super::mailbox::connect(store, id),
         ("GET", ["vault", "oauth", job]) => super::mailbox::oauth_status(store, job),
         ("POST", ["vault", "entries", id, "messages"]) => super::mailbox::messages(store, id, body),
-        ("POST", ["vault", "entries", id, "open-verification"]) => super::identity::open_verification(store, id, s(body, "url").ok_or("缺少验证地址")?),
+        ("POST", ["vault", "entries", id, "open-verification"]) => {
+            super::identity::open_verification(store, id, s(body, "url").ok_or("缺少验证地址")?)
+        }
         ("POST", ["open-external"]) => {
             super::identity::open_external(s(body, "url").ok_or("缺少地址")?)?;
             Ok(json!({"ok": true}))

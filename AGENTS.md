@@ -21,7 +21,7 @@
 - `cam doctor`：全面体检（账号登录、Claude 服务、本机 Claude Code 和正在运行的会话、cam 自己、聊天机器人），不显示密钥。联网时会刷新用量、替不在用的号续快过期的登录（当前登录不碰）；只想看、不想改任何东西用 `cam doctor --offline`（`--json` 给脚本用）。`cam verify`：按 `SHA256SUMS` 校验代码文件
 - 三套测试，都不碰真实账号：
   - `python3 -m unittest scripts.test_cam`（账号库和身份识别的测试一起跑：`python3 -m unittest discover -s scripts -p 'test_*.py'`）
-  - `cd desktop/src-tauri/engine && cargo test`
+  - `cd desktop/src-tauri/engine && cargo test`；改了 Rust 还要在 `desktop/src-tauri` 运行 `cargo fmt --all`（自动编译会检查排版，不对就失败）
   - `cd desktop && npx tsc --noEmit`
 - 推到 GitHub 后 `.github/workflows/build.yml` 每次推送自动跑这三套测试（脚本版在三个系统上跑，引擎还跑 clippy，有警告就算失败）；桌面版安装包只在推 `v*` 标签或手动运行时编
 - 改了 PowerShell 脚本（`install.ps1`、`extras/windows-tray/cam-tray.ps1`）：存成带 BOM 的 UTF-8（Windows PowerShell 5.1 读不带 BOM 的文件会把中文读乱）；双引号字符串里的中文引号要写成 `` `“ `` `` `” ``，不然 PowerShell 把它们当成引号，后面的字会丢。没有 Windows 时至少用 pwsh 的 `[System.Management.Automation.Language.Parser]::ParseFile` 查一遍语法

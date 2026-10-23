@@ -151,11 +151,23 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, TrayHead)> {
         .collect();
     if !desk.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
-        menu.append(&MenuItem::with_id(app, "hdr-desk", "Claude 桌面版", false, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(
+            app,
+            "hdr-desk",
+            "Claude 桌面版",
+            false,
+            None::<&str>,
+        )?)?;
         for a in desk {
             let id = s(a, "id").unwrap_or_default();
             let text = format!("切换 {}", s(a, "label").unwrap_or("未命名"));
-            menu.append(&MenuItem::with_id(app, format!("open:{id}"), text, true, None::<&str>)?)?;
+            menu.append(&MenuItem::with_id(
+                app,
+                format!("open:{id}"),
+                text,
+                true,
+                None::<&str>,
+            )?)?;
         }
     }
 
@@ -165,17 +177,41 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, TrayHead)> {
         .collect();
     if !web.is_empty() {
         menu.append(&PredefinedMenuItem::separator(app)?)?;
-        menu.append(&MenuItem::with_id(app, "hdr-web", "网页版", false, None::<&str>)?)?;
+        menu.append(&MenuItem::with_id(
+            app,
+            "hdr-web",
+            "网页版",
+            false,
+            None::<&str>,
+        )?)?;
         for a in web {
             let id = s(a, "id").unwrap_or_default();
             let text = format!("打开 {}", s(a, "label").unwrap_or("未命名"));
-            menu.append(&MenuItem::with_id(app, format!("open:{id}"), text, true, None::<&str>)?)?;
+            menu.append(&MenuItem::with_id(
+                app,
+                format!("open:{id}"),
+                text,
+                true,
+                None::<&str>,
+            )?)?;
         }
     }
 
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, "refresh", "刷新用量", true, None::<&str>)?)?;
-    menu.append(&MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "refresh",
+        "刷新用量",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "show",
+        "打开主窗口",
+        true,
+        None::<&str>,
+    )?)?;
     menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
     Ok((menu, head))
 }
@@ -233,7 +269,12 @@ fn on_menu(app: &AppHandle, id: &str) {
                         }
                     })
                 } else if let Some(acc) = id.strip_prefix("open:") {
-                    let (code, out) = api::route(&store, "POST", &format!("/api/accounts/{acc}/open"), &json!({}));
+                    let (code, out) = api::route(
+                        &store,
+                        "POST",
+                        &format!("/api/accounts/{acc}/open"),
+                        &json!({}),
+                    );
                     if code == 200 {
                         if let Some(msg) = out["message"].as_str() {
                             let _ = app.emit("toast", json!({"message": msg, "bad": false}));
@@ -302,13 +343,19 @@ fn server_info_value(st: &AppState) -> Value {
 
 /// 前端所有数据操作都走这一个命令，内部与 HTTP API 共用同一套路由。
 #[tauri::command]
-async fn api_call(app: AppHandle, method: String, path: String, body: Option<Value>) -> Result<Value, String> {
+async fn api_call(
+    app: AppHandle,
+    method: String,
+    path: String,
+    body: Option<Value>,
+) -> Result<Value, String> {
     let m = method.to_uppercase();
     let m2 = m.clone();
     let body = body.unwrap_or_else(|| json!({}));
-    let (code, out) = tauri::async_runtime::spawn_blocking(move || api::route(&Store::new(), &m2, &path, &body))
-        .await
-        .map_err(|e| e.to_string())?;
+    let (code, out) =
+        tauri::async_runtime::spawn_blocking(move || api::route(&Store::new(), &m2, &path, &body))
+            .await
+            .map_err(|e| e.to_string())?;
     if code != 200 {
         return Err(out
             .get("error")
@@ -328,12 +375,20 @@ fn server_info(state: tauri::State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, state: tauri::State<'_, AppState>, settings: Settings) -> Result<Value, String> {
+fn save_settings(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    settings: Settings,
+) -> Result<Value, String> {
     if settings.port < 1024 {
         return Err("端口需要在 1024–65535 之间".into());
     }
     apply_server(&app, &state, &settings)?;
-    write_json_atomic(&settings_path(), &serde_json::to_value(&settings).unwrap(), false)?;
+    write_json_atomic(
+        &settings_path(),
+        &serde_json::to_value(&settings).unwrap(),
+        false,
+    )?;
     *state.settings.lock().unwrap() = settings;
     Ok(server_info_value(&state))
 }
@@ -381,9 +436,16 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 
 /// 当前账号 5 小时额度超过阈值时提醒一次（每个额度窗口只提醒一次）。
 fn check_alert(app: &AppHandle, warned: &mut HashSet<String>) {
-    let Ok(data) = Store::new().load() else { return };
-    let Some(act) = active_code_id(&data) else { return };
-    let Some(acc) = accounts(&data).iter().find(|a| s(a, "id") == Some(act.as_str())) else {
+    let Ok(data) = Store::new().load() else {
+        return;
+    };
+    let Some(act) = active_code_id(&data) else {
+        return;
+    };
+    let Some(acc) = accounts(&data)
+        .iter()
+        .find(|a| s(a, "id") == Some(act.as_str()))
+    else {
         return;
     };
     let Some(w) = acc.get("usage").and_then(|u| u.get("five_hour")) else {
@@ -398,7 +460,11 @@ fn check_alert(app: &AppHandle, warned: &mut HashSet<String>) {
         return;
     }
     let name = s(acc, "label").or(s(acc, "email")).unwrap_or("当前账号");
-    notify(app, &format!("{} 的 5 小时额度已用 {:.0}%", name, pct), &usage::fmt_reset(resets));
+    notify(
+        app,
+        &format!("{} 的 5 小时额度已用 {:.0}%", name, pct),
+        &usage::fmt_reset(resets),
+    );
 }
 
 fn background(app: AppHandle) {
@@ -463,13 +529,21 @@ fn background(app: AppHandle) {
                     &format!(
                         "claude 会话已退出，Claude Code 已切换到 {}{}",
                         r.label,
-                        if reason == "rule" { "（时间规则）" } else { "" }
+                        if reason == "rule" {
+                            "（时间规则）"
+                        } else {
+                            ""
+                        }
                     ),
                 ),
                 Err(e) => {
                     eprintln!("等待切换执行失败：{e}");
                     // 登记已作废（目标账号的登录失效了），不会再试，告诉用户一声。与 cam.py 的 background_round 一致
-                    if store.load().map(|d| d.get("pending_switch").is_none()).unwrap_or(false) {
+                    if store
+                        .load()
+                        .map(|d| d.get("pending_switch").is_none())
+                        .unwrap_or(false)
+                    {
                         notify(&app, "等待中的切换没有完成", &e);
                     }
                 }

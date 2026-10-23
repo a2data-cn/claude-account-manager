@@ -32,13 +32,21 @@ fn token_urls() -> Vec<String> {
 fn agent(timeout_secs: u64) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(concat!("claude-account-manager/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            "claude-account-manager/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .try_proxy_from_env(true)
         .build()
 }
 
 /// 返回 (状态码, JSON)。网络错误时状态码为 0。
-pub fn http_json(method: &str, url: &str, headers: &[(&str, &str)], body: Option<&Value>) -> (u16, Value) {
+pub fn http_json(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+) -> (u16, Value) {
     http_json_timeout(method, url, headers, body, 20)
 }
 
@@ -49,7 +57,9 @@ pub fn http_json_timeout(
     body: Option<&Value>,
     timeout_secs: u64,
 ) -> (u16, Value) {
-    let mut req = agent(timeout_secs).request(method, url).set("Accept", "application/json");
+    let mut req = agent(timeout_secs)
+        .request(method, url)
+        .set("Accept", "application/json");
     for (k, v) in headers {
         req = req.set(k, v);
     }
@@ -63,8 +73,9 @@ pub fn http_json_timeout(
         let v = if text.trim().is_empty() {
             json!({})
         } else {
-            serde_json::from_str(&text)
-                .unwrap_or_else(|_| json!({"error": {"message": text.chars().take(200).collect::<String>()}}))
+            serde_json::from_str(&text).unwrap_or_else(
+                |_| json!({"error": {"message": text.chars().take(200).collect::<String>()}}),
+            )
         };
         (code, v)
     };
@@ -116,7 +127,13 @@ pub(crate) fn get_with(url: &str, h: &[(String, String)]) -> (u16, Value) {
 pub fn get_oauth(token: &str, path: &str, timeout_secs: u64) -> (u16, Value) {
     let h = oauth_headers(token);
     let refs: Vec<(&str, &str)> = h.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    http_json_timeout("GET", &format!("{}{}", api_base(), path), &refs, None, timeout_secs)
+    http_json_timeout(
+        "GET",
+        &format!("{}{}", api_base(), path),
+        &refs,
+        None,
+        timeout_secs,
+    )
 }
 
 pub(crate) fn refresh_oauth(refresh_token: &str) -> R<Value> {
@@ -127,7 +144,9 @@ pub(crate) fn refresh_oauth(refresh_token: &str) -> R<Value> {
             "POST",
             &url,
             &[("Content-Type", "application/json")],
-            Some(&json!({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": OAUTH_CLIENT_ID})),
+            Some(
+                &json!({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": OAUTH_CLIENT_ID}),
+            ),
             8,
         );
         if code == 200 && s(&body, "access_token").is_some() {
@@ -158,12 +177,19 @@ fn find_acc<'a>(data: &'a Value, id: &str) -> R<&'a Value> {
 
 /// 不联网能拿到的 access token：当前账号读 Claude Code 正在用的；其它账号读保存的、且没过期的。
 fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Value)>> {
-    let saved = store.load_secret(id).get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
+    let saved = store
+        .load_secret(id)
+        .get("claudeAiOauth")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     if active_code_id(data).as_deref() == Some(id) {
         let (creds, _) = read_live()?;
         if let Some(c) = creds {
             let ob = oauth_block(&c);
-            if let (Some(t), Some(i)) = (s(&ob, "accessToken"), identify(data, &read_oauth_account()?, &c)) {
+            if let (Some(t), Some(i)) = (
+                s(&ob, "accessToken"),
+                identify(data, &read_oauth_account()?, &c),
+            ) {
                 if s(&accounts(data)[i], "id") == Some(id) {
                     return Ok(Some((t.to_string(), ob.clone())));
                 }
@@ -175,7 +201,11 @@ fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Valu
     }
     let t = s(&saved, "accessToken").ok_or("没有保存凭据")?.to_string();
     let exp = saved.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
-    Ok(if exp > now_ms() + 120_000 { Some((t, saved)) } else { None })
+    Ok(if exp > now_ms() + 120_000 {
+        Some((t, saved))
+    } else {
+        None
+    })
 }
 
 /// 返回 (access token, oauth 块)。
@@ -212,7 +242,10 @@ pub fn ensure_fresh_token(store: &Store, id: &str, allow_refresh: bool) -> R<(St
 /// 还要负责保存 data（token_fp 改了）。refresh token 已作废或连不上时返回 Err（见 refresh_oauth）。与 cam.py 一致。
 pub(crate) fn renew_saved_login(store: &Store, data: &mut Value, id: &str) -> R<Value> {
     let mut secret = store.load_secret(id);
-    let mut ob = secret.get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}));
+    let mut ob = secret
+        .get("claudeAiOauth")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let rt = s(&ob, "refreshToken")
         .ok_or("登录已过期且没有 refresh token")?
         .to_string();
@@ -221,7 +254,10 @@ pub(crate) fn renew_saved_login(store: &Store, data: &mut Value, id: &str) -> R<
     if let Some(r) = s(&tok, "refresh_token") {
         ob["refreshToken"] = json!(r);
     }
-    let secs = tok.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(28800);
+    let secs = tok
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(28800);
     ob["expiresAt"] = json!(now_ms() + secs * 1000);
     secret["claudeAiOauth"] = ob.clone();
     if secret.get("raw").map(|r| r.is_object()).unwrap_or(false) {
@@ -230,7 +266,10 @@ pub(crate) fn renew_saved_login(store: &Store, data: &mut Value, id: &str) -> R<
     secret["saved_at"] = json!(now_iso());
     store.save_secret(id, &secret)?;
     let fp = token_fp(s(&ob, "refreshToken").unwrap_or_default());
-    if let Some(a) = accounts_mut(data).iter_mut().find(|a| s(a, "id") == Some(id)) {
+    if let Some(a) = accounts_mut(data)
+        .iter_mut()
+        .find(|a| s(a, "id") == Some(id))
+    {
         a["token_fp"] = json!(fp);
     }
     Ok(ob)
@@ -239,19 +278,29 @@ pub(crate) fn renew_saved_login(store: &Store, data: &mut Value, id: &str) -> R<
 fn pick_window(body: &Value, key: &str) -> Value {
     match body.get(key) {
         Some(w) if w.is_object() => match w.get("utilization").and_then(|u| u.as_f64()) {
-            Some(u) => json!({"utilization": u, "resets_at": w.get("resets_at").cloned().unwrap_or(Value::Null)}),
+            Some(u) => {
+                json!({"utilization": u, "resets_at": w.get("resets_at").cloned().unwrap_or(Value::Null)})
+            }
             None => Value::Null,
         },
         _ => Value::Null,
     }
 }
 
-const WINDOWS: [&str; 4] = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"];
+const WINDOWS: [&str; 4] = [
+    "five_hour",
+    "seven_day",
+    "seven_day_opus",
+    "seven_day_sonnet",
+];
 
 /// 单独计算的周额度，例如“7 天 · Fable”。接口在 limits 里按模型（或产品）给出。与 cam.py 的 scoped_windows 一致。
 fn scoped_windows(body: &Value) -> Vec<Value> {
     fn name_of<'a>(scope: &'a Value, k: &str) -> Option<&'a str> {
-        scope.get(k).and_then(|v| s(v, "display_name")).filter(|n| !n.is_empty())
+        scope
+            .get(k)
+            .and_then(|v| s(v, "display_name"))
+            .filter(|n| !n.is_empty())
     }
     body.get("limits")
         .and_then(|l| l.as_array())
@@ -292,7 +341,11 @@ pub fn parse_usage_body(body: &Value, source: &str) -> Value {
     let models = scoped_windows(body);
     if !models.is_empty() {
         // 新接口里 Opus / Sonnet 的周额度也在 limits 里，别显示两遍
-        let names: HashSet<String> = models.iter().filter_map(|m| s(m, "name")).map(str::to_lowercase).collect();
+        let names: HashSet<String> = models
+            .iter()
+            .filter_map(|m| s(m, "name"))
+            .map(str::to_lowercase)
+            .collect();
         for (k, n) in [("seven_day_opus", "opus"), ("seven_day_sonnet", "sonnet")] {
             if names.contains(n) {
                 usage[k] = Value::Null;
@@ -338,7 +391,9 @@ const PRICES: [(&str, f64, f64, f64); 15] = [
 
 /// usage 里的整数字段，没有或不是数字时为 0（小数截掉，和 cam.py 的 int() 一样）。
 fn count(u: &Value, k: &str) -> i64 {
-    u.get(k).and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))).unwrap_or(0)
+    u.get(k)
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        .unwrap_or(0)
 }
 
 /// 一条消息按 API 价折算多少美元；不认识的模型返回 None。与 cam.py 的 message_cost 一致。
@@ -346,12 +401,20 @@ pub fn message_cost(model: &str, u: &Value) -> Option<f64> {
     let m = model.to_lowercase();
     let m = m.find("claude-").map(|i| &m[i + 7..]).unwrap_or(&m);
     let &(key, mut inp, mut out, mut cr) = PRICES.iter().find(|r| m.starts_with(r.0))?;
-    let (w5, w1) = match u.get("cache_creation").filter(|c| c.as_object().is_some_and(|o| !o.is_empty())) {
-        Some(cc) => (count(cc, "ephemeral_5m_input_tokens"), count(cc, "ephemeral_1h_input_tokens")),
+    let (w5, w1) = match u
+        .get("cache_creation")
+        .filter(|c| c.as_object().is_some_and(|o| !o.is_empty()))
+    {
+        Some(cc) => (
+            count(cc, "ephemeral_5m_input_tokens"),
+            count(cc, "ephemeral_1h_input_tokens"),
+        ),
         None => (count(u, "cache_creation_input_tokens"), 0),
     };
     // Haiku 5.5 的提示超过 10 万 token 时整条按 5 倍价
-    if key == "haiku-5-5" && count(u, "input_tokens") + count(u, "cache_read_input_tokens") + w5 + w1 > 100_000 {
+    if key == "haiku-5-5"
+        && count(u, "input_tokens") + count(u, "cache_read_input_tokens") + w5 + w1 > 100_000
+    {
         (inp, out, cr) = (inp * 5.0, out * 5.0, cr * 5.0);
     }
     let n = |k: &str| count(u, k) as f64;
@@ -416,7 +479,11 @@ fn fetch_code(store: &Store, acc: &Value, allow_refresh: bool) -> R<(Value, Map<
             meta.insert("rate_limit_tier".into(), json!(v));
         }
         let mut auto = Map::new();
-        for k in ["subscription_status", "subscription_expires_at", "billing_type"] {
+        for k in [
+            "subscription_status",
+            "subscription_expires_at",
+            "billing_type",
+        ] {
             if let Some(v) = s(&o, k) {
                 auto.insert(k.into(), json!(v));
             }
@@ -464,7 +531,10 @@ fn fetch_web(store: &Store, acc: &Value) -> R<(Value, Map<String, Value>)> {
         meta.insert("rate_limit_tier".into(), json!(v));
     }
     let uuid = s(&org, "uuid").ok_or("组织信息缺少 uuid")?;
-    let (code, body) = get_with(&format!("{}/api/organizations/{}/usage", web_base(), uuid), &h);
+    let (code, body) = get_with(
+        &format!("{}/api/organizations/{}/usage", web_base(), uuid),
+        &h,
+    );
     if code != 200 {
         return Err(err_msg(code, &body));
     }
@@ -515,8 +585,18 @@ fn fetch_api(store: &Store, acc: &Value) -> R<(Value, Map<String, Value>)> {
             if code != 200 {
                 return Err(err_msg(code, &body));
             }
-            for b in body.get("data").and_then(|d| d.as_array()).into_iter().flatten() {
-                for r in b.get("results").and_then(|d| d.as_array()).into_iter().flatten() {
+            for b in body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .into_iter()
+                .flatten()
+            {
+                for r in b
+                    .get("results")
+                    .and_then(|d| d.as_array())
+                    .into_iter()
+                    .flatten()
+                {
                     let amt = match r.get("amount") {
                         Some(Value::String(x)) => x.parse::<f64>().unwrap_or(0.0),
                         Some(Value::Number(x)) => x.as_f64().unwrap_or(0.0),
@@ -550,7 +630,10 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
         // 清除旧版把 Desktop 当 API 账号刷出的错误，保留真实的客户端额度快照。
         for a in accounts_mut(&mut d) {
             if s(a, "kind") == Some("claude_desktop")
-                && !matches!(a.get("usage").and_then(|u| s(u, "source")), Some("desktop_cache" | "desktop_history"))
+                && !matches!(
+                    a.get("usage").and_then(|u| s(u, "source")),
+                    Some("desktop_cache" | "desktop_history")
+                )
             {
                 a["usage"] = Value::Null;
             }
@@ -561,7 +644,12 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
     let targets: Vec<Value> = accounts(&data)
         .iter()
         .filter(|a| only.map(|o| s(a, "id") == Some(o)).unwrap_or(true))
-        .filter(|a| matches!(s(a, "kind"), Some("claude_code" | "claude_web" | "claude_desktop" | "api")))
+        .filter(|a| {
+            matches!(
+                s(a, "kind"),
+                Some("claude_code" | "claude_web" | "claude_desktop" | "api")
+            )
+        })
         .cloned()
         .collect();
     let mut results: Vec<(String, Value, Map<String, Value>)> = std::thread::scope(|sc| {
@@ -572,7 +660,9 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
                     let r = match s(acc, "kind") {
                         Some("claude_code") => fetch_code(store, acc, allow_token_refresh),
                         Some("claude_web") => fetch_web(store, acc),
-                        Some("claude_desktop") => super::desktop_usage::fetch_desktop_usage(store, acc),
+                        Some("claude_desktop") => {
+                            super::desktop_usage::fetch_desktop_usage(store, acc)
+                        }
                         _ => fetch_api(store, acc),
                     };
                     let (mut u, meta) = match r {
@@ -601,7 +691,11 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     // 本机记录里每个 Claude Code 号当前窗口用了多少，和刚拉到的百分比对照着看；统计不影响用量本身
-    let is_code = |id: &str| targets.iter().any(|a| s(a, "id") == Some(id) && s(a, "kind") == Some("claude_code"));
+    let is_code = |id: &str| {
+        targets
+            .iter()
+            .any(|a| s(a, "id") == Some(id) && s(a, "kind") == Some("claude_code"))
+    };
     let fetched: HashMap<String, Value> = results
         .iter()
         .filter(|(id, u, _)| u["error"].is_null() && is_code(id))
@@ -633,7 +727,9 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
 
 /// “3小时20分后重置（17:39）”，与 cam.py 的 fmt_reset 一致。
 pub fn fmt_reset(resets_at: &str) -> String {
-    let Some(t) = parse_time(resets_at) else { return String::new() };
+    let Some(t) = parse_time(resets_at) else {
+        return String::new();
+    };
     let secs = (t - Utc::now()).num_seconds();
     if secs <= 0 {
         return "已重置".into();
@@ -641,7 +737,14 @@ pub fn fmt_reset(resets_at: &str) -> String {
     let (h, m) = (secs / 3600, secs / 60 % 60);
     let local = t.with_timezone(&chrono::Local);
     if h >= 24 {
-        format!("{}天{}小时后重置（{}月{}日 {}）", h / 24, h % 24, local.month(), local.day(), local.format("%H:%M"))
+        format!(
+            "{}天{}小时后重置（{}月{}日 {}）",
+            h / 24,
+            h % 24,
+            local.month(),
+            local.day(),
+            local.format("%H:%M")
+        )
     } else if h > 0 {
         format!("{}小时{}分后重置（{}）", h, m, local.format("%H:%M"))
     } else {
@@ -674,7 +777,11 @@ pub fn roll_renewals_at(data: &mut Value, today: chrono::NaiveDate) {
         let Some(mut d) = s(m, "expires_at").and_then(parse_day) else {
             continue;
         };
-        let step = if s(m, "cycle") == Some("yearly") { 12 } else { 1 };
+        let step = if s(m, "cycle") == Some("yearly") {
+            12
+        } else {
+            1
+        };
         // 记住原始扣费日，避免 1 月 31 日顺延到 2 月 28 日后一直停在 28 日
         let anchor = m
             .get("renew_day")
@@ -707,7 +814,9 @@ fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
         let p = e.path();
         match e.file_type() {
             Ok(t) if t.is_dir() => walk_jsonl(&p, out, depth + 1),
-            Ok(t) if t.is_file() && p.extension().map(|x| x == "jsonl").unwrap_or(false) => out.push(p),
+            Ok(t) if t.is_file() && p.extension().map(|x| x == "jsonl").unwrap_or(false) => {
+                out.push(p)
+            }
             _ => {}
         }
     }
@@ -738,13 +847,19 @@ fn local_events(since: chrono::DateTime<Utc>) -> Vec<(chrono::DateTime<Utc>, Str
             let Some(ts) = s(&ev, "timestamp").and_then(parse_time) else {
                 continue;
             };
-            let Some(msg) = ev.get_mut("message").filter(|m| m.get("usage").is_some_and(Value::is_object)) else {
+            let Some(msg) = ev
+                .get_mut("message")
+                .filter(|m| m.get("usage").is_some_and(Value::is_object))
+            else {
                 continue;
             };
             if ts < since {
                 continue;
             }
-            let key = (s(msg, "id").map(String::from), s(&ev, "requestId").map(String::from));
+            let key = (
+                s(msg, "id").map(String::from),
+                s(&ev, "requestId").map(String::from),
+            );
             let msg = &mut ev["message"];
             if key != (None, None) && !seen.insert(key) {
                 continue;
@@ -767,12 +882,18 @@ fn owner_finder(data: &Value) -> impl Fn(chrono::DateTime<Utc>) -> Option<String
         .filter_map(|e| Some((parse_time(s(e, "at")?)?, s(e, "id")?.to_string())))
         .collect();
     log.sort_by_key(|a| a.0);
-    let active = data.get("active").and_then(|a| s(a, "claude_code")).map(String::from);
+    let active = data
+        .get("active")
+        .and_then(|a| s(a, "claude_code"))
+        .map(String::from);
     move |ts| {
         if log.is_empty() {
             return active.clone();
         }
-        log.iter().take_while(|(at, _)| *at <= ts).last().map(|(_, id)| id.clone())
+        log.iter()
+            .take_while(|(at, _)| *at <= ts)
+            .last()
+            .map(|(_, id)| id.clone())
     }
 }
 
@@ -785,10 +906,14 @@ pub fn local_usage(data: &Value, days: i64) -> Value {
     let since = Utc::now() - chrono::Duration::days(days);
     let owner_of = owner_finder(data);
     // (日期, 账号) -> ([input, output, cache_write, cache_read, messages], 金额)
-    let mut daily: std::collections::BTreeMap<(String, String), ([i64; 5], f64)> = Default::default();
+    let mut daily: std::collections::BTreeMap<(String, String), ([i64; 5], f64)> =
+        Default::default();
     for (ts, model, u) in local_events(since) {
         let owner = owner_of(ts).unwrap_or_else(|| "unattributed".to_string());
-        let day = ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+        let day = ts
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
         let (rec, cost) = daily.entry((day, owner)).or_insert(([0; 5], 0.0));
         rec[0] += count(&u, "input_tokens");
         rec[1] += count(&u, "output_tokens");
@@ -816,19 +941,41 @@ type Span = (String, Option<String>, chrono::DateTime<Utc>);
 ///
 /// usages 是 {账号 id: 刚拉到的 usage}。窗口起点 = 重置时间 - 窗口长度（按模型的周额度也是 7 天）。
 /// 界面拿它和接口给的百分比对照，推算整个窗口大约能用多少。返回 {账号 id: {"at", "windows"}}。
-pub fn local_window_usage(data: &Value, usages: &HashMap<String, Value>, now: chrono::DateTime<Utc>) -> Map<String, Value> {
+pub fn local_window_usage(
+    data: &Value,
+    usages: &HashMap<String, Value>,
+    now: chrono::DateTime<Utc>,
+) -> Map<String, Value> {
     let mut spans: HashMap<&str, Vec<Span>> = HashMap::new();
     for (id, u) in usages {
         for (key, secs) in WINDOW_SECS {
-            if let Some(r) = u.get(key).and_then(|w| s(w, "resets_at")).and_then(parse_time) {
-                spans.entry(id).or_default().push((key.to_string(), None, r - chrono::Duration::seconds(secs)));
+            if let Some(r) = u
+                .get(key)
+                .and_then(|w| s(w, "resets_at"))
+                .and_then(parse_time)
+            {
+                spans.entry(id).or_default().push((
+                    key.to_string(),
+                    None,
+                    r - chrono::Duration::seconds(secs),
+                ));
             }
         }
-        for m in u.get("models").and_then(|m| m.as_array()).into_iter().flatten() {
-            let (Some(name), Some(r)) = (s(m, "name"), s(m, "resets_at").and_then(parse_time)) else {
+        for m in u
+            .get("models")
+            .and_then(|m| m.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (Some(name), Some(r)) = (s(m, "name"), s(m, "resets_at").and_then(parse_time))
+            else {
                 continue;
             };
-            spans.entry(id).or_default().push((name.to_string(), Some(name.to_lowercase()), r - chrono::Duration::days(7)));
+            spans.entry(id).or_default().push((
+                name.to_string(),
+                Some(name.to_lowercase()),
+                r - chrono::Duration::days(7),
+            ));
         }
     }
     let Some(since) = spans.values().flatten().map(|(_, _, start)| *start).min() else {
@@ -839,12 +986,16 @@ pub fn local_window_usage(data: &Value, usages: &HashMap<String, Value>, now: ch
     let mut sums: HashMap<(&str, &str), (i64, f64, i64)> = HashMap::new();
     for (ts, model, u) in local_events(since) {
         let Some(owner) = owner_of(ts) else { continue };
-        let Some((&id, list)) = spans.get_key_value(owner.as_str()) else { continue };
+        let Some((&id, list)) = spans.get_key_value(owner.as_str()) else {
+            continue;
+        };
         if ts > now {
             continue;
         }
         let cost = message_cost(&model, &u).unwrap_or(0.0);
-        let tokens = count(&u, "input_tokens") + count(&u, "output_tokens") + count(&u, "cache_creation_input_tokens");
+        let tokens = count(&u, "input_tokens")
+            + count(&u, "output_tokens")
+            + count(&u, "cache_creation_input_tokens");
         let lower = model.to_lowercase();
         for (name, family, start) in list {
             if ts < *start || family.as_ref().is_some_and(|f| !lower.contains(f.as_str())) {
@@ -861,10 +1012,13 @@ pub fn local_window_usage(data: &Value, usages: &HashMap<String, Value>, now: ch
     } else {
         now.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
     };
-    let mut out: Map<String, Value> =
-        spans.keys().map(|id| (id.to_string(), json!({"at": at, "windows": {}}))).collect();
+    let mut out: Map<String, Value> = spans
+        .keys()
+        .map(|id| (id.to_string(), json!({"at": at, "windows": {}})))
+        .collect();
     for ((id, name), (tokens, cost, messages)) in sums {
-        out[id]["windows"][name] = json!({"tokens": tokens, "cost_usd": round4(cost), "messages": messages});
+        out[id]["windows"][name] =
+            json!({"tokens": tokens, "cost_usd": round4(cost), "messages": messages});
     }
     out
 }

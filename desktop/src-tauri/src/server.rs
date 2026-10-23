@@ -67,10 +67,20 @@ fn handle(mut req: Request, token: &str, on_change: &OnChange) {
     let path = url.split('?').next().unwrap_or("/").to_string();
 
     if method == "GET" && (path == "/" || path == "/index.html") {
-        return send(req, 200, "text/html; charset=utf-8", PANEL.as_bytes().to_vec());
+        return send(
+            req,
+            200,
+            "text/html; charset=utf-8",
+            PANEL.as_bytes().to_vec(),
+        );
     }
     if method == "GET" && path == "/manifest.webmanifest" {
-        return send(req, 200, "application/manifest+json", MANIFEST.as_bytes().to_vec());
+        return send(
+            req,
+            200,
+            "application/manifest+json",
+            MANIFEST.as_bytes().to_vec(),
+        );
     }
     if !path.starts_with("/api/") {
         return send_json(req, 404, &json!({"error": "not found"}));
@@ -86,7 +96,12 @@ fn handle(mut req: Request, token: &str, on_change: &OnChange) {
         return send_json(req, 401, &json!({"error": "需要访问令牌"}));
     }
     let mut raw = String::new();
-    if req.as_reader().take(1_000_000).read_to_string(&mut raw).is_err() {
+    if req
+        .as_reader()
+        .take(1_000_000)
+        .read_to_string(&mut raw)
+        .is_err()
+    {
         return send_json(req, 400, &json!({"error": "请求体不是合法 UTF-8"}));
     }
     let body: Value = if raw.trim().is_empty() {
@@ -107,7 +122,8 @@ fn handle(mut req: Request, token: &str, on_change: &OnChange) {
 
 pub fn start(lan: bool, port: u16, on_change: OnChange) -> R<ServerHandle> {
     let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
-    let server = Server::http(format!("{}:{}", host, port)).map_err(|e| format!("端口 {} 启动失败：{}", port, e))?;
+    let server = Server::http(format!("{}:{}", host, port))
+        .map_err(|e| format!("端口 {} 启动失败：{}", port, e))?;
     let server = Arc::new(server);
     let token = Store::new().server_token();
     let srv = server.clone();

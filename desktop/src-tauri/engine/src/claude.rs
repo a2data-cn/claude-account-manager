@@ -54,7 +54,9 @@ fn keychain_read() -> Option<Value> {
     if let Ok(v) = serde_json::from_str::<Value>(&raw) {
         return Some(v);
     }
-    hex::decode(&raw).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    hex::decode(&raw)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 fn keychain_write(v: &Value) -> R<()> {
@@ -138,7 +140,10 @@ pub fn write_oauth_account(oa: &Value) -> R<()> {
 }
 
 pub fn oauth_block(creds: &Value) -> Value {
-    creds.get("claudeAiOauth").cloned().unwrap_or_else(|| json!({}))
+    creds
+        .get("claudeAiOauth")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
 }
 
 pub fn token_fp(rt: &str) -> String {
@@ -161,7 +166,10 @@ pub fn match_identity(data: &Value, uuid: Option<&str>, email: Option<&str>) -> 
     let list = code_indices(data);
     let accs = accounts(data);
     if let Some(u) = uuid.filter(|u| !u.is_empty()) {
-        if let Some(i) = list.iter().find(|&&i| s(&accs[i], "account_uuid") == Some(u)) {
+        if let Some(i) = list
+            .iter()
+            .find(|&&i| s(&accs[i], "account_uuid") == Some(u))
+        {
             return Some(*i);
         }
     }
@@ -252,7 +260,8 @@ const PENDING_MAX_DAYS: i64 = 7;
 
 /// access token 本地看还没过期。过期了 /api/oauth/profile 必然 401，不必白跑一趟。
 fn access_token_fresh(ob: &Value) -> bool {
-    ob.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0) > chrono::Utc::now().timestamp_millis()
+    ob.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0)
+        > chrono::Utc::now().timestamp_millis()
 }
 
 /// 时间戳 a 晚于 b（两边后端写的格式可能略有差异，解析后再比）。
@@ -279,9 +288,12 @@ fn file_credentials(
     where_: Option<&str>,
     oauth_account: Option<&Value>,
 ) -> R<()> {
-    let id = s(&accounts(data)[idx], "id").unwrap_or_default().to_string();
+    let id = s(&accounts(data)[idx], "id")
+        .unwrap_or_default()
+        .to_string();
     let prev = store.load_secret(&id);
-    let same_rt = prev.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")) == s(ob, "refreshToken");
+    let same_rt =
+        prev.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")) == s(ob, "refreshToken");
     let saved_oa = match oauth_account {
         Some(oa) => oa.clone(),
         None => prev.get("oauthAccount").cloned().unwrap_or(Value::Null),
@@ -290,7 +302,11 @@ fn file_credentials(
         Some(t) if same_rt => t.to_string(),
         _ => now_iso(),
     };
-    apply_meta(&mut accounts_mut(data)[idx], oauth_account.unwrap_or(&Value::Null), creds);
+    apply_meta(
+        &mut accounts_mut(data)[idx],
+        oauth_account.unwrap_or(&Value::Null),
+        creds,
+    );
     store.save_secret(
         &id,
         &json!({"claudeAiOauth": ob, "oauthAccount": saved_oa, "raw": creds, "store": where_, "saved_at": saved_at}),
@@ -310,7 +326,8 @@ fn park_unverified(
     oa: &Value,
 ) -> R<()> {
     let prev = store.load_secret(PENDING_ID);
-    let same_rt = prev.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")) == s(ob, "refreshToken");
+    let same_rt =
+        prev.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")) == s(ob, "refreshToken");
     let at = match s(&prev, "at") {
         Some(t) if same_rt => t.to_string(),
         _ => now_iso(),
@@ -329,7 +346,9 @@ fn park_unverified(
             "raw": creds, "store": where_, "candidate": cid, "at": at
         }),
     )?;
-    let who = label.map(|l| format!("可能是“{}”，", l)).unwrap_or_default();
+    let who = label
+        .map(|l| format!("可能是“{}”，", l))
+        .unwrap_or_default();
     data["live_unverified"] = json!({
         "at": at, "candidate": cid,
         "message": format!(
@@ -342,19 +361,15 @@ fn park_unverified(
 
 fn pending_is_stale(p: &Value) -> bool {
     match s(p, "at").and_then(parse_time) {
-        Some(at) => chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(PENDING_MAX_DAYS),
+        Some(at) => {
+            chrono::Utc::now().signed_duration_since(at) > chrono::Duration::days(PENDING_MAX_DAYS)
+        }
         None => true,
     }
 }
 
 /// 暂存的登录已核对出主人：归到它名下；账号里已有更新的就不覆盖；没有这个账号就新建。
-fn file_pending(
-    store: &Store,
-    data: &mut Value,
-    p: &Value,
-    ob: &Value,
-    owner: &Owner,
-) -> R<usize> {
+fn file_pending(store: &Store, data: &mut Value, p: &Value, ob: &Value, owner: &Owner) -> R<usize> {
     let (ou, oe) = (owner.0.as_deref(), owner.1.as_deref());
     let idx = match match_identity(data, ou, oe) {
         Some(i) => {
@@ -376,9 +391,21 @@ fn file_pending(
     };
     let oa = p.get("oauthAccount").cloned().unwrap_or(Value::Null);
     let oa_ok = !is_empty_obj(&oa)
-        && identity_agrees(&accounts(data)[idx], s(&oa, "accountUuid"), s(&oa, "emailAddress"));
+        && identity_agrees(
+            &accounts(data)[idx],
+            s(&oa, "accountUuid"),
+            s(&oa, "emailAddress"),
+        );
     let creds = p.get("raw").cloned().unwrap_or(Value::Null);
-    file_credentials(store, data, idx, ob, &creds, s(p, "store"), if oa_ok { Some(&oa) } else { None })?;
+    file_credentials(
+        store,
+        data,
+        idx,
+        ob,
+        &creds,
+        s(p, "store"),
+        if oa_ok { Some(&oa) } else { None },
+    )?;
     Ok(idx)
 }
 
@@ -439,8 +466,12 @@ fn adopt_pending_for(store: &Store, data: &mut Value, target_id: &str) -> R<()> 
                         if let Some(r) = s(&tok, "refresh_token") {
                             ob["refreshToken"] = json!(r);
                         }
-                        let secs = tok.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(28800);
-                        ob["expiresAt"] = json!(chrono::Utc::now().timestamp_millis() + secs * 1000);
+                        let secs = tok
+                            .get("expires_in")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(28800);
+                        ob["expiresAt"] =
+                            json!(chrono::Utc::now().timestamp_millis() + secs * 1000);
                         if !p.get("raw").map(|r| r.is_object()).unwrap_or(false) {
                             p["raw"] = json!({});
                         }
@@ -470,7 +501,12 @@ fn adopt_pending_for(store: &Store, data: &mut Value, target_id: &str) -> R<()> 
 /// /api/oauth/profile 问出了主人。两样都做不到（离线、access token 过期）时暂存起来，不碰任何账号。
 /// 凭据和 ~/.claude.json 里的 oauthAccount 对不上时，以凭据为准：token 存进它真正的主人名下，
 /// 不会覆盖别的账号，并在 data["live_mismatch"] 里留下说明。逻辑与 cam.py 的 snapshot_live 一致。
-pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, create: bool) -> R<Option<usize>> {
+pub fn snapshot_live(
+    store: &Store,
+    data: &mut Value,
+    label: Option<&str>,
+    create: bool,
+) -> R<Option<usize>> {
     let (creds, where_) = read_live()?;
     let creds = match creds {
         Some(c) if s(&oauth_block(&c), "accessToken").is_some() => c,
@@ -519,7 +555,12 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
         o.remove("live_unverified");
     }
     let pend = store.load_secret(PENDING_ID);
-    if pend.get("claudeAiOauth").and_then(|o| s(o, "refreshToken")).map(token_fp) == Some(live_fp.clone()) {
+    if pend
+        .get("claudeAiOauth")
+        .and_then(|o| s(o, "refreshToken"))
+        .map(token_fp)
+        == Some(live_fp.clone())
+    {
         store.delete_secret(PENDING_ID); // 暂存的就是这份，现在认出来了
     }
     // oauthAccount 是否描述的就是这份凭据的主人
@@ -528,7 +569,9 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
             Some(i) => identity_agrees(&accounts(data)[i], oa_uuid, oa_email),
             None => match &owner {
                 None => true,
-                Some((ou, oe)) => identity_agrees(&json!({"account_uuid": ou, "email": oe}), oa_uuid, oa_email),
+                Some((ou, oe)) => {
+                    identity_agrees(&json!({"account_uuid": ou, "email": oe}), oa_uuid, oa_email)
+                }
             },
         };
     let idx = match idx {
@@ -562,7 +605,9 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
             accounts(data).len() - 1
         }
     };
-    let id = s(&accounts(data)[idx], "id").unwrap_or_default().to_string();
+    let id = s(&accounts(data)[idx], "id")
+        .unwrap_or_default()
+        .to_string();
     if oa_ok {
         if let Some(o) = data.as_object_mut() {
             o.remove("live_mismatch");
@@ -580,7 +625,15 @@ pub fn snapshot_live(store: &Store, data: &mut Value, label: Option<&str>, creat
     } else if let Some(o) = data.as_object_mut() {
         o.remove("live_mismatch"); // ~/.claude.json 里根本没有 oauthAccount，谈不上对不上
     }
-    file_credentials(store, data, idx, &ob, &creds, where_, if oa_ok { Some(&oa) } else { None })?;
+    file_credentials(
+        store,
+        data,
+        idx,
+        &ob,
+        &creds,
+        where_,
+        if oa_ok { Some(&oa) } else { None },
+    )?;
     set_active_code(data, Some(&id));
     Ok(Some(idx))
 }
@@ -589,7 +642,11 @@ fn backup_live(store: &Store, tag: &str) -> R<PathBuf> {
     let d = store.new_backup_dir(tag)?;
     let (creds, where_) = read_live()?;
     if let Some(c) = creds {
-        write_json_atomic(&d.join("credentials.json"), &json!({"store": where_, "data": c}), true)?;
+        write_json_atomic(
+            &d.join("credentials.json"),
+            &json!({"store": where_, "data": c}),
+            true,
+        )?;
     }
     let cj = claude_json_file();
     if cj.exists() {
@@ -612,7 +669,11 @@ fn repair_oauth_account(store: &Store, data: &mut Value, id: &str) -> R<bool> {
     if has_oa && identity_agrees(acc, s(&oa, "accountUuid"), s(&oa, "emailAddress")) {
         return Ok(false);
     }
-    let saved = store.load_secret(id).get("oauthAccount").cloned().unwrap_or(Value::Null);
+    let saved = store
+        .load_secret(id)
+        .get("oauthAccount")
+        .cloned()
+        .unwrap_or(Value::Null);
     if !saved.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
         return Ok(false);
     }
@@ -641,7 +702,10 @@ fn switch_renew_error(label: &str, err: &str) -> String {
             label
         )
     } else {
-        format!("没有切换：“{}”保存的登录过期了，切换前要先续一下，但{}。当前登录没有动", label, err)
+        format!(
+            "没有切换：“{}”保存的登录过期了，切换前要先续一下，但{}。当前登录没有动",
+            label, err
+        )
     }
 }
 
@@ -687,7 +751,8 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
         match super::usage::renew_saved_login(store, &mut data, &tid) {
             Ok(v) => ob = v,
             Err(e) => {
-                let pending_here = data.get("pending_switch").and_then(|p| s(p, "account")) == Some(tid.as_str());
+                let pending_here =
+                    data.get("pending_switch").and_then(|p| s(p, "account")) == Some(tid.as_str());
                 if e.contains("登录已失效") && pending_here {
                     if let Some(o) = data.as_object_mut() {
                         o.remove("pending_switch"); // 等下去也切不过去，登记作废
@@ -737,7 +802,11 @@ pub fn import_current(store: &Store, label: Option<&str>) -> R<Value> {
     let _g = store.lock()?;
     let mut data = store.load()?;
     let idx = snapshot_live(store, &mut data, label, true)?;
-    if let Some(m) = data.get("live_unverified").and_then(|u| s(u, "message")).map(String::from) {
+    if let Some(m) = data
+        .get("live_unverified")
+        .and_then(|u| s(u, "message"))
+        .map(String::from)
+    {
         store.save(&mut data)?; // 暂存的记录要留着
         return Err(m);
     }
@@ -797,7 +866,10 @@ pub fn is_claude_cmd(argv0: &str, cmdline: &str) -> bool {
     let name = exe.rsplit('/').next().unwrap_or("");
     let low_exe = exe.to_lowercase();
     // Claude 桌面 App（macOS 上叫 Claude，Windows 上装在 AnthropicClaude 下）不算
-    if low_exe.contains("/claude.app/") || low_exe.contains("anthropicclaude") || low_exe.contains("/windowsapps/") {
+    if low_exe.contains("/claude.app/")
+        || low_exe.contains("anthropicclaude")
+        || low_exe.contains("/windowsapps/")
+    {
         return false;
     }
     if name == "claude" || name == "claude.exe" || exe.contains("/claude/versions/") {
@@ -849,13 +921,19 @@ pub fn running_claude_processes() -> Vec<(u32, String)> {
             }
         }
     } else if std::path::Path::new("/proc/self").exists() {
-        let Ok(rd) = fs::read_dir("/proc") else { return found };
+        let Ok(rd) = fs::read_dir("/proc") else {
+            return found;
+        };
         for e in rd.flatten() {
-            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
             if pid == me {
                 continue;
             }
-            let Ok(raw) = fs::read(e.path().join("cmdline")) else { continue };
+            let Ok(raw) = fs::read(e.path().join("cmdline")) else {
+                continue;
+            };
             let argv: Vec<String> = raw
                 .split(|b| *b == 0)
                 .filter(|a| !a.is_empty())
@@ -872,7 +950,10 @@ pub fn running_claude_processes() -> Vec<(u32, String)> {
         // macOS：comm 是可执行文件完整路径（可能带空格），args 是完整命令行
         let ps = |field: &str| -> std::collections::HashMap<u32, String> {
             let mut m = std::collections::HashMap::new();
-            if let Ok(out) = Command::new("ps").args(["-A", "-o", &format!("pid=,{}=", field)]).output() {
+            if let Ok(out) = Command::new("ps")
+                .args(["-A", "-o", &format!("pid=,{}=", field)])
+                .output()
+            {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
                     let line = line.trim();
                     let (pid, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -900,7 +981,11 @@ pub fn running_summary(procs: &[(u32, String)]) -> String {
     if procs.len() > 5 {
         pids.push("…".into());
     }
-    format!("有 {} 个 claude 进程正在运行（pid {}）", procs.len(), pids.join("、"))
+    format!(
+        "有 {} 个 claude 进程正在运行（pid {}）",
+        procs.len(),
+        pids.join("、")
+    )
 }
 
 pub fn running_warning(procs: &[(u32, String)]) -> Option<String> {
@@ -924,7 +1009,10 @@ fn pending_switch_expired(p: &Value) -> bool {
         return false;
     }
     match s(p, "at").and_then(parse_time) {
-        Some(at) => chrono::Utc::now().signed_duration_since(at) > chrono::Duration::hours(PENDING_SWITCH_HOURS),
+        Some(at) => {
+            chrono::Utc::now().signed_duration_since(at)
+                > chrono::Duration::hours(PENDING_SWITCH_HOURS)
+        }
         None => true,
     }
 }
@@ -937,7 +1025,10 @@ pub fn pending_switch_view(data: &Value) -> Value {
     else {
         return Value::Null;
     };
-    let Some(acc) = accounts(data).iter().find(|a| s(a, "id") == s(p, "account")) else {
+    let Some(acc) = accounts(data)
+        .iter()
+        .find(|a| s(a, "id") == s(p, "account"))
+    else {
         return Value::Null;
     };
     let label = s(acc, "label").unwrap_or("");
@@ -955,7 +1046,8 @@ pub fn pending_switch_view(data: &Value) -> Value {
 
 /// 记下“等 claude 会话都退出后切到 acc_id”。调用方持有锁并负责保存。
 pub fn defer_switch(data: &mut Value, acc_id: &str, reason: &str, rule_id: Option<&str>) {
-    data["pending_switch"] = json!({"account": acc_id, "reason": reason, "rule": rule_id, "at": now_iso()});
+    data["pending_switch"] =
+        json!({"account": acc_id, "reason": reason, "rule": rule_id, "at": now_iso()});
 }
 
 pub fn cancel_pending_switch(store: &Store) -> R<bool> {
@@ -977,7 +1069,10 @@ pub fn apply_pending_switch(store: &Store) -> R<Option<(SwitchResult, String)>> 
 /// 目标账号没了、已经是当前账号、手动登记放了 PENDING_SWITCH_HOURS 小时还没等到、或时间规则的时间段已经过了，
 /// 就作废（过期的不等会话退出，马上清掉）。切换本身走 switch_account，它会清掉登记。
 /// 与 cam.py 的 apply_pending_switch 一致。
-pub fn apply_pending_switch_at(store: &Store, now: chrono::NaiveDateTime) -> R<Option<(SwitchResult, String)>> {
+pub fn apply_pending_switch_at(
+    store: &Store,
+    now: chrono::NaiveDateTime,
+) -> R<Option<(SwitchResult, String)>> {
     let data = store.load()?;
     let Some(p) = data.get("pending_switch").filter(|p| p.is_object()) else {
         return Ok(None);
@@ -988,13 +1083,20 @@ pub fn apply_pending_switch_at(store: &Store, now: chrono::NaiveDateTime) -> R<O
     let (target, reason) = {
         let _g = store.lock()?;
         let mut data = store.load()?;
-        let Some(p) = data.get("pending_switch").filter(|p| p.is_object()).cloned() else {
+        let Some(p) = data
+            .get("pending_switch")
+            .filter(|p| p.is_object())
+            .cloned()
+        else {
             return Ok(None);
         };
         let target = s(&p, "account").unwrap_or_default().to_string();
-        let known = accounts(&data).iter().any(|a| s(a, "id") == Some(target.as_str()));
-        let mut drop =
-            !known || active_code_id(&data).as_deref() == Some(target.as_str()) || pending_switch_expired(&p);
+        let known = accounts(&data)
+            .iter()
+            .any(|a| s(a, "id") == Some(target.as_str()));
+        let mut drop = !known
+            || active_code_id(&data).as_deref() == Some(target.as_str())
+            || pending_switch_expired(&p);
         if !drop && s(&p, "reason") == Some("rule") {
             let r = super::rules::match_time_rule(&data, now);
             drop = r.as_ref().and_then(|r| s(r, "id")) != s(&p, "rule"); // 时间段已经过了，或规则变了
