@@ -32,9 +32,24 @@ jobs:
       - name: 桌面额度与本地账号库依赖
         run: python -m pip install -r scripts/requirements-desktop.txt -r scripts/requirements-vault.txt
       - name: 脚本版测试（含 SHA256SUMS 是否最新）
-        run: python -m unittest discover -s scripts -p "test_*.py"
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s scripts -p "test_*.py" 2>&1 | tee "${{ runner.temp }}/test.log"
         env:
           CAM_NO_KEYCHAIN: "1"
+      - name: 失败详情 1（写成注释，公开接口能读到）
+        if: failure()
+        shell: bash
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 0
+      - name: 失败详情 2
+        if: failure()
+        shell: bash
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 10
+      - name: 失败详情 3
+        if: failure()
+        shell: bash
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 20
 
   engine-tests:
     name: Rust 引擎测试
@@ -53,7 +68,16 @@ jobs:
       - name: 排版检查（整个工作区，改完 Rust 运行 cargo fmt --all）
         run: cargo fmt --all --check
       - name: 引擎测试（含 tests/shared 与脚本版的一致性）
-        run: cargo test -p cam-engine
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p cam-engine 2>&1 | tee "${{ runner.temp }}/test.log"
+        env:
+          RUST_BACKTRACE: "1"
+      - name: 失败详情（写成注释，公开接口能读到）
+        if: failure()
+        shell: bash
+        run: python3 ../../.github/ci-annotate.py "${{ runner.temp }}/test.log" cargo
       - name: 引擎 Rust 检查
         run: cargo clippy -p cam-engine --all-targets -- -D warnings -A clippy::too_many_lines
 

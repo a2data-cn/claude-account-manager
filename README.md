@@ -22,7 +22,7 @@
 
 ## 安装
 
-先把代码拿到本机：推荐 `git clone`（以后一条命令就能更新），也可以下载压缩包解压。然后：
+先把代码拿到本机：推荐 `git clone https://github.com/a2data-cn/claude-account-manager.git`（以后一条命令就能更新），也可以在 GitHub 页面点 Code → Download ZIP 下载压缩包解压。桌面版的现成安装包在 [Releases](https://github.com/a2data-cn/claude-account-manager/releases) 页面。然后：
 
 - **macOS**：在访达里双击 `安装.command`（从网上下载的压缩包第一次可能提示无法打开：到“系统设置 → 隐私与安全性”最下面点“仍要打开”），或者在终端运行 `bash install.sh`
 - **Linux**：终端运行 `bash install.sh`
@@ -415,7 +415,7 @@ npm run tauri build    # 打包，产物在 src-tauri/target/release/bundle/
 
 **一键编译安装**：`bash scripts/build-desktop-mac.sh`（Windows：`powershell -ExecutionPolicy Bypass -File scripts\build-desktop-windows.ps1`）。脚本会自动安装缺少的 Rust，编译后把 App 装进“应用程序”。如果失败，把生成的 `build.log` 发给作者。
 
-**不想本地编译**：把项目推到 GitHub，`.github/workflows/build.yml` 每次推送都会跑测试；推送 `v1.0.0` 这样的标签时自动编译 macOS（通用版）、Windows、Linux 三个平台的安装包，生成 Release 草稿（到仓库的 Releases 页面检查后发布）。不打标签也想编一次：到 Actions 页面选 build → Run workflow，安装包在这次运行的 Artifacts 里。
+**不想本地编译**：到 [Releases](https://github.com/a2data-cn/claude-account-manager/releases) 页面下载现成的安装包。它们由 `.github/workflows/build.yml` 自动编出来：每次推送只跑测试，推送 `v1.3.0` 这样的标签时编 macOS（通用版）、Windows、Linux 三个平台的安装包，生成 Release 草稿，检查后发布。不打标签也想编一次：到 Actions 页面选 build → Run workflow，安装包在这次运行的 Artifacts 里。
 
 桌面版功能：
 - 关闭窗口后缩到托盘继续运行。托盘菜单列出所有账号和额度，点一下即可切换。托盘图标右下角有一个额度圆点（当前账号 5 小时额度 70% 以下绿、70–89% 黄、90% 以上红），鼠标放上去显示当前账号和 5 小时、7 天额度；macOS 菜单栏上还直接显示 5 小时用量百分比。
