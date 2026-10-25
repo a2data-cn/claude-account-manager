@@ -1,6 +1,6 @@
 [package]
 name = "cam-engine"
-version = "1.2.1"
+version = "1.3.0"
 description = "Claude 多账号管理的核心逻辑（不依赖 Tauri）"
 edition = "2021"
 rust-version = "1.89"
