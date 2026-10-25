@@ -2331,7 +2331,7 @@ class CamTest(unittest.TestCase):
         self.assertIn(("warn", "A：用量上次刷新 2 小时前，后台没在刷新它"), items)
         # 菜单栏插件：每分钟跑一轮，看它的状态文件
         write(os.path.join(store.root, ".menubar-state.json"), "{}")
-        self.assertTrue(any(t.startswith("后台任务：菜单栏插件每分钟做一轮") for _, t in texts(self.cam.checkup_cam(store, store.load()))))
+        self.assertTrue(any(t.startswith(f"后台任务：{self.cam.MENU_TOOL}每分钟做一轮") for _, t in texts(self.cam.checkup_cam(store, store.load()))))
         # 有新版本、代码目录有改动、文件对不上
         upd = {"checkout": True, "behind": 2, "ahead": 0, "dirty": [" M README.md"], "checked_at": self.cam.now_iso(), "message": "x"}
         with mock.patch.object(self.cam, "saved_update_check", lambda: upd), \
@@ -2796,7 +2796,7 @@ exit 2""")
             self.cam.remove_account(store, acc["id"])
         data["active"].pop("claude_desktop")
         store.save(data)
-        for profile in (directory, None):
+        for profile in (os.path.normcase(directory), None):  # _desktop_processes 返回的路径是 normcase 过的
             with mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, profile)]):
                 with self.assertRaisesRegex(self.cam.CamError, "可能仍在使用"):
                     self.cam.remove_account(store, acc["id"])
