@@ -1,5 +1,6 @@
 """Isolated vault, OAuth and read-only mailbox regression tests; no real accounts."""
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import importlib.util
@@ -74,7 +75,7 @@ class VaultTest(unittest.TestCase):
             vault.unlock(self.store, {"master_password": "wrong password"})
         self.assertFalse(vault.status(self.store)["unlocked"])
         vault.unlock(self.store, {"master_password": "test master password"})
-        with sqlite3.connect(os.path.join(self.tmp.name, "vault.sqlite3")) as db:
+        with contextlib.closing(sqlite3.connect(os.path.join(self.tmp.name, "vault.sqlite3"))) as db, db:
             blob = bytearray(db.execute("SELECT secret FROM vault_entries WHERE id=?", (entry_id,)).fetchone()[0])
             blob[-1] ^= 1
             db.execute("UPDATE vault_entries SET secret=? WHERE id=?", (bytes(blob), entry_id))
@@ -158,7 +159,7 @@ class VaultTest(unittest.TestCase):
                 with self.assertRaisesRegex(vault.VaultError, "正在授权"):
                     vault.save_entry(self.store, {"id": entry_id, "email": "changed@example.com"})
                 # 模拟未实现条目锁的旧后端；callback 的最终身份检查仍然应阻止写入。
-                with sqlite3.connect(os.path.join(self.tmp.name, "vault.sqlite3")) as db:
+                with contextlib.closing(sqlite3.connect(os.path.join(self.tmp.name, "vault.sqlite3"))) as db, db:
                     db.execute("UPDATE vault_entries SET email=? WHERE id=?", ("changed@example.com", entry_id))
             def fake_http(method, url, **kwargs):
                 return {"access_token": "never-save", "refresh_token": "never-save-refresh"} if method == "POST" else {"emailAddress": "wrong@example.com"}

@@ -882,7 +882,7 @@ class CamTest(unittest.TestCase):
         lines = []
         cam_menu.render(store, {}, out=lines.append)
         clicks = [l for l in lines if 'param2="switch"' in l]
-        self.assertTrue(clicks and all(f'param1="{cam_menu.MENU_PY}"' in l for l in clicks), clicks)
+        self.assertTrue(clicks and all(f'param1="{menu_arg(cam_menu.MENU_PY)}"' in l for l in clicks), clicks)
         # 有会话在跑：不打断，登记等待并通知
         self.cam.running_claude_processes = lambda: [(1, "claude")]
         self.assertEqual(cam_menu.switch_from_menu(store, a_id), 0)
@@ -2314,7 +2314,7 @@ class CamTest(unittest.TestCase):
             store.save(d)
         texts = lambda items: [(i["level"], i["text"]) for i in items]
         items = texts(self.cam.checkup_cam(store, store.load()))
-        self.assertIn(("info", "后台任务：没有程序在做（桌面版、cam serve、菜单栏插件都没在运行）"), items)
+        self.assertIn(("info", f"后台任务：没有程序在做（桌面版、cam serve、{self.cam.MENU_TOOL}都没在运行）"), items)
         self.assertIn(("info", "A：用量上次刷新 2 小时前"), items)  # 没有后台在跑，不算没在刷新
         # cam serve 拿着后台锁，心跳记在数据目录里
         self._fake_proc(110, ["python3", "/x/scripts/cam.py", "serve", "--port", "8787"])
@@ -2361,7 +2361,7 @@ class CamTest(unittest.TestCase):
 
     def test_checkup_survives_corrupt_files(self):
         self._two_accounts()
-        with open(self.creds_path, "w") as f:
+        with open(self.creds_path, "w", encoding="utf-8") as f:
             f.write("{坏了")
         res = self._checkup(offline=True)
         local = [(i["level"], i["text"]) for i in self._section(res, "claude_code")]
@@ -2373,6 +2373,7 @@ class CamTest(unittest.TestCase):
         self.assertEqual([(i["level"], i["text"]) for i in self._section(res, "cam")], [("bad", "这一节没查完：RuntimeError: 炸了")])
         self.assertTrue(self._section(res, "accounts"))
 
+    @unittest.skipIf(os.name == "nt", "用 sh 脚本模拟机器人命令，Windows 上跳过")
     def test_checkup_runs_chat_bot_doctors(self):
         bindir = os.path.join(self.tmp, ".local", "bin")
         ran = os.path.join(self.tmp, "ran.txt")
@@ -2453,7 +2454,8 @@ exit 2""")
         items = [i for sec in res["sections"] for i in sec["items"] if i.get("kind") != "summary"]
         self.assertEqual((s["bad"], s["warn"]), (sum(i["level"] == "bad" for i in items), sum(i["level"] == "warn" for i in items)))
         self.assertEqual(s["text"], f"{s['bad']} 项要处理，{s['warn']} 项留意")
-        self.assertTrue(os.path.exists(ran))
+        if os.name != "nt":  # 机器人命令是 sh 脚本模拟的，Windows 上跑不了
+            self.assertTrue(os.path.exists(ran))
         # 文字版：标记顶格（install.sh 按 ^(✗|!) 挑出要留意的行），第一行是版本，最后一行是总结
         lines = doctor().splitlines()
         self.assertTrue(lines[0].startswith("cam "))
@@ -2506,10 +2508,10 @@ exit 2""")
         lines = []
         cam_menu.render(store, {}, out=lines.append)
         item = next(l for l in lines if l.startswith("全面体检 |"))
-        self.assertIn(f'param1="{cam_menu.MENU_PY}" param2="checkup"', item)
+        self.assertIn(f'param1="{menu_arg(cam_menu.MENU_PY)}" param2="checkup"', item)
         self.assertIn("terminal=false", item)
         term = next(l for l in lines if l.startswith("在终端看完整体检结果 |"))
-        self.assertIn(f'param1="{cam_menu.CAM_PY}" param2="doctor" terminal=true', term)
+        self.assertIn(f'param1="{menu_arg(cam_menu.CAM_PY)}" param2="doctor" terminal=true', term)
         self.assertEqual(cam_menu.checkup_from_menu(), 0)
         self.assertEqual(told[-1][0], "全面体检")
         self.assertRegex(told[-1][1], r"^(一切正常|\d+ 项要处理：.+|\d+ 项留意：.+)$")
@@ -2644,12 +2646,14 @@ exit 2""")
                 self.assertTrue(self.cam._is_desktop_cmd(r'C:\Users\me\AppData\Local\AnthropicClaude\app-1.2\claude.exe'))
                 self.assertTrue(self.cam._is_desktop_cmd(r'"C:\Program Files\WindowsApps\AnthropicPBC.Claude_1.2\Claude.exe"'))
                 self.assertFalse(self.cam._is_desktop_cmd(r'C:\Users\me\.local\bin\claude.exe'))
-        expected = os.path.realpath(os.path.join(self.tmp, "with spaces"))
-        for flag in (f'--user-data-dir="{expected}"', f'--user-data-dir "{expected}" --other-flag',
-                     f'--user-data-dir={expected}'):
+        given = os.path.realpath(os.path.join(self.tmp, "with spaces"))
+        expected = os.path.normcase(given)  # Windows 上统一成小写比较
+        for flag in (f'--user-data-dir="{given}"', f'--user-data-dir "{given}" --other-flag',
+                     f'--user-data-dir={given}'):
             self.assertEqual(self.cam._desktop_profile_from_command("Claude " + flag), expected)
         self.assertIsNone(self.cam._desktop_profile_from_command("Claude"))
 
+    @unittest.skipIf(os.name == "nt", "模拟的是 ps 和 lsof 的输出，Windows 上走的是 PowerShell")
     def test_desktop_process_query_failures_and_macos_file_evidence(self):
         failed = subprocess.CompletedProcess([], 1, stdout="", stderr="permission denied")
         with mock.patch.object(self.cam.subprocess, "run", return_value=failed):
@@ -2776,14 +2780,15 @@ exit 2""")
         launcher.poll.return_value = None
         with mock.patch.object(self.cam, "IS_MAC", False), mock.patch.object(self.cam, "IS_WIN", False), \
                 mock.patch.object(self.cam.subprocess, "Popen", return_value=launcher), \
-                mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, directory)]):
+                mock.patch.object(self.cam, "_desktop_processes", return_value=[(101, os.path.normcase(directory))]):
             self.cam._launch_claude_desktop("/fake/Claude", directory)
 
     def test_desktop_removal_preserves_active_and_running_profiles(self):
         store = self.cam.Store()
         acc = self.cam.add_account(store, "claude_desktop", "A")
         directory = os.path.realpath(self.cam.desktop_profile_dir(store, acc))
-        self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
+        if os.name != "nt":
+            self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
         data = store.load()
         data["active"]["claude_desktop"] = acc["id"]
         store.save(data)
@@ -3181,6 +3186,11 @@ def write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
+
+
+def menu_arg(path):
+    """菜单栏插件把路径写进 bash= / param1= 时会把反斜杠写成两个（Windows 路径才有）。"""
+    return path.replace("\\", "\\\\")
 
 
 def stub(bindir, name, body):
