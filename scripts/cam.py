@@ -6459,6 +6459,10 @@ def cmd_vault(store, args):
 
 
 def main(argv=None):
+    if os.name == "nt":  # Windows 上输出到管道时按系统代码页编码，英文系统（cp1252）遇到中文会直接报错；托盘和测试都按 UTF-8 读
+        for stream in (sys.stdout, sys.stderr):
+            if not stream.isatty() and hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(prog="cam", description="Claude 多账号管理（脚本版）",
                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     p.add_argument("--version", action="version", version=VERSION)

@@ -35,13 +35,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python -m unittest discover -s scripts -p "test_*.py" 2>&1 | tee test.log
+          python -m unittest discover -s scripts -p "test_*.py" 2>&1 | tee "${{ runner.temp }}/test.log"
         env:
           CAM_NO_KEYCHAIN: "1"
       - name: 失败详情（写成注释，公开接口能读到）
         if: failure()
         shell: bash
-        run: python .github/ci-annotate.py test.log unittest
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest
 
   engine-tests:
     name: Rust 引擎测试
@@ -63,13 +63,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p cam-engine 2>&1 | tee test.log
+          for i in 1 2 3; do echo "=== 第 $i 遍"; cargo test -p cam-engine 2>&1 | tee -a "${{ runner.temp }}/test.log"; done
         env:
           RUST_BACKTRACE: "1"
       - name: 失败详情（写成注释，公开接口能读到）
         if: failure()
         shell: bash
-        run: python3 ../../.github/ci-annotate.py test.log cargo
+        run: python3 ../../.github/ci-annotate.py "${{ runner.temp }}/test.log" cargo
       - name: 引擎 Rust 检查
         run: cargo clippy -p cam-engine --all-targets -- -D warnings -A clippy::too_many_lines
 

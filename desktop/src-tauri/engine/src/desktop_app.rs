@@ -896,16 +896,16 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("自动恢复原窗口失败"));
         let unknown = MockRuntime::new(None, vec![]);
-        assert!(open_with_runtime(
+        let err = open_with_runtime(
             &f.store,
             &f.acc,
             &unknown,
             Some(Path::new("/fake/app")),
             &f.previous,
-            false
+            false,
         )
-        .unwrap_err()
-        .contains("无法确认"));
+        .unwrap_err();
+        assert!(err.contains("无法确认"), "{err}");
         assert!(unknown.events.borrow().is_empty());
         *unknown.procs.borrow_mut() = Err("process inspection denied".into());
         assert!(open_with_runtime(

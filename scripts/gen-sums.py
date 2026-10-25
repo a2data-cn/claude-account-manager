@@ -17,6 +17,11 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUMS = "SHA256SUMS"
 
+if os.name == "nt":  # Windows 上输出到管道时按系统代码页编码，英文系统（cp1252）遇到中文会直接报错；测试和脚本都按 UTF-8 读
+    for _stream in (sys.stdout, sys.stderr):
+        if not _stream.isatty() and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def git_files(*args, root=ROOT):
     out = subprocess.run(["git", "-C", root, "ls-files", "-z", *args], capture_output=True, check=True).stdout
