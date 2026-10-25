@@ -38,10 +38,18 @@ jobs:
           python -m unittest discover -s scripts -p "test_*.py" 2>&1 | tee "${{ runner.temp }}/test.log"
         env:
           CAM_NO_KEYCHAIN: "1"
-      - name: 失败详情（写成注释，公开接口能读到）
+      - name: 失败详情 1（写成注释，公开接口能读到）
         if: failure()
         shell: bash
-        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 0
+      - name: 失败详情 2
+        if: failure()
+        shell: bash
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 10
+      - name: 失败详情 3
+        if: failure()
+        shell: bash
+        run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 20
 
   engine-tests:
     name: Rust 引擎测试

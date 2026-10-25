@@ -615,8 +615,19 @@ fn open_with_runtime(
     if s(acc, "kind") != Some("claude_desktop") {
         return Err("只有 Claude 桌面版账号可以这样切换".into());
     }
-    let _switch = try_lock_file(&store.root.join("desktop-switch.lock"))?
-        .ok_or("另一个 Claude 桌面版操作正在进行，请稍后重试")?;
+    // 这把锁（flock）在别的线程正好 fork 子进程的一瞬间会被子进程的文件句柄多拿一会儿，
+    // 所以拿不到时先等一小会儿再报忙，不然偶发地把正常操作当成并发冲突。
+    let switch_path = store.root.join("desktop-switch.lock");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let _switch = loop {
+        if let Some(guard) = try_lock_file(&switch_path)? {
+            break guard;
+        }
+        if Instant::now() >= deadline {
+            return Err("另一个 Claude 桌面版操作正在进行，请稍后重试".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     let id = s(acc, "id").ok_or("桌面版账号缺少 ID")?;
     // 拿操作锁后重新读取，不能用路由在等待操作之前取得的旧账号。
     let data = store.load()?;
