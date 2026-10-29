@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude 账号</title>
+<style>
+/* 菜单栏小工具点开的卡片小面板：340 宽，像系统小组件那样一张张卡片。配色和 panel.html 一致 */
+:root {
+  --paper: #F4F2EC; --surface: #FBFAF7; --ink: #2E2C27; --muted: #6E6857; --line: #E7E3D9; --track: #ECE8DE;
+  --accent: #B5532F; --accent-ink: #FFFFFF; --bar: #6E685A; --warn: #96600F; --hot: #B5432E; --live: #3B7A52; --live-soft: #E2EDDF;
+  --violet: #7656B4; --ok: #3E6EA8; --shadow: 0 1px 2px rgba(60, 45, 25, .06);
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --track: #3B3A36;
+    --accent: #D97757; --accent-ink: #1F1E1D; --bar: #BDB7A8; --warn: #E0A548; --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30;
+    --violet: #B49AEF; --ok: #7FA6E0; --shadow: none; color-scheme: dark; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--paper); color: var(--ink); }
+body { font: 13px/1.5 var(--sans); font-variant-numeric: tabular-nums; padding: 12px 12px 10px; -webkit-user-select: none; user-select: none; }
+button { font: inherit; color: inherit; }
+.head { display: flex; align-items: center; gap: 8px; margin: 0 2px 10px; }
+.head .logo { width: 20px; height: 20px; border-radius: 5px; flex: none; }
+.head b { font-size: 14px; font-weight: 650; }
+.head .when { margin-left: auto; font-size: 11px; color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 12px 14px; margin-bottom: 8px; }
+.cur { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 0 14px; align-items: center; }
+.ring { display: block; }
+.ring circle { fill: none; stroke-width: 5; }
+.ring .rt { stroke: var(--track); }
+.ring .rf { stroke: var(--bar); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.ring .rf.warn { stroke: var(--warn); }
+.ring .rf.hot { stroke: var(--hot); }
+.ring text { fill: var(--ink); font: 650 15px var(--sans); }
+.ring text tspan { font-size: 9px; font-weight: 600; }
+.ring.sm circle { stroke-width: 3.5; }
+.ring.sm text { font-size: 10px; }
+.ring.sm text tspan { font-size: 6.5px; }
+.name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.name b { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; line-height: 1.5; flex: none; }
+.chip.live { background: var(--live-soft); border-color: transparent; color: var(--live); }
+.chip.p-pro { color: var(--ok); border-color: currentColor; }
+.chip.p-max { color: var(--violet); border-color: currentColor; }
+.chip.p-team { color: var(--live); border-color: currentColor; }
+.chip.bad { background: var(--hot); border-color: var(--hot); color: #fff; }
+.sub { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.line { font-size: 12px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.line b { color: var(--ink); font-weight: 650; }
+.bar { position: relative; height: 5px; background: var(--track); border-radius: 999px; margin-top: 4px; overflow: hidden; }
+.bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--bar); min-width: 5px; }
+.bar i.warn { background: var(--warn); }
+.bar i.hot { background: var(--hot); }
+.sec { font-size: 11px; color: var(--muted); margin: 10px 4px 6px; font-weight: 600; letter-spacing: .02em; }
+.acc { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 0 10px; align-items: center; width: 100%; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 9px 12px; margin-bottom: 6px; cursor: pointer;
+  transition: border-color .12s, transform .12s, box-shadow .12s; }
+.acc:hover { border-color: var(--muted); transform: translateY(-1px); box-shadow: 0 3px 10px rgba(40, 30, 20, .08); }
+.acc:disabled { cursor: progress; opacity: .6; transform: none; }
+.acc .go { font-size: 11.5px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.acc .name b { font-size: 13px; }
+.acc.web .go { color: var(--muted); }
+.acts { display: flex; gap: 6px; margin-top: 10px; }
+.btn { flex: 1; border: 1px solid var(--line); background: var(--surface); border-radius: 9px; padding: 6px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+.btn:disabled { opacity: .5; cursor: progress; }
+.foot { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; font-size: 11px; color: var(--muted); }
+.foot .risk.medium { color: var(--warn); }
+.foot .risk.high { color: var(--hot); font-weight: 600; }
+.msg { margin-top: 8px; padding: 7px 10px; border-radius: 9px; font-size: 12px; background: var(--live-soft); color: var(--live); }
+.msg.bad { background: var(--hot); color: #fff; }
+.msg.wait { background: var(--track); color: var(--ink); }
+.empty { padding: 14px; text-align: center; color: var(--muted); font-size: 12.5px; }
+.empty code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="head"><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7.7" fill="#D97757"/><circle cx="16" cy="16" r="6.72" fill="none" stroke="#FFF6EE" stroke-width="4" stroke-linecap="round" stroke-dasharray="31.67 42.22" transform="rotate(45 16 16)"/></svg><b>Claude 账号</b><span class="when" id="when"></span></div>
+<main id="main"><div class="empty">正在读取…</div></main>
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const token = new URL(location.href).searchParams.get("t") || "";
+  const PLAN = { free: "Free", pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", api: "API" };
+  const PLAN_CLASS = { pro: "p-pro", max: "p-max", team: "p-team" };
+  let state = null, busy = false, msg = null;
+
+  async function api(method, path, body) {
+    const res = await fetch(path, { method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body) });
+    let data = null;
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
+    return data;
+  }
+  function dur(ms) {
+    const m = Math.round(ms / 60000);
+    if (m < 60) return `${Math.max(1, m)} 分钟`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} 小时${m % 60 ? ` ${m % 60} 分` : ""}`;
+    return `${Math.floor(h / 24)} 天 ${h % 24} 小时`;
+  }
+  function resetShort(iso) {
+    if (!iso) return "";
+    const ms = new Date(iso) - Date.now();
+    return isNaN(ms) ? "" : ms <= 0 ? "已重置" : `${dur(ms)}后重置`;
+  }
+  const pct = (w) => w && w.utilization !== null && w.utilization !== undefined ? Math.max(0, Math.min(100, w.utilization)) : null;
+  const lv = (p) => p >= 90 ? "hot" : p >= 70 ? "warn" : "";
+  function ring(p, size, small) {
+    const r = size / 2 - 4, c = 2 * Math.PI * r, v = p === null ? 0 : p;
+    return `<svg class="ring${small ? " sm" : ""}" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
+      <circle class="rt" cx="${size / 2}" cy="${size / 2}" r="${r}"/>
+      <circle class="rf ${lv(v)}" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - v / 100)).toFixed(2)}"/>
+      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central">${p === null ? "–" : `${Math.round(p)}<tspan>%</tspan>`}</text></svg>`;
+  }
+  function planChip(a) {
+    const p = a.plan_display;
+    if (!p) return "";
+    const tier = (a.rate_limit_tier || "").match(/max_(\d+)x/);
+    return `<span class="chip ${PLAN_CLASS[p] || ""}">${esc(PLAN[p] || p)}${tier ? " " + tier[1] + "x" : ""}</span>`;
+  }
+  function usageLines(a) {
+    const u = a.usage || {}, p5 = pct(u.five_hour), p7 = pct(u.seven_day);
+    if (p5 === null && p7 === null) return `<div class="line">${a.kind === "claude_web" && !a.has_session_key ? "不自动读取用量" : "还没有用量"}</div>`;
+    const when = resetShort((u.five_hour || {}).resets_at);
+    return (p5 === null ? "" : `<div class="line">5 小时 <b>${p5.toFixed(0)}%</b>${when ? ` · ${esc(when)}` : ""}</div>`)
+      + (p7 === null ? "" : `<div class="line">7 天 <b>${p7.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p7)}" style="width:${p7}%"></i></div>`);
+  }
+  function render() {
+    const main = $("#main");
+    if (!state) return;
+    $("#when").textContent = state.generated_at ? "更新于 " + new Date(state.generated_at).toTimeString().slice(0, 5) : "";
+    const accs = state.accounts || [];
+    if (!accs.length) {
+      main.innerHTML = `<div class="card empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
+      return;
+    }
+    const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs[0];
+    const others = accs.filter((a) => a.id !== cur.id && a.kind !== "api");
+    const h = cur.health || {};
+    const curCard = `<div class="card cur">${ring(pct((cur.usage || {}).five_hour), 64)}
+      <div><div class="name"><b>${esc(cur.label || cur.email || "未命名")}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">正在用</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}</div>
+        ${cur.email && cur.email !== cur.label ? `<div class="sub">${esc(cur.email)}</div>` : ""}${usageLines(cur)}</div></div>`;
+    const rows = others.map((a) => {
+      const u = a.usage || {}, p5 = pct(u.five_hour), p7 = pct(u.seven_day), hh = a.health || {};
+      const web = a.kind !== "claude_code";
+      return `<button type="button" class="acc${web ? " web" : ""}" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" ${busy ? "disabled" : ""}>${ring(p5, 36, true)}
+        <span><span class="name"><b>${esc(a.label || a.email || "未命名")}</b>${planChip(a)}${hh.level === "error" ? `<span class="chip bad">异常</span>` : ""}</span>
+          <span class="line">${p5 === null ? (a.kind === "claude_web" ? "网页版" : a.kind === "claude_desktop" ? "桌面版" : "还没有用量") : `5 小时 <b>${p5.toFixed(0)}%</b>${p7 === null ? "" : ` · 7 天 <b>${p7.toFixed(0)}%</b>`}`}</span></span>
+        <span class="go">${a.kind === "claude_code" ? "切换 ›" : a.kind === "claude_desktop" ? "打开 ›" : "打开 ›"}</span></button>`;
+    }).join("");
+    const sc = state.risk_score, reg = state.region || {};
+    const foot = `<div class="foot"><span>${esc(state.host || "")}${reg.loc ? ` · 出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : ""}</span>
+      ${sc && reg.status ? `<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : ""}</div>`;
+    main.innerHTML = curCard + (rows ? `<div class="sec">其它账号 · 点一下切换</div>${rows}` : "")
+      + `<div class="acts"><button class="btn" data-act="refresh" ${busy ? "disabled" : ""}>刷新用量</button><button class="btn" data-act="panel" ${busy ? "disabled" : ""}>打开管理面板</button></div>`
+      + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "") + foot;
+  }
+  async function load() {
+    try { state = await api("GET", "/api/state"); render(); }
+    catch (e) { $("#main").innerHTML = `<div class="card empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+  }
+  function say(text, cls) { msg = text ? { text, cls: cls || "" } : null; render(); if (text && cls !== "bad") setTimeout(() => { msg = null; render(); }, 6000); }
+  async function run(fn) {
+    if (busy) return;
+    busy = true; render();
+    try { await fn(); } catch (e) { say(e.message, "bad"); }
+    finally { busy = false; render(); }
+  }
+  document.addEventListener("click", (ev) => {
+    const acc = ev.target.closest(".acc");
+    if (acc) {
+      const id = acc.dataset.id, kind = acc.dataset.kind;
+      return run(async () => {
+        if (kind === "claude_code") {
+          const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/switch`, { mode: "wait" });  // 有会话在跑就等它们退出再切
+          state = await api("GET", "/api/state");
+          say(r.message, r.deferred ? "wait" : r.changed ? "" : "wait");
+        } else {
+          const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/open`);
+          say(r.message || "已打开");
+        }
+      });
+    }
+    const btn = ev.target.closest("[data-act]");
+    if (!btn) return;
+    if (btn.dataset.act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); });
+    if (btn.dataset.act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已在浏览器打开管理面板"); });
+  });
+  load();
+  setInterval(load, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
+  window.addEventListener("focus", load);
+  window.addEventListener("pageshow", load);
+})();
+</script>
+</body>
+</html>

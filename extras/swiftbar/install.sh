@@ -54,6 +54,7 @@ cat > "$PLUGIN" <<EOF
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
 # <swiftbar.hideSwiftBar>false</swiftbar.hideSwiftBar>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
+# <swiftbar.persistentWebView>false</swiftbar.persistentWebView>
 export PATH="\$PATH:/usr/local/bin:/opt/homebrew/bin:\$HOME/.local/bin:\$HOME/.npm-global/bin"
 exec "$PY" "$MENU_PY" "\$@"
 EOF

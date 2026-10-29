@@ -40,6 +40,9 @@ PY = sys.executable
 REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
 # 全局快捷键的前缀（SwiftBar 注册，任何应用里按都生效）：+C 打开菜单，+1 / 2 / 3… 切到第几个号（按添加顺序）。设成空就不注册
 HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
+# 点菜单栏图标弹出的卡片小面板（SwiftBar 的 webview，页面是 cam serve 的 /mini）；CAM_MENU_MINI=0 关掉，只用系统菜单
+MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
+MINI_SIZE = (340, 470)
 LINE = 40  # 提醒、建议这类长句最多显示多少个字（SwiftBar 的 length 参数：截短，完整内容放鼠标悬停提示），免得把菜单撑得很宽
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
 
@@ -352,6 +355,22 @@ def _background_work(store):
     return st
 
 
+def mini_href(store):
+    """标题行的 href + webview 参数：左键点图标弹出卡片小面板，右键还是系统菜单。
+
+    要本机有 cam serve 在跑，没有就在后台起一个（只监听 127.0.0.1）；在跑的是桌面版的服务时没有这个页面，就不加。
+    """
+    if not MINI:
+        return ""
+    try:
+        port, token = cam.ensure_panel(store)
+        if not cam.mini_available(port, token):
+            return ""
+    except Exception:  # noqa: BLE001  起不来就只用系统菜单
+        return ""
+    return f" href=http://127.0.0.1:{port}/mini?t={token} webview=true webvieww={MINI_SIZE[0]} webviewh={MINI_SIZE[1]}"
+
+
 def bg_error(store, st):
     """后台上一轮的错误：自己做的看 st，归桌面版 / cam serve 做的看它们记的心跳。"""
     if st.get("bg_owner") != "other":
@@ -402,7 +421,7 @@ def render(store, st, out=print, rich=None):
         head = f"{esc(name)} | sfimage=person.2.circle"
     else:
         head = "Claude | sfimage=person.2.circle"
-    out(head + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
+    out(head + (mini_href(store) if rich else "") + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
     out("---")
 
     if not accs:

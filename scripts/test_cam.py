@@ -793,6 +793,7 @@ class CamTest(unittest.TestCase):
     def test_menubar_plugin(self):
         os.environ["CAM_MENU_NO_NOTIFY"] = "1"
         os.environ["CAM_MENU_REFRESH_MIN"] = "0"
+        os.environ["CAM_MENU_MINI"] = "0"  # 测试里不去起 cam serve（卡片小面板要它）
         sys.path.insert(0, os.path.join(HERE, "..", "extras", "swiftbar"))
         import cam_menu
         cam_menu = importlib.reload(cam_menu)
@@ -849,6 +850,26 @@ class CamTest(unittest.TestCase):
         self.assertTrue(all('badge="Max' in l for l in rows), rows)
         # 全局快捷键：标题行 +C 打开菜单；账号行 +1 / +2 按添加顺序（当前号 B 排在最前，但它是第二个加的）
         self.assertTrue(title.endswith(" shortcut=CTRL+OPTION+CMD+C"), title)
+        # 标题行带卡片小面板的 href + webview（本机 cam serve 的 /mini）；CAM_MENU_MINI=0、起不来或是桌面版的服务就不带
+        self.assertNotIn("webview=", title)
+        cam_menu.MINI = True
+        try:
+            with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
+                 mock.patch.object(cam_menu.cam, "mini_available", return_value=True):
+                lines2 = []
+                cam_menu.render(store, {}, out=lines2.append, rich=True)
+            self.assertIn(" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww=340 webviewh=470 shortcut=", lines2[0])
+            with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
+                 mock.patch.object(cam_menu.cam, "mini_available", return_value=False):
+                lines2 = []
+                cam_menu.render(store, {}, out=lines2.append, rich=True)
+            self.assertNotIn("webview=", lines2[0])
+            with mock.patch.object(cam_menu.cam, "ensure_panel", side_effect=self.cam.CamError("起不来")):
+                lines2 = []
+                cam_menu.render(store, {}, out=lines2.append, rich=True)
+            self.assertNotIn("webview=", lines2[0])
+        finally:
+            cam_menu.MINI = False
         self.assertTrue(rows[0].startswith("B |") and rows[0].endswith(" shortcut=CTRL+OPTION+CMD+2"), rows)
         self.assertTrue(rows[1].endswith(" shortcut=CTRL+OPTION+CMD+1"), rows)
         alts = [l for l in lines if "alternate=true" in l]
@@ -938,6 +959,7 @@ class CamTest(unittest.TestCase):
     def _menu_plugin(self):
         os.environ["CAM_MENU_NO_NOTIFY"] = "1"
         os.environ["CAM_MENU_REFRESH_MIN"] = "0"
+        os.environ["CAM_MENU_MINI"] = "0"  # 测试里不去起 cam serve（卡片小面板要它）
         sys.path.insert(0, os.path.join(HERE, "..", "extras", "swiftbar"))
         import cam_menu
         cam_menu = importlib.reload(cam_menu)
@@ -3513,6 +3535,33 @@ class UpdateTest(unittest.TestCase):
         self.assertIn("不是用 git 下载的", str(ctx.exception))
         with mock.patch.object(self.cam, "code_root", lambda: plain), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.cam.main(["update", "--check"]), 1)
+
+    def test_mini_page_and_open_panel(self):
+        # 菜单栏小工具点开的卡片小面板：/mini 不用令牌（和 / 一样），接口要令牌；"打开管理面板"在本机浏览器里打开
+        store = self.cam.Store()
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        port = srv.server_address[1]
+        with opener.open(f"http://127.0.0.1:{port}/mini") as r:
+            html = r.read().decode()
+        self.assertEqual(r.status, 200)
+        self.assertIn("Claude 账号", html)
+        self.assertIn("/api/open-panel", html)
+        self.assertTrue(self.cam.mini_available(port, token))
+        self.assertFalse(self.cam.mini_available(1, token))  # 没人听的端口
+        opened = []
+        with mock.patch.object(self.cam, "open_in_browser", opened.append):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/open-panel", method="POST", data=b"{}",
+                                         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+            with opener.open(req) as r:
+                body = json.loads(r.read().decode())
+        self.assertEqual(opened, [f"http://127.0.0.1:{port}/?t={token}"])  # 用的就是这个在跑的面板，不另起
+        self.assertEqual(body["url"], opened[0])
+        self.assertEqual((self.cam.ensure_panel(store, port)), (port, token))
 
     def test_http_api_and_menu(self):
         store = self.cam.Store()

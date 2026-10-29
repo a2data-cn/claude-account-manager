@@ -2973,13 +2973,18 @@ def _remove_account_locked(store, key):
 
 # --------------------------------------------------------------------------- Web 服务
 
-def panel_html():
+def panel_html(name="panel.html"):
     here = os.path.dirname(os.path.abspath(__file__))
-    for p in (os.path.join(here, "..", "web", "panel.html"), os.path.join(here, "panel.html")):
+    for p in (os.path.join(here, "..", "web", name), os.path.join(here, name)):
         if os.path.exists(p):
             with open(p, "r", encoding="utf-8") as f:
                 return f.read()
-    return "<h1>panel.html not found</h1><p>请把 web/panel.html 放在 cam.py 旁边。</p>"
+    return f"<h1>{name} not found</h1><p>请把 web/{name} 放在 cam.py 旁边。</p>"
+
+
+def mini_html():
+    """菜单栏小工具点开的卡片小面板（SwiftBar 的 webview），和面板用同一套接口。"""
+    return panel_html("mini.html")
 
 
 def server_token(store):
@@ -3150,6 +3155,8 @@ def make_handler(store, token):
             path = urllib.parse.urlparse(self.path).path
             if method == "GET" and path in ("/", "/index.html"):
                 return self._send(200, raw=panel_html().encode(), ctype="text/html; charset=utf-8")
+            if method == "GET" and path == "/mini":
+                return self._send(200, raw=mini_html().encode(), ctype="text/html; charset=utf-8")
             if method == "GET" and path == "/manifest.webmanifest":
                 return self._send(200, MANIFEST, ctype="application/manifest+json")
             if not path.startswith("/api/"):
@@ -3162,6 +3169,8 @@ def make_handler(store, token):
                     return self._send(200, vault_route(store, method, parts, self._body() if method == "POST" else {}))
                 if method == "POST" and parts == ["open-external"]:
                     return self._send(200, open_external_url(self._body().get("url")))
+                if method == "POST" and parts == ["open-panel"]:  # 卡片小面板里点“打开管理面板”：在这台电脑的浏览器里打开
+                    return self._send(200, {"ok": True, "url": open_panel(store, self.server.server_address[1])})
                 if method == "GET" and parts == ["state"]:
                     return self._send(200, public_state(store, store.load()))
                 if method == "POST" and parts == ["refresh"]:
@@ -3481,34 +3490,48 @@ def port_free(port):
             return False
 
 
-def open_panel(store, port=8787):
-    """在浏览器打开 Web 面板（菜单栏的“打开管理面板”）。
+def ensure_panel(store, port=8787):
+    """确保本机有面板在跑（cam serve 或桌面版），返回 (端口, 令牌)。
 
-    本机已经有面板在跑就直接用；没有就在后台起一个只监听 127.0.0.1 的 cam serve，
-    它一直运行到注销或重启。端口被别的程序占了就往后找。返回打开的地址。
+    没有就在后台起一个只监听 127.0.0.1 的 cam serve，它一直运行到注销或重启。端口被别的程序占了就往后找。
     """
     token = server_token(store)
     for p in range(port, port + 10):
-        url = f"http://127.0.0.1:{p}/?t={token}"
-        if not panel_running(p, token):
-            if not port_free(p):
-                continue
-            kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
-                  "close_fds": True}
-            if IS_WIN:
-                kw["creationflags"] = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
-            else:
-                kw["start_new_session"] = True
-            subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", "--port", str(p)], **kw)
-            for _ in range(40):
-                time.sleep(0.25)
-                if panel_running(p, token):
-                    break
-            else:
-                raise CamError("面板没能启动。在终端运行 cam serve 看看报错")
-        open_in_browser(url)
-        return url
+        if panel_running(p, token):
+            return p, token
+        if not port_free(p):
+            continue
+        kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+              "close_fds": True}
+        if IS_WIN:
+            kw["creationflags"] = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", "--port", str(p)], **kw)
+        for _ in range(40):
+            time.sleep(0.25)
+            if panel_running(p, token):
+                return p, token
+        raise CamError("面板没能启动。在终端运行 cam serve 看看报错")
     raise CamError(f"{port}–{port + 9} 端口都被别的程序占用了，用 cam panel --port 换一个")
+
+
+def mini_available(port, token):
+    """本机 port 上的面板有没有卡片小面板页（只有脚本版的 cam serve 有；桌面版的服务没有）。"""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/mini", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
+            return r.status == 200
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return False
+
+
+def open_panel(store, port=8787):
+    """在浏览器打开 Web 面板（菜单栏的“打开管理面板”）。返回打开的地址。"""
+    p, token = ensure_panel(store, port)
+    url = f"http://127.0.0.1:{p}/?t={token}"
+    open_in_browser(url)
+    return url
 
 
 # --------------------------------------------------------------------------- 命令行输出
