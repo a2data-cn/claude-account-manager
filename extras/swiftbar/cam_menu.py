@@ -591,8 +591,6 @@ def render(store, st, out=print, rich=None, phase=None):
         c = {"ok": GREEN, "busy": YELLOW, "bad": RED}[light[0]]
         more = f"（还有 {light[3]} 项，见下面）" if light[3] else ""
         out(f"● {esc(light[1])}{more} | size=12 color={c} length={LINE}")
-        if rich and title_acc is not None and needs_number(title_acc):  # 菜单栏显示的是序号：提示起个短名（面板“编辑”里有昵称一键选）
-            out(f"给“{title_name(title_acc, pos[title_acc['id']])}”起个短名，菜单栏就显示名字（打开面板改） | size=12 sfimage=pencil {action('panel', refresh=False)}")
 
     if not accs:
         out("还没有账号 | color=gray")
@@ -652,6 +650,8 @@ def render(store, st, out=print, rich=None, phase=None):
                 out(f"--{dl} 天后到期（{exp}）" + (" | color=#BF3B33,#EE776E" if dl <= 2 else ""))
             if a.get("email") and a.get("email") != a.get("label"):
                 out(f"--{esc(a['email'])} | color=gray")
+            if rich and needs_number(a):  # 菜单栏显示的是序号：子菜单里提示起个短名（面板“编辑”里有昵称一键选）
+                out(f"--起个短名（打开面板） | sfimage=pencil {action('panel', refresh=False)}")
             if a["id"] != act_id:
                 out(f"--切换到这个账号 | {switch_action(a['id'])}")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
@@ -738,49 +738,56 @@ def render(store, st, out=print, rich=None, phase=None):
         out("---")
 
     # ---- 操作
+    # ---- 常用的三项留在顶层，其余收进“更多”，菜单短一点
     out(f"打开管理面板 | {action('panel', refresh=False)} sfimage=macwindow")  # 改名、规则、隐私设置都在面板里
-    out(f"刷新全部用量 | {action('usage')} sfimage=arrow.clockwise")
-    out(f"打开终端查看 | {action(terminal=True, refresh=False)} sfimage=terminal")
+    out(f"刷新用量 | {action('usage')} sfimage=arrow.clockwise")
     out(f"全面体检 | {action('checkup', script=MENU_PY)} sfimage=stethoscope")  # 体检会续登录、刷新用量，跑完刷新菜单
-    out(f"在终端看完整体检结果 | {action('doctor', terminal=True, refresh=False)} sfimage=list.bullet.clipboard")
     try:
         upd = cam.saved_update_check()  # 上次点“检查更新”的结果，不联网
     except Exception:  # noqa: BLE001
         upd = None
     if upd and upd.get("behind"):
         out(f"更新（{upd['behind']} 个新改动） | {action('update', script=MENU_PY)} sfimage=arrow.down.circle")
-    out(f"检查更新 | {action('update-check', script=MENU_PY)} sfimage=arrow.triangle.2.circlepath")
-    if rich:  # 经典 / 流式在菜单里切：两行当开关，打勾的是现在的模式，点另一行就切（重写启动脚本后重启 SwiftBar）
-        out(heading("动画模式"))
-        for mode, label in (("classic", "经典模式：每分钟刷新一次，动画 5 秒一帧"), ("stream", "流式模式：插件常驻，动画顺滑")):
+    out("更多 | sfimage=ellipsis.circle")
+    out(f"--打开终端查看 | {action(terminal=True, refresh=False)} sfimage=terminal")
+    out(f"--在终端看完整体检结果 | {action('doctor', terminal=True, refresh=False)} sfimage=list.bullet.clipboard")
+    out(f"--检查更新 | {action('update-check', script=MENU_PY)} sfimage=arrow.triangle.2.circlepath")
+    if rich:  # 动画模式、图标样式：打勾的是现在的，点另一行就换（卡片小面板的“设置”里是真正的开关）
+        out("-----")
+        out("--动画模式 | size=12 color=gray")
+        for mode, label in (("classic", "经典：每分钟刷新，动画 5 秒一帧"), ("stream", "流式：插件常驻，动画顺滑")):
             on = (mode == "stream") == STREAMING
-            out(f"{label} | size=12" + (" checked=true" if on else f" {action('mode', mode, script=MENU_PY, refresh=False)}"))
-        out(heading("图标样式"))
-        for key, label in ICON_STYLES:  # 打勾的是现在的样式，点另一行就换（记在账号库里）
-            out(f"{label} | size=12" + (" checked=true" if key == style else f" {action('icon', key, script=MENU_PY)}"))
+            out(f"--{label} | size=12" + (" checked=true" if on else f" {action('mode', mode, script=MENU_PY, refresh=False)}"))
+        out("--图标样式 | size=12 color=gray")
+        for key, label in ICON_STYLES:
+            out(f"--{label} | size=12" + (" checked=true" if key == style else f" {action('icon', key, script=MENU_PY)}"))
     if st.get("bg_owner") == "other":
-        out("自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
+        out("--自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
     elif st.get("last_refresh"):
         t = dt.datetime.fromtimestamp(float(st["last_refresh"])).strftime("%H:%M")
-        out(f"用量更新于 {t} | size=12 color=gray")
+        out(f"--用量更新于 {t} | size=12 color=gray")
+    # ---- 要紧的提醒留顶层：登录对不上、等待中的切换、后台出错
     notice = (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message")
     if notice:
         out(f"⚠ {esc(notice)} | size=12 color=#B87A08,#E0A93B length={LINE}")
     pend = cam.pending_switch_view(data)
     if pend:
         out(f"⏳ {esc(pend['message'])} | size=12 color=#5A6676,#94A0AF length={LINE}")
+    # ---- 环境：顶层一行“环境 75/100 · 最要紧的一条”，每条风险和怎么办收进子菜单
     risks = cam.risk_items(data)
     if cam.region_view(data)["status"]:  # 后台检测过才有评分
         sc = cam.risk_score(risks)
         c = {"low": GREEN, "medium": YELLOW, "high": RED}[sc["grade"]]
         mark = "✓" if sc["grade"] == "low" else "⚠"  # 不用 sfimage：带 color 的行会丢图标（见 heading）
-        out(f"{mark} 环境评分 {sc['score']}/100：{esc(sc['label'])} | size=12 color={c} length={LINE}")
-    for r in risks:  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
-        if r["level"] not in ("warn", "bad"):
-            continue
-        out(f"⚠ {esc(r['text'])} | size=12 color=#BF3B33,#E06C66 length={LINE}")
-        if r["advice"]:
-            out(f"{esc(r['advice'])} | size=11 color=#5A6676,#94A0AF length={LINE}")
+        warns = [r for r in risks if r["level"] in ("warn", "bad")]  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
+        out(f"{mark} 环境 {sc['score']}/100" + (f" · {esc(warns[0]['text'])}" if warns else f"：{esc(sc['label'])}") + f" | size=12 color={c} length={LINE}")
+        out(f"--{esc(sc['label'])} | size=12 color=gray")
+        for r in warns:
+            out(f"--⚠ {esc(r['text'])} | size=12 color=#BF3B33,#E06C66 length=70")
+            if r["advice"]:
+                out(f"--{esc(r['advice'])} | size=11 color=#5A6676,#94A0AF length=70")
+        if not warns:
+            out("--没有要注意的 | size=12 color=gray")
     err = bg_error(store, st)
     if err and accs:  # 没账号时已经放在最上面了
         out(f"⚠ {esc(err)} | size=12 color=#B87A08,#E0A93B length={LINE}")

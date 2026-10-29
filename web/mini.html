@@ -115,6 +115,25 @@ button { font: inherit; color: inherit; }
 .act:disabled { cursor: progress; opacity: .6; }
 .act svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .act span { font-size: 11px; color: var(--muted); }
+/* 设置页：真正的开关和分段选择，像系统设置 */
+.set { display: grid; gap: 2px; }
+.set .row { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid var(--track); }
+.set .row:first-child { border-top: 0; padding-top: 2px; }
+.set .lab { flex: 1; min-width: 0; }
+.set .lab b { display: block; font-size: 13px; font-weight: 600; }
+.set .lab span { display: block; font-size: 11px; color: var(--muted); margin-top: 1px; }
+.sw { position: relative; width: 44px; height: 26px; flex: none; }
+.sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+.sw i { position: absolute; inset: 0; border-radius: 999px; background: var(--track); transition: background .15s; cursor: pointer; }
+.sw i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: transform .15s; }
+.sw input:checked + i { background: var(--g); }
+.sw input:checked + i::after { transform: translateX(18px); }
+.sw input:disabled + i { opacity: .5; cursor: progress; }
+.seg { display: inline-flex; background: var(--track); border-radius: 9px; padding: 2px; flex: none; }
+.seg button { font-size: 12px; padding: 3px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+.seg button.on { background: var(--tile); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); font-weight: 600; }
+.seg button:disabled { cursor: progress; }
+.set .hint { font-size: 11px; color: var(--muted); padding: 6px 2px 0; }
 .sec { font-size: 11px; color: var(--muted); margin: 2px 6px -2px; font-weight: 600; }
 .foot { display: flex; justify-content: space-between; gap: 8px; margin: 2px 6px 0; font-size: 11px; color: var(--muted); }
 .foot .risk.medium { color: var(--warn); }
@@ -141,7 +160,26 @@ button { font: inherit; color: inherit; }
   const ICON = {
     refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>',
     panel: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 9h18"/><circle cx="6.5" cy="7" r=".6"/></svg>',
+    gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   };
+  let settings = null, showSettings = false;  // 设置页：菜单栏小工具的动画模式、图标样式（GET / PUT /api/menubar）
+  function settingsHtml() {
+    if (!showSettings) return "";
+    if (!settings) return `<div class="tile glass set"><div class="hint">正在读设置…</div></div>`;
+    const s = settings, dis = busy ? "disabled" : "";
+    if (!s.installed) return `<div class="tile glass set"><div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh</div><div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
+    return `<div class="tile glass set">
+      <div class="row"><div class="lab"><b>流式动画</b><span>${s.mode === "stream" ? "插件常驻，信号格 / 红绿灯顺滑地动" : "关着是经典模式：每分钟刷新，动画 5 秒一帧"}</span></div>
+        <label class="sw"><input type="checkbox" data-set="mode" ${s.mode === "stream" ? "checked" : ""} ${dis}><i></i></label></div>
+      <div class="row"><div class="lab"><b>图标样式</b><span>菜单栏图标用哪种当红绿灯</span></div>
+        <span class="seg"><button type="button" data-icon="bars" class="${s.icon === "bars" ? "on" : ""}" ${dis}>信号格</button><button type="button" data-icon="lamp" class="${s.icon === "lamp" ? "on" : ""}" ${dis}>红绿灯</button></span></div>
+      <div class="row"><div class="lab"><b>全局快捷键</b><span>⌃⌥⌘C 打开菜单，⌃⌥⌘1…9 切到第几个号</span></div></div>
+      <div class="hint">切流式 / 经典会重写插件的启动脚本并重新打开 SwiftBar（几秒）。<a href="#" data-act="set-close">收起</a></div></div>`;
+  }
+  async function loadSettings() {
+    try { settings = await api("GET", "/api/menubar"); } catch (e) { settings = { installed: false, error: e.message }; }
+    render();
+  }
   let state = null, local = null, busy = false, msg = null, ask = null;  // ask：点了别的号、有会话在跑，等用户选怎么切
   let renaming = null;  // 正在改名的账号 id：输入框在的时候定时刷新不重画，免得把正在打的字冲掉
   const NICKS = ["工作号", "个人号", "公司号", "团队号", "备用号", "测试号", "主号", "副号"];
@@ -284,8 +322,9 @@ button { font: inherit; color: inherit; }
     main.innerHTML = lightHtml(cur, pos) + curTile
       + (pills ? `<div class="sec">其它账号 · 点一下切换</div><div class="pills${others.length === 1 ? " one" : ""}">${pills}</div>` : "")
       + `<div class="acts"><button class="act" data-act="refresh" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
-          <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button></div>`
-      + foot + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "");
+          <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button>
+          <button class="act" data-act="settings" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.gear}</span><span>设置</span></button></div>`
+      + settingsHtml() + foot + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "");
   }
   async function load() {
     try { state = await api("GET", "/api/state"); render(); }
@@ -327,18 +366,32 @@ button { font: inherit; color: inherit; }
     if (!btn) return;
     const act = btn.dataset.act;
     if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadLocal(); });
-    if (act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已在浏览器打开管理面板"); });
+    if (act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已打开"); });
     if (act === "ask-wait" && ask) run(() => switchTo(ask.id, "wait"));
     if (act === "ask-now" && ask) run(() => switchTo(ask.id, "now"));
     if (act === "ask-no") { ask = null; render(); }
     if (act === "pend-now" && state.pending_switch) run(() => switchTo(state.pending_switch.account, "now"));
-    if (act === "pend-cancel") run(async () => { state = await api("DELETE", "/api/pending-switch"); say("已取消等待中的切换", "wait"); });
+    if (act === "pend-cancel") run(async () => { state = await api("DELETE", "/api/pending-switch"); say("已取消", "wait"); });
+    if (act === "settings") { showSettings = !showSettings; render(); if (showSettings) loadSettings(); }
+    if (act === "set-close") { ev.preventDefault(); showSettings = false; render(); }
+    const ic = ev.target.closest("[data-icon]");
+    if (ic && settings && ic.dataset.icon !== settings.icon) run(async () => { settings = await api("PUT", "/api/menubar", { icon: ic.dataset.icon }); say("已切换"); });
     if (act === "rename") { renaming = btn.dataset.id; render(); const i = $(".rn input"); if (i) { i.focus(); i.select(); } }
     if (act === "rn-cancel") { renaming = null; render(); }
   });
   document.addEventListener("click", (ev) => {  // 昵称一键选：填进输入框，自己点保存
     const b = ev.target.closest("[data-nick]"), i = $(".rn input");
     if (b && i) { i.value = b.dataset.nick; i.focus(); }
+  });
+  document.addEventListener("change", (ev) => {
+    const sw = ev.target.closest('[data-set="mode"]');
+    if (!sw || !settings) return;
+    const mode = sw.checked ? "stream" : "classic";
+    run(async () => {
+      say("正在切换…", "wait");
+      settings = await api("PUT", "/api/menubar", { mode });
+      say(settings.restarting ? "已切换" : "没有变化");
+    });
   });
   document.addEventListener("submit", (ev) => {
     const f = ev.target.closest(".rn");
@@ -349,7 +402,7 @@ button { font: inherit; color: inherit; }
     run(async () => {
       state = await api("PATCH", `/api/accounts/${encodeURIComponent(id)}`, { label });
       renaming = null;
-      say("已改名，菜单栏马上跟着变");
+      say("已修改");
     });
   });
   load();

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import time
 import unittest
 import urllib.request
@@ -639,6 +640,32 @@ class CamTest(unittest.TestCase):
         self.assertIn("1.2.3.4", body["text"])
         self.assertTrue(body["filename"].endswith(".md"))
 
+    def test_menubar_settings(self):
+        """卡片小面板“设置”页：动画模式看启动脚本、图标样式记在 prefs；改模式重跑安装脚本（这里不真跑）。"""
+        plugins = os.path.join(self.tmp, "plugins")
+        os.makedirs(plugins)
+        store = self.cam.Store()
+        with mock.patch.dict(os.environ, {"CAM_SWIFTBAR_DIR": plugins}):
+            st = self.cam.menubar_settings(store)
+            self.assertEqual((st["available"], st["installed"], st["mode"], st["icon"]), (True, False, None, "bars"))
+            with open(os.path.join(plugins, self.cam.MENUBAR_PLUGIN), "w", encoding="utf-8") as f:
+                f.write("#!/bin/bash\n# <swiftbar.type>streamable</swiftbar.type>\nexec python3 cam_menu.py stream\n")
+            self.assertEqual(self.cam.menubar_settings(store)["mode"], "stream")
+            r = self.cam.save_menubar_settings(store, {"icon": "lamp"})
+            self.assertEqual((r["icon"], store.load()["prefs"]["menu_icon"], r["restarting"]), ("lamp", "lamp", False))
+            with self.assertRaises(self.cam.CamError):
+                self.cam.save_menubar_settings(store, {"icon": "neon"})
+            self.assertFalse(self.cam.save_menubar_settings(store, {"mode": "stream"})["restarting"])  # 已经是流式，不动
+            ran = []
+            fake = lambda cmd, **kw: (ran.append(cmd), types.SimpleNamespace(returncode=0, stdout="", stderr=""))[1]  # noqa: E731
+            with mock.patch.object(self.cam.subprocess, "run", side_effect=fake):
+                r = self.cam.save_menubar_settings(store, {"mode": "classic"})
+            self.assertTrue(r["restarting"])
+            self.assertTrue(ran and ran[0][0] == "bash" and ran[0][1].endswith("extras/swiftbar/install.sh") and ran[0][2] == "--classic", ran)
+            fail = lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr="没装 SwiftBar")  # noqa: E731
+            with mock.patch.object(self.cam.subprocess, "run", side_effect=fail), self.assertRaises(self.cam.CamError):
+                self.cam.save_menubar_settings(store, {"mode": "classic"})
+
     def test_local_window_usage(self):
         """当前窗口里本机用了多少：按切换记录归属、按窗口起点截断、按模型的周额度只算那个模型。"""
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
@@ -927,18 +954,18 @@ class CamTest(unittest.TestCase):
             self.assertTrue(f0.startswith("B 75% | image="), f0[:40])
             # 模式两行当开关：打勾的是现在的模式，另一行点了就切
             self.assertIn('param2="mode" param3="classic"', f0)
-            self.assertIn("流式模式：插件常驻，动画顺滑 | size=12 checked=true", f0)
+            self.assertIn("--流式：插件常驻，动画顺滑 | size=12 checked=true", f0)  # 模式和样式收在“更多”子菜单里
             self.assertTrue(any('param2="mode" param3="stream"' in l for l in lines), lines[-8:])
-            self.assertTrue(any(l.startswith("经典模式：") and l.endswith(" checked=true") for l in lines), lines[-8:])
+            self.assertTrue(any(l.startswith("--经典") and l.endswith(" checked=true") for l in lines), lines[-8:])
             # 图标样式两行当开关：默认信号格打勾；选红绿灯后记在账号库 prefs 里，标题的图换了、红绿灯那行打勾
-            self.assertTrue(any(l.startswith("信号格") and l.endswith(" checked=true") for l in lines), lines[-4:])
+            self.assertTrue(any(l.startswith("--信号格") and l.endswith(" checked=true") for l in lines), lines[-4:])
             self.assertTrue(any('param2="icon" param3="lamp"' in l for l in lines), lines[-4:])
             self.assertEqual(cam_menu.set_icon_from_menu(store, "lamp"), 0)
             self.assertEqual(store.load()["prefs"]["menu_icon"], "lamp")
             lamp = []
             cam_menu.render(store, {}, out=lamp.append, rich=True)
             self.assertNotEqual(lamp[0].split("image=")[1].split()[0], lines[0].split("image=")[1].split()[0])
-            self.assertTrue(any(l.startswith("红绿灯") and l.endswith(" checked=true") for l in lamp), lamp[-4:])
+            self.assertTrue(any(l.startswith("--红绿灯") and l.endswith(" checked=true") for l in lamp), lamp[-4:])
             cam_menu.set_icon_from_menu(store, "bars")
             i0, i1 = cam_menu.stream_frame(store, {}, 0.0), cam_menu.stream_frame(store, {}, 0.25)
             self.assertEqual(cam_menu.LAST_LIGHT[2], "")
@@ -1033,7 +1060,7 @@ class CamTest(unittest.TestCase):
         lines = []
         cam_menu.render(store, {}, out=lines.append, rich=True)
         self.assertTrue(lines[0].startswith("2号 75% | image="), lines[0])
-        self.assertTrue(any(l.startswith("给“2号”起个短名") and 'param2="panel"' in l for l in lines), lines[:6])  # 显示序号时提示起名
+        self.assertTrue(any(l.startswith("--起个短名") and 'param2="panel"' in l for l in lines), lines)  # 显示序号时账号子菜单里提示起名
         self.assertTrue(any(l.startswith("2 · b@x.com | sfimage=checkmark.circle.fill") and "shortcut=CTRL+OPTION+CMD+2" in l for l in lines), lines)
         self.assertEqual(self.run_cam("set", "2", "--label", "B"), 0)
         self.assertEqual([cam_menu.level_of(p) for p in (10, 70, 90)], ["ok", "warn", "bad"])
@@ -1182,9 +1209,10 @@ class CamTest(unittest.TestCase):
         self.assertFalse(out["items"][-1].get("sep"))
         acts = {i["text"]: i["run"] for i in out["items"] if i.get("run")}
         self.assertEqual(acts["打开管理面板"], ["cam", "panel"])
-        self.assertEqual(acts["刷新全部用量"], ["cam", "usage"])
+        self.assertEqual(acts["刷新用量"], ["cam", "usage"])
         self.assertEqual(acts["全面体检"], ["menu", "checkup"])
-        self.assertEqual(acts["在终端看完整体检结果"], ["terminal", "doctor"])
+        more = next(i for i in out["items"] if i.get("text") == "更多")  # 不常用的收在“更多”里
+        self.assertTrue(any(c.get("text") == "在终端看完整体检结果" and c.get("run") == ["terminal", "doctor"] for c in more["children"]), more)
         # 90% 以上红底，用满写“满”；后台定时刷新发现超过提醒阈值，通知交给托盘弹
         MockAnthropic.tokens["at-B1"]["u5"] = 100.0
         tray.cam_menu.REFRESH_MIN = 10
@@ -2782,7 +2810,7 @@ exit 2""")
         item = next(l for l in lines if l.startswith("全面体检 |"))
         self.assertIn(f'param1="{menu_arg(cam_menu.MENU_PY)}" param2="checkup"', item)
         self.assertIn("terminal=false", item)
-        term = next(l for l in lines if l.startswith("在终端看完整体检结果 |"))
+        term = next(l for l in lines if l.startswith("--在终端看完整体检结果 |"))
         self.assertIn(f'param1="{menu_arg(cam_menu.CAM_PY)}" param2="doctor" terminal=true', term)
         self.assertEqual(cam_menu.checkup_from_menu(), 0)
         self.assertEqual(told[-1][0], "全面体检")
@@ -3707,6 +3735,9 @@ class UpdateTest(unittest.TestCase):
             self.assertEqual(st["code_stamp"], self.cam.CODE_STAMP)  # 插件据此判断后台 cam serve 是不是旧代码
             self.assertFalse(self.cam.serve_outdated(port, token))
             self.assertFalse(self.cam.serve_outdated(1, token))  # 连不上不算旧
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/menubar", headers={"Authorization": "Bearer " + token})
+            with opener.open(req) as r:
+                self.assertEqual(json.load(r)["icon"], "bars")
         self.assertTrue(self.cam.mini_available(port, token))
         self.assertFalse(self.cam.mini_available(1, token))  # 没人听的端口
         opened = []

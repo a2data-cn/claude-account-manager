@@ -3344,6 +3344,10 @@ def make_handler(store, token):
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     days = max(1, min(365, int((q.get("days") or ["30"])[0])))
                     return self._send(200, local_usage(store.load(), days))
+                if method == "GET" and parts == ["menubar"]:  # 卡片小面板的“设置”页
+                    return self._send(200, menubar_settings(store))
+                if method == "PUT" and parts == ["menubar"]:
+                    return self._send(200, save_menubar_settings(store, self._body()))
                 if method == "GET" and parts == ["rules"]:
                     return self._send(200, rules_view(store.load()))
                 if method == "PUT" and parts == ["rules"]:
@@ -6349,6 +6353,65 @@ SERVE_UNIT = "cam-serve.service"  # install.sh 在 Linux 上装的后台 cam ser
 NOT_CHECKOUT = ("这份代码不是用 git 下载的（没有 .git 目录），没法用 cam update 更新。下载新版本的完整代码，解压后重新运行"
                 "里面的安装脚本（macOS 双击“安装.command”，Linux 运行 bash install.sh，Windows 双击“安装.cmd”），"
                 "cam 命令会改用新目录；账号数据在 ~/.claude-accounts，不受影响。")
+
+
+MENUBAR_PLUGIN = "Claude 账号.1m.sh"  # SwiftBar 插件目录里的启动脚本（extras/swiftbar/install.sh 写的）
+ICON_STYLES = ("bars", "lamp")
+MENU_MODES = ("classic", "stream")
+
+
+def swiftbar_plugin_dir():
+    """SwiftBar 的插件目录：测试用 CAM_SWIFTBAR_DIR 指到临时目录；macOS 上问 SwiftBar 的设置，没设过就是默认目录。"""
+    d = os.environ.get("CAM_SWIFTBAR_DIR")
+    if not d and IS_MAC:
+        d = _run_text(["defaults", "read", "com.ameba.SwiftBar", "PluginDirectory"]).strip()
+    return os.path.expanduser(d or "~/Library/Application Support/SwiftBar/Plugins")
+
+
+def menubar_settings(store):
+    """菜单栏小工具的设置，给卡片小面板的“设置”页：装没装、动画模式（看启动脚本里有没有 streamable）、图标样式（prefs）。"""
+    path = os.path.join(swiftbar_plugin_dir(), MENUBAR_PLUGIN)
+    installed = os.path.isfile(path)
+    mode = None
+    if installed:
+        try:
+            with open(path, encoding="utf-8") as f:
+                mode = "stream" if "<swiftbar.type>streamable</swiftbar.type>" in f.read() else "classic"
+        except OSError:
+            mode = None
+    prefs = store.load().get("prefs") or {}
+    return {"available": IS_MAC or bool(os.environ.get("CAM_SWIFTBAR_DIR")), "installed": installed, "mode": mode,
+            "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars", "plugin": path}
+
+
+def save_menubar_settings(store, body):
+    """改图标样式（记到 prefs，插件下次渲染就换）、改动画模式（重跑 extras/swiftbar/install.sh 改写启动脚本，再重开 SwiftBar）。"""
+    if not isinstance(body, dict):
+        raise CamError("请求体应为 JSON 对象")
+    restarting = False
+    if "icon" in body:
+        if body["icon"] not in ICON_STYLES:
+            raise CamError("图标样式只能是 bars（信号格）或 lamp（红绿灯）")
+        with store.lock():
+            data = store.load()
+            data.setdefault("prefs", {})["menu_icon"] = body["icon"]
+            store.save(data)
+    if "mode" in body:
+        if body["mode"] not in MENU_MODES:
+            raise CamError("动画模式只能是 classic（经典）或 stream（流式）")
+        if menubar_settings(store)["mode"] != body["mode"]:
+            script = os.path.join(code_root(), "extras", "swiftbar", "install.sh")
+            try:
+                r = subprocess.run(["bash", script, f"--{body['mode']}"], capture_output=True, text=True, timeout=180)
+            except (OSError, subprocess.SubprocessError) as e:
+                raise CamError(f"改启动脚本失败：{e}")
+            if r.returncode != 0:
+                raise CamError("改启动脚本失败：" + (r.stderr or r.stdout).strip()[-300:])
+            if IS_MAC:  # SwiftBar 只在加载插件时看类型：退出再打开；放到独立进程里，不跟着本进程走
+                subprocess.Popen(["bash", "-c", "sleep 1; osascript -e 'quit app \"SwiftBar\"'; sleep 1; open -a SwiftBar"],
+                                 start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            restarting = True
+    return {"ok": True, "restarting": restarting, **menubar_settings(store)}
 
 
 def code_root():
