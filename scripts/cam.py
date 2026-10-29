@@ -158,6 +158,8 @@ def read_json(path, default=None):
             return json.load(f)
     except FileNotFoundError:
         return default
+    except PermissionError:
+        raise CamError(*unreadable_message(path))
     except json.JSONDecodeError as e:
         raise CamError(f"文件损坏，无法解析：{path}（{e}）")
 
@@ -168,6 +170,33 @@ def read_bytes(path):
             return f.read()
     except FileNotFoundError:
         return None
+    except PermissionError:
+        raise CamError(*unreadable_message(path))
+
+
+def unreadable_message(path):
+    """没有权限读某个文件时的说明和修法：属主是谁、权限多少、当前用户是谁。
+
+    常见原因是用 sudo 跑过 claude，~/.claude.json 之类的文件就归了 root；属主不是自己时给 chown，是自己时给 chmod。
+    返回 (说明, 怎么办)，正好是 CamError 的两个参数。
+    """
+    me = getpass.getuser()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return f"没有权限读 {path}（当前用户 {me}）", f"ls -l {path} 看看它的属主和权限"
+    mode = f"0{st.st_mode & 0o777:o}"
+    owner = None
+    if not IS_WIN:
+        try:
+            import pwd
+            owner = pwd.getpwuid(st.st_uid).pw_name
+        except (ImportError, KeyError):
+            owner = str(st.st_uid)
+    if owner is not None and owner != me:
+        return (f"没有权限读 {path}（属主 {owner}，权限 {mode}；当前用户 {me}）",
+                f"这个文件应该归你，用 sudo 跑过 claude 会变成 root 的：sudo chown {me} {path}")
+    return f"没有权限读 {path}（权限 {mode}，当前用户 {me}）", f"chmod u+rw {path}"
 
 
 def write_json_atomic(path, data, private=False):
@@ -195,7 +224,11 @@ def write_json_atomic(path, data, private=False):
 
 
 class CamError(Exception):
-    pass
+    """给用户看的错误。advice 是“→ 怎么办”，体检和命令行都会单独显示。"""
+
+    def __init__(self, msg, advice=""):
+        super().__init__(msg)
+        self.advice = advice
 
 
 class FileLock:
@@ -5706,7 +5739,7 @@ def checkup_local_claude(store, latest=None):
             out.append(ck("ok" if has else "bad", f"凭据文件：{f}" + ("" if has else "（里面没有登录信息）"),
                           "" if has else "运行 claude 登录一次"))
         except CamError as e:
-            out.append(ck("bad", str(e), "在 claude 里 /login 重新登录一次会重写这个文件"))
+            out.append(ck("bad", str(e), e.advice or "在 claude 里 /login 重新登录一次会重写这个文件"))
         try:
             mode = os.stat(f).st_mode & 0o777
         except OSError:
@@ -5736,7 +5769,7 @@ def checkup_local_claude(store, latest=None):
         oa = read_oauth_account() or {}
     except CamError as e:
         oa = {}
-        out.append(ck("bad", str(e), "这个文件是 Claude Code 写的；在 claude 里 /login 一次通常会修好"))
+        out.append(ck("bad", str(e), e.advice or "这个文件是 Claude Code 写的；在 claude 里 /login 一次通常会修好"))
     out.append(ck("ok", f"当前登录邮箱：{oa['emailAddress']}") if oa.get("emailAddress") else
                ck("bad", "当前登录邮箱：无（Claude Code 还没登录）", "运行 claude 登录一次"))
     data = store.load()
@@ -6708,6 +6741,8 @@ def main(argv=None):
         return 0
     except CamError as e:
         print(color("错误：", "r") + str(e), file=sys.stderr)
+        if e.advice:
+            print("  → " + e.advice, file=sys.stderr)
         return 1
 
 

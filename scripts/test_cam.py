@@ -7,6 +7,7 @@ import importlib
 import base64
 import contextlib
 import datetime as dt
+import getpass
 import io
 import signal
 import json
@@ -2373,6 +2374,37 @@ class CamTest(unittest.TestCase):
             res = self._checkup(offline=True)
         self.assertEqual([(i["level"], i["text"]) for i in self._section(res, "cam")], [("bad", "这一节没查完：RuntimeError: 炸了")])
         self.assertTrue(self._section(res, "accounts"))
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "靠文件权限制造读不了的情况，Windows 和 root 下不成立")
+    def test_checkup_explains_unreadable_claude_json(self):
+        # 2026-10-29 Mac 上 ~/.claude.json 读不了，体检整节只报 "这一节没查完：PermissionError"。要说清哪个文件、属主、怎么修
+        self._two_accounts()
+        me = getpass.getuser()
+        os.chmod(self.cj_path, 0)
+        try:
+            with self.assertRaises(self.cam.CamError) as cm:
+                self.cam.read_json(self.cj_path)
+            self.assertEqual(str(cm.exception), f"没有权限读 {self.cj_path}（权限 00，当前用户 {me}）")
+            self.assertEqual(cm.exception.advice, f"chmod u+rw {self.cj_path}")
+            # 属主是别人（用 sudo 跑过 claude）时给 chown
+            with mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_name="root")):
+                msg, fix = self.cam.unreadable_message(self.cj_path)
+            self.assertEqual(msg, f"没有权限读 {self.cj_path}（属主 root，权限 00；当前用户 {me}）")
+            self.assertIn(f"sudo chown {me} {self.cj_path}", fix)
+            res = self._checkup(offline=True)
+            for key in ("accounts", "service", "claude_code", "cam"):
+                self.assertFalse(any("没查完" in i["text"] for i in self._section(res, key)), (key, self._section(res, key)))
+            local = self._section(res, "claude_code")
+            self.assertEqual([(i["level"], i["advice"]) for i in local if "没有权限读" in i["text"]],
+                             [("bad", f"chmod u+rw {self.cj_path}")], local)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = self.cam.main(["current"])
+            self.assertEqual(rc, 1, err.getvalue())
+            self.assertIn("没有权限读", err.getvalue())
+            self.assertIn(f"→ chmod u+rw {self.cj_path}", err.getvalue())
+        finally:
+            os.chmod(self.cj_path, 0o600)
 
     @unittest.skipIf(os.name == "nt", "用 sh 脚本模拟机器人命令，Windows 上跳过")
     def test_checkup_runs_chat_bot_doctors(self):
