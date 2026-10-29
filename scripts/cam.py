@@ -2908,6 +2908,7 @@ def session_count(max_age=20):
 
 
 KIND_NAMES = {"claude_code": "Claude Code", "claude_web": "claude.ai 网页版", "claude_desktop": "Claude 桌面版", "api": "API Key"}
+PLAN_NAMES = {"free": "Free", "pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "api": "API"}
 
 
 def _when(iso):
@@ -2961,7 +2962,7 @@ def diagnostic_text(rep):
     L = [f"# cam 账号诊断：{a['label']}" + (f"（{a['email']}）" if a.get("email") and a["email"] != a["label"] else ""),
          f"生成于 {_when(rep['generated_at'])} · 本机 {rep['host']}（{rep['platform']}）· cam {rep['cam_version']} · 不含任何密钥", "",
          "## 账号"]
-    plan = (a.get("plan_display") or "未知") + (f" {plan_tier(a)}" if plan_tier(a) else "")
+    plan = PLAN_NAMES.get(a.get("plan_display"), a.get("plan_display") or "未知") + (f" {plan_tier(a)}" if plan_tier(a) else "")
     L.append(f"- 类型 {KIND_NAMES.get(a['kind'], a['kind'])} · 套餐 {plan}" + (f" · 组织 {a['org_name']}" if a.get("org_name") else "")
              + (" · 正在用" if a.get("is_active") else ""))
     L.append(f"- 添加于 {_when(a.get('created_at'))} · 最近切换 {_when(a.get('last_switched_at'))}")
@@ -2974,7 +2975,8 @@ def diagnostic_text(rep):
         L.append(f"- 用量更新于 {_when(u['fetched_at'])}" + (f"，报错：{u['error']}" if u.get("error") else ""))
     L += ["", "## 现在的问题"]
     issues = (a.get("health") or {}).get("issues") or []
-    L += [f"- [{ {'error': '异常', 'warn': '注意', 'info': '提示'}.get(i['level'], i['level'])}] {i['text']}" + (f"：{i['detail']}" if i.get("detail") else "")
+    L += [f"- [{ {'error': '异常', 'warn': '注意', 'info': '提示'}.get(i['level'], i['level'])}] {i['text']}"
+          + (f"：{i['detail']}" if i.get("detail") and not str(i["detail"]).startswith(i["text"]) else "")
           + (f"\n  怎么办：{i['advice']}" if i.get("advice") else "") for i in issues] or ["- 没有发现问题"]
     L += ["", f"## 出问题时的现场（最近 {len(rep['incidents'])} 次）"]
     for inc in rep["incidents"]:
