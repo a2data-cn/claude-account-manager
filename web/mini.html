@@ -69,6 +69,17 @@ button { font: inherit; color: inherit; }
 .chip.p-max { color: var(--violet); }
 .chip.bad { background: var(--hot); color: #fff; }
 .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+/* 改名：名字旁边的小铅笔，点了原地变成输入框，下面一排昵称一键选 */
+.pen { border: 0; background: var(--circle); color: var(--muted); border-radius: 999px; width: 20px; height: 20px; font-size: 12px; line-height: 20px; padding: 0; cursor: pointer; flex: none; }
+.pen:hover { color: var(--ink); background: var(--tile-hover); }
+.rn { display: flex; gap: 6px; align-items: center; }
+.rn input { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 9px; border: 1px solid var(--track); background: rgba(255, 255, 255, .5); color: var(--ink); }
+.rn button { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--tile-line); background: var(--circle); cursor: pointer; flex: none; }
+.rn button.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.rn button:disabled { opacity: .6; cursor: progress; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.chips button { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--tile-line); background: var(--circle); cursor: pointer; }
+.chips button:hover { background: var(--tile-hover); }
 /* 滑杆式的额度条：左边标题、右边百分比，下面一根粗条 */
 .meter { margin-top: 10px; }
 .meter + .meter { margin-top: 8px; }
@@ -132,6 +143,17 @@ button { font: inherit; color: inherit; }
     panel: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 9h18"/><circle cx="6.5" cy="7" r=".6"/></svg>',
   };
   let state = null, local = null, busy = false, msg = null, ask = null;  // ask：点了别的号、有会话在跑，等用户选怎么切
+  let renaming = null;  // 正在改名的账号 id：输入框在的时候定时刷新不重画，免得把正在打的字冲掉
+  const NICKS = ["工作号", "个人号", "公司号", "团队号", "备用号", "测试号", "主号", "副号"];
+  function renameForm(a) {
+    const used = new Set(state.accounts.filter((x) => x.id !== a.id).map((x) => x.label));
+    const plan = PLAN[a.plan_display];
+    const sug = [...(plan && plan !== "API" ? [`${plan}号`] : []), ...NICKS].filter((n) => !used.has(n)).slice(0, 6);
+    const cur = a.label && a.label.includes("@") ? "" : (a.label || "");
+    return `<form class="rn" data-id="${esc(a.id)}"><input name="label" maxlength="60" value="${esc(cur)}" placeholder="起个短名，6 个字以内" autocomplete="off">
+      <button type="submit" class="go" ${busy ? "disabled" : ""}>保存</button><button type="button" data-act="rn-cancel">取消</button></form>
+      <div class="chips">${sug.map((n) => `<button type="button" data-nick="${esc(n)}">${esc(n)}</button>`).join("")}</div>`;
+  }
 
   async function api(method, path, body) {
     const res = await fetch(path, { method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
@@ -227,6 +249,7 @@ button { font: inherit; color: inherit; }
   function render() {
     const main = $("#main");
     if (!state) return;
+    if (renaming && $(".rn")) return;
     const accs = state.accounts || [];
     if (!accs.length) {
       main.innerHTML = `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
@@ -238,9 +261,11 @@ button { font: inherit; color: inherit; }
     const u = cur.usage || {}, h = cur.health || {};
     const p5 = pct(u.five_hour), curName = nameOf(cur, pos);
     const sub = cur.email && cur.email !== curName ? cur.email : (p5 === null ? "还没有用量" : "");
+    const nameBlock = renaming === cur.id ? renameForm(cur)
+      : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">正在用</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
+        <div class="sub">${esc(sub)}</div>`;
     const curTile = `<div class="tile glass"><div class="who"><div class="circle on">${ring(p5, 44, 5)}</div>
-      <div><div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">正在用</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}</div>
-        <div class="sub">${esc(sub)}</div></div></div>
+      <div>${nameBlock}</div></div>
       ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
       ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}</div>`;
     const pills = others.map((a) => {
@@ -307,6 +332,24 @@ button { font: inherit; color: inherit; }
     if (act === "ask-no") { ask = null; render(); }
     if (act === "pend-now" && state.pending_switch) run(() => switchTo(state.pending_switch.account, "now"));
     if (act === "pend-cancel") run(async () => { state = await api("DELETE", "/api/pending-switch"); say("已取消等待中的切换", "wait"); });
+    if (act === "rename") { renaming = btn.dataset.id; render(); const i = $(".rn input"); if (i) { i.focus(); i.select(); } }
+    if (act === "rn-cancel") { renaming = null; render(); }
+  });
+  document.addEventListener("click", (ev) => {  // 昵称一键选：填进输入框，自己点保存
+    const b = ev.target.closest("[data-nick]"), i = $(".rn input");
+    if (b && i) { i.value = b.dataset.nick; i.focus(); }
+  });
+  document.addEventListener("submit", (ev) => {
+    const f = ev.target.closest(".rn");
+    if (!f) return;
+    ev.preventDefault();
+    const label = f.label.value.trim(), id = f.dataset.id;
+    if (!label) return;
+    run(async () => {
+      state = await api("PATCH", `/api/accounts/${encodeURIComponent(id)}`, { label });
+      renaming = null;
+      say("已改名，菜单栏马上跟着变");
+    });
   });
   load();
   loadLocal();

@@ -943,6 +943,9 @@ class CamTest(unittest.TestCase):
         # 标题行带卡片小面板的 href + webview（本机 cam serve 的 /mini）；CAM_MENU_MINI=0、起不来或是桌面版的服务就不带
         self.assertNotIn("webview=", title)
         cam_menu.MINI = True
+        fresh = mock.patch.object(cam_menu.cam, "serve_outdated", return_value=False)  # 后台 cam serve 的代码不旧
+        fresh.start()
+        self.addCleanup(fresh.stop)
         try:
             with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
                  mock.patch.object(cam_menu.cam, "mini_available", return_value=True):
@@ -976,6 +979,19 @@ class CamTest(unittest.TestCase):
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
             self.assertIn("webview=true", lines2[0])
             self.assertEqual(told, ["面板已更新"])
+            # 后台 cam serve 有 /mini 但代码过时（code_stamp 对不上）：一样重启
+            told.clear()
+            with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
+                 mock.patch.object(cam_menu.cam, "mini_available", return_value=True), \
+                 mock.patch.object(cam_menu.cam, "serve_outdated", return_value=True), \
+                 mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=True) as rs:
+                lines2 = []
+                cam_menu.render(store, {}, out=lines2.append, rich=True)
+            self.assertTrue(rs.called)
+            self.assertIn("webview=true", lines2[0])
+            self.assertEqual(told, ["面板已更新"])
+            # 流式模式靠源文件的修改时间认出代码更新
+            self.assertEqual(len(cam_menu.source_stamp()), 2)
             with mock.patch.object(cam_menu.cam, "ensure_panel", side_effect=self.cam.CamError("起不来")):
                 lines2 = []
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
@@ -3672,7 +3688,11 @@ class UpdateTest(unittest.TestCase):
             self.assertEqual(self.cam.session_count(max_age=0), 0)
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + token})
             with opener.open(req) as r:
-                self.assertEqual(json.load(r)["sessions"], {"count": 0})
+                st = json.load(r)
+            self.assertEqual(st["sessions"], {"count": 0})
+            self.assertEqual(st["code_stamp"], self.cam.CODE_STAMP)  # 插件据此判断后台 cam serve 是不是旧代码
+            self.assertFalse(self.cam.serve_outdated(port, token))
+            self.assertFalse(self.cam.serve_outdated(1, token))  # 连不上不算旧
         self.assertTrue(self.cam.mini_available(port, token))
         self.assertFalse(self.cam.mini_available(1, token))  # 没人听的端口
         opened = []

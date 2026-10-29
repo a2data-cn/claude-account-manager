@@ -65,6 +65,7 @@ else:
     import fcntl
 
 VERSION = "1.3.1"
+CODE_STAMP = str(int(os.path.getmtime(os.path.realpath(__file__))))  # 这份代码的修改时间：菜单栏插件用它认出后台跑的 cam serve 是不是旧代码
 
 # --------------------------------------------------------------------------- 路径
 
@@ -2890,7 +2891,7 @@ def public_state(store, data):
         if a["kind"] == "claude_web":
             p["has_session_key"] = bool(store.load_secret(a["id"]).get("session_key"))
         accs.append(p)
-    return {"version": VERSION, "backend": "python", "host": socket.gethostname(),
+    return {"version": VERSION, "backend": "python", "code_stamp": CODE_STAMP, "host": socket.gethostname(),
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
@@ -3690,6 +3691,18 @@ def mini_available(port, token):
             return r.status == 200
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
         return False
+
+
+def serve_outdated(port, token):
+    """本机 port 上跑的脚本版 cam serve 用的是不是旧代码（git pull / cam update 之后没重启）。
+    桌面版的服务、连不上、回答里没有 code_stamp 的老版本：桌面版和连不上算“不是”，老版本算“是”。"""
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=3) as r:
+            st = json.loads(r.read().decode())
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return False
+    return st.get("backend") == "python" and st.get("code_stamp") != CODE_STAMP
 
 
 def restart_stale_serve(store, port, token):

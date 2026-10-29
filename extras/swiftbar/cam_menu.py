@@ -455,7 +455,7 @@ def mini_href(store, accs):
         return mini_params(*_MINI_CACHE[1], accs)
     try:
         port, token = cam.ensure_panel(store)
-        if not cam.mini_available(port, token):
+        if not cam.mini_available(port, token) or cam.serve_outdated(port, token):
             # 在跑的是旧代码的 cam serve（git pull / cam update 之后没重启）：结束它再起一个新的；桌面版的服务就算了
             if not cam.restart_stale_serve(store, port, token):
                 return ""
@@ -785,6 +785,17 @@ def render(store, st, out=print, rich=None, phase=None):
         out(f"⚠ {esc(err)} | size=12 color=#B87A08,#E0A93B length={LINE}")
 
 
+SOURCE_FILES = (MENU_PY, os.path.realpath(cam.__file__))
+
+
+def source_stamp():
+    """插件和 cam.py 的修改时间：流式模式里代码一变（git pull / cam update）就重新加载自己，不用重启 SwiftBar。"""
+    try:
+        return tuple(os.path.getmtime(p) for p in SOURCE_FILES)
+    except OSError:
+        return None
+
+
 def stream_frame(store, st, phase):
     """流式模式的一帧：整份菜单的文字。出错也给一份能显示的菜单，进程不能死（SwiftBar 不会重启它）。"""
     lines = []
@@ -803,8 +814,11 @@ def stream(store):
     """
     global STREAMING, SESSION_MAX_AGE
     STREAMING, SESSION_MAX_AGE = True, 5
-    st, last_bg, last, phase = {}, None, None, 0.0
+    st, last_bg, last, phase, stamp = {}, None, None, 0.0, source_stamp()
     while True:
+        if source_stamp() != stamp:  # 代码更新了：原地换成新代码（pid 和 stdout 不变，SwiftBar 继续读）
+            sys.stdout.flush()
+            os.execv(sys.executable, [sys.executable, MENU_PY, "stream"])
         now = time.monotonic()
         if last_bg is None or now - last_bg >= 60:
             try:
