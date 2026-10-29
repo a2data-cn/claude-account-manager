@@ -661,7 +661,8 @@ class CamTest(unittest.TestCase):
             with mock.patch.object(self.cam.subprocess, "run", side_effect=fake):
                 r = self.cam.save_menubar_settings(store, {"mode": "classic"})
             self.assertTrue(r["restarting"])
-            self.assertTrue(ran and ran[0][0] == "bash" and ran[0][1].endswith("extras/swiftbar/install.sh") and ran[0][2] == "--classic", ran)
+            self.assertTrue(ran and ran[0][0] == "bash" and ran[0][1].replace("\\", "/").endswith("extras/swiftbar/install.sh")
+                            and ran[0][2] == "--classic", ran)  # Windows 上是反斜杠
             fail = lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr="没装 SwiftBar")  # noqa: E731
             with mock.patch.object(self.cam.subprocess, "run", side_effect=fail), self.assertRaises(self.cam.CamError):
                 self.cam.save_menubar_settings(store, {"mode": "classic"})

@@ -2907,7 +2907,7 @@ def session_count(max_age=20):
     查进程表要几百毫秒（Windows 上要一秒多），所以缓存 max_age 秒；切换前的判断不走这里，用 running_claude_processes 现查。
     """
     now = time.monotonic()
-    if now - _SESSION_CACHE[0] > max_age:
+    if now - _SESSION_CACHE[0] >= max_age:  # >=：Windows 的 monotonic 一格 15 毫秒，max_age=0 时两次调用可能在同一格里
         try:
             _SESSION_CACHE[:] = [now, len(running_claude_processes())]
         except Exception:  # noqa: BLE001  数不出来就沿用上次的
