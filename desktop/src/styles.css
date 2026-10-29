@@ -144,6 +144,8 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .d-title { flex: 1 1 280px; min-width: 0; }
 .d-title .name { font-size: 18px; font-weight: 650; letter-spacing: -.01em; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .d-title .mail { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.d-title .rename { font: inherit; font-size: 12px; font-weight: 500; letter-spacing: 0; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
+.d-title .rename:hover { color: var(--ink); border-color: var(--muted); }
 .d-acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .btn.danger { color: var(--hot); }
 .btn.danger:hover { border-color: var(--hot); }
