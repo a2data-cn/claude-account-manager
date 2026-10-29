@@ -842,13 +842,13 @@ class CamTest(unittest.TestCase):
         cam_menu.render(store, {}, out=lines.append, rich=True)
         title = lines[0]
         self.assertTrue(title.startswith("B 75% | image="), title)
-        self.assertIn(" width=16 height=16", title)
+        self.assertIn(" width=26 height=16", title)  # 额度环 16 + 空 3 + 信号灯 7
         pics = re.search(r"image=(\S+)", title).group(1).split(",")
         self.assertEqual(len(pics), 2)
         for pic in pics:
             png = base64.b64decode(pic)
             self.assertTrue(png.startswith(b"\x89PNG"))
-            self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))  # 16 点 × 2
+            self.assertEqual(struct.unpack(">II", png[16:24]), (52, 32))  # 26 × 16 点，两倍像素
             self.assertIn(b"pHYs", png)
         # 红绿灯：没会话在跑、没问题时标题只有一行（右下角绿点），菜单第一行写“空闲 · 一切正常”
         self.assertEqual(lines[1], "---")
@@ -865,6 +865,21 @@ class CamTest(unittest.TestCase):
         self.assertNotIn(" shortcut=", busy[1])
         self.assertNotIn("dropdown=false", lines[0])
         self.assertTrue(busy[3].startswith("● 工作中 · 2 个 claude 会话在跑 | size=12 color=" + cam_menu.YELLOW), busy[3])
+        # 流式模式：一帧就是整份菜单，标题只有一行；工作中时相邻两帧的图标不一样（橙灯呼吸），空闲时每帧都一样
+        cam_menu.STREAMING = True
+        try:
+            with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude")]):
+                f0, f1 = cam_menu.stream_frame(store, {}, 0.0), cam_menu.stream_frame(store, {}, 0.25)
+            self.assertEqual(cam_menu.LAST_LIGHT[2], "pulse")
+            self.assertNotEqual(f0, f1)
+            self.assertEqual(f0.split("\n---\n")[0].count("\n"), 0)  # 第一个 --- 前只有一行标题
+            self.assertNotIn(" dropdown=false", f0)
+            self.assertTrue(f0.startswith("B 75% | image="), f0[:40])
+            i0, i1 = cam_menu.stream_frame(store, {}, 0.0), cam_menu.stream_frame(store, {}, 0.25)
+            self.assertEqual(cam_menu.LAST_LIGHT[2], "")
+            self.assertEqual(i0, i1)
+        finally:
+            cam_menu.STREAMING = False
         rows = [l for l in lines if l.startswith(("A |", "B |"))]
         self.assertEqual(len(rows), 2, lines)
         self.assertTrue(all('badge="Max' in l for l in rows), rows)

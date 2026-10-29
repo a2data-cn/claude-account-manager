@@ -21,6 +21,7 @@
 Windows 托盘小工具（extras/windows-tray/cam_tray.py）也用这里的 render 和各个命令，改菜单时两边一起生效。
 """
 import base64
+import functools
 import datetime as dt
 import json
 import math
@@ -28,6 +29,7 @@ import os
 import struct
 import subprocess
 import sys
+import time
 import zlib
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -188,17 +190,23 @@ def quota_ring(p, dark, size=16, thick=2.5):
     return _png(S, S, _raster(S, S, [(ring, TRACK[dark]), (arc, (*FILL[level_of(p)][dark], 1.0))]))
 
 
-def status_ring(p, dark, level="ok", frame=0, size=16, thick=2.5):
-    """额度环右下角加一个状态点（红绿灯）：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。
+ICON_W = 26  # 菜单栏图标宽（点）：额度环 16 + 空 3 + 信号灯 7
+BODY = ((58, 58, 64, 0.88), (205, 205, 212, 0.6))  # 信号灯的灯体，浅色 / 深色模式
 
-    点的周围挖掉一圈环，看得清。frame=1 画成空心，和 frame=0 交替放在标题里：SwiftBar 每 5 秒轮换一次标题行，
-    就成了慢慢的闪（菜单栏图标做不了更快的动画，它不是网页）。
+
+@functools.lru_cache(maxsize=512)
+def status_icon(p, dark, level="ok", kind="", phase=0.0, size=16, thick=2.5):
+    """菜单栏图标：左边额度环，右边一个小信号灯（红 / 橙 / 绿三盏，亮哪盏就是哪个状态）。
+
+    kind="pulse"（工作中）时橙灯随 phase（0–1）一呼一吸，"blink"（等你确认）时一亮一灭。
+    经典模式只有两帧（phase 0 和 0.5），SwiftBar 每 5 秒轮换一次标题；流式模式每半秒推一帧。画好的图按参数缓存。
     """
-    S = size * SCALE
+    S, W = size * SCALE, ICON_W * SCALE
     c, ro, ri = S / 2, S / 2, S / 2 - thick * SCALE
     sweep = 2 * math.pi * min(max(p or 0, 0), 100) / 100
-    cx = cy = S - 3.5 * SCALE
-    rd, rc, rh = 3 * SCALE, 4.1 * SCALE, 1.7 * SCALE  # 点的半径、挖掉的半径、空心时内圈的半径
+    bx0, bw, br = (size + 3) * SCALE, 7 * SCALE, 2.6 * SCALE  # 灯体：左边界、宽、圆角
+    lx, lr = bx0 + bw / 2, 1.9 * SCALE  # 灯的圆心 x、半径
+    lamps = (("bad", 2.8 * SCALE), ("busy", 8.0 * SCALE), ("ok", 13.2 * SCALE))  # 红、橙、绿三盏灯的圆心 y
 
     def ring(px, py):
         d = (px - c) ** 2 + (py - c) ** 2
@@ -207,16 +215,30 @@ def status_ring(p, dark, level="ok", frame=0, size=16, thick=2.5):
     def arc(px, py):
         return ring(px, py) and math.atan2(px - c, c - py) % (2 * math.pi) <= sweep
 
-    def cut(px, py):
-        return (px - cx) ** 2 + (py - cy) ** 2 <= rc * rc
+    def body(px, py):
+        if not (bx0 <= px <= bx0 + bw and 0 <= py <= S):
+            return False
+        qx, qy = min(max(px, bx0 + br), bx0 + bw - br), min(max(py, br), S - br)
+        return (px - qx) ** 2 + (py - qy) ** 2 <= br * br
 
-    def dot(px, py):
-        d = (px - cx) ** 2 + (py - cy) ** 2
-        return d <= rd * rd and (frame == 0 or d >= rh * rh)
+    def lamp(cy):
+        return lambda px, py: (px - lx) ** 2 + (py - cy) ** 2 <= lr * lr
 
-    tone = FILL[{"busy": "warn"}.get(level, level)][dark]
-    return _png(S, S, _raster(S, S, [(ring, TRACK[dark]), (arc, (*FILL[level_of(p or 0)][dark], 1.0)),
-                                     (cut, (0, 0, 0, 0.0)), (dot, (*tone, 1.0))]))
+    glow = 1.0
+    if kind == "pulse":
+        glow = 0.45 + 0.55 * (0.5 - 0.5 * math.cos(2 * math.pi * phase))
+    elif kind == "blink":
+        glow = 1.0 if phase < 0.5 else 0.25
+    base = BODY[dark]
+
+    def mix(tone, g):  # 灯的颜色：从灯体色往灯色过渡 g，没亮的灯只透一点颜色
+        return (base[0] + (tone[0] - base[0]) * g, base[1] + (tone[1] - base[1]) * g, base[2] + (tone[2] - base[2]) * g,
+                base[3] + (1 - base[3]) * g)
+
+    shapes = [(ring, TRACK[dark]), (arc, (*FILL[level_of(p or 0)][dark], 1.0)), (body, base)]
+    for lv, cy in lamps:
+        shapes.append((lamp(cy), mix(FILL[{"busy": "warn"}.get(lv, lv)][dark], glow if lv == level else 0.3)))
+    return _png(W, S, _raster(W, S, shapes))
 
 
 def image_param(draw, p, w, h):
@@ -395,6 +417,12 @@ def _background_work(store):
     return st
 
 
+STREAMING = False  # 流式模式（见 stream）
+SESSION_MAX_AGE = 0  # 数 claude 进程的缓存秒数：经典模式每分钟是个新进程不用缓存，流式模式 5 秒
+LAST_LIGHT = None  # render 最近算出的红绿灯，stream 用它决定要不要继续推动画帧
+_MINI_CACHE = [0.0, None]  # [探测时间, (端口, 令牌)]
+
+
 def mini_href(store, accs):
     """标题行的 href + webview 参数：左键点图标弹出卡片小面板，右键还是系统菜单。
 
@@ -402,6 +430,8 @@ def mini_href(store, accs):
     """
     if not MINI:
         return ""
+    if STREAMING and _MINI_CACHE[1] and time.monotonic() - _MINI_CACHE[0] < 60:  # 流式模式每半秒渲染一次，探测一分钟一次就够
+        return mini_params(*_MINI_CACHE[1], accs)
     try:
         port, token = cam.ensure_panel(store)
         if not cam.mini_available(port, token):
@@ -414,6 +444,11 @@ def mini_href(store, accs):
             notify("面板已更新", "后台的 cam serve 用的是旧代码，已重启（自己用 cam serve --lan 开的要重开一次）")
     except Exception:  # noqa: BLE001  起不来就只用系统菜单
         return ""
+    _MINI_CACHE[:] = [time.monotonic(), (port, token)]
+    return mini_params(port, token, accs)
+
+
+def mini_params(port, token, accs):
     w, h = mini_size(accs)
     return f" href=http://127.0.0.1:{port}/mini?t={token} webview=true webvieww={w} webviewh={h}"
 
@@ -436,7 +471,7 @@ def health_of(store, a):
 
 
 def status_light(store, data, accs, active, st):
-    """红绿灯：(级别, 一句话, 闪不闪, 还有几项)。规则和卡片小面板一致：
+    """红绿灯：(级别, 一句话, 动画种类, 还有几项)。动画：工作中 = pulse（橙灯一呼一吸），等你确认 = blink（一亮一灭），其它不动。规则和卡片小面板一致：
     bad = 要处理（后台出错、登录对不上、当前号登录失效、额度用完）；busy = 等你确认的切换、有 claude 会话在跑、额度快满、
     当前号要注意、别的号有问题；都没有就是 ok。"""
     items = []  # (级别, 文字, 闪)，按严重程度排
@@ -456,10 +491,10 @@ def status_light(store, data, accs, active, st):
         items.append(("bad", "5 小时额度用完了", False))
     pend = cam.pending_switch_view(data)
     if pend:
-        items.append(("busy", pend["message"], True))
-    n = cam.session_count(max_age=0)  # 插件每分钟是个新进程，不用缓存
+        items.append(("busy", pend["message"], "blink"))
+    n = cam.session_count(max_age=SESSION_MAX_AGE)
     if n:
-        items.append(("busy", f"工作中 · {n} 个 claude 会话在跑", True))
+        items.append(("busy", f"工作中 · {n} 个 claude 会话在跑", "pulse"))
     if p5 is not None and p5 >= 90:
         items.append(("busy", f"5 小时额度 {p5:.0f}%，快满了", False))
     elif p7 is not None and p7 >= 90:
@@ -473,12 +508,12 @@ def status_light(store, data, accs, active, st):
         if ha["level"] == "error":
             items.append(("busy", f"{a.get('label') or a.get('email') or '未命名'}：{ha['issues'][0]['text'] if ha['issues'] else ha['label']}", False))
     if not items:
-        return "ok", "空闲 · 一切正常" if n == 0 else "一切正常", False, 0
+        return "ok", "空闲 · 一切正常" if n == 0 else "一切正常", "", 0
     level, text, blink = items[0]
     return level, text, blink, len(items) - 1
 
 
-def render(store, st, out=print, rich=None):
+def render(store, st, out=print, rich=None, phase=None):
     """rich：菜单栏画额度环、账号下面画进度条图（SwiftBar 认 image 参数；Windows 托盘不认，用文字进度条）。默认 macOS 上开。"""
     rich = cam.IS_MAC if rich is None else rich
     data = store.load()
@@ -497,12 +532,16 @@ def render(store, st, out=print, rich=None):
             title_acc = web_with_usage[0]
 
     # ---- 菜单栏标题（标题行上的快捷键是“打开菜单”）
-    # rich 时图标是额度环，右下角一个红绿灯状态点；闪的时候（工作中、等你确认）两张图交替放在标题里，SwiftBar 每 5 秒换一张
+    # rich 时图标是额度环加一个小信号灯；要动画时（工作中、等你确认）经典模式放两帧在标题里让 SwiftBar 每 5 秒轮换，
+    # 流式模式（phase 给定）每帧只有一行标题，由 stream() 每半秒推一帧
+    global LAST_LIGHT
     light = status_light(store, data, accs, active, st) if accs else None
-    frames = [0, 1] if light and light[2] else [0]
+    LAST_LIGHT = light
+    kind = light[2] if light else ""
+    phases = [phase] if phase is not None else ([0.0, 0.5] if kind else [0.0])
 
-    def ring_icon(p, frame):
-        return image_param(lambda v, dark: status_ring(v, dark, light[0], frame), p, 16, 16)
+    def ring_icon(p, ph):
+        return image_param(lambda v, dark: status_icon(int(round(v or 0)), dark, light[0], kind, ph), p, ICON_W, 16)
 
     heads = []
     if not accs:
@@ -514,12 +553,12 @@ def render(store, st, out=print, rich=None):
         name = title_name(title_acc, pos[title_acc["id"]]) if rich else short(title_acc.get("label") or title_acc.get("email"))
         text, tail = f"{esc(name)} {p:.0f}% | ", (f" color={color_for(p)}" if color_for(p) else "")
         if rich:
-            heads += [text + ring_icon(p, f) + tail for f in frames]
+            heads += [text + ring_icon(p, ph) + tail for ph in phases]
         else:
             heads.append(text + f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + tail)
     elif active:
         name = title_name(active, pos[active["id"]]) if rich else short(active.get("label") or active.get("email"))
-        heads += [f"{esc(name)} | " + ring_icon(0, f) for f in frames] if rich else [f"{esc(name)} | sfimage=person.2.circle"]
+        heads += [f"{esc(name)} | " + ring_icon(0, ph) for ph in phases] if rich else [f"{esc(name)} | sfimage=person.2.circle"]
     else:
         heads.append("Claude | sfimage=person.2.circle")
     extra = (mini_href(store, accs) if rich else "") + (" dropdown=false" if len(heads) > 1 else "")  # 多行标题不进下拉菜单
@@ -720,8 +759,53 @@ def render(store, st, out=print, rich=None):
         out(f"⚠ {esc(err)} | size=12 color=#B87A08,#E0A93B length={LINE}")
 
 
+def stream_frame(store, st, phase):
+    """流式模式的一帧：整份菜单的文字。出错也给一份能显示的菜单，进程不能死（SwiftBar 不会重启它）。"""
+    lines = []
+    try:
+        render(store, st, out=lines.append, rich=True, phase=phase)
+    except Exception as e:  # noqa: BLE001
+        lines = ["Claude ⚠ | sfimage=exclamationmark.triangle", "---", f"出错了：{esc(e)} | color=red"]
+    return "\n".join(lines) + "\n"
+
+
+def stream(store):
+    """流式模式（SwiftBar 的 streamable 插件，安装时 --stream）：进程常驻，每份菜单以一行 ~~~ 开头推给 SwiftBar，有变化才推。
+
+    后台任务照旧每分钟一轮；信号灯要动画时（工作中、等你确认）每半秒推一帧，8 帧一个周期（图按参数缓存，不重画）；
+    不动时 5 秒看一眼。SwiftBar 对标题行数不变的更新做增量刷新，菜单开着也不会被关掉。
+    """
+    global STREAMING, SESSION_MAX_AGE
+    STREAMING, SESSION_MAX_AGE = True, 5
+    st, last_bg, last, phase = {}, None, None, 0.0
+    while True:
+        now = time.monotonic()
+        if last_bg is None or now - last_bg >= 60:
+            try:
+                st = background_work(store)
+            except Exception as e:  # noqa: BLE001
+                st = {"last_error": str(e)}
+            last_bg = now
+        block = stream_frame(store, st, phase)
+        if block != last:
+            try:
+                sys.stdout.write("~~~\n" + block)
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError):  # SwiftBar 关了
+                return
+            last = block
+        if LAST_LIGHT and LAST_LIGHT[2]:
+            phase = (phase + 0.125) % 1.0
+            time.sleep(0.5)
+        else:
+            phase = 0.0
+            time.sleep(5)
+
+
 def main():
     store = cam.Store()
+    if sys.argv[1:2] == ["stream"]:
+        return stream(store)
     if sys.argv[1:2] == ["switch"] and len(sys.argv) > 2:  # 菜单里点了切换，见 switch_action
         sys.exit(switch_from_menu(store, sys.argv[2]))
     if sys.argv[1:2] == ["update-check"]:
