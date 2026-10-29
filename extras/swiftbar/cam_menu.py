@@ -46,7 +46,7 @@ HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
 MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
 MINI_WIDTH = 340
 # 量出来的高度：一个账号（红绿灯 + 当前号卡片 + 两个按钮 + 页脚）、“其它账号”标题、每行两张药丸卡（含间距）；到上限后整页上下滑
-MINI_BASE, MINI_SEC, MINI_ROW, MINI_MAX = 394, 24, 66, 600
+MINI_BASE, MINI_SEC, MINI_ROW, MINI_MAX = 428, 24, 66, 620  # Mac 上苹方字体比这边量的高一截，基数多留 34
 
 
 def mini_size(accs):

@@ -108,11 +108,12 @@ button { font: inherit; color: inherit; }
 .foot { display: flex; justify-content: space-between; gap: 8px; margin: 2px 6px 0; font-size: 11px; color: var(--muted); }
 .foot .risk.medium { color: var(--warn); }
 .foot .risk.high { color: var(--hot); font-weight: 600; }
-/* 操作结果：浮在底部，不把布局往下挤 */
-.msg { position: fixed; left: 10px; right: 10px; bottom: 10px; z-index: 9; padding: 8px 12px; border-radius: 14px; font-size: 12px;
-  background: var(--toast); border: 1px solid var(--tile-line); color: var(--live); box-shadow: 0 4px 14px rgba(0, 0, 0, .14); }
-.msg.bad { color: var(--hot); }
-.msg.wait { color: var(--ink); }
+/* 操作结果：正中间一块小提示（像系统的音量 / 亮度提示），不挡底下的按钮和页脚，几秒后自己消失 */
+.msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9; max-width: 84%; padding: 12px 18px; border-radius: 16px;
+  font-size: 13px; line-height: 1.45; text-align: center; background: rgba(50, 50, 54, .9); color: #8FDCA6; box-shadow: 0 8px 28px rgba(0, 0, 0, .24);
+  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); pointer-events: none; }
+.msg.bad { color: #FFB4A8; }
+.msg.wait { color: #F5F5F3; }
 .empty { text-align: center; color: var(--muted); font-size: 12.5px; padding: 6px 0; }
 .empty code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--circle); padding: 1px 5px; border-radius: 4px; }
 </style>
@@ -268,7 +269,11 @@ button { font: inherit; color: inherit; }
     try { local = await api("GET", "/api/local-usage?days=1"); } catch (_) { local = { rows: [] }; }
     render();
   }
-  function say(text, cls) { msg = text ? { text, cls: cls || "" } : null; render(); if (text && cls !== "bad") setTimeout(() => { msg = null; render(); }, 6000); }
+  function say(text, cls) {  // 成功的提示 2.5 秒，出错的 6 秒
+    msg = text ? { text, cls: cls || "" } : null;
+    render();
+    if (text) setTimeout(() => { if (msg && msg.text === text) { msg = null; render(); } }, cls === "bad" ? 6000 : 2500);
+  }
   async function run(fn) {
     if (busy) return;
     busy = true; render();
