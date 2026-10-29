@@ -210,12 +210,14 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         bw, br, lr = 9 * SCALE, 3 * SCALE, 2.1 * SCALE  # 灯体宽、圆角，灯的半径
         bx0, cx = (S - 9 * SCALE) / 2, S / 2
         lamps = (("bad", 3.0 * SCALE), ("busy", 8.0 * SCALE), ("ok", 13.0 * SCALE))  # 红、橙、绿三盏灯的圆心 y
-        glow = 1.0
+        glow = 1.0  # 亮的那盏灯有多亮：呼吸时 0 → 1 → 0，亮的时候灯还会变大一圈、外面带一圈光晕，暗的时候几乎熄掉
         if kind == "pulse":
-            glow = 0.4 + 0.6 * (0.5 - 0.5 * math.cos(2 * math.pi * phase))
+            glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)
         elif kind == "blink":
-            glow = 1.0 if phase < 0.5 else 0.2
+            glow = 1.0 if phase < 0.5 else 0.0
         base = BODY[dark]
+        lit_r = lr * (0.8 + 0.5 * glow)
+        halo_r = lr * (1.0 + 1.1 * glow)
 
         def body(px, py):
             if not (bx0 <= px <= bx0 + bw):
@@ -223,14 +225,22 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
             qx, qy = min(max(px, bx0 + br), bx0 + bw - br), min(max(py, br), S - br)
             return (px - qx) ** 2 + (py - qy) ** 2 <= br * br
 
-        def lamp(cy):
-            return lambda px, py: (px - cx) ** 2 + (py - cy) ** 2 <= lr * lr
+        def lamp(cy, r):
+            return lambda px, py: (px - cx) ** 2 + (py - cy) ** 2 <= r * r
 
         def mix(tone, g):  # 从灯体色往灯色过渡 g；没亮的灯只透一点颜色
             return (base[0] + (tone[0] - base[0]) * g, base[1] + (tone[1] - base[1]) * g, base[2] + (tone[2] - base[2]) * g,
                     base[3] + (1 - base[3]) * g)
 
-        shapes = [(body, base)] + [(lamp(cy), mix(FILL[{"busy": "warn"}.get(lv, lv)][dark], glow if lv == level else 0.28)) for lv, cy in lamps]
+        shapes = [(body, base)]
+        for lv, cy in lamps:
+            tone = FILL[{"busy": "warn"}.get(lv, lv)][dark]
+            if lv == level:
+                if kind and glow > 0.05:
+                    shapes.append((lamp(cy, halo_r), mix(tone, 0.45 * glow)))  # 光晕
+                shapes.append((lamp(cy, lit_r), mix(tone, 0.15 + 0.85 * glow)))
+            else:
+                shapes.append((lamp(cy, lr), mix(tone, 0.28)))
         return _png(S, S, _raster(S, S, shapes))
     lit = 4
     if kind == "pulse":
@@ -824,7 +834,7 @@ def stream_frame(store, st, phase):
 def stream(store):
     """流式模式（SwiftBar 的 streamable 插件，安装时 --stream）：进程常驻，每份菜单以一行 ~~~ 开头推给 SwiftBar，有变化才推。
 
-    后台任务照旧每分钟一轮；信号灯要动画时（工作中、等你确认）每半秒推一帧，8 帧一个周期（图按参数缓存，不重画）；
+    后台任务照旧每分钟一轮；信号灯要动画时（工作中、等你确认）每半秒推一帧，4 帧一个周期（图按参数缓存，不重画）；
     不动时 5 秒看一眼。SwiftBar 对标题行数不变的更新做增量刷新，菜单开着也不会被关掉。
     """
     global STREAMING, SESSION_MAX_AGE
@@ -854,7 +864,7 @@ def stream(store):
                 return
             last = block
         if LAST_LIGHT and LAST_LIGHT[2]:
-            phase = (phase + 0.125) % 1.0
+            phase = (phase + 0.25) % 1.0  # 半秒一帧、四帧一圈：呼吸和信号格涨落 2 秒一个来回
             time.sleep(0.5)
         else:
             phase = 0.0
