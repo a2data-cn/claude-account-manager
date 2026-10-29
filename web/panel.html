@@ -905,6 +905,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (a.kind === "claude_desktop") acts.push(`<button class="btn primary" data-act="open" data-id="${esc(a.id)}">${a.is_active ? "重新打开" : "切换桌面版"}</button>`);
     acts.push(`<button class="btn" data-act="refresh" data-id="${esc(a.id)}">${a.kind === "claude_desktop" ? "读取本地额度" : "刷新"}</button>`);
     acts.push(`<button class="btn" data-act="edit" data-id="${esc(a.id)}">编辑</button>`);
+    if (state.backend === "python") acts.push(`<button class="btn${h.level === "error" ? " primary" : ""}" data-act="diag" data-id="${esc(a.id)}" title="下载一份诊断报告：现在的问题、出问题时的现场（出口 IP、环境）、用过的出口、当前环境和风险项，不含密钥">导出诊断</button>`);
     acts.push(`<button class="btn quiet danger" data-act="remove" data-id="${esc(a.id)}">移除</button>`);
     return `<section class="detail" aria-label="${esc(nameOf(a))} 的详情">
       <div class="d-head">
@@ -1394,6 +1395,20 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     upd();
   }
 
+  // ---- 导出诊断：后端给 Markdown 文本，这里存成文件
+  async function exportDiag(id, btn) {
+    await busy(btn, async () => {
+      try {
+        const r = await api("GET", `/api/accounts/${encodeURIComponent(id)}/diagnostic`);
+        const url = URL.createObjectURL(new Blob([r.text], { type: "text/markdown;charset=utf-8" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = r.filename; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        toast(`已导出 ${r.filename}`);
+      } catch (e) { toast(e.message, true); }
+    });
+  }
+
   // ---- 编辑
   let editing = null;
   function openEdit(a) {
@@ -1647,6 +1662,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
           catch (err) { toast(err.message, true); }
         }); break;
       case "refresh": refresh(id, b); break;
+      case "diag": exportDiag(id, b); break;
       case "edit": if (a) openEdit(a); break;
       case "select": select(id); break;
       case "add": openAdd(); break;

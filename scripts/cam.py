@@ -991,7 +991,7 @@ def switch_code_account(store, key):
         data["active"]["claude_code"] = target["id"]  # 第 6 步
         target["last_switched_at"] = now_iso()
         data["switch_log"].append({"id": target["id"], "at": now_iso()})
-        note_account_region(data, target["id"], cached_region_loc(data))  # 给风险提示记一笔地区
+        note_account_region(data, target["id"], cached_region_loc(data), data.get("region"))  # 给风险提示和诊断记一笔地区
         store.save(data)
         return target, backup, True
 
@@ -1730,11 +1730,40 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
                 a["usage"] = None
             if a["id"] in results:
                 u, meta = results[a["id"]]
+                note_incident(fresh, a, u)
                 a["usage"] = u
                 a.update(meta)
         roll_renewals(fresh)
         store.save(fresh)
         return fresh
+
+
+INCIDENT_KINDS = ("wrong_owner", "login_invalid", "session_invalid", "key_invalid")  # 这几种算“账号出事了”，要记现场
+INCIDENT_KEEP = 10
+
+
+def note_incident(data, acc, new_usage):
+    """账号刚出问题的那一刻把现场记下来：出口（IP、地区、运营商、IP 类型）、本机环境（时区、语言、代理、VPN、DNS）、
+    几个 claude 会话在跑、环境评分。同一种问题持续着不重复记；每个号留最近 INCIDENT_KEEP 条。给“导出诊断”用，只记录不干预。"""
+    err = (new_usage or {}).get("error")
+    kind = _health_kind_of_error(acc.get("kind"), err) if err else None
+    if kind not in INCIDENT_KINDS:
+        return
+    prev = (acc.get("usage") or {}).get("error")
+    if prev and _health_kind_of_error(acc.get("kind"), prev) == kind:
+        return
+    reg = data.get("region") or {}
+    env = reg.get("env") or {}
+    try:
+        score = risk_score(risk_items(data))["score"]
+    except Exception:  # noqa: BLE001  评分算不出来也要记
+        score = None
+    acc.setdefault("incidents", []).insert(0, {
+        "at": now_iso(), "kind": kind, "error": err,
+        "region": {k: reg.get(k) for k in ("loc", "ip", "org", "city", "ip_type", "warp", "colo", "skew", "lookup_mode", "checked_at")},
+        "env": {k: env.get(k) for k in ("tz", "locale", "dns", "proxy", "tunnel")},
+        "sessions": session_count(), "active": (data.get("active") or {}).get("claude_code") == acc["id"], "risk_score": score})
+    acc["incidents"] = acc["incidents"][:INCIDENT_KEEP]
 
 
 def add_months(d: dt.date, n: int, day=None) -> dt.date:
@@ -2878,6 +2907,108 @@ def session_count(max_age=20):
     return _SESSION_CACHE[1]
 
 
+KIND_NAMES = {"claude_code": "Claude Code", "claude_web": "claude.ai 网页版", "claude_desktop": "Claude 桌面版", "api": "API Key"}
+
+
+def _when(iso):
+    """ISO 时间 → 本机时区的“2026-10-29 15:40”。"""
+    t = parse_iso(iso) if iso else None
+    return t.astimezone().strftime("%Y-%m-%d %H:%M") if t else "–"
+
+
+def account_diagnostic(store, data, key):
+    """一个账号的诊断报告（不含任何密钥）：资料和现在的问题、出问题时的现场、用过的出口、当前环境和全部风险项、最近切换、本机。"""
+    acc = find_account(data, key)
+    pub = next(a for a in public_state(store, data)["accounts"] if a["id"] == acc["id"])
+    names = {a["id"]: a["label"] for a in data["accounts"]}
+    risks = risk_items(data)
+    return {"generated_at": now_iso(), "cam_version": VERSION, "host": socket.gethostname(), "platform": platform.platform(),
+            "account": pub, "incidents": acc.get("incidents") or [], "regions": acc.get("regions") or [],
+            "region": region_view(data), "env": (data.get("region") or {}).get("env") or {},
+            "risks": [r for r in risks if r.get("kind") != "summary"], "risk_score": risk_score(risks),
+            "status_page": data.get("status_page"), "sessions": session_count(), "pending_switch": pending_switch_view(data),
+            "switches": [{"at": e["at"], "to": names.get(e["id"], e["id"]), "this": e["id"] == acc["id"]}
+                         for e in data.get("switch_log", [])[-30:] if e.get("at")]}
+
+
+def diagnostic_filename(rep):
+    label = re.sub(r"[\\/:*?\"<>|\s]+", "_", rep["account"].get("label") or "账号")[:30]
+    return f"cam-诊断-{label}-{_when(rep['generated_at']).replace(' ', '-').replace(':', '')}.md"
+
+
+def dns_name(d):
+    """DNS 条目（local_env 里是 {ip, name, country}）→ “8.8.8.8（Google）”。"""
+    if not isinstance(d, dict):
+        return str(d)
+    return (d.get("ip") or "?") + (f"（{d['name']}）" if d.get("name") else "")
+
+
+def diagnostic_text(rep):
+    """诊断报告的 Markdown，给人看、也方便发给别人。"""
+    a, reg, env, sc = rep["account"], rep["region"], rep["env"], rep["risk_score"]
+
+    def exit_line(r):
+        ip_type = IP_TYPE_NAMES.get(r.get("ip_type"), r.get("ip_type") or "类型未知")
+        bits = [region_label(r.get("loc"))] + ([r["ip"]] if r.get("ip") else []) + [f"{r.get('org') or '运营商未知'}，{ip_type}"]
+        return " ".join(bits[:2]) + f"（{bits[2]}" + (f"，{r['city']}" if r.get("city") else "") + "）"
+
+    def env_line(e):
+        px = e.get("proxy") or []
+        tun = e.get("tunnel")
+        return (f"时区 {e.get('tz') or '未知'} · 语言 {e.get('locale') or '未知'} · 代理 {'；'.join(px) if px else '无'} · "
+                f"VPN {tun[0] + '（' + tun[1] + '）' if tun else '无'} · DNS {'、'.join(dns_name(d) for d in e.get('dns') or []) or '未知'}")
+
+    L = [f"# cam 账号诊断：{a['label']}" + (f"（{a['email']}）" if a.get("email") and a["email"] != a["label"] else ""),
+         f"生成于 {_when(rep['generated_at'])} · 本机 {rep['host']}（{rep['platform']}）· cam {rep['cam_version']} · 不含任何密钥", "",
+         "## 账号"]
+    plan = (a.get("plan_display") or "未知") + (f" {plan_tier(a)}" if plan_tier(a) else "")
+    L.append(f"- 类型 {KIND_NAMES.get(a['kind'], a['kind'])} · 套餐 {plan}" + (f" · 组织 {a['org_name']}" if a.get("org_name") else "")
+             + (" · 正在用" if a.get("is_active") else ""))
+    L.append(f"- 添加于 {_when(a.get('created_at'))} · 最近切换 {_when(a.get('last_switched_at'))}")
+    u = a.get("usage") or {}
+    for key, name in (("five_hour", "5 小时"), ("seven_day", "7 天")):
+        w = u.get(key) or {}
+        if w.get("utilization") is not None:
+            L.append(f"- {name}额度已用 {w['utilization']:.0f}%，{_when(w.get('resets_at'))} 重置")
+    if u.get("fetched_at"):
+        L.append(f"- 用量更新于 {_when(u['fetched_at'])}" + (f"，报错：{u['error']}" if u.get("error") else ""))
+    L += ["", "## 现在的问题"]
+    issues = (a.get("health") or {}).get("issues") or []
+    L += [f"- [{ {'error': '异常', 'warn': '注意', 'info': '提示'}.get(i['level'], i['level'])}] {i['text']}" + (f"：{i['detail']}" if i.get("detail") else "")
+          + (f"\n  怎么办：{i['advice']}" if i.get("advice") else "") for i in issues] or ["- 没有发现问题"]
+    L += ["", f"## 出问题时的现场（最近 {len(rep['incidents'])} 次）"]
+    for inc in rep["incidents"]:
+        L.append(f"- {_when(inc['at'])} {HEALTH_TEXT.get(inc['kind'], ('', inc['kind'], ''))[1]}：{inc.get('error') or ''}")
+        L.append(f"  出口 {exit_line(inc.get('region') or {})} · WARP {'是' if (inc.get('region') or {}).get('warp') else '否'}"
+                 f" · {env_line(inc.get('env') or {})} · {inc.get('sessions') or 0} 个 claude 会话在跑"
+                 + (f" · 环境评分 {inc['risk_score']}/100" if inc.get("risk_score") is not None else "")
+                 + ("" if inc.get("active") else " · 当时不是正在用的号"))
+    if not rep["incidents"]:
+        L.append("- 还没有记录（账号出问题那一刻才会记）")
+    L += ["", "## 这个账号用过的出口"]
+    L += [f"- {exit_line(r)} · 最近 {_when(r.get('at'))} · 首次 {_when(r.get('first_at') or r.get('at'))} · {r.get('times') or 1} 次"
+          for r in rep["regions"]] or ["- 还没有记录"]
+    L += ["", "## 当前环境"]
+    if reg.get("checked_at"):
+        L.append(f"- 出口 {exit_line(reg)} · WARP {'是' if reg.get('warp') else '否'} · 查询方式 {reg.get('lookup_mode') or '自动'} · 检测于 {_when(reg['checked_at'])}")
+        L.append(f"- {reg.get('message') or ''}" + (f"（{reg['advice']}）" if reg.get("advice") else ""))
+    else:
+        L.append("- 还没有检测过出口地区")
+    L.append(f"- {env_line(env)}")
+    L.append(f"- 环境评分 {sc['score']}/100（{sc['label']}）")
+    L += [f"- [{ {'bad': '风险', 'warn': '注意', 'info': '提示', 'ok': '正常'}.get(r['level'], r['level'])}] {r['text']}"
+          + (f"（{r['advice']}）" if r.get("advice") else "") for r in rep["risks"]]
+    sp = rep.get("status_page") or {}
+    if sp.get("text") or sp.get("description"):
+        L.append(f"- Anthropic 状态页：{sp.get('text') or sp.get('description')}")
+    L += ["", "## 最近切换"]
+    L += [f"- {_when(e['at'])} → {e['to']}" + ("（这个号）" if e.get("this") else "") for e in rep["switches"][-15:]] or ["- 没有切换记录"]
+    L += ["", "## 本机", f"- 正在跑的 claude 会话：{rep.get('sessions') or 0} 个"
+          + (f" · 等待中的切换：{rep['pending_switch']['message']}" if rep.get("pending_switch") else "")]
+    L.append("- 导出的 IP 是 cam 检测到的这台电脑的出口；Anthropic 那边的记录拿不到。只记录、只导出，不拦任何操作。")
+    return "\n".join(L) + "\n"
+
+
 def mask(s):
     if not s:
         return None
@@ -3242,6 +3373,9 @@ def make_handler(store, token):
                     return self._send(200, public_state(store, store.load()))
                 if len(parts) >= 2 and parts[0] == "accounts":
                     aid = parts[1]
+                    if method == "GET" and parts[2:] == ["diagnostic"]:  # 面板“导出诊断”：报告 + Markdown + 文件名
+                        rep = account_diagnostic(store, store.load(), aid)
+                        return self._send(200, {"report": rep, "text": diagnostic_text(rep), "filename": diagnostic_filename(rep)})
                     if method == "POST" and parts[2:] == ["identify"]:
                         return self._send(200, identify_account(store, aid))
                     if method == "POST" and parts[2:] == ["switch"]:
@@ -4928,14 +5062,24 @@ def default_route_tunnel():
     return (name, k) if name and k else None
 
 
-def note_account_region(data, acc_id, loc):
-    """记一笔“这个账号在这个出口地区用过”，给风险提示用（每个账号只留最近几个地区）。"""
+def note_account_region(data, acc_id, loc, reg=None):
+    """记一笔“这个账号在这个出口地区用过”，给风险提示和诊断导出用（每个账号只留最近几个地区）。
+
+    reg 是当时的出口检测结果，有的话把 IP、运营商、城市、IP 类型一起记下；同一地区只留一条，次数累加、首次时间不变。
+    """
     if not acc_id or not loc:
         return
     for a in data.get("accounts") or []:
         if a["id"] == acc_id:
+            old = next((r for r in (a.get("regions") or []) if r.get("loc") == loc), None) or {}
             regs = [r for r in (a.get("regions") or []) if r.get("loc") != loc]
-            regs.insert(0, {"loc": loc, "at": now_iso()})
+            entry = {"loc": loc, "at": now_iso(), "first_at": old.get("first_at") or old.get("at") or now_iso(),
+                     "times": int(old.get("times") or 0) + 1}
+            for k in ("ip", "org", "city", "ip_type"):
+                v = (reg or {}).get(k) or old.get(k)
+                if v:
+                    entry[k] = v
+            regs.insert(0, entry)
             a["regions"] = regs[:ACCOUNT_REGION_KEEP]
 
 
@@ -4992,7 +5136,7 @@ def check_region(store, max_age=300):
             data["status_page"] = dict(sp, checked_at=reg["checked_at"])
         else:
             data.pop("status_page", None)
-        note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"])
+        note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"], reg)
         ss = data.get("service_status")
         if reg["loc"] and isinstance(ss, dict):  # 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
             ss["items"] = [i for i in ss.get("items") or [] if not resolved_by_trace(i)]
@@ -6654,6 +6798,10 @@ def main(argv=None):
     s.add_argument("account")
     s = sub.add_parser("local", help="本地 Claude Code token 消耗统计")
     s.add_argument("--days", type=int, default=7)
+    s = sub.add_parser("diag", help="一个账号的诊断报告：现在的问题、出问题时的现场（出口 IP、环境）、用过的出口、当前环境，不含密钥")
+    s.add_argument("account", help="账号名字、序号或邮箱")
+    s.add_argument("--json", action="store_true", help="输出 JSON 而不是 Markdown")
+    s.add_argument("--out", help="存成文件")
     s = sub.add_parser("serve", help="启动 Web 面板")
     s.add_argument("--lan", action="store_true", help="允许局域网（手机）访问")
     s.add_argument("--port", type=int, default=8787)
@@ -6799,6 +6947,15 @@ def main(argv=None):
                       f"缓存读 {r['cache_read']:>12,}  合计(不含缓存读) {tot:>11,}  ≈ ${r['cost_usd']:,.2f}")
             if rep["rows"]:
                 print(color(f"合计 ≈ ${sum(r['cost_usd'] for r in rep['rows']):,.2f}（按 API 价折算，订阅不按这个收费，只用来比较用量）", "d"))
+        elif c == "diag":
+            rep = account_diagnostic(store, store.load(), args.account)
+            text = json.dumps(rep, ensure_ascii=False, indent=2) if args.json else diagnostic_text(rep)
+            if args.out:
+                with open(args.out, "w", encoding="utf-8") as f:
+                    f.write(text)
+                print(f"已写入 {args.out}")
+            else:
+                print(text)
         elif c == "serve":
             serve(store, "0.0.0.0" if args.lan else "127.0.0.1", args.port, args.refresh_every)
         elif c == "panel":

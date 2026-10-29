@@ -589,6 +589,53 @@ class CamTest(unittest.TestCase):
             by_model[r["model"]] = by_model.get(r["model"], 0) + r["output"]
         self.assertEqual(by_model, {"claude-opus-4-1-20250805": 107, "claude-sonnet-4-5": 1000})
 
+    def test_incident_and_diagnostic(self):
+        """账号刚出问题那一刻记现场（出口 IP、环境、会话数），同一问题持续着不重复记；用过的出口补 IP 和次数；导出的诊断不含密钥。"""
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        d = self.data()
+        aid = d["accounts"][0]["id"]
+        d["region"] = {"loc": "SG", "ip": "1.2.3.4", "org": "Singtel", "city": "Singapore", "ip_type": "residential", "warp": False,
+                       "checked_at": self.cam.now_iso(), "env": {"tz": "Asia/Shanghai", "locale": "zh_CN", "proxy": [], "tunnel": None, "dns": [{"ip": "8.8.8.8", "name": "Google", "country": None}]}}
+        self.cam.note_account_region(d, aid, "SG", d["region"])
+        self.cam.note_account_region(d, aid, "SG", d["region"])
+        self.cam.Store().save(d)
+        with mock.patch.object(self.cam, "fetch_code_usage", side_effect=self.cam.CamError("登录已失效，无法续期")):
+            self.cam.refresh_usage(self.cam.Store(), aid)
+            self.cam.refresh_usage(self.cam.Store(), aid)
+        acc = self.data()["accounts"][0]
+        self.assertEqual(len(acc["incidents"]), 1, acc["incidents"])
+        inc = acc["incidents"][0]
+        self.assertEqual((inc["kind"], inc["region"]["ip"], inc["region"]["org"], inc["env"]["tz"], inc["sessions"]),
+                         ("login_invalid", "1.2.3.4", "Singtel", "Asia/Shanghai", 0))
+        self.assertEqual((acc["regions"][0]["loc"], acc["regions"][0]["ip"], acc["regions"][0]["times"]), ("SG", "1.2.3.4", 2))
+        store = self.cam.Store()
+        rep = self.cam.account_diagnostic(store, store.load(), "A")
+        text = self.cam.diagnostic_text(rep)
+        for secret in ("rt-A1", "at-A1", "refreshToken", "accessToken"):
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret, json.dumps(rep, ensure_ascii=False))
+        for s in ("# cam 账号诊断：A", "登录已失效", "1.2.3.4", "Singtel", "家庭 / 公司宽带", "Asia/Shanghai", "出问题时的现场（最近 1 次）"):
+            self.assertIn(s, text)
+        self.assertTrue(self.cam.diagnostic_filename(rep).startswith("cam-诊断-A-"))
+        # 命令行和接口
+        self.assertEqual(self.run_cam("diag", "A"), 0)
+        out = os.path.join(self.tmp, "diag.md")
+        self.assertEqual(self.run_cam("diag", "1", "--out", out), 0)
+        self.assertIn("## 当前环境", open(out, encoding="utf-8").read())
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/api/accounts/{aid}/diagnostic",
+                                     headers={"Authorization": "Bearer " + token})
+        with opener.open(req) as r:
+            body = json.load(r)
+        self.assertIn("1.2.3.4", body["text"])
+        self.assertTrue(body["filename"].endswith(".md"))
+
     def test_local_window_usage(self):
         """当前窗口里本机用了多少：按切换记录归属、按窗口起点截断、按模型的周额度只算那个模型。"""
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")

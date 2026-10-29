@@ -191,6 +191,7 @@ cam set 工作号 --expires 2026-11-03 --auto-renew --price '$100/月'
 cam serve --lan           # 启动 Web 面板，手机扫链接即可访问
 cam panel                 # 在浏览器打开 Web 面板（没在运行就在后台启动，只限本机访问）
 cam local --days 7        # 本机每天消耗了多少 token、记在哪个号上、按 API 价折算约多少钱
+cam diag 工作号 --out 诊断.md   # 这个号的诊断报告：现在的问题、出问题时的现场、用过的出口、当前环境，不含密钥
 cam doctor                # 全面体检：账号登录还能不能续、Claude 服务、本机 Claude Code、cam 自己、聊天机器人；不显示密钥
 cam doctor --offline      # 不联网：不续登录、不刷新、不测服务，只看本机和上次的结果（--json 给脚本用）
 cam env install           # 用 Anthropic 官方安装器安装 Claude Code
@@ -198,6 +199,8 @@ cam env clean             # 清理 Claude Code 缓存（默认只预演，加 --
 cam update --check        # 看有没有新版本；cam update 更新（见上面“更新”）
 cam verify                # 按 SHA256SUMS 校验代码文件
 ```
+
+账号一出问题（登录失效、sessionKey 失效、API Key 无效、登录被别的号覆盖）那一刻，cam 会把现场记下来：出口 IP、地区、运营商、IP 类型、WARP、时区、语言、代理 / VPN、DNS、当时几个 `claude` 会话在跑、环境评分，每个号留最近 10 条；账号用过的出口也记着 IP、运营商和次数。`cam diag` 或面板账号详情里的“导出诊断”把这些连同现在的问题和建议、当前环境和全部风险项、最近切换记录导出成一份 Markdown，不含任何密钥，可以直接发给别人看。导出的 IP 是 cam 检测到的这台电脑的出口，Anthropic 那边的记录拿不到；只记录、只导出，不拦任何操作。
 
 Windows 用 `scripts\cam.cmd`（一键安装后直接 `cam`），用法相同。
 
