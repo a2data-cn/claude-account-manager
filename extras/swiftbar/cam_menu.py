@@ -443,29 +443,36 @@ LAST_LIGHT = None  # render 最近算出的红绿灯，stream 用它决定要不
 _MINI_CACHE = [0.0, None]  # [探测时间, (端口, 令牌)]
 
 
-def mini_href(store, accs):
-    """标题行的 href + webview 参数：左键点图标弹出卡片小面板，右键还是系统菜单。
+def mini_endpoint(store):
+    """本机卡片小面板的 (端口, 令牌)，macOS 的弹窗和 Windows 的小窗都用它。
 
-    要本机有 cam serve 在跑，没有就在后台起一个（只监听 127.0.0.1）；在跑的是桌面版的服务时没有这个页面，就不加。
+    要本机有 cam serve 在跑，没有就在后台起一个（只监听 127.0.0.1）；在跑的是旧代码的就重启它；
+    在跑的是桌面版的服务时没有这个页面，返回 None。
     """
     if not MINI:
-        return ""
+        return None
     if STREAMING and _MINI_CACHE[1] and time.monotonic() - _MINI_CACHE[0] < 60:  # 流式模式每半秒渲染一次，探测一分钟一次就够
-        return mini_params(*_MINI_CACHE[1], accs)
+        return _MINI_CACHE[1]
     try:
         port, token = cam.ensure_panel(store)
         if not cam.mini_available(port, token) or cam.serve_outdated(port, token):
             # 在跑的是旧代码的 cam serve（git pull / cam update 之后没重启）：结束它再起一个新的；桌面版的服务就算了
             if not cam.restart_stale_serve(store, port, token):
-                return ""
+                return None
             port, token = cam.ensure_panel(store)
             if not cam.mini_available(port, token):
-                return ""
+                return None
             notify("面板已更新", "后台的 cam serve 用的是旧代码，已重启（自己用 cam serve --lan 开的要重开一次）")
     except Exception:  # noqa: BLE001  起不来就只用系统菜单
-        return ""
+        return None
     _MINI_CACHE[:] = [time.monotonic(), (port, token)]
-    return mini_params(port, token, accs)
+    return port, token
+
+
+def mini_href(store, accs):
+    """标题行的 href + webview 参数：左键点图标弹出卡片小面板，右键还是系统菜单。"""
+    ep = mini_endpoint(store)
+    return mini_params(*ep, accs) if ep else ""
 
 
 def mini_params(port, token, accs):

@@ -6,7 +6,7 @@
 和菜单栏小工具共用后台锁：桌面版或 cam serve 在跑时由它们做。
 
 用法（都由 cam-tray.ps1 调用，输出一行 JSON）：
-  cam_tray.py menu               托盘图标、提示文字和菜单：{"tip", "badge", "level", "items", "notes"}
+  cam_tray.py menu               托盘图标、提示文字和菜单：{"tip", "badge", "level", "items", "notes", "mini"}
   cam_tray.py do <种类> 参数…    菜单里点了某一项：{"notes": [{"title", "body"}]}，通知由托盘弹出
     menu switch|update-check|update|checkup …  菜单栏小工具自己的命令
     cam  usage|open|panel …                     cam 命令，出错时把报错写进通知
@@ -138,7 +138,16 @@ def menu(store, notes):
     cam_menu.render(store, st, out=lines.append, rich=False)  # 托盘菜单不认图片，用文字进度条（不管在哪个系统上跑）
     title, items = convert(lines)
     badge, level, tip = badge_of(title)
-    return {"tip": tip, "badge": badge, "level": level, "items": items, "notes": notes.items}
+    return {"tip": tip, "badge": badge, "level": level, "items": items, "notes": notes.items, "mini": mini_info(store)}
+
+
+def mini_info(store):
+    """卡片小面板：左键点托盘图标时 cam-tray.ps1 用浏览器的应用模式开一个小窗显示它。没有（桌面版的服务、起不来）就 None，左键退回弹菜单。"""
+    ep = cam_menu.mini_endpoint(store)
+    if not ep:
+        return None
+    w, h = cam_menu.mini_size(store.load().get("accounts") or [])
+    return {"url": f"http://127.0.0.1:{ep[0]}/mini?t={ep[1]}", "w": w, "h": h}
 
 
 def last_line(*texts):

@@ -17,6 +17,9 @@ Add-Type -Namespace CamTray -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int cmd);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr handle, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
 '@
 
 $created = $false
@@ -213,7 +216,43 @@ function Invoke-MenuItem($it) {
   Start-TrayPy (@("do") + @($it.run | ForEach-Object { [string]$_ })) "do" ([bool]$it.refresh)
 }
 
+# ---- 卡片小面板：和 macOS 菜单栏弹窗同一张页面（本机 cam serve 的 /mini），用 Edge / Chrome 的应用模式开成一个没有地址栏的小窗，
+# 贴在屏幕右下角（托盘上方）；再点一下托盘图标就关掉。没有 Edge 也没有 Chrome 就用默认浏览器打开。
+$script:mini = $null
+$CardTitle = "Claude 账号"  # 页面的 <title>，应用模式的窗口标题就是它，按它找窗口
+
+function Find-Browser {
+  # 先 Edge 后 Chrome；哪个目录变量是空的（比如 32 位系统没有 ProgramFiles(x86)）就跳过，Join-Path 不接受空路径
+  $bases = @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA) | Where-Object { $_ }
+  foreach ($rel in @("Microsoft\Edge\Application\msedge.exe", "Google\Chrome\Application\chrome.exe")) {
+    foreach ($b in $bases) {
+      $c = Join-Path $b $rel
+      if (Test-Path -LiteralPath $c) { return $c }
+    }
+  }
+  return $null
+}
+
+function Toggle-Card {
+  if (-not $script:mini) {  # 没有卡片页（在跑的是桌面版的服务、或者起不来）：左键还是弹菜单
+    if ($showMenu) { try { [void]$showMenu.Invoke($script:notify, $null) } catch { } }
+    return
+  }
+  $h = [CamTray.Native]::FindWindow($null, $CardTitle)
+  if ($h -ne [IntPtr]::Zero) { [void][CamTray.Native]::PostMessage($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero); return }  # WM_CLOSE
+  $browser = Find-Browser
+  $url = [string]$script:mini.url
+  if (-not $browser) { Start-Process $url; return }
+  $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  $w = [int]$script:mini.w + 16   # 窗口边框
+  $hh = [int]$script:mini.h + 40  # 标题栏
+  $x = $wa.Right - $w - 12
+  $y = $wa.Bottom - $hh - 12
+  Start-Process -FilePath $browser -ArgumentList @("--app=$url", "--window-size=$w,$hh", "--window-position=$x,$y")
+}
+
 function Update-Tray($res) {
+  $script:mini = $res.mini
   $tip = [string]$res.tip
   if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 62) + "…" }  # 托盘提示最多 63 个字
   $script:notify.Text = $tip
@@ -275,11 +314,11 @@ $script:notify.ContextMenuStrip = $script:menu
 $script:notify.Text = "Claude 账号"
 Set-TrayIcon "gray" "C"
 $script:notify.Visible = $true
-# 左键也弹出菜单（NotifyIcon 只在右键时自己弹，左键借用它内部弹菜单的方法）
+# 左键开 / 关卡片小窗（没有卡片页时弹菜单：借用 NotifyIcon 内部弹菜单的方法），右键菜单由 NotifyIcon 自己弹
 $showMenu = [System.Windows.Forms.NotifyIcon].GetMethod("ShowContextMenu", [System.Reflection.BindingFlags]"Instance,NonPublic")
 $script:notify.Add_MouseUp({
   param($s, $e)
-  if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $showMenu) { try { [void]$showMenu.Invoke($script:notify, $null) } catch { } }
+  if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { try { Toggle-Card } catch { Add-Note "托盘小工具出错了" $_.Exception.Message } }
 })
 
 # 事件处理里冒出来的异常会让 WinForms 弹“未处理的异常”对话框，点“退出”托盘就没了，所以下面的处理都接住变成通知。

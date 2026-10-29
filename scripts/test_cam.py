@@ -1207,6 +1207,7 @@ class CamTest(unittest.TestCase):
         seps = [n for n, i in enumerate(out["items"]) if i.get("sep")]
         self.assertTrue(seps and all(b - a > 1 for a, b in zip(seps, seps[1:])), seps)
         self.assertFalse(out["items"][-1].get("sep"))
+        self.assertIsNone(out["mini"])  # 测试里 CAM_MENU_MINI=0：没有卡片页，左键退回弹菜单
         acts = {i["text"]: i["run"] for i in out["items"] if i.get("run")}
         self.assertEqual(acts["打开管理面板"], ["cam", "panel"])
         self.assertEqual(acts["刷新用量"], ["cam", "usage"])
