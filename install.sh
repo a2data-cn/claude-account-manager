@@ -17,7 +17,7 @@ for arg in "$@"; do
     --skip-verify) VERIFY=0 ;;
     --uninstall) UNINSTALL=1 ;;
     -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "不认识的参数：$arg（bash install.sh --help 查看用法）"; exit 2 ;;
+    *) echo "不认识的参数：${arg}（bash install.sh --help 查看用法）"; exit 2 ;;
   esac
 done
 
@@ -98,7 +98,7 @@ uninstall() {
       rm -f "$LINK"
       ok "已删除 $LINK"
     else
-      warn "$LINK 指向 $dest，不是这份代码装的，没有删"
+      warn "$LINK 指向 ${dest}，不是这份代码装的，没有删"
     fi
   elif [[ -e "$LINK" ]]; then
     warn "$LINK 不是 install.sh 装的，没有删"
@@ -124,7 +124,7 @@ uninstall() {
     if [[ -f "$plugin" ]]; then
       rm -f "$plugin"
       open -g "swiftbar://refreshallplugins" 2>/dev/null || true
-      ok "已删除插件 $plugin（SwiftBar 本身留着，不用了可以把它从“应用程序”里删掉）"
+      ok "已删除插件 ${plugin}（SwiftBar 本身留着，不用了可以把它从“应用程序”里删掉）"
     else
       note "没装菜单栏插件"
     fi
@@ -162,7 +162,7 @@ if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/d
   [[ $OS == Darwin ]] && note "macOS 第一次运行 python3 可能弹窗要装“命令行开发者工具”，装完重新运行本脚本"
   fail "Python 版本太旧或者不能用（$("$PY" -V 2>&1 | head -1)），需要 3.8 以上"
 fi
-ok "$("$PY" -V 2>&1)（$PY）"
+ok "$("$PY" -V 2>&1)（${PY}）"
 
 # ---- 2. 校验文件：安装任何东西之前先确认代码完整、没被改过
 step "校验文件（SHA256SUMS）"
@@ -244,7 +244,7 @@ if [[ $OS == Linux ]]; then
       systemctl --user try-restart "$UNIT" >/dev/null 2>&1 || true
       note "已按这份代码更新 $UNIT_FILE"
     fi
-    ok "已经装好了：$UNIT（systemctl --user status $UNIT 查看）"
+    ok "已经装好了：${UNIT}（systemctl --user status $UNIT 查看）"
   elif ! command -v systemctl >/dev/null 2>&1; then
     note "这台电脑没有 systemd，不装后台服务。需要时运行 cam serve 或 cam panel"
   else
@@ -253,9 +253,9 @@ if [[ $OS == Linux ]]; then
       mkdir -p "$(dirname "$UNIT_FILE")"
       unit_text > "$UNIT_FILE"
       if systemctl --user daemon-reload && systemctl --user enable --now "$UNIT"; then
-        ok "已装好并启动 $UNIT（只监听 127.0.0.1:8787；cam panel 打开面板，systemctl --user status $UNIT 查看）"
+        ok "已装好并启动 ${UNIT}（只监听 127.0.0.1:8787；cam panel 打开面板，systemctl --user status $UNIT 查看）"
       else
-        warn "服务文件写好了（$UNIT_FILE），但没能启动，见上面的输出。可以先手动运行 cam serve"
+        warn "服务文件写好了（${UNIT_FILE}），但没能启动，见上面的输出。可以先手动运行 cam serve"
       fi
     else
       note "没装。需要时运行 cam serve 或 cam panel；以后想装，重新运行一次 install.sh"
@@ -279,7 +279,7 @@ echo
 echo "✓ 安装完成"
 echo
 echo "下一步："
-[[ $NEW_SHELL == 1 ]] && echo "  · 新开一个终端，cam 命令才找得到（或者在当前终端先运行 $PATH_LINE）"
+[[ $NEW_SHELL == 1 ]] && echo "  · 新开一个终端，cam 命令才找得到（或者在当前终端先运行 ${PATH_LINE}）"
 echo "  · cam login 工作号    登录一个 Claude 账号，浏览器里登录完自动保存；每个账号换个名字各登录一次"
 echo "  · cam                 列出所有账号和额度；cam switch 名字 切换"
 echo "  · cam panel           在浏览器打开管理面板"

@@ -11,6 +11,7 @@ import io
 import signal
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -3478,6 +3479,26 @@ class UpdateTest(unittest.TestCase):
                 return f.read().splitlines()
         except FileNotFoundError:
             return []
+
+
+class ShellScriptTest(unittest.TestCase):
+    """shell 脚本要能在 macOS 自带的 bash 3.2 上跑。"""
+
+    def test_no_variable_directly_followed_by_cjk(self):
+        # bash 3.2 在 UTF-8 locale 下把紧跟在 $NAME 后面的中文字符的首字节也当成变量名（报 "PY�: unbound variable"），
+        # 2026-10-29 install.sh 在 Mac 上就是这样挂的。变量后面紧跟中文或中文标点时写成 ${NAME}
+        bad = []
+        for dirpath, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "target")]
+            for name in files:
+                if not name.endswith((".sh", ".command")):
+                    continue
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as f:
+                    for n, line in enumerate(f, 1):
+                        if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", line):
+                            bad.append(f"{os.path.relpath(path, ROOT)}:{n}: {line.strip()}")
+        self.assertEqual(bad, [], "变量名后面紧跟中文要写成 ${NAME}，不然 macOS 的 bash 3.2 报 unbound variable")
 
 
 @unittest.skipIf(os.name == "nt", "install.sh 只用在 macOS / Linux")
