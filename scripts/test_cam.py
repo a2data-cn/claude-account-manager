@@ -838,6 +838,12 @@ class CamTest(unittest.TestCase):
         rows = [l for l in lines if l.startswith(("A |", "B |"))]
         self.assertEqual(len(rows), 2, lines)
         self.assertTrue(all('badge="Max' in l for l in rows), rows)
+        # 全局快捷键：标题行 +C 打开菜单；账号行 +1 / +2 按添加顺序（当前号 B 排在最前，但它是第二个加的）
+        self.assertTrue(title.endswith(" shortcut=CTRL+OPTION+CMD+C"), title)
+        self.assertTrue(rows[0].startswith("B |") and rows[0].endswith(" shortcut=CTRL+OPTION+CMD+2"), rows)
+        self.assertTrue(rows[1].endswith(" shortcut=CTRL+OPTION+CMD+1"), rows)
+        alts = [l for l in lines if "alternate=true" in l]
+        self.assertTrue(alts and not any("shortcut=" in l for l in alts), alts)
         bars = [l for l in lines if "size=11" in l and "| image=" in l]
         self.assertEqual(len(bars), 2, lines)
         self.assertTrue(any(l.startswith("5 小时 75%，") and "7 天 30%" in l for l in bars), bars)
@@ -852,6 +858,11 @@ class CamTest(unittest.TestCase):
         self.assertEqual("| image=" in lines[0], self.cam.IS_MAC)  # sfimage= 里也有 image=，要连竖线一起比
         if not self.cam.IS_MAC:
             self.assertIn("▰", "\n".join(lines))
+        # CAM_MENU_HOTKEY 设成空就一个快捷键都不注册
+        cam_menu.HOTKEY = ""
+        lines = []
+        cam_menu.render(store, {}, out=lines.append, rich=True)
+        self.assertNotIn("shortcut=", "\n".join(lines))
 
     # ---- 锁
 

@@ -38,6 +38,8 @@ CAM_PY = os.path.realpath(os.path.join(HERE, "..", "..", "scripts", "cam.py"))
 MENU_PY = os.path.realpath(__file__)
 PY = sys.executable
 REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
+# 全局快捷键的前缀（SwiftBar 注册，任何应用里按都生效）：+C 打开菜单，+1 / 2 / 3… 切到第几个号（按添加顺序）。设成空就不注册
+HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
 
 # 浅色 / 深色模式各一个颜色
@@ -357,20 +359,21 @@ def render(store, st, out=print, rich=None):
         if web_with_usage:
             title_acc = web_with_usage[0]
 
-    # ---- 菜单栏标题
+    # ---- 菜单栏标题（标题行上的快捷键是“打开菜单”）
     if not accs:
-        out("Claude ⚠ | sfimage=person.2.circle")
+        head = "Claude ⚠ | sfimage=person.2.circle"
     elif title_acc is not None and pct(title_acc, "five_hour") is not None:
         p = pct(title_acc, "five_hour")
         # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
         # rich 时图标是画出已用比例的额度环；不然用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
         icon = image_param(quota_ring, p, 16, 16) if rich else f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}"
-        out(f"{esc(short(title_acc.get('label') or title_acc.get('email')))} {p:.0f}% | {icon}"
-            + (f" color={color_for(p)}" if color_for(p) else ""))
+        head = (f"{esc(short(title_acc.get('label') or title_acc.get('email')))} {p:.0f}% | {icon}"
+                + (f" color={color_for(p)}" if color_for(p) else ""))
     elif active:
-        out(f"{esc(short(active.get('label') or active.get('email')))} | sfimage=person.2.circle")
+        head = f"{esc(short(active.get('label') or active.get('email')))} | sfimage=person.2.circle"
     else:
-        out("Claude | sfimage=person.2.circle")
+        head = "Claude | sfimage=person.2.circle"
+    out(head + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
     out("---")
 
     if not accs:
@@ -383,6 +386,7 @@ def render(store, st, out=print, rich=None):
     code = [a for a in accs if a["kind"] == "claude_code"]
     if code:
         out(heading("Claude Code 账号", "terminal"))
+        order = {a["id"]: n for n, a in enumerate(code, 1)}  # 快捷键的数字按添加顺序，不跟着下面的排序变
         code.sort(key=lambda a: (a["id"] != act_id, pct(a, "five_hour") if pct(a, "five_hour") is not None else 999))
         for a in code:
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
@@ -400,7 +404,9 @@ def render(store, st, out=print, rich=None):
                 params += f" {switch_action(a['id'])}" + (f" color={c}" if c else "")
             if rich and plan:
                 params += f" badge={q(plan)}"
-            out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
+            # 快捷键只挂在这一行（按住 Option 的那行是同一项，不重复注册）；当前号没有切换动作，按了不做事
+            hk = f" shortcut={HOTKEY}+{order[a['id']]}" if HOTKEY and order[a["id"]] <= 9 else ""
+            out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}{hk}")
             for i in h["issues"]:
                 out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={RED if i['level'] == 'error' else YELLOW if i['level'] == 'warn' else 'gray'}")
                 out(f"--   {esc(i['advice'])[:80]} | size=11 color=gray")
