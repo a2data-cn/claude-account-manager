@@ -860,10 +860,21 @@ class CamTest(unittest.TestCase):
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
             self.assertIn(" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww=340 webviewh=470 shortcut=", lines2[0])
             with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
-                 mock.patch.object(cam_menu.cam, "mini_available", return_value=False):
+                 mock.patch.object(cam_menu.cam, "mini_available", return_value=False), \
+                 mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=False):
                 lines2 = []
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
             self.assertNotIn("webview=", lines2[0])
+            # 旧代码的 cam serve：重启后再探到 /mini，就带上
+            told = []
+            cam_menu.notify = lambda title, body: told.append(title)
+            with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
+                 mock.patch.object(cam_menu.cam, "mini_available", side_effect=[False, True]), \
+                 mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=True):
+                lines2 = []
+                cam_menu.render(store, {}, out=lines2.append, rich=True)
+            self.assertIn("webview=true", lines2[0])
+            self.assertEqual(told, ["面板已更新"])
             with mock.patch.object(cam_menu.cam, "ensure_panel", side_effect=self.cam.CamError("起不来")):
                 lines2 = []
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
@@ -3562,6 +3573,19 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(opened, [f"http://127.0.0.1:{port}/?t={token}"])  # 用的就是这个在跑的面板，不另起
         self.assertEqual(body["url"], opened[0])
         self.assertEqual((self.cam.ensure_panel(store, port)), (port, token))
+        # 旧代码的 cam serve（没有 /mini）：按心跳里的 pid 认出是 cam serve 才结束它；pid 对不上、不是 cam serve、桌面版的服务都不动
+        write(os.path.join(store.root, self.cam.SERVE_STATE), json.dumps({"pid": 4242}))
+        killed = []
+        with mock.patch.object(self.cam, "process_table", return_value=[(4242, "python3 cam.py serve --port 8787")]), \
+             mock.patch.object(self.cam.os, "kill", lambda pid, sig: killed.append((pid, sig))), \
+             mock.patch.object(self.cam, "port_free", return_value=True):
+            self.assertTrue(self.cam.restart_stale_serve(store, port, token))
+        self.assertEqual(killed, [(4242, signal.SIGTERM)])
+        with mock.patch.object(self.cam, "process_table", return_value=[(4242, "python3 other.py")]), \
+             mock.patch.object(self.cam.os, "kill", lambda pid, sig: killed.append((pid, sig))):
+            self.assertFalse(self.cam.restart_stale_serve(store, port, token))
+        self.assertFalse(self.cam.restart_stale_serve(store, 1, token))  # 没人听的端口
+        self.assertEqual(len(killed), 1)
 
     def test_http_api_and_menu(self):
         store = self.cam.Store()

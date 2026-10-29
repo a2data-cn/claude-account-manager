@@ -3526,6 +3526,33 @@ def mini_available(port, token):
         return False
 
 
+def restart_stale_serve(store, port, token):
+    """port 上在跑的是旧代码的 cam serve（没有 /mini 页）：代码更新后它没重启。
+
+    只动 cam serve（桌面版的服务不碰）：按它记的心跳找到 pid、确认命令行是 cam serve，结束它并等端口空出来。
+    返回有没有结束掉，调用方再用 ensure_panel 起新的。
+    """
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
+            if json.loads(r.read().decode()).get("backend") != "python":
+                return False
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return False
+    pid = _read_json_quiet(os.path.join(store.root, SERVE_STATE)).get("pid")
+    if not pid or not any(p == pid and _is_cam_serve(cmd) for p, cmd in process_table()):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    for _ in range(40):
+        if port_free(port):
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def open_panel(store, port=8787):
     """在浏览器打开 Web 面板（菜单栏的“打开管理面板”）。返回打开的地址。"""
     p, token = ensure_panel(store, port)

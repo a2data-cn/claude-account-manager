@@ -365,7 +365,13 @@ def mini_href(store):
     try:
         port, token = cam.ensure_panel(store)
         if not cam.mini_available(port, token):
-            return ""
+            # 在跑的是旧代码的 cam serve（git pull / cam update 之后没重启）：结束它再起一个新的；桌面版的服务就算了
+            if not cam.restart_stale_serve(store, port, token):
+                return ""
+            port, token = cam.ensure_panel(store)
+            if not cam.mini_available(port, token):
+                return ""
+            notify("面板已更新", "后台的 cam serve 用的是旧代码，已重启（自己用 cam serve --lan 开的要重开一次）")
     except Exception:  # noqa: BLE001  起不来就只用系统菜单
         return ""
     return f" href=http://127.0.0.1:{port}/mini?t={token} webview=true webvieww={MINI_SIZE[0]} webviewh={MINI_SIZE[1]}"
