@@ -1171,7 +1171,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (!state || !localRep || (!rows.length && localRange !== "1")) { $("#local-block").hidden = true; return; }
     $("#local-range").innerHTML = RANGES.map(([v, t]) => `<button type="button" data-range="${v}" aria-pressed="${v === localRange}">${t}</button>`).join("");
     const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
-    const label = (id) => names[id] || "未归属（装 cam 之前）";  // 最早一次切换 / 导入之前的记录算不出是哪个号的
+    const label = (id) => names[id] || "未归属";  // 最早一次切换 / 导入之前的记录算不出是哪个号的，提示文字里有解释
     const order = state.accounts.map((a) => a.id);
     const rank = (id) => (order.indexOf(id) + 1 || 99);
     const ids = [...new Set(rows.map((r) => r.account_id))].sort((a, b) => rank(a) - rank(b));
