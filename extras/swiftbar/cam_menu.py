@@ -119,7 +119,7 @@ def bar(p, n=10):
 # ---- 画给 SwiftBar 的小图：菜单栏的额度环、账号行下面的进度条
 # 只用标准库写 PNG：按 Retina 画两倍像素，PNG 里标成 144 dpi，再用 width / height 定成点数。
 # 颜色是苹果的系统色，浅色 / 深色模式各一组（SwiftBar 的 image 参数可以写“浅色图,深色图”两张）。
-SCALE = 2
+SCALE = 3  # 按 3 倍像素画：Retina 上整数倍清晰，缩放过的分辨率（“更多空间”）和 1 倍屏缩下来也不糊
 FILL = {"ok": ((52, 199, 89), (48, 209, 88)), "warn": ((255, 159, 10), (255, 179, 64)), "bad": ((255, 59, 48), (255, 105, 97))}
 TRACK = ((0, 0, 0, 0.13), (255, 255, 255, 0.24))
 
@@ -133,7 +133,7 @@ def _png(w, h, rows):
     def chunk(tag, data):
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
-    dpm = round(72 * SCALE / 0.0254)  # 像素 / 米：标成两倍 dpi，macOS 就按一半的点数显示
+    dpm = round(72 * SCALE / 0.0254)  # 像素 / 米：标成 SCALE 倍 dpi，macOS 就按 1/SCALE 的点数显示（width / height 参数再定一次）
     raw = b"".join(b"\x00" + bytes(r) for r in rows)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
             + chunk(b"pHYs", struct.pack(">IIB", dpm, dpm, 1)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
@@ -166,8 +166,9 @@ def _pill(x0, x1, cy, r):
     return inside
 
 
+@functools.lru_cache(maxsize=512)
 def quota_bar(p, dark, w=56, h=6):
-    """账号行下面的进度条：淡灰的底，已用的部分按额度上色。"""
+    """账号行下面的进度条：淡灰的底，已用的部分按额度上色。按参数缓存：流式模式每半秒渲染一次，不能每次重画。"""
     W, H = w * SCALE, h * SCALE
     r = H / 2
     x1 = max(H, W * min(max(p, 0), 100) / 100)  # 再少也画一个圆点

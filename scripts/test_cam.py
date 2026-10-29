@@ -940,7 +940,7 @@ class CamTest(unittest.TestCase):
         for pic in pics:
             png = base64.b64decode(pic)
             self.assertTrue(png.startswith(b"\x89PNG"))
-            self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))  # 16 点，两倍像素
+            self.assertEqual(struct.unpack(">II", png[16:24]), (16 * cam_menu.SCALE, 16 * cam_menu.SCALE))  # 16 点 × 像素倍数
             self.assertIn(b"pHYs", png)
         # 红绿灯：没会话在跑、没问题时标题只有一行（右下角绿点），菜单第一行写“空闲 · 一切正常”
         self.assertEqual(lines[1], "---")
