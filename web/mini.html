@@ -362,6 +362,11 @@ button { font: inherit; color: inherit; }
         say(r.message || "已打开");
       });
     }
+    const ic = ev.target.closest("[data-icon]");  // 设置页里的图标样式分段按钮（没有 data-act，要在下面那句 return 之前处理）
+    if (ic) {
+      if (settings && !busy && ic.dataset.icon !== settings.icon) run(async () => { settings = await api("PUT", "/api/menubar", { icon: ic.dataset.icon }); say("已切换"); });
+      return;
+    }
     const btn = ev.target.closest("[data-act]");
     if (!btn) return;
     const act = btn.dataset.act;
@@ -374,8 +379,6 @@ button { font: inherit; color: inherit; }
     if (act === "pend-cancel") run(async () => { state = await api("DELETE", "/api/pending-switch"); say("已取消", "wait"); });
     if (act === "settings") { showSettings = !showSettings; render(); if (showSettings) loadSettings(); }
     if (act === "set-close") { ev.preventDefault(); showSettings = false; render(); }
-    const ic = ev.target.closest("[data-icon]");
-    if (ic && settings && ic.dataset.icon !== settings.icon) run(async () => { settings = await api("PUT", "/api/menubar", { icon: ic.dataset.icon }); say("已切换"); });
     if (act === "rename") { renaming = btn.dataset.id; render(); const i = $(".rn input"); if (i) { i.focus(); i.select(); } }
     if (act === "rn-cancel") { renaming = null; render(); }
   });
