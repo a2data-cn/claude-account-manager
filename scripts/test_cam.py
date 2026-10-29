@@ -850,6 +850,21 @@ class CamTest(unittest.TestCase):
             self.assertTrue(png.startswith(b"\x89PNG"))
             self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))  # 16 点 × 2
             self.assertIn(b"pHYs", png)
+        # 红绿灯：没会话在跑、没问题时标题只有一行（右下角绿点），菜单第一行写“空闲 · 一切正常”
+        self.assertEqual(lines[1], "---")
+        self.assertTrue(lines[2].startswith("● 空闲 · 一切正常 | size=12 color=" + cam_menu.GREEN), lines[2])
+        # 有 claude 会话在跑：橙点，标题两行实心 / 空心交替（SwiftBar 每 5 秒换一张），第二行不进下拉菜单、不带快捷键
+        with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude"), (2, "claude")]):
+            busy = []
+            cam_menu.render(store, {}, out=busy.append, rich=True)
+        self.assertEqual(busy[2], "---", busy[:3])
+        self.assertTrue(busy[0].startswith("B 75% | image=") and busy[1].startswith("B 75% | image="), busy[:2])
+        self.assertNotEqual(busy[0].split("image=")[1].split()[0], busy[1].split("image=")[1].split()[0])  # 两张图不一样
+        self.assertTrue(all(" dropdown=false" in l for l in busy[:2]), busy[:2])
+        self.assertIn(" shortcut=", busy[0])
+        self.assertNotIn(" shortcut=", busy[1])
+        self.assertNotIn("dropdown=false", lines[0])
+        self.assertTrue(busy[3].startswith("● 工作中 · 2 个 claude 会话在跑 | size=12 color=" + cam_menu.YELLOW), busy[3])
         rows = [l for l in lines if l.startswith(("A |", "B |"))]
         self.assertEqual(len(rows), 2, lines)
         self.assertTrue(all('badge="Max' in l for l in rows), rows)

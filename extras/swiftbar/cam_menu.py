@@ -188,6 +188,37 @@ def quota_ring(p, dark, size=16, thick=2.5):
     return _png(S, S, _raster(S, S, [(ring, TRACK[dark]), (arc, (*FILL[level_of(p)][dark], 1.0))]))
 
 
+def status_ring(p, dark, level="ok", frame=0, size=16, thick=2.5):
+    """额度环右下角加一个状态点（红绿灯）：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。
+
+    点的周围挖掉一圈环，看得清。frame=1 画成空心，和 frame=0 交替放在标题里：SwiftBar 每 5 秒轮换一次标题行，
+    就成了慢慢的闪（菜单栏图标做不了更快的动画，它不是网页）。
+    """
+    S = size * SCALE
+    c, ro, ri = S / 2, S / 2, S / 2 - thick * SCALE
+    sweep = 2 * math.pi * min(max(p or 0, 0), 100) / 100
+    cx = cy = S - 3.5 * SCALE
+    rd, rc, rh = 3 * SCALE, 4.1 * SCALE, 1.7 * SCALE  # 点的半径、挖掉的半径、空心时内圈的半径
+
+    def ring(px, py):
+        d = (px - c) ** 2 + (py - c) ** 2
+        return ri * ri <= d <= ro * ro
+
+    def arc(px, py):
+        return ring(px, py) and math.atan2(px - c, c - py) % (2 * math.pi) <= sweep
+
+    def cut(px, py):
+        return (px - cx) ** 2 + (py - cy) ** 2 <= rc * rc
+
+    def dot(px, py):
+        d = (px - cx) ** 2 + (py - cy) ** 2
+        return d <= rd * rd and (frame == 0 or d >= rh * rh)
+
+    tone = FILL[{"busy": "warn"}.get(level, level)][dark]
+    return _png(S, S, _raster(S, S, [(ring, TRACK[dark]), (arc, (*FILL[level_of(p or 0)][dark], 1.0)),
+                                     (cut, (0, 0, 0, 0.0)), (dot, (*tone, 1.0))]))
+
+
 def image_param(draw, p, w, h):
     """SwiftBar 的 image 参数：浅色、深色两张图，以及显示成多少点。"""
     pics = ",".join(base64.b64encode(draw(p, dark)).decode() for dark in (0, 1))
@@ -404,6 +435,49 @@ def health_of(store, a):
     return cam.account_health(a, has, cam.days_left(a))
 
 
+def status_light(store, data, accs, active, st):
+    """红绿灯：(级别, 一句话, 闪不闪, 还有几项)。规则和卡片小面板一致：
+    bad = 要处理（后台出错、登录对不上、当前号登录失效、额度用完）；busy = 等你确认的切换、有 claude 会话在跑、额度快满、
+    当前号要注意、别的号有问题；都没有就是 ok。"""
+    items = []  # (级别, 文字, 闪)，按严重程度排
+    notice = (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message")
+    if notice:
+        items.append(("bad", notice, False))
+    err = bg_error(store, st)
+    if err:
+        items.append(("bad", f"后台出错：{err}", False))
+    h = health_of(store, active) if active else None
+    first = (h["issues"][0]["text"] if h["issues"] else h["label"]) if h else ""
+    p5 = pct(active, "five_hour") if active else None
+    p7 = pct(active, "seven_day") if active else None
+    if h and h["level"] == "error":
+        items.append(("bad", f"当前号：{first}", False))
+    if p5 is not None and p5 >= 100:
+        items.append(("bad", "5 小时额度用完了", False))
+    pend = cam.pending_switch_view(data)
+    if pend:
+        items.append(("busy", pend["message"], True))
+    n = cam.session_count(max_age=0)  # 插件每分钟是个新进程，不用缓存
+    if n:
+        items.append(("busy", f"工作中 · {n} 个 claude 会话在跑", True))
+    if p5 is not None and p5 >= 90:
+        items.append(("busy", f"5 小时额度 {p5:.0f}%，快满了", False))
+    elif p7 is not None and p7 >= 90:
+        items.append(("busy", f"7 天额度 {p7:.0f}%，快满了", False))
+    if h and h["level"] == "warn":
+        items.append(("busy", f"当前号：{first}", False))
+    for a in accs:
+        if active is not None and a["id"] == active["id"]:
+            continue
+        ha = health_of(store, a)
+        if ha["level"] == "error":
+            items.append(("busy", f"{a.get('label') or a.get('email') or '未命名'}：{ha['issues'][0]['text'] if ha['issues'] else ha['label']}", False))
+    if not items:
+        return "ok", "空闲 · 一切正常" if n == 0 else "一切正常", False, 0
+    level, text, blink = items[0]
+    return level, text, blink, len(items) - 1
+
+
 def render(store, st, out=print, rich=None):
     """rich：菜单栏画额度环、账号下面画进度条图（SwiftBar 认 image 参数；Windows 托盘不认，用文字进度条）。默认 macOS 上开。"""
     rich = cam.IS_MAC if rich is None else rich
@@ -423,22 +497,39 @@ def render(store, st, out=print, rich=None):
             title_acc = web_with_usage[0]
 
     # ---- 菜单栏标题（标题行上的快捷键是“打开菜单”）
+    # rich 时图标是额度环，右下角一个红绿灯状态点；闪的时候（工作中、等你确认）两张图交替放在标题里，SwiftBar 每 5 秒换一张
+    light = status_light(store, data, accs, active, st) if accs else None
+    frames = [0, 1] if light and light[2] else [0]
+
+    def ring_icon(p, frame):
+        return image_param(lambda v, dark: status_ring(v, dark, light[0], frame), p, 16, 16)
+
+    heads = []
     if not accs:
-        head = "Claude ⚠ | sfimage=person.2.circle"
+        heads.append("Claude ⚠ | sfimage=person.2.circle")
     elif title_acc is not None and pct(title_acc, "five_hour") is not None:
         p = pct(title_acc, "five_hour")
         # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
-        # rich 时图标是画出已用比例的额度环；不然用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
-        icon = image_param(quota_ring, p, 16, 16) if rich else f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}"
+        # 不 rich 时用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
         name = title_name(title_acc, pos[title_acc["id"]]) if rich else short(title_acc.get("label") or title_acc.get("email"))
-        head = f"{esc(name)} {p:.0f}% | {icon}" + (f" color={color_for(p)}" if color_for(p) else "")
+        text, tail = f"{esc(name)} {p:.0f}% | ", (f" color={color_for(p)}" if color_for(p) else "")
+        if rich:
+            heads += [text + ring_icon(p, f) + tail for f in frames]
+        else:
+            heads.append(text + f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + tail)
     elif active:
         name = title_name(active, pos[active["id"]]) if rich else short(active.get("label") or active.get("email"))
-        head = f"{esc(name)} | sfimage=person.2.circle"
+        heads += [f"{esc(name)} | " + ring_icon(0, f) for f in frames] if rich else [f"{esc(name)} | sfimage=person.2.circle"]
     else:
-        head = "Claude | sfimage=person.2.circle"
-    out(head + (mini_href(store, accs) if rich else "") + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
+        heads.append("Claude | sfimage=person.2.circle")
+    extra = (mini_href(store, accs) if rich else "") + (" dropdown=false" if len(heads) > 1 else "")  # 多行标题不进下拉菜单
+    for i, head in enumerate(heads):
+        out(head + extra + (f" shortcut={HOTKEY}+C" if HOTKEY and i == 0 else ""))
     out("---")
+    if light:  # 下拉菜单第一行：红绿灯说的是什么
+        c = {"ok": GREEN, "busy": YELLOW, "bad": RED}[light[0]]
+        more = f"（还有 {light[3]} 项，见下面）" if light[3] else ""
+        out(f"● {esc(light[1])}{more} | size=12 color={c} length={LINE}")
 
     if not accs:
         out("还没有账号 | color=gray")
