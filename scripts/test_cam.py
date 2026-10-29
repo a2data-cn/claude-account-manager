@@ -1015,6 +1015,12 @@ class CamTest(unittest.TestCase):
             self.assertEqual(cam_menu.mini_size([code] * 3)[1], two)
             self.assertGreater(cam_menu.mini_size([code] * 4)[1], two)
             self.assertEqual(cam_menu.mini_size([code] * 40)[1], cam_menu.MINI_MAX)
+            web, desk = {"kind": "claude_web"}, {"kind": "claude_desktop"}
+            self.assertEqual(cam_menu.mini_size([code, web])[1], two)  # 网页 / 桌面号单独一组，也是两张一行
+            self.assertGreater(cam_menu.mini_size([code, code, web])[1], two)  # 两组各占一行
+            self.assertEqual(cam_menu.mini_size([web])[1], one + cam_menu.MINI_BTN)  # 没有 Code 号：大卡是网页号，多一个“打开”按钮
+            self.assertEqual(cam_menu.mini_size([web, desk])[1], one + cam_menu.MINI_BTN + cam_menu.MINI_SEC + cam_menu.MINI_ROW)
+            self.assertEqual(cam_menu.mini_size([code, web, desk])[1], one + cam_menu.MINI_SEC + 2 * cam_menu.MINI_ROW)  # 网页 / 桌面号一行一个
             with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
                  mock.patch.object(cam_menu.cam, "mini_available", return_value=False), \
                  mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=False):
@@ -3737,6 +3743,9 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(r.status, 200)
         self.assertIn("Claude 账号", html)
         self.assertIn("/api/open-panel", html)
+        self.assertIn("网页版 / 桌面版 · 点一下打开窗口", html)  # 网页号、桌面号单独一组，点一下开它的窗口（桌面号先问一句）
+        self.assertIn('"open-now"', html)
+        self.assertIn("打开窗口重新登录", html)  # 网页号 sessionKey 失效时红绿灯上的按钮
         # /api/state 带正在跑的会话数（红绿灯用），数进程表的结果缓存 20 秒
         self.cam._SESSION_CACHE[0] = 0.0
         with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude"), (2, "claude")]):

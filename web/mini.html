@@ -107,6 +107,13 @@ button { font: inherit; color: inherit; }
 .acc .chip { font-size: 9.5px; padding: 0 6px; }
 .acc > span:last-child { display: grid; min-width: 0; }
 .acc .sub { font-size: 11px; }
+/* 网页版 / 桌面版的号：右边一个“打开窗口”的小箭头，没有额度时圆圈里是地球 / 显示器 */
+.acc.open { grid-template-columns: 40px minmax(0, 1fr) auto; }
+.acc .go { width: 15px; height: 15px; color: var(--muted); }
+.acc .go svg, .acc .circle svg.ic { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.acc .circle svg.ic { width: 18px; height: 18px; color: var(--muted); }
+.open-btn { display: block; width: 100%; margin-top: 10px; padding: 7px 12px; border-radius: 999px; border: 0; background: var(--accent); color: var(--accent-ink); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.open-btn:disabled { opacity: .6; cursor: progress; }
 /* 底下一排圆按钮，像控制中心的那种 */
 .acts { display: flex; justify-content: center; gap: 18px; margin: 4px 0 2px; }
 .act { display: grid; justify-items: center; gap: 4px; background: none; border: 0; cursor: pointer; color: var(--ink); padding: 0; }
@@ -160,6 +167,9 @@ button { font: inherit; color: inherit; }
   const ICON = {
     refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>',
     panel: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 9h18"/><circle cx="6.5" cy="7" r=".6"/></svg>',
+    open: '<svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M20 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h5"/></svg>',
+    globe: '<svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/></svg>',
+    desktop: '<svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>',
     gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   };
   let settings = null, showSettings = false;  // 设置页：菜单栏小工具的动画模式、图标样式（GET / PUT /api/menubar）
@@ -269,10 +279,13 @@ button { font: inherit; color: inherit; }
     const p5 = pct(u.five_hour), p7 = pct(u.seven_day);
     const n = state.sessions ? state.sessions.count : null, pend = state.pending_switch;
     if (state.warning) items.push({ lv: "bad", text: state.warning });
-    if (h.level === "error") items.push({ lv: "bad", text: `当前号${issue.text ? "：" + issue.text : "有问题"}`, tip: issue.advice });
+    if (h.level === "error") items.push({ lv: "bad", text: `当前号${issue.text ? "：" + issue.text : "有问题"}`, tip: issue.advice,
+      ...(cur.kind === "claude_web" && issue.kind === "session_invalid" ? { ask: true, btns: [["open", "打开窗口重新登录", "go", cur.id]] } : {}) });  // 登录在它自己的窗口里做
     if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: `5 小时额度用完了，${resetShort(u.five_hour.resets_at)}` });
-    if (ask) items.push({ lv: "busy", ask: true, text: `有 ${ask.running} 个 Claude Code 会话在跑，切到 ${ask.label}？`,
+    if (ask && ask.id) items.push({ lv: "busy", ask: true, text: `有 ${ask.running} 个 Claude Code 会话在跑，切到 ${ask.label}？`,
       btns: [["ask-wait", "等它们退出再切"], ["ask-now", "现在就切", "go"], ["ask-no", "取消"]] });
+    if (ask && ask.open) items.push({ lv: "busy", ask: true, text: `打开 ${ask.label} 会退出并重启电脑上的 Claude 桌面版，里面在跑的先处理好。继续？`,
+      btns: [["open-now", "打开", "go"], ["ask-no", "取消"]] });
     if (pend) items.push({ lv: "busy", ask: true, text: pend.message, btns: [["pend-now", "现在就切", "go"], ["pend-cancel", "取消"]] });
     if (n > 0) items.push({ lv: "busy", text: `工作中 · ${n} 个 Claude Code 会话在跑` });
     if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${p5.toFixed(0)}%，快满了` });
@@ -283,7 +296,7 @@ button { font: inherit; color: inherit; }
     }
     if (!items.length) items.push({ lv: "ok", text: n === 0 ? "空闲 · 一切正常" : "一切正常" });
     const top = items[0], tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
-    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}" ${busy ? "disabled" : ""}>${label}</button>`).join("")}</span>` : ""}</div>`;
+    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls, id]) => `<button type="button" class="${cls || ""}" data-act="${act}"${id ? ` data-id="${esc(id)}" data-kind="claude_web"` : ""} ${busy ? "disabled" : ""}>${label}</button>`).join("")}</span>` : ""}</div>`;
   }
   function render() {
     const main = $("#main");
@@ -295,32 +308,36 @@ button { font: inherit; color: inherit; }
       return;
     }
     const pos = Object.fromEntries(accs.map((a, i) => [a.id, i + 1]));
-    const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs[0];
-    const others = accs.filter((a) => a.id !== cur.id && a.kind !== "api");
+    // 大卡是当前的 Claude Code 号；一个 Code 号都没有时是第一个网页 / 桌面号（多一个“打开”按钮）。和插件 mini_size 算高度的规则一致
+    const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs.find((a) => a.kind !== "api") || accs[0];
+    const codeOthers = accs.filter((a) => a.id !== cur.id && a.kind === "claude_code");
+    const opens = accs.filter((a) => a.id !== cur.id && (a.kind === "claude_web" || a.kind === "claude_desktop"));  // 点一下打开窗口，不是切换
     const u = cur.usage || {}, h = cur.health || {};
     const p5 = pct(u.five_hour), curName = nameOf(cur, pos);
     const sub = cur.email && cur.email !== curName ? cur.email : (p5 === null ? "还没有用量" : "");
     const nameBlock = renaming === cur.id ? renameForm(cur)
-      : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">正在用</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
+      : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">${cur.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
         <div class="sub">${esc(sub)}</div>`;
     const curTile = `<div class="tile glass"><div class="who"><div class="circle on">${ring(p5, 44, 5)}</div>
       <div>${nameBlock}</div></div>
       ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
-      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}</div>`;
-    const pills = others.map((a) => {
-      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos);
-      const line = q5 === null ? (a.kind === "claude_web" ? "网页版 · 打开" : a.kind === "claude_desktop" ? "桌面版 · 打开" : "点一下切换")
-        : `5 小时 ${q5.toFixed(0)}%`;  // 药丸卡太窄，7 天的切过去后在大卡里看
-      return `<button type="button" class="acc glass" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" ${busy ? "disabled" : ""} title="${esc(a.email || "")}${a.kind === "claude_code" ? "\n切换到这个账号" : "\n打开"}">
-        <span class="circle">${ring(q5, 32, 4)}</span>
-        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(line)}</span></span></button>`;
-    }).join("");
+      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}${cur.kind === "claude_code" ? "" : `<button type="button" class="open-btn" data-act="open" data-id="${esc(cur.id)}" data-kind="${esc(cur.kind)}" data-name="${esc(curName)}" ${busy ? "disabled" : ""}>${cur.kind === "claude_desktop" ? "用这个号打开 Claude 桌面版" : "打开它的窗口"}</button>`}</div>`;
+    const pill = (a) => {
+      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos), open = a.kind !== "claude_code";
+      const q = q5 === null ? null : `5 小时 ${q5.toFixed(0)}%`;  // 药丸卡太窄，7 天的切过去后在大卡里看
+      const line = open ? `${a.kind === "claude_web" ? "网页版" : "桌面版"} · ${q || "点一下打开"}` : q || "点一下切换";
+      const tip = (a.email ? a.email + "\n" : "") + (open ? (a.kind === "claude_web" ? "打开它专属的浏览器窗口" : "退出并用这个号重新打开 Claude 桌面版（会先问一句）") : "切换到这个账号");
+      return `<button type="button" class="acc glass${open ? " open" : ""}" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" ${busy ? "disabled" : ""} title="${esc(tip)}">
+        <span class="circle">${q5 === null && open ? ICON[a.kind === "claude_web" ? "globe" : "desktop"] : ring(q5, 32, 4)}</span>
+        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(line)}</span></span>${open ? `<span class="go">${ICON.open}</span>` : ""}</button>`;
+    };
+    const group = (list, label, wide) => list.length ? `<div class="sec">${label}</div><div class="pills${wide || list.length === 1 ? " one" : ""}">${list.map(pill).join("")}</div>` : "";
     const sc = state.risk_score, reg = state.region || {};
     const left = (reg.loc ? `出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : "")
       + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
     const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
     main.innerHTML = lightHtml(cur, pos) + curTile
-      + (pills ? `<div class="sec">其它账号 · 点一下切换</div><div class="pills${others.length === 1 ? " one" : ""}">${pills}</div>` : "")
+      + group(codeOthers, "其它 Claude Code 账号 · 点一下切换") + group(opens, "网页版 / 桌面版 · 点一下打开窗口", true)  // 一行一个：名字、套餐、额度和箭头才放得下
       + `<div class="acts"><button class="act" data-act="refresh" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
           <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button>
           <button class="act" data-act="settings" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.gear}</span><span>设置</span></button></div>`
@@ -352,15 +369,21 @@ button { font: inherit; color: inherit; }
     state = await api("GET", "/api/state");
     say(r.message, r.deferred || !r.changed ? "wait" : "");
   }
+  // 网页号：打开它专属的浏览器窗口（第一次或登录过期了就在那个窗口里登录）；桌面号：要退出并重启 Claude 桌面版，先在红绿灯那里问一句
+  function openAcc(id, kind, name, now) {
+    if (busy) return;
+    if (kind === "claude_desktop" && !now) { ask = { open: id, label: name }; render(); return; }
+    return run(async () => {
+      const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/open`);
+      ask = null;
+      say(kind === "claude_desktop" ? (r.message || "已打开") : "已打开");
+    });
+  }
   document.addEventListener("click", (ev) => {
     const acc = ev.target.closest(".acc");
     if (acc) {
-      const id = acc.dataset.id, kind = acc.dataset.kind;
-      return run(async () => {
-        if (kind === "claude_code") return switchTo(id);
-        const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/open`);
-        say(r.message || "已打开");
-      });
+      const { id, kind, name } = acc.dataset;
+      return kind === "claude_code" ? run(() => switchTo(id)) : openAcc(id, kind, name);
     }
     const ic = ev.target.closest("[data-icon]");  // 设置页里的图标样式分段按钮（没有 data-act，要在下面那句 return 之前处理）
     if (ic) {
@@ -372,9 +395,11 @@ button { font: inherit; color: inherit; }
     const act = btn.dataset.act;
     if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadLocal(); });
     if (act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已打开"); });
-    if (act === "ask-wait" && ask) run(() => switchTo(ask.id, "wait"));
-    if (act === "ask-now" && ask) run(() => switchTo(ask.id, "now"));
+    if (act === "ask-wait" && ask && ask.id) run(() => switchTo(ask.id, "wait"));
+    if (act === "ask-now" && ask && ask.id) run(() => switchTo(ask.id, "now"));
     if (act === "ask-no") { ask = null; render(); }
+    if (act === "open") openAcc(btn.dataset.id, btn.dataset.kind, btn.dataset.name);
+    if (act === "open-now" && ask && ask.open) openAcc(ask.open, "claude_desktop", ask.label, true);
     if (act === "pend-now" && state.pending_switch) run(() => switchTo(state.pending_switch.account, "now"));
     if (act === "pend-cancel") run(async () => { state = await api("DELETE", "/api/pending-switch"); say("已取消", "wait"); });
     if (act === "settings") { showSettings = !showSettings; render(); if (showSettings) loadSettings(); }
