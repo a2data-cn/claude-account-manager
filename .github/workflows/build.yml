@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   script-tests:
+    timeout-minutes: 20
     name: 脚本版测试（${{ matrix.os }}）
     strategy:
       fail-fast: false
@@ -52,6 +53,7 @@ jobs:
         run: python .github/ci-annotate.py "${{ runner.temp }}/test.log" unittest 20
 
   engine-tests:
+    timeout-minutes: 20
     name: Rust 引擎测试
     runs-on: ubuntu-latest
     defaults:
@@ -82,6 +84,7 @@ jobs:
         run: cargo clippy -p cam-engine --all-targets -- -D warnings -A clippy::too_many_lines
 
   frontend-check:
+    timeout-minutes: 20
     name: 桌面版前端检查
     runs-on: ubuntu-latest
     defaults:
@@ -100,6 +103,7 @@ jobs:
         run: npm run build
 
   desktop:
+    timeout-minutes: 60
     name: 桌面版安装包（${{ matrix.platform }}）
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [script-tests, engine-tests, frontend-check]

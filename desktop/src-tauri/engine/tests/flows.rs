@@ -1831,8 +1831,9 @@ fn refresh_rechecks_active_account_inside_lock() {
     store.save(&mut d).unwrap();
     e.login("at-A1", "rt-A1", "uuid-A", "a@x.com", past());
     drop(guard);
-    let (tok, _) = t.join().unwrap().unwrap();
-    assert_eq!(tok, "at-A1");
+    // 现在 A 是当前账号而且登录过期了：不替它续（交给 Claude Code），也不拿过期的 token 白跑一趟
+    let err = t.join().unwrap().unwrap_err();
+    assert!(err.contains("等 Claude Code 自己续"), "{}", err);
     assert_eq!(token_calls("rt-A1"), 0);
 }
 

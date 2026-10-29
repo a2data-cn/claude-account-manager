@@ -63,10 +63,105 @@ fn health_text(kind: &str) -> (&'static str, &'static str, &'static str) {
         "session_invalid" => ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),
         "key_invalid" => ("error", "API Key 无效或没有填写", "在“编辑”里换一个有效的 Key。"),
         "stale" => ("info", "用量没更新：登录过期了，后台不替不常用的账号续登录", "点“刷新”会续一次；切换到这个账号时也会自动续。"),
+        "live_expired" => ("info", "用量没更新：当前登录的 access token 过期了，等 Claude Code 自己续", "在 claude 里发一句话它就会续上；cam 不碰当前正在用的登录。"),
         "network" => ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
         "expired" => ("warn", "订阅已过期", "续费后在“编辑”里改到期日；没续的话这个号可能已经降级为免费版。"),
         _ => ("warn", "用量获取失败", "稍后再刷新；持续出现请把错误信息发给作者。"),
     }
+}
+
+/// 要记现场的那几种问题（和 cam.py 的 INCIDENT_KINDS 一致）；每个号留最近 INCIDENT_KEEP 条
+const INCIDENT_KINDS: [&str; 4] = [
+    "wrong_owner",
+    "login_invalid",
+    "session_invalid",
+    "key_invalid",
+];
+const INCIDENT_KEEP: usize = 10;
+
+/// 这次刷新是不是“刚出问题”：新结果的报错是要记的那几种，而且上一次不是同一种（同一种问题持续着不重复记）
+pub fn incident_kind(acc: &Value, new_usage: &Value) -> Option<&'static str> {
+    let kind = health_kind_of_error(s(new_usage, "error")?)?;
+    if !INCIDENT_KINDS.contains(&kind) {
+        return None;
+    }
+    let prev = acc.get("usage").and_then(|u| s(u, "error"));
+    if prev.and_then(health_kind_of_error) == Some(kind) {
+        return None;
+    }
+    Some(kind)
+}
+
+/// 出问题那一刻的现场：出口（IP、地区、运营商、IP 类型）、本机环境（时区、语言、代理、VPN、DNS）、几个 claude 会话在跑、环境评分。
+/// 从整份数据算一次，给每个出问题的号共用；只记录不干预（和 cam.py 的 note_incident 一致）
+pub struct IncidentScene {
+    pub region: Value,
+    pub env: Value,
+    pub active: Option<String>,
+    pub score: Value,
+    pub sessions: usize,
+}
+
+pub fn incident_scene(data: &Value) -> IncidentScene {
+    let reg = data
+        .get("region")
+        .cloned()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| json!({}));
+    let env = reg
+        .get("env")
+        .cloned()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| json!({}));
+    let pick = |src: &Value, keys: &[&str]| -> Value {
+        let mut o = serde_json::Map::new();
+        for k in keys {
+            o.insert((*k).into(), src.get(*k).cloned().unwrap_or(Value::Null));
+        }
+        Value::Object(o)
+    };
+    let risks = super::health::risk_items(data, true);
+    let score = super::health::risk_score(&risks)
+        .get("score")
+        .cloned()
+        .unwrap_or(Value::Null);
+    IncidentScene {
+        region: pick(
+            &reg,
+            &[
+                "loc",
+                "ip",
+                "org",
+                "city",
+                "ip_type",
+                "warp",
+                "colo",
+                "skew",
+                "lookup_mode",
+                "checked_at",
+            ],
+        ),
+        env: pick(&env, &["tz", "locale", "dns", "proxy", "tunnel"]),
+        active: active_code_id(data),
+        score,
+        sessions: running_claude_processes().len(),
+    }
+}
+
+pub fn push_incident(acc: &mut Value, scene: &IncidentScene, kind: &str, err: &str) {
+    let id = s(acc, "id").unwrap_or_default().to_string();
+    let entry = json!({
+        "at": now_iso(), "kind": kind, "error": err, "region": scene.region, "env": scene.env,
+        "sessions": scene.sessions, "active": scene.active.as_deref() == Some(id.as_str()), "risk_score": scene.score,
+    });
+    let mut list: Vec<Value> = acc
+        .get("incidents")
+        .and_then(|i| i.as_array())
+        .cloned()
+        .unwrap_or_default();
+    list.insert(0, entry);
+    list.truncate(INCIDENT_KEEP);
+    acc["incidents"] = Value::Array(list);
 }
 
 /// 把用量报错归类成健康问题的种类；None 表示这不是问题（例如网页号本来就没填 sessionKey）。
@@ -75,6 +170,8 @@ fn health_kind_of_error(err: &str) -> Option<&'static str> {
         Some("wrong_owner")
     } else if err.contains("没有保存凭据") {
         Some("no_credentials")
+    } else if err.contains("等 Claude Code 自己续") {
+        Some("live_expired")
     } else if err.contains("登录已失效") || err.contains("没有 refresh token") {
         Some("login_invalid")
     } else if err.contains("未填写 sessionKey") {
@@ -178,14 +275,20 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             }
             // 桌面版的登录独立保存，不能把旧版本误写的 API Key 错误当成账号异常。
             let mut health_account = a.clone();
-            if s(a, "kind") == Some("claude_desktop")
-                && !matches!(
+            if s(a, "kind") == Some("claude_desktop") {
+                if !matches!(
                     a.get("usage").and_then(|u| s(u, "source")),
                     Some("desktop_cache" | "desktop_history")
-                )
-            {
-                p.insert("usage".into(), Value::Null);
-                health_account["usage"] = Value::Null;
+                ) {
+                    p.insert("usage".into(), Value::Null);
+                    health_account["usage"] = Value::Null;
+                } else {
+                    // 跨过重置时间后不能继续展示旧百分比（存档不动，只过滤显示）
+                    p.insert(
+                        "usage".into(),
+                        super::desktop_usage::desktop_usage_view(&a["usage"]),
+                    );
+                }
             }
             let id = s(a, "id").unwrap_or_default();
             let is_active = if s(a, "kind") == Some("claude_desktop") {
@@ -208,6 +311,52 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
             p.insert("days_left".into(), dl);
             let plan = s(a, "plan").or_else(|| a.get("manual").and_then(|m| s(m, "plan")));
             p.insert("plan_display".into(), json!(plan));
+            // 上次出问题的现场摘要和用过的出口：面板账号详情直接显示（和 cam.py 的 public_state 一致）
+            let truthy = |v: Option<&Value>| match v {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(b)) => *b,
+                Some(Value::String(x)) => !x.is_empty(),
+                Some(Value::Array(x)) => !x.is_empty(),
+                Some(Value::Object(x)) => !x.is_empty(),
+                Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+            };
+            let inc = a
+                .get("incidents")
+                .and_then(|i| i.as_array())
+                .and_then(|i| i.first())
+                .filter(|i| i.is_object());
+            let last_incident = match inc {
+                Some(inc) => {
+                    let ir = inc.get("region").cloned().unwrap_or_else(|| json!({}));
+                    let ie = inc.get("env").cloned().unwrap_or_else(|| json!({}));
+                    let kind = s(inc, "kind").unwrap_or("");
+                    json!({
+                        "at": inc.get("at").cloned().unwrap_or(Value::Null),
+                        "text": if INCIDENT_KINDS.contains(&kind) { health_text(kind).1 } else { kind },
+                        "loc": ir.get("loc").cloned().unwrap_or(Value::Null),
+                        "ip": ir.get("ip").cloned().unwrap_or(Value::Null),
+                        "org": ir.get("org").cloned().unwrap_or(Value::Null),
+                        "ip_type": s(&ir, "ip_type").map(super::health::ip_type_name),
+                        "proxy": truthy(ie.get("proxy")), "tunnel": truthy(ie.get("tunnel")),
+                        "sessions": inc.get("sessions").and_then(|v| v.as_u64()).unwrap_or(0),
+                    })
+                }
+                None => Value::Null,
+            };
+            p.insert("last_incident".into(), last_incident);
+            let exits: Vec<Value> = a
+                .get("regions")
+                .and_then(|r| r.as_array())
+                .map(|r| r.iter().take(3).collect::<Vec<_>>())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| {
+                    json!({"loc": r.get("loc").cloned().unwrap_or(Value::Null), "ip": r.get("ip").cloned().unwrap_or(Value::Null),
+                           "org": r.get("org").cloned().unwrap_or(Value::Null), "at": r.get("at").cloned().unwrap_or(Value::Null),
+                           "times": r.get("times").and_then(|t| t.as_i64()).filter(|t| *t > 0).unwrap_or(1)})
+                })
+                .collect();
+            p.insert("exits".into(), Value::Array(exits));
             match s(a, "kind") {
                 Some("api") => {
                     let sec = store.load_secret(id);

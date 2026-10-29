@@ -219,7 +219,7 @@ function Invoke-MenuItem($it) {
 # ---- 卡片小面板：和 macOS 菜单栏弹窗同一张页面（本机 cam serve 的 /mini），用 Edge / Chrome 的应用模式开成一个没有地址栏的小窗，
 # 贴在屏幕右下角（托盘上方）；再点一下托盘图标就关掉。没有 Edge 也没有 Chrome 就用默认浏览器打开。
 $script:mini = $null
-$CardTitle = "Claude 账号"  # 页面的 <title>，应用模式的窗口标题就是它，按它找窗口
+$CardTitle = "Claude 账号卡片"  # mini.html 的 <title>，应用模式的窗口标题就是它，按它找窗口（面板和桌面版叫“Claude 账号”，不能混）
 
 function Find-Browser {
   # 先 Edge 后 Chrome；哪个目录变量是空的（比如 32 位系统没有 ProgramFiles(x86)）就跳过，Join-Path 不接受空路径

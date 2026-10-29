@@ -320,7 +320,7 @@ def _authorized_entry(store, entry_id):
 
 def _official_host(host):
     host = (host or "").lower().rstrip(".")
-    return any(host == domain or host.endswith("." + domain) for domain in ("anthropic.com", "claude.ai"))
+    return any(host == domain or host.endswith("." + domain) for domain in ("anthropic.com", "claude.ai", "claude.com"))  # 和打开链接的白名单一致
 
 
 def _summary(message_id, sender, subject, received, body, since):

@@ -448,6 +448,8 @@ def read_live_credentials():
         kc = keychain_read()
         if kc:
             return kc, "keychain"
+        if keychain_exists():  # 钥匙串里有条目但这次没读出来（锁着、授权窗没点）：不能退回去读旧的文件版本，当这次没读到
+            return None, None
     data = read_json(claude_credentials_file(), None)
     if data:
         return data, "file"
@@ -456,7 +458,7 @@ def read_live_credentials():
 
 def write_live_credentials(creds, where_hint=None):
     target = where_hint
-    if target is None:
+    if target is None or use_keychain():  # macOS 上 Claude Code 只认钥匙串：就算这次是从文件读出来的，也不能只写文件
         target = "keychain" if use_keychain() else "file"
     if target == "keychain":
         keychain_write(creds)
@@ -682,8 +684,8 @@ def resolve_pending(store, data, live_fp=None):
     if owner:
         _file_pending(store, data, p, ob, owner)
         store.delete_secret(PENDING_ID)
-    elif st != 0:
-        store.delete_secret(PENDING_ID)  # 服务端明确不认这个 token 了，留着也没用
+    elif st == 401:
+        store.delete_secret(PENDING_ID)  # 服务端明确不认这个 token 了，留着也没用；限流、5xx 只是这次核对不了，留着下次再问
 
 
 def adopt_pending_for(store, data, target):
@@ -712,7 +714,8 @@ def adopt_pending_for(store, data, target):
         ob["expiresAt"] = int((time.time() + (tok.get("expires_in") or 28800)) * 1000)
         raw = dict(p.get("raw") or {})
         raw["claudeAiOauth"] = ob
-        p["raw"] = raw
+        p["raw"], p["claudeAiOauth"] = raw, ob
+        store.save_secret(PENDING_ID, p)  # 旧的 refresh token 已作废：新的先存回暂存，下面核对失败也不能丢这份登录
         owner = token_owner(ob["accessToken"])
     if not owner:
         return  # 还是核对不了：暂存留着，这次用 target 已保存的登录
@@ -744,7 +747,7 @@ def snapshot_live(store, data, label=None, create_if_unknown=True):
         # token 换过了，只能靠 oauthAccount 认人；先联网核对一下这份凭据到底是谁的
         if access_token_fresh(ob):
             st, owner = probe_token_owner(ob["accessToken"])
-            unreachable = st == 0
+            unreachable = owner is None and st != 401  # 离线、限流、5xx 都是“这次核对不了”：不能按 ~/.claude.json 里的名字把它存进别人名下；只有 401 是服务端明确不认
         else:
             unreachable = True  # 过期了，问也是 401
         if owner and (acc is None or not identity_agrees(acc, owner["uuid"], owner["email"])):
@@ -844,8 +847,10 @@ def _is_claude_cmd(argv0, cmdline):
     # Claude 桌面 App（macOS 上叫 Claude，Windows 上装在 AnthropicClaude 下）不算
     if "/claude.app/" in low_exe or "anthropicclaude" in low_exe or "/windowsapps/" in low_exe:
         return False
+    if re.search(r"(?:^|\s)--type(?:=|\s)", cmdline or ""):  # Electron 的子进程（渲染、GPU…）：桌面版的，不是 Claude Code
+        return False
     if name in ("claude", "claude.exe") or "/claude/versions/" in exe:  # 原生安装版
-        return True
+        return not _is_desktop_cmd(cmdline)  # Linux 上桌面版的可执行文件也叫 claude
     if name.lower() in ("node", "node.exe", "bun", "bun.exe"):  # npm 安装版
         low = cmdline.replace("\\", "/").lower()
         return "@anthropic-ai/claude-code" in low or "claude-code/cli" in low
@@ -1105,12 +1110,13 @@ def _usable_token(store, data, acc):
     if data["active"].get("claude_code") == acc["id"]:
         creds, _ = read_live_credentials()
         ob = oauth_block(creds)
-        if ob.get("accessToken") and identify_code_account(data, read_oauth_account(), creds) is acc:
-            return ob["accessToken"], ob
-        ob = dict(store.load_secret(acc["id"]).get("claudeAiOauth") or {})
-        if not ob.get("accessToken"):
-            raise CamError("没有保存凭据")
-        return ob["accessToken"], ob  # 当前账号从不在这里刷新，交给 Claude Code
+        if not (ob.get("accessToken") and identify_code_account(data, read_oauth_account(), creds) is acc):
+            ob = dict(store.load_secret(acc["id"]).get("claudeAiOauth") or {})
+            if not ob.get("accessToken"):
+                raise CamError("没有保存凭据")
+        if not access_token_fresh(ob):  # 当前账号从不在这里刷新，交给 Claude Code；过期了就等它下次运行自己续，不白跑一趟拿 401
+            raise CamError("当前登录的 access token 过期了，等 Claude Code 自己续")
+        return ob["accessToken"], ob
     ob = dict(store.load_secret(acc["id"]).get("claudeAiOauth") or {})
     if not ob.get("accessToken"):
         raise CamError("没有保存凭据")
@@ -1164,7 +1170,7 @@ def renew_saved_login(store, acc):
     ob["accessToken"] = tok["access_token"]
     if tok.get("refresh_token"):
         ob["refreshToken"] = tok["refresh_token"]
-    ob["expiresAt"] = int((time.time() + int(tok.get("expires_in", 28800))) * 1000)
+    ob["expiresAt"] = int((time.time() + int(tok.get("expires_in") or 28800)) * 1000)
     secret["claudeAiOauth"] = ob
     if isinstance(secret.get("raw"), dict):
         secret["raw"]["claudeAiOauth"] = ob
@@ -1832,8 +1838,10 @@ def parse_days(v):
             if not part:
                 continue
             if "-" in part:
-                a, b = part.split("-", 1)
-                days += list(range(int(a), int(b) + 1))
+                a, b = (int(x) for x in part.split("-", 1))
+                if not (1 <= a <= b <= 7):  # 先校验再展开，"1-4000000000" 不能先撑爆内存
+                    raise CamError("星期需在 1–7 之间，1 是周一")
+                days += list(range(a, b + 1))
             else:
                 days.append(int(part))
     days = sorted(set(days))
@@ -2242,20 +2250,24 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
 
 def run_claude(store, args):
     """按目录规则切号后启动 claude，参数原样透传。启动前按环境风险提醒并（分数低时）让用户确认。"""
+    exe = shutil.which("claude")
+    if not exe:
+        raise CamError("找不到 claude 命令，请确认 Claude Code 已安装")
+    if not risk_prompt_before_launch(store):  # 先问，不然按规则切完了用户又不启动，号已经换掉了
+        return 1
     data = store.load()
     r = match_dir_rule(data, os.getcwd())
     if r:
-        acc, _, changed = switch_code_account(store, r["account"])
+        try:
+            acc, _, changed = switch_code_account(store, r["account"])
+        except CamError as e:  # 规则指向的号登录失效、离线：提醒一句，用现在的登录照常启动
+            print(color(f"[cam] 按目录规则切换失败：{e}，先用当前登录启动", "y"), file=sys.stderr)
+            changed = False
         if changed:
             print(color(f"[cam] 按目录规则切换到 {acc['label']}", "d"), file=sys.stderr)
             warn = running_warning(running_claude_processes())
             if warn:
                 print(color(f"[cam] {warn}", "y"), file=sys.stderr)
-    exe = shutil.which("claude")
-    if not exe:
-        raise CamError("找不到 claude 命令，请确认 Claude Code 已安装")
-    if not risk_prompt_before_launch(store):
-        return 1
     if IS_WIN:
         return subprocess.call([exe] + args)
     os.execv(exe, [exe] + args)
@@ -2560,9 +2572,8 @@ def _desktop_processes():
         if IS_WIN:
             ps = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process "
                   "| ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath) $($_.CommandLine)\" }")
-            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                                 capture_output=True, text=True, timeout=15)
-            lines = out.stdout.splitlines()
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=15)
+            lines = decode_output(out.stdout).splitlines()  # 命令行里有系统编码外的字符时 text=True 会抛 UnicodeDecodeError
         else:
             out = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True, timeout=10)
             lines = out.stdout.splitlines()
@@ -2804,6 +2815,7 @@ HEALTH_TEXT = {  # kind → (level, 一句话, 怎么办)。规则和 Rust 版 a
     "session_invalid": ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),
     "key_invalid": ("error", "API Key 无效或没有填写", "在“编辑”里换一个有效的 Key。"),
     "stale": ("info", "用量没更新：登录过期了，后台不替不常用的账号续登录", "点“刷新”会续一次；切换到这个账号时也会自动续。"),
+    "live_expired": ("info", "用量没更新：当前登录的 access token 过期了，等 Claude Code 自己续", "在 claude 里发一句话它就会续上；cam 不碰当前正在用的登录。"),
     "network": ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
     "usage_error": ("warn", "用量获取失败", "稍后再刷新；持续出现请把错误信息发给作者。"),
     "expired": ("warn", "订阅已过期", "续费后在“编辑”里改到期日；没续的话这个号可能已经降级为免费版。"),
@@ -2816,6 +2828,8 @@ def _health_kind_of_error(kind, err):
         return "wrong_owner"
     if "没有保存凭据" in err:
         return "no_credentials"
+    if "等 Claude Code 自己续" in err:
+        return "live_expired"
     if "登录已失效" in err or "没有 refresh token" in err:
         return "login_invalid"
     if "未填写 sessionKey" in err:
@@ -3116,17 +3130,30 @@ def _remove_account_locked(store, key):
         d = store.new_backup_dir(f"removed-{acc['id']}")
         rules = [r for r in data.get("rules", []) if r.get("account") == acc["id"]]
         write_json_atomic(os.path.join(d, "account.json"), dict(acc, rules=rules), private=True)
-        sp = store.secret_path(acc["id"])
-        if os.path.exists(sp):
-            shutil.move(sp, os.path.join(d, "secret.json"))
+        moves = []
         prof = os.path.join(store.profiles_dir, acc["id"])
         if os.path.isdir(prof):  # 网页账号的浏览器 Profile（含登录 Cookie）也一起移走
-            shutil.move(prof, os.path.join(d, "browser-profile"))
+            moves.append((prof, os.path.join(d, "browser-profile")))
         # 绑定“当前已登录”的桌面版目录就是 Claude 自己的数据，只解除记录，不搬走
         if acc.get("kind") == "claude_desktop" and acc.get("desktop_profile") != "default":
             desk = os.path.join(store.root, "desktop-profiles", acc["id"])
             if os.path.isdir(desk):
-                shutil.move(desk, os.path.join(d, "desktop-profile"))
+                moves.append((desk, os.path.join(d, "desktop-profile")))
+        sp = store.secret_path(acc["id"])
+        if os.path.exists(sp):
+            moves.append((sp, os.path.join(d, "secret.json")))  # 密钥最后搬：前面哪步失败都还在原处
+        done = []
+        try:
+            for src, dst in moves:
+                shutil.move(src, dst)
+                done.append((dst, src))
+        except OSError as e:  # 浏览器窗口还开着（Windows 锁住目录）这类：全部搬回去，账号保持原样
+            for src, back in reversed(done):
+                try:
+                    shutil.move(src, back)
+                except OSError:
+                    pass
+            raise CamError(f"没能移走这个账号的文件（{e}）。它的浏览器窗口或 Claude 还开着的话先关掉再试")
         if data["active"].get("claude_desktop") == acc["id"]:
             data["active"]["claude_desktop"] = None
         data["accounts"] = [a for a in data["accounts"] if a["id"] != acc["id"]]
@@ -3161,7 +3188,11 @@ def server_token(store):
     except FileNotFoundError:
         pass
     t = pysecrets.token_urlsafe(24)
-    with open(p, "w") as f:
+    try:
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # 建文件时就只有自己能读，不留先建再改权限的窗口
+    except FileExistsError:  # 已有但是空的：照常覆盖
+        fd = os.open(p, os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         f.write(t)
     if not IS_WIN:
         os.chmod(p, 0o600)
@@ -3283,6 +3314,7 @@ def open_verification_url(store, entry_id, url):
 def make_handler(store, token):
     class H(http.server.BaseHTTPRequestHandler):
         server_version = f"cam/{VERSION}"
+        timeout = 30  # 一条连接最多等 30 秒：不让谁开着连接不说话把线程占住
 
         def log_message(self, fmt, *args):
             if os.environ.get("CAM_VERBOSE"):
@@ -3296,6 +3328,8 @@ def make_handler(store, token):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")  # 面板记着令牌：不能被别的网页用 iframe 套起来骗点
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
 
@@ -3305,8 +3339,11 @@ def make_handler(store, token):
             return pysecrets.compare_digest(got.encode(), token.encode())
 
         def _body(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > 1_000_000:
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise CamError("Content-Length 不是数字")
+            if n < 0 or n > 1_000_000:  # 负数会让 read(-1) 一直等到对方断开
                 raise CamError("请求过大")
             if not n:
                 return {}
@@ -3342,7 +3379,10 @@ def make_handler(store, token):
                     return self._send(200, public_state(store, data))
                 if method == "GET" and parts == ["local-usage"]:
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                    days = max(1, min(365, int((q.get("days") or ["30"])[0])))
+                    try:
+                        days = max(1, min(365, int((q.get("days") or ["30"])[0])))
+                    except ValueError:
+                        raise CamError("days 要是天数")
                     return self._send(200, local_usage(store.load(), days))
                 if method == "GET" and parts == ["menubar"]:  # 卡片小面板的“设置”页
                     return self._send(200, menubar_settings(store))
@@ -3377,10 +3417,11 @@ def make_handler(store, token):
                     return self._send(200, clear_region_history(store))
                 if method == "POST" and parts == ["accounts"]:
                     b = self._body()
+                    label = label_arg(b.get("label"))
                     if b.get("kind") == "claude_code":
-                        import_current(store, b.get("label"))
+                        import_current(store, label)
                     else:
-                        add_account(store, b.get("kind"), b.get("label"), email=b.get("email"),
+                        add_account(store, b.get("kind"), label, email=b.get("email"),
                                     session_key=b.get("session_key"), api_key=b.get("api_key"),
                                     admin_key=b.get("admin_key"), app_mode=b.get("app_mode"),
                                     use_current=b.get("use_current"))
@@ -3642,8 +3683,28 @@ def serve(store, host, port, auto_refresh_min):
         pass
 
 
+def cam_panel_at(port):
+    """本机 port 上听着的是不是 cam 的面板（cam serve 或桌面版）：不带令牌问一下，只有它会这样回 401。
+
+    令牌只发给认出来的面板：端口被别的程序先占了，不能把令牌送上门。不走代理。
+    """
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state")
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2):
+            return False  # 不要令牌就给看：不是我们的
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code == 401 and json.loads(e.read().decode()).get("error") == "需要访问令牌"
+        except (ValueError, OSError, AttributeError):
+            return False
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return False
+
+
 def panel_running(port, token):
     """本机 port 上是不是已经有一个用同一令牌的面板（cam serve 或桌面版开的）。不走代理。"""
+    if not cam_panel_at(port):
+        return False
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
@@ -3904,7 +3965,17 @@ def print_accounts(store, data):
 
 # --------------------------------------------------------------------------- 命令
 
+def label_arg(v):
+    """接口和命令行传来的账号名：只收文字，去掉首尾空白、最多 60 个字；空的当没传（和“编辑”里的规则一致）。"""
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise CamError("名称要是文字")
+    return v.strip()[:60] or None
+
+
 def import_current(store, label=None):
+    label = label_arg(label)
     with store.lock():
         data = store.load()
         acc = snapshot_live(store, data, label=label)
@@ -4867,15 +4938,15 @@ PROXY_ENV_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_
 
 
 def mask_proxy(v):
-    """代理地址里的账号密码不露出来：http://user:pass@host:port → http://***@host:port。这些字会进面板、通知和导出的诊断。"""
-    try:
-        u = urllib.parse.urlsplit(v if "://" in v else "http://" + v)
-    except ValueError:
-        return v
-    if not (u.username or u.password):
-        return v
-    host = (u.hostname or "") + (f":{u.port}" if u.port else "")
-    return f"{u.scheme}://***@{host}" if "://" in v else f"***@{host}"
+    """代理地址里的账号密码不露出来：http://user:pass@host:port → http://***@host:port。这些字会进面板、通知和导出的诊断。
+
+    按字符串处理、不解析 URL：端口不是数字这类怪地址也照样遮，不能因为解析失败把密码原样放出去。和 Rust 版 mask_proxy 一致。
+    """
+    v = str(v or "")
+    scheme, rest = (v.split("://", 1)[0] + "://", v.split("://", 1)[1]) if "://" in v else ("", v)
+    auth = rest.split("/", 1)[0]
+    at = auth.rfind("@")
+    return v if at < 0 else f"{scheme}***@{auth[at + 1:]}"
 
 
 def proxy_parts():
@@ -5873,6 +5944,8 @@ def checkup_account(store, p, live_ob, before_exp, offline):
                 out.append(ck("warn", f"用量接口不认这个登录（HTTP 401）{when}",
                               "在 claude 里发一句话让它续一次；还不行就 /login 重新登录" if p.get("is_active")
                               else "切换过去时 Claude Code 会试着续；续不上就 " + relogin))
+        elif hk == "live_expired":  # 当前登录过期了：cam 从不替它续，不算出错
+            out.append(ck("info", HEALTH_TEXT[hk][1], HEALTH_TEXT[hk][2]))
         elif hk:
             level, _, advice = HEALTH_TEXT[hk]
             out.append(ck(HEALTH_TO_CHECK[level], f"{'上次' if offline else ''}取用量出错{when}：{err}",
@@ -6411,10 +6484,14 @@ def save_menubar_settings(store, body):
     if "mode" in body:
         if body["mode"] not in MENU_MODES:
             raise CamError("动画模式只能是 classic（经典）或 stream（流式）")
-        if menubar_settings(store)["mode"] != body["mode"]:
+        cur = menubar_settings(store)
+        if not cur["installed"]:
+            raise CamError("还没装菜单栏小工具（bash extras/swiftbar/install.sh）")  # 不然安装脚本会去装 SwiftBar
+        if cur["mode"] != body["mode"]:
             script = os.path.join(code_root(), "extras", "swiftbar", "install.sh")
+            env = dict(os.environ, CAM_PYTHON=sys.executable)  # 插件继续用现在这个 python，不让脚本在 SwiftBar 的短 PATH 里重找
             try:
-                r = subprocess.run(["bash", script, f"--{body['mode']}"], capture_output=True, text=True, timeout=180)
+                r = subprocess.run(["bash", script, f"--{body['mode']}"], capture_output=True, text=True, timeout=180, env=env)
             except (OSError, subprocess.SubprocessError) as e:
                 raise CamError(f"改启动脚本失败：{e}")
             if r.returncode != 0:

@@ -10,6 +10,7 @@ import datetime as dt
 import getpass
 import io
 import signal
+import socket
 import json
 import os
 import re
@@ -2258,8 +2259,13 @@ class CamTest(unittest.TestCase):
         MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
         store = self.cam.Store()
         out = {}
+        def go():
+            try:
+                out["tok"] = self.cam.ensure_fresh_token(store, a_id)
+            except self.cam.CamError as e:
+                out["err"] = str(e)
         with store.lock():
-            t = threading.Thread(target=lambda: out.setdefault("tok", self.cam.ensure_fresh_token(store, a_id)))
+            t = threading.Thread(target=go)
             t.start()
             time.sleep(0.3)  # 线程发现 A 过期，正在等锁
             # 等锁期间切到了 A（相当于 switch_code_account 做的事）
@@ -2268,7 +2274,8 @@ class CamTest(unittest.TestCase):
             store.save(d)
             self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
         t.join(10)
-        self.assertEqual(out["tok"][0], "at-A1")  # 当前账号：只读，不刷新
+        # 现在 A 是当前账号而且登录过期了：不替它续（交给 Claude Code），也不拿过期的 token 白跑一趟
+        self.assertIn("等 Claude Code 自己续", out.get("err", ""), out)
         self.assertNotIn(("POST", "/v1/oauth/token", "rt-A1"), MockAnthropic.calls)
 
     def test_invalid_refresh_token_says_relogin(self):
@@ -2468,7 +2475,7 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")
         self.assertIn("（Claude Code，Max，当前登录）", b[0]["group"])
         self.assertIn("当前登录：access token 已过期", b[0]["text"])
-        self.assertIn("用量接口返回 401：access token 过期了，等 Claude Code 自己续", [i["text"] for i in b])
+        self.assertIn("用量没更新：当前登录的 access token 过期了，等 Claude Code 自己续", [i["text"] for i in b])
         self.assertTrue(all(i["level"] in ("ok", "info") for i in b), b)
 
     def test_checkup_flags_revoked_saved_login(self):
@@ -3361,6 +3368,103 @@ exit 2""")
         self.assertIn("记录时间", text)
         self.assertIn("旧快照", text)
         self.assertNotIn("99.0%", text)
+    def test_review_round_fixes(self):
+        cam = self.cam
+        # 星期范围先校验再展开；代理地址端口不是数字也照样遮密码
+        self.assertEqual(cam.parse_days("1-5"), [1, 2, 3, 4, 5])
+        for bad in ("1-4000000000", "5-1", "0,3", [8]):
+            with self.assertRaises(cam.CamError):
+                cam.parse_days(bad)
+        self.assertEqual(cam.mask_proxy("http://u:p@host:port"), "http://***@host:port")
+        self.assertEqual(cam.mask_proxy("http://u:p@host:8080/path"), "http://***@host:8080")
+        self.assertEqual(cam.mask_proxy("http://alice:S3cretPass@proxy.local:8080"), "http://***@proxy.local:8080")
+        # Electron 子进程、Linux 上同名的桌面版都不算 Claude Code 会话
+        with mock.patch.object(cam, "_desktop_candidates", return_value=["/opt/Claude/claude"]):
+            self.assertFalse(cam._is_claude_cmd("/opt/Claude/claude", "/opt/Claude/claude --type=renderer --x"))
+            self.assertFalse(cam._is_claude_cmd("/opt/Claude/claude", "/opt/Claude/claude"))
+            self.assertTrue(cam._is_claude_cmd("/usr/local/bin/claude", "/usr/local/bin/claude --resume"))
+        # 当前账号的 access token 过期：是提示不是异常；expires_in 为 null 也不崩
+        self.assertEqual(cam._health_kind_of_error("claude_code", "当前登录的 access token 过期了，等 Claude Code 自己续"), "live_expired")
+        self.assertEqual(cam.account_health({"kind": "claude_code", "usage": {"error": "当前登录的 access token 过期了，等 Claude Code 自己续"}}, True, None)["level"], "info")
+        store = cam.Store()
+        far = int((time.time() + 3600) * 1000)
+        data = store.load()
+        for i, (lab, rt) in enumerate((("A", "rtA"), ("B", "rtB"))):
+            aid = f"id{i}"
+            data["accounts"].append({"id": aid, "kind": "claude_code", "label": lab, "email": f"{lab.lower()}@x.com",
+                                     "account_uuid": f"uuid-{lab}", "token_fp": cam.token_fp(rt), "manual": {}, "usage": None})
+            store.save_secret(aid, {"claudeAiOauth": {"accessToken": f"at{lab}", "refreshToken": rt, "expiresAt": far}, "saved_at": cam.now_iso()})
+        data["active"]["claude_code"] = "id0"
+        store.save(data)
+        with mock.patch.object(cam, "refresh_oauth", return_value={"access_token": "newA", "expires_in": None}):
+            cam.renew_saved_login(store, data["accounts"][0])
+        self.assertEqual(store.load_secret("id0")["claudeAiOauth"]["accessToken"], "newA")
+        # 当前登录是未知的 token、~/.claude.json 还写着 B、服务端 503：不能把它存进 B 名下，要暂存并提示核对不了
+        live = {"claudeAiOauth": {"accessToken": "atX", "refreshToken": "rtX", "expiresAt": far}}
+        with mock.patch.object(cam, "read_live_credentials", return_value=(live, "file")), \
+             mock.patch.object(cam, "read_oauth_account", return_value={"accountUuid": "uuid-B", "emailAddress": "b@x.com"}), \
+             mock.patch.object(cam, "probe_token_owner", return_value=(503, None)):
+            cam.snapshot_live(store, data)
+        self.assertEqual(store.load_secret("id1")["claudeAiOauth"]["refreshToken"], "rtB")
+        self.assertTrue(data.get("live_unverified"))
+        self.assertEqual(store.load_secret(cam.PENDING_ID)["claudeAiOauth"]["refreshToken"], "rtX")
+        # 暂存的 token 核对时限流：留着下次再问；401 才删
+        with mock.patch.object(cam, "probe_token_owner", return_value=(429, None)):
+            cam.resolve_pending(store, data, "nope")
+        self.assertTrue(store.load_secret(cam.PENDING_ID))
+        with mock.patch.object(cam, "probe_token_owner", return_value=(401, None)):
+            cam.resolve_pending(store, data, "nope")
+        self.assertFalse(store.load_secret(cam.PENDING_ID))
+        # 移除网页号时浏览器 Profile 搬不动（窗口还开着）：全部搬回去，账号和密钥都还在
+        self.run_cam("add-web", "--label", "W", "--session-key", "sk-ant-test")
+        data = store.load()
+        wid = next(a["id"] for a in data["accounts"] if a["kind"] == "claude_web")
+        os.makedirs(os.path.join(store.profiles_dir, wid), exist_ok=True)
+        real_move = shutil.move
+
+        def flaky_move(src, dst):
+            if dst.endswith("browser-profile"):
+                raise PermissionError("locked")
+            return real_move(src, dst)
+        with mock.patch.object(cam.shutil, "move", flaky_move), self.assertRaises(cam.CamError):
+            cam.remove_account(store, wid)
+        data = store.load()
+        self.assertTrue(any(a["id"] == wid for a in data["accounts"]))
+        self.assertEqual(store.load_secret(wid).get("session_key"), "sk-ant-test")
+        # 接口：参数不合法回 400 不是 500；页面带禁止嵌套的头；不带令牌的 401 用来认 cam 的面板
+        token = cam.server_token(store)
+        if not cam.IS_WIN:
+            self.assertEqual(os.stat(os.path.join(store.root, "server-token")).st_mode & 0o777, 0o600)
+        srv = cam.ThreadingServer(("127.0.0.1", 0), cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(method, path, body=None, headers=None):
+            h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", **(headers or {})}
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method,
+                                         data=json.dumps(body).encode() if body is not None else None, headers=h)
+            try:
+                with opener.open(req) as r:
+                    return r.status, json.loads(r.read().decode()), r.headers
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read().decode()), e.headers
+        self.assertEqual(call("GET", "/api/local-usage?days=abc")[0], 400)
+        self.assertEqual(call("POST", "/api/accounts", {"kind": "claude_web", "label": ["x"]})[0], 400)
+        self.assertEqual(call("POST", "/api/accounts", {"kind": "claude_code", "label": {"a": 1}})[0], 400)
+        st, _, hdr = call("GET", "/api/state")
+        self.assertEqual((st, hdr["X-Frame-Options"]), (200, "DENY"))
+        with opener.open(f"http://127.0.0.1:{port}/") as r:
+            self.assertEqual(r.headers["Content-Security-Policy"], "frame-ancestors 'none'")
+        self.assertTrue(cam.cam_panel_at(port))
+        self.assertFalse(cam.cam_panel_at(1))
+        self.assertTrue(cam.panel_running(port, token))
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sk:  # 负的 Content-Length：直接拒绝，不挂住线程
+            sk.sendall(f"POST /api/refresh HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: -1\r\n\r\n".encode())
+            self.assertIn(b" 400 ", sk.recv(200))
+        self.assertEqual(call("PUT", "/api/menubar", {"mode": "stream"})[0], 400)  # 没装插件：不跑安装脚本
 
 
 SHARED = os.path.join(HERE, "..", "tests", "shared")
@@ -3935,7 +4039,7 @@ class InstallTest(unittest.TestCase):
         write(os.path.join(self.home, ".claude", "settings.json"), "{}\n")
         menu_py = os.path.join(ROOT, "extras", "swiftbar", "cam_menu.py")
         if sys.platform == "darwin":  # 菜单栏插件已经装好：不再跑 SwiftBar 的安装（会用 Homebrew）
-            write(os.path.join(self.plugins, "claude-accounts.1m.sh"), f'exec python3 "{menu_py}"\n')
+            write(os.path.join(self.plugins, "Claude 账号.1m.sh"), f'exec python3 "{menu_py}"\n')
         for i in range(2):
             code, out = self.install("--yes", "--skip-verify")
             self.assertEqual(code, 0, out)

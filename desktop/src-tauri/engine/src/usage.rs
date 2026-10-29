@@ -184,6 +184,7 @@ fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Valu
         .unwrap_or_else(|| json!({}));
     if active_code_id(data).as_deref() == Some(id) {
         let (creds, _) = read_live()?;
+        let mut live: Option<(String, Value)> = None;
         if let Some(c) = creds {
             let ob = oauth_block(&c);
             if let (Some(t), Some(i)) = (
@@ -191,13 +192,22 @@ fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Valu
                 identify(data, &read_oauth_account()?, &c),
             ) {
                 if s(&accounts(data)[i], "id") == Some(id) {
-                    return Ok(Some((t.to_string(), ob.clone())));
+                    live = Some((t.to_string(), ob.clone()));
                 }
             }
         }
-        // 当前账号从不在这里刷新，交给 Claude Code
-        let t = s(&saved, "accessToken").ok_or("没有保存凭据")?.to_string();
-        return Ok(Some((t, saved)));
+        // 当前账号从不在这里刷新，交给 Claude Code；过期了就等它下次运行自己续，不白跑一趟拿 401
+        let (t, ob) = match live {
+            Some(x) => x,
+            None => (
+                s(&saved, "accessToken").ok_or("没有保存凭据")?.to_string(),
+                saved,
+            ),
+        };
+        if ob.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0) <= now_ms() {
+            return Err("当前登录的 access token 过期了，等 Claude Code 自己续".into());
+        }
+        return Ok(Some((t, ob)));
     }
     let t = s(&saved, "accessToken").ok_or("没有保存凭据")?.to_string();
     let exp = saved.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -499,44 +509,107 @@ fn fetch_code(store: &Store, acc: &Value, allow_refresh: bool) -> R<(Value, Map<
     Ok((usage, meta))
 }
 
+/// 浏览器样式的请求头：带上这些后 claude.ai 更不容易把请求当成机器人。
+/// 这仍然是用用户自己的登录态做只读查询，不绕过任何验证。和 cam.py 的 WEB_UA / web_get 一致
+const WEB_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
+
+/// 向 claude.ai 发起只读请求。返回 (状态码, 解析后的 JSON 或 Null, 原始文本)；状态 0 表示没连上，原始文本是错误说明
+fn web_get(path: &str, sk: &str) -> (u16, Value, String) {
+    let base = web_base();
+    let req = agent(20)
+        .get(&format!("{}{}", base, path))
+        .set("User-Agent", WEB_UA)
+        .set("Accept", "application/json, text/plain, */*")
+        .set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .set("Referer", &format!("{}/", base))
+        .set("Origin", &base)
+        .set("Cookie", &format!("sessionKey={}", sk));
+    let (code, raw) = match req.call() {
+        Ok(r) => {
+            let code = r.status();
+            (code, r.into_string().unwrap_or_default())
+        }
+        Err(ureq::Error::Status(code, r)) => (code, r.into_string().unwrap_or_default()),
+        Err(e) => return (0, Value::Null, format!("网络错误：{}", e)),
+    };
+    let body = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    (code, body, raw)
+}
+
+/// 把 claude.ai 的失败翻译成一句人话（和 cam.py 的 web_error 一致；健康分类靠这些字）
+pub fn web_error(code: u16, body: &Value, raw: &str) -> String {
+    if super::health::is_cloudflare(raw) {
+        return "claude.ai 返回了人机验证页（通常是网络被公司管控拦截，和账号无关）。可换个网络，或只手动记录到期日。".into();
+    }
+    if code == 401 || code == 403 {
+        return "sessionKey 已过期或无效，请在浏览器里重新复制一次（见 cam set -h）。".into();
+    }
+    if code == 0 {
+        return s(body, "message")
+            .map(String::from)
+            .unwrap_or_else(|| raw.to_string());
+    }
+    if body.as_object().is_some_and(|o| !o.is_empty()) {
+        err_msg(code, body)
+    } else {
+        let head: String = raw.chars().take(120).collect();
+        err_msg(code, &json!({"error": {"message": head}}))
+    }
+}
+
+/// 组织的 capabilities 里的订阅：claude_max / claude_pro / claude_team / claude_enterprise → max / pro / team / enterprise
+pub fn plan_from_caps(caps: Option<&Value>) -> Option<&'static str> {
+    let caps = caps.and_then(|c| c.as_array())?;
+    [
+        "claude_max",
+        "claude_pro",
+        "claude_team",
+        "claude_enterprise",
+    ]
+    .into_iter()
+    .find(|p| caps.iter().any(|c| c.as_str() == Some(p)))
+    .map(|p| p.trim_start_matches("claude_"))
+}
+
 fn fetch_web(store: &Store, acc: &Value) -> R<(Value, Map<String, Value>)> {
     let id = s(acc, "id").unwrap_or_default();
     let sec = store.load_secret(id);
-    let sk = s(&sec, "session_key").ok_or("未填写 sessionKey，只能显示手动信息")?;
-    let h = vec![("Cookie".to_string(), format!("sessionKey={}", sk))];
-    let (code, orgs) = get_with(&format!("{}/api/organizations", web_base()), &h);
-    let org = orgs.as_array().and_then(|a| a.first()).cloned();
-    let org = match (code, org) {
-        (200, Some(o)) => o,
-        _ => {
-            return Err(format!(
-                "{}（claude.ai 可能拦截了非浏览器请求，或 sessionKey 已过期）",
-                err_msg(code, &orgs)
-            ))
-        }
+    let sk = s(&sec, "session_key")
+        .ok_or("未填写 sessionKey。在浏览器登录 claude.ai 后复制 sessionKey 填到“编辑”里；或只手动记录到期日。")?;
+    let (code, orgs, raw) = web_get("/api/organizations", sk);
+    let list = match orgs.as_array() {
+        Some(a) if code == 200 && !a.is_empty() => a.clone(),
+        _ => return Err(web_error(code, &orgs, &raw)),
     };
+    // 优先选个人订阅那个组织（有 claude_pro / claude_max 能力的）
+    let org = list
+        .iter()
+        .find(|o| plan_from_caps(o.get("capabilities")).is_some())
+        .unwrap_or(&list[0])
+        .clone();
     let mut meta = Map::new();
     if let Some(n) = s(&org, "name") {
         meta.insert("org_name".into(), json!(n));
     }
-    if let Some(caps) = org.get("capabilities").and_then(|c| c.as_array()) {
-        for p in ["claude_max", "claude_pro"] {
-            if caps.iter().any(|c| c.as_str() == Some(p)) {
-                meta.insert("plan".into(), json!(p.trim_start_matches("claude_")));
-                break;
-            }
-        }
+    if let Some(p) = plan_from_caps(org.get("capabilities")) {
+        meta.insert("plan".into(), json!(p));
     }
     if let Some(v) = s(&org, "rate_limit_tier") {
         meta.insert("rate_limit_tier".into(), json!(v));
     }
+    // 账号邮箱，失败不影响用量
+    let (code_a, acct, _) = web_get("/api/account", sk);
+    if code_a == 200 {
+        let email = s(&acct, "email_address")
+            .or_else(|| acct.get("account").and_then(|a| s(a, "email_address")));
+        if let Some(e) = email {
+            meta.insert("email".into(), json!(e));
+        }
+    }
     let uuid = s(&org, "uuid").ok_or("组织信息缺少 uuid")?;
-    let (code, body) = get_with(
-        &format!("{}/api/organizations/{}/usage", web_base(), uuid),
-        &h,
-    );
-    if code != 200 {
-        return Err(err_msg(code, &body));
+    let (code, body, raw) = web_get(&format!("/api/organizations/{}/usage", uuid), sk);
+    if code != 200 || !body.is_object() {
+        return Err(web_error(code, &body, &raw));
     }
     Ok((parse_usage_body(&body, "claude.ai"), meta))
 }
@@ -711,9 +784,29 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
     let mut fresh = store.load()?;
     let by_id: HashMap<String, (Value, Map<String, Value>)> =
         results.into_iter().map(|(id, u, m)| (id, (u, m))).collect();
+    // 账号刚出问题的那一刻把现场记下来（和 cam.py 的 note_incident 一致）：先看哪些号这次新出了问题，现场只算一次
+    let incidents: Vec<(String, &'static str, String)> = accounts(&fresh)
+        .iter()
+        .filter_map(|a| {
+            let id = s(a, "id")?;
+            let (u, _) = by_id.get(id)?;
+            let kind = super::api::incident_kind(a, u)?;
+            Some((
+                id.to_string(),
+                kind,
+                s(u, "error").unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+    let scene = (!incidents.is_empty()).then(|| super::api::incident_scene(&fresh));
     for a in accounts_mut(&mut fresh).iter_mut() {
         let id = s(a, "id").unwrap_or_default().to_string();
         if let Some((u, meta)) = by_id.get(&id) {
+            if let (Some(sc), Some((_, kind, err))) =
+                (&scene, incidents.iter().find(|(i, _, _)| *i == id))
+            {
+                super::api::push_incident(a, sc, kind, err);
+            }
             a["usage"] = u.clone();
             for (k, v) in meta {
                 a[k.as_str()] = v.clone();
@@ -770,7 +863,10 @@ pub fn roll_renewals(data: &mut Value) {
 
 pub fn roll_renewals_at(data: &mut Value, today: chrono::NaiveDate) {
     for a in accounts_mut(data).iter_mut() {
-        let m = &mut a["manual"];
+        // 手改过的 accounts.json 里混进非对象时跳过，不 panic
+        let Some(m) = a.get_mut("manual").filter(|m| m.is_object()) else {
+            continue;
+        };
         if m.get("auto_renew").and_then(|v| v.as_bool()) != Some(true) {
             continue;
         }

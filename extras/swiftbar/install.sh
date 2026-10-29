@@ -22,14 +22,15 @@ fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MENU_PY="$HERE/cam_menu.py"
 
-# 1. Python：优先用当前终端里的 python3（SwiftBar 运行插件时 PATH 很短，必须写绝对路径）
-PY="$(command -v python3 || true)"
+# 1. Python：优先用 CAM_PYTHON（从菜单 / 卡片里切换模式时传进来的，就是插件现在用的那个），
+#    其次当前终端里的 python3（SwiftBar 运行插件时 PATH 很短，必须写绝对路径；pyenv 这类的 shim 要换成真正的解释器）
+PY="${CAM_PYTHON:-$(command -v python3 || true)}"
 if [[ -z "$PY" ]]; then
   echo "没找到 python3，请先安装：https://www.python.org/downloads/macos/"
   exit 1
 fi
-PY="$(cd "$(dirname "$PY")" && pwd)/$(basename "$PY")"
 "$PY" -c 'import sys; assert sys.version_info >= (3, 8)' || { echo "需要 Python 3.8 以上"; exit 1; }
+PY="$("$PY" -c 'import sys; print(sys.executable)')"
 
 # 2. SwiftBar
 if [[ ! -d "/Applications/SwiftBar.app" && ! -d "$HOME/Applications/SwiftBar.app" ]]; then
@@ -45,8 +46,8 @@ if [[ ! -d "/Applications/SwiftBar.app" && ! -d "$HOME/Applications/SwiftBar.app
   fi
 fi
 
-# 3. 插件目录：沿用 SwiftBar 已设置的目录，没有就用默认目录
-PLUGIN_DIR="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
+# 3. 插件目录：CAM_SWIFTBAR_DIR（测试用）> SwiftBar 已设置的目录 > 默认目录
+PLUGIN_DIR="${CAM_SWIFTBAR_DIR:-$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)}"
 if [[ -z "$PLUGIN_DIR" ]]; then
   PLUGIN_DIR="$HOME/Library/Application Support/SwiftBar/Plugins"
   defaults write com.ameba.SwiftBar PluginDirectory "$PLUGIN_DIR"
@@ -82,7 +83,8 @@ chmod +x "$PLUGIN"
 
 # 5. 先跑一次，顺便触发钥匙串授权
 echo "正在检查…（如果弹出“python3 想访问钥匙串”，请点“始终允许”）"
-"$PY" "$MENU_PY" | head -1 | sed 's/ |.*//' | xargs -I{} echo "菜单栏将显示：{}"
+TITLE="$("$PY" "$MENU_PY" 2>/dev/null | head -n 1 || true)"  # 插件文件已经写好了：这一步只是看一眼，不能因为它让脚本失败
+echo "菜单栏将显示：${TITLE%% |*}"
 
 open -a SwiftBar
 open -g "swiftbar://refreshallplugins" 2>/dev/null || true

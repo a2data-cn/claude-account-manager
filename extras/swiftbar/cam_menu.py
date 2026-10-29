@@ -476,8 +476,14 @@ def mini_endpoint(store):
     """
     if not MINI:
         return None
-    if STREAMING and _MINI_CACHE[1] and time.monotonic() - _MINI_CACHE[0] < 60:  # 流式模式每半秒渲染一次，探测一分钟一次就够
+    if STREAMING and _MINI_CACHE[0] and time.monotonic() - _MINI_CACHE[0] < 60:  # 流式模式每半秒渲染一次，探测一分钟一次就够（没探到也记着，不每帧重试）
         return _MINI_CACHE[1]
+    ep = _probe_mini(store)
+    _MINI_CACHE[:] = [time.monotonic(), ep]
+    return ep
+
+
+def _probe_mini(store):
     try:
         port, token = cam.ensure_panel(store)
         if not cam.mini_available(port, token) or cam.serve_outdated(port, token):
@@ -490,7 +496,6 @@ def mini_endpoint(store):
             notify("面板已更新", "后台的 cam serve 用的是旧代码，已重启（自己用 cam serve --lan 开的要重开一次）")
     except Exception:  # noqa: BLE001  起不来就只用系统菜单
         return None
-    _MINI_CACHE[:] = [time.monotonic(), (port, token)]
     return port, token
 
 
@@ -606,8 +611,8 @@ def render(store, st, out=print, rich=None, phase=None):
         # 不 rich 时用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
         name = title_name(title_acc, pos[title_acc["id"]]) if rich else short(title_acc.get("label") or title_acc.get("email"))
         text, tail = f"{esc(name)} {p:.0f}% | ", (f" color={color_for(p)}" if color_for(p) else "")
-        if rich:
-            heads += [text + bars_icon(ph) + tail for ph in phases]
+        if rich:  # 带图的行不加 color（会把图丢掉，见 heading）：额度高低由图标颜色表示
+            heads += [text + bars_icon(ph) for ph in phases]
         else:
             heads.append(text + f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + tail)
     elif active:
@@ -774,10 +779,7 @@ def render(store, st, out=print, rich=None, phase=None):
     out(f"打开管理面板 | {action('panel', refresh=False)} sfimage=macwindow")  # 改名、规则、隐私设置都在面板里
     out(f"刷新用量 | {action('usage')} sfimage=arrow.clockwise")
     out(f"全面体检 | {action('checkup', script=MENU_PY)} sfimage=stethoscope")  # 体检会续登录、刷新用量，跑完刷新菜单
-    try:
-        upd = cam.saved_update_check()  # 上次点“检查更新”的结果，不联网
-    except Exception:  # noqa: BLE001
-        upd = None
+    upd = saved_update()  # 上次点“检查更新”的结果，不联网
     if upd and upd.get("behind"):
         out(f"更新（{upd['behind']} 个新改动） | {action('update', script=MENU_PY)} sfimage=arrow.down.circle")
     out("更多 | sfimage=ellipsis.circle")
@@ -825,7 +827,32 @@ def render(store, st, out=print, rich=None, phase=None):
         out(f"⚠ {esc(err)} | size=12 color=#B87A08,#E0A93B length={LINE}")
 
 
+_UPD_CACHE = [0.0, None]
+
+
+def saved_update():
+    """上次“检查更新”的结果。流式模式每半秒渲染一次，而它要跑一次 git：一分钟看一次就够。"""
+    if STREAMING and _UPD_CACHE[0] and time.monotonic() - _UPD_CACHE[0] < 60:
+        return _UPD_CACHE[1]
+    try:
+        upd = cam.saved_update_check()
+    except Exception:  # noqa: BLE001
+        upd = None
+    _UPD_CACHE[:] = [time.monotonic(), upd]
+    return upd
+
+
 SOURCE_FILES = (MENU_PY, os.path.realpath(cam.__file__))
+
+
+def source_ok():
+    """新代码能不能导入：在子进程里试一下。坏的（拉到一半、两个文件不是一个版本）就先留在旧代码上，SwiftBar 不会重启死掉的流式插件。"""
+    try:
+        r = subprocess.run([sys.executable, "-c", "import cam_menu"], cwd=os.path.dirname(MENU_PY),
+                           capture_output=True, timeout=60, env=dict(os.environ, CAM_MENU_MINI="0"))
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def source_stamp():
@@ -861,8 +888,13 @@ def stream(store):
         now_stamp = source_stamp()
         if now_stamp and stamp and now_stamp != stamp:  # 代码更新了：原地换成新代码（pid 和 stdout 不变，SwiftBar 继续读）
             time.sleep(1)  # git / cam update 可能还在写文件，等一秒再换；写到一半时 stamp 是 None，这轮跳过
-            sys.stdout.flush()
-            os.execv(sys.executable, [sys.executable, MENU_PY, "stream"])
+            stamp = source_stamp()  # 坏的新代码：记下这个版本不再试，等下次再改
+            if source_ok():
+                sys.stdout.flush()
+                try:
+                    os.execv(sys.executable, [sys.executable, MENU_PY, "stream"])
+                except OSError:
+                    pass  # 换不过去就继续用旧代码跑
         now = time.monotonic()
         if last_bg is None or now - last_bg >= 60:
             try:
@@ -889,8 +921,9 @@ def stream(store):
 def set_mode_from_menu(mode):
     """菜单里切换经典 / 流式：重跑安装脚本改写 SwiftBar 的启动脚本（插件类型写在里面），再重启 SwiftBar 让它按新模式加载。"""
     script = os.path.join(os.path.dirname(MENU_PY), "install.sh")
-    try:
-        r = subprocess.run(["bash", script, f"--{mode}"], capture_output=True, text=True, timeout=180)
+    try:  # 插件继续用现在这个 python：SwiftBar 的 PATH 很短，不让脚本重找
+        r = subprocess.run(["bash", script, f"--{mode}"], capture_output=True, text=True, timeout=180,
+                           env=dict(os.environ, CAM_PYTHON=sys.executable))
     except (OSError, subprocess.SubprocessError) as e:
         notify("切换失败", str(e)[:200])
         return 1

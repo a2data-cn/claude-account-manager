@@ -1688,6 +1688,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
           catch (err) { toast(err.message, true); }
         }); break;
       case "open":
+        if ((state.accounts.find((a) => a.id === id) || {}).kind === "claude_desktop"
+            && !confirm("会退出并重启电脑上的 Claude 桌面版，里面在跑的先处理好。继续？")) break;
         await busy(b, async () => {
           try {
             const r = await api("POST", `/api/accounts/${id}/open`);

@@ -1214,25 +1214,55 @@ pub fn default_route_tunnel() -> Option<(String, &'static str)> {
     tunnel_kind(&name, &desc).map(|k| (name, k))
 }
 
-/// 记一笔“这个账号在这个出口地区用过”，给风险提示用（每个账号只留最近几个地区）。
-pub fn note_account_region(data: &mut Value, acc_id: Option<&str>, loc: Option<&str>) {
+/// 记一笔“这个账号在这个出口地区用过”，给风险提示和诊断导出用（每个账号只留最近几个地区）。
+///
+/// reg 是当时的出口检测结果，有的话把 IP、运营商、城市、IP 类型一起记下；同一地区只留一条，次数累加、首次时间不变。
+/// 和 cam.py 的 note_account_region 一致（两个版本共用一份数据，不能互相覆盖掉对方记的）
+pub fn note_account_region(
+    data: &mut Value,
+    acc_id: Option<&str>,
+    loc: Option<&str>,
+    reg: Option<&Value>,
+) {
     let (Some(id), Some(loc)) = (acc_id, loc) else {
         return;
     };
+    let now = now_iso();
+    fn text(v: Option<&Value>) -> Option<&str> {
+        v.and_then(|v| v.as_str()).filter(|x| !x.is_empty())
+    }
     for a in accounts_mut(data) {
-        if s(a, "id") == Some(id) {
-            let mut regs: Vec<Value> = a
-                .get("regions")
-                .and_then(|r| r.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| s(r, "loc") != Some(loc))
-                .collect();
-            regs.insert(0, json!({"loc": loc, "at": now_iso()}));
-            regs.truncate(ACCOUNT_REGION_KEEP);
-            a["regions"] = Value::Array(regs);
+        if s(a, "id") != Some(id) {
+            continue;
         }
+        let all: Vec<Value> = a
+            .get("regions")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let old = all
+            .iter()
+            .find(|r| s(r, "loc") == Some(loc))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let mut regs: Vec<Value> = all
+            .into_iter()
+            .filter(|r| s(r, "loc") != Some(loc))
+            .collect();
+        let first = s(&old, "first_at")
+            .or_else(|| s(&old, "at"))
+            .map(String::from)
+            .unwrap_or_else(|| now.clone());
+        let times = old.get("times").and_then(|t| t.as_i64()).unwrap_or(0) + 1;
+        let mut entry = json!({"loc": loc, "at": now, "first_at": first, "times": times});
+        for k in ["ip", "org", "city", "ip_type"] {
+            if let Some(v) = text(reg.and_then(|r| r.get(k))).or_else(|| text(old.get(k))) {
+                entry[k] = json!(v);
+            }
+        }
+        regs.insert(0, entry);
+        regs.truncate(ACCOUNT_REGION_KEEP);
+        a["regions"] = Value::Array(regs);
     }
 }
 
@@ -1337,7 +1367,13 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
         }
     }
     let act = active_code_id(&data);
-    note_account_region(&mut data, act.as_deref(), new_loc.as_deref());
+    let reg_now = data.get("region").cloned();
+    note_account_region(
+        &mut data,
+        act.as_deref(),
+        new_loc.as_deref(),
+        reg_now.as_ref(),
+    );
     if new_loc.is_some() {
         // 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
         let mut drop_all = false;
@@ -2416,5 +2452,42 @@ mod proxy_mask_tests {
         assert_eq!(mask_proxy("user:pw@10.0.0.1:3128"), "***@10.0.0.1:3128");
         assert_eq!(mask_proxy("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
         assert_eq!(mask_proxy("HTTPS 127.0.0.1:7890"), "HTTPS 127.0.0.1:7890");
+        assert_eq!(mask_proxy("http://u:p@host:port"), "http://***@host:port"); // 端口不是数字也照样遮
+    }
+}
+
+#[cfg(test)]
+mod region_note_tests {
+    use super::note_account_region;
+    use serde_json::json;
+
+    #[test]
+    fn merges_same_region_and_keeps_details() {
+        // 同一地区只留一条：次数累加、首次时间不变；IP 这些有新的用新的，没有就留旧的
+        let mut data = json!({"accounts": [{"id": "a", "regions": [
+            {"loc": "US", "at": "2026-01-01T00:00:00Z", "first_at": "2025-12-01T00:00:00Z", "times": 7, "ip": "1.2.3.4", "org": "Old ISP"}]}]});
+        note_account_region(
+            &mut data,
+            Some("a"),
+            Some("US"),
+            Some(&json!({"ip": "5.6.7.8", "city": "Seattle"})),
+        );
+        let r = &data["accounts"][0]["regions"];
+        assert_eq!(r.as_array().unwrap().len(), 1);
+        assert_eq!(r[0]["times"], 8);
+        assert_eq!(r[0]["first_at"], "2025-12-01T00:00:00Z");
+        assert_eq!(r[0]["ip"], "5.6.7.8");
+        assert_eq!(r[0]["org"], "Old ISP");
+        assert_eq!(r[0]["city"], "Seattle");
+        note_account_region(&mut data, Some("a"), Some("SG"), None);
+        let r = &data["accounts"][0]["regions"];
+        assert_eq!(
+            (
+                r[0]["loc"].as_str(),
+                r[0]["times"].as_i64(),
+                r[1]["loc"].as_str()
+            ),
+            (Some("SG"), Some(1), Some("US"))
+        );
     }
 }

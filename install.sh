@@ -124,7 +124,7 @@ uninstall() {
     old_plugin="$(dirname "$plugin")/claude-accounts.1m.sh"  # 旧版本的文件名
     if [[ -f "$plugin" || -f "$old_plugin" ]]; then
       rm -f "$plugin" "$old_plugin"
-      open -g "swiftbar://refreshallplugins" 2>/dev/null || true
+      pgrep -xq SwiftBar && { open -g "swiftbar://refreshallplugins" 2>/dev/null || true; }  # 没在跑就别把它启动起来
       ok "已删除插件 ${plugin}（SwiftBar 本身留着，不用了可以把它从“应用程序”里删掉）"
     else
       note "没装菜单栏插件"
@@ -228,7 +228,9 @@ if [[ $OS == Darwin ]]; then
   else
     note "菜单栏常驻显示当前账号和 5 小时额度，点一下切换；顺带在后台保存新登录、执行时间规则、刷新用量、额度提醒"
     if ask "安装菜单栏小工具吗？（没有 SwiftBar 时会用 Homebrew 装）" y; then
-      bash "$ROOT/extras/swiftbar/install.sh" || warn "菜单栏小工具没装成，见上面的输出；以后可以运行 bash extras/swiftbar/install.sh 再试"
+      MODE_ARG=""
+      if [[ -f "$PLUGIN" ]] && grep -q "<swiftbar.type>streamable" "$PLUGIN"; then MODE_ARG="--stream"; fi  # 之前是流式模式就保持
+      bash "$ROOT/extras/swiftbar/install.sh" $MODE_ARG || warn "菜单栏小工具没装成，见上面的输出；以后可以运行 bash extras/swiftbar/install.sh 再试"
     else
       note "以后想装：bash extras/swiftbar/install.sh"
     fi

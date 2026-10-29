@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude 账号</title>
+<title>Claude 账号卡片</title>
 <style>
 /* 菜单栏小工具点开的卡片小面板：340 宽，高度由插件按账号数算，账号多了整页上下滑。
    照 macOS 控制中心的样子——大圆角的玻璃卡片、左边圆形图标、滑杆式的额度条；顶上一条红绿灯状态 */
@@ -293,13 +293,20 @@ button { font: inherit; color: inherit; }
       if (a.id !== cur.id && (a.health || {}).level === "error") items.push({ lv: "busy", text: `${nameOf(a, pos)}：${((a.health.issues || [])[0] || {}).text || "登录有问题"}` });
     }
     if (!items.length) items.push({ lv: "ok", text: n === 0 ? "空闲 · 一切正常" : "一切正常" });
-    const top = items[0], tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
+    const top = items.find((i) => i.ask) || items[0];  // 等你确认的（切换、打开桌面版）要排在红色状态前面，不然按钮永远看不到
+    const tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
     return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}" ${busy ? "disabled" : ""}>${label}</button>`).join("")}</span>` : ""}</div>`;
   }
   function render() {
     const main = $("#main");
     if (!state) return;
-    if (renaming && $(".rn")) return;
+    if (renaming && $(".rn")) {  // 改名表单开着时不整页重画（会丢输入），只更新按钮状态和提示
+      document.querySelectorAll(".rn button, .rn input").forEach((el) => { el.disabled = busy; });
+      const old = $(".msg");
+      if (old) old.remove();
+      if (msg) main.insertAdjacentHTML("beforeend", `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>`);
+      return;
+    }
     const accs = state.accounts || [];
     if (!accs.length) {
       main.innerHTML = `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;

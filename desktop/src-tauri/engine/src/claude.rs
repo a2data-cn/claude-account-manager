@@ -788,7 +788,8 @@ pub fn switch_account(store: &Store, key: &str) -> R<SwitchResult> {
     accounts_mut(&mut data)[ti]["last_switched_at"] = json!(now_iso());
     push_switch_log(&mut data, &tid);
     let loc = super::health::cached_region_loc(&data, super::health::REGION_FRESH_SECS); // 给风险提示记一笔地区
-    super::health::note_account_region(&mut data, Some(&tid), loc.as_deref());
+    let reg_now = data.get("region").cloned();
+    super::health::note_account_region(&mut data, Some(&tid), loc.as_deref(), reg_now.as_ref());
     store.save(&mut data)?;
     Ok(SwitchResult {
         id: tid,

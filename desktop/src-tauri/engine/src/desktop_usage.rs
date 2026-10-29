@@ -319,6 +319,49 @@ fn present(snapshot: Snapshot, now: DateTime<Utc>) -> Value {
     usage
 }
 
+/// 只过滤对外显示，保留存档的原采样时间；跨过重置时间后不能继续展示旧百分比。和 cam.py 的 _desktop_usage_view 一致
+pub fn desktop_usage_view(usage: &Value) -> Value {
+    desktop_usage_view_at(usage, Utc::now())
+}
+
+pub fn desktop_usage_view_at(usage: &Value, now: DateTime<Utc>) -> Value {
+    let mut shown = usage.clone();
+    let age = s(usage, "fetched_at")
+        .and_then(parse_time)
+        .map(|t| now.signed_duration_since(t).num_seconds())
+        .unwrap_or(i64::MAX);
+    shown["cache_stale"] = json!(age > 1800);
+    let had = WINDOWS
+        .iter()
+        .any(|(n, _, _)| usage.get(*n).is_some_and(|w| !w.is_null()));
+    let mut any = false;
+    for (name, _, lifetime) in WINDOWS {
+        let w = usage.get(name).cloned().unwrap_or(Value::Null);
+        let percent_ok = w
+            .as_object()
+            .and_then(|o| o.get("utilization"))
+            .and_then(valid_percent)
+            .is_some();
+        let valid = percent_ok
+            && match w.get("resets_at") {
+                Some(Value::String(r)) => parse_time(r).is_some_and(|t| t > now),
+                Some(Value::Null) | None => age < lifetime,
+                _ => false,
+            };
+        if valid {
+            any = true;
+            shown[name] = w;
+        } else {
+            shown[name] = Value::Null;
+        }
+    }
+    if had && !any {
+        shown["cache_status"] = json!("expired");
+        shown["notice"] = json!("本地额度快照已过期，请在 Claude 设置中查看用量后刷新。");
+    }
+    shown
+}
+
 /// 返回 (用量, 可合并进账号的身份元数据)。所有路径均来自这个 Desktop 账号的 profile。
 /// 没有缓存属于正常状态，不应回落到 API Key 或显示虚构的 0%。
 pub fn fetch_desktop_usage(store: &Store, acc: &Value) -> R<(Value, Map<String, Value>)> {
@@ -395,6 +438,38 @@ fn fetch_at(store: &Store, acc: &Value, now: DateTime<Utc>) -> R<(Value, Map<Str
         ),
     };
     Ok((usage, metadata))
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::desktop_usage_view_at;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+
+    #[test]
+    fn hides_windows_past_their_reset() {
+        // 存档里的采样是 10:00，五小时窗 10:30 重置；到 11:00 看，五小时的不能再显示旧百分比，七天的还在
+        let now = Utc::now();
+        let iso = |t: chrono::DateTime<Utc>| t.to_rfc3339();
+        let usage = json!({"source": "desktop_cache", "cache_status": "ok", "notice": "x",
+            "fetched_at": iso(now - Duration::minutes(60)),
+            "five_hour": {"utilization": 40.0, "resets_at": iso(now - Duration::minutes(30))},
+            "seven_day": {"utilization": 12.0, "resets_at": iso(now + Duration::days(2))}});
+        let v = desktop_usage_view_at(&usage, now);
+        assert!(v["five_hour"].is_null());
+        assert_eq!(v["seven_day"]["utilization"], 12.0);
+        assert_eq!(v["cache_status"], "ok");
+        assert_eq!(v["cache_stale"], true);
+        let all_old = json!({"source": "desktop_cache", "cache_status": "ok", "fetched_at": iso(now - Duration::hours(6)),
+            "five_hour": {"utilization": 40.0, "resets_at": null}});
+        let v = desktop_usage_view_at(&all_old, now);
+        assert!(v["five_hour"].is_null());
+        assert_eq!(v["cache_status"], "expired");
+        assert_eq!(
+            v["notice"],
+            "本地额度快照已过期，请在 Claude 设置中查看用量后刷新。"
+        );
+    }
 }
 
 #[cfg(test)]

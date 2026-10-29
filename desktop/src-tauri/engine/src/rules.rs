@@ -27,7 +27,8 @@ fn parse_days(v: &Value) -> R<Vec<u32>> {
     match v {
         Value::Array(a) => {
             for x in a {
-                days.push(x.as_u64().ok_or_else(bad)? as u32);
+                let d = x.as_u64().filter(|d| (1..=7).contains(d)).ok_or_else(bad)?;
+                days.push(d as u32);
             }
         }
         Value::Null => days.extend(1..=7),
@@ -44,6 +45,9 @@ fn parse_days(v: &Value) -> R<Vec<u32>> {
                 if let Some((a, b)) = part.split_once('-') {
                     let a: u32 = a.trim().parse().map_err(|_| bad())?;
                     let b: u32 = b.trim().parse().map_err(|_| bad())?;
+                    if !(1 <= a && a <= b && b <= 7) {
+                        return Err(bad()); // 先校验再展开，"1-4000000000" 不能先撑爆内存
+                    }
                     days.extend(a..=b);
                 } else {
                     days.push(part.parse().map_err(|_| bad())?);
@@ -239,4 +243,21 @@ pub fn apply_time_rules_at(store: &Store, now: chrono::NaiveDateTime) -> R<Optio
         return Ok(None);
     }
     switch_account(store, &target).map(Some)
+}
+
+#[cfg(test)]
+mod parse_days_tests {
+    use super::parse_days;
+    use serde_json::json;
+
+    #[test]
+    fn validates_before_expanding() {
+        assert_eq!(parse_days(&json!("1-5")).unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(parse_days(&json!([5, 1, 5])).unwrap(), vec![1, 5]);
+        assert_eq!(parse_days(&json!(null)).unwrap(), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert!(parse_days(&json!("1-4000000000")).is_err());
+        assert!(parse_days(&json!("5-1")).is_err());
+        assert!(parse_days(&json!([4294967297u64])).is_err());
+        assert!(parse_days(&json!("0,3")).is_err());
+    }
 }

@@ -1,68 +1,398 @@
 {
   "_说明": "账号健康状态：account_health(账号, 有没有保存凭据, 剩余天数) → level（ok / info / warn / error）、label（正常 / 注意 / 异常）和问题种类。Python 与 Rust 两边按同一份数据跑。",
   "cases": [
-    {"name": "Claude Code 正常", "has_creds": true, "days_left": 20,
-     "account": {"kind": "claude_code", "usage": {"error": null, "five_hour": {"utilization": 10}}},
-     "expect": {"level": "ok", "label": "正常", "kinds": []}},
-    {"name": "Claude Code 没有凭据", "has_creds": false, "days_left": null,
-     "account": {"kind": "claude_code", "usage": null},
-     "expect": {"level": "error", "label": "异常", "kinds": ["no_credentials"]}},
-    {"name": "没有凭据的报错不重复", "has_creds": false, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "没有保存凭据"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["no_credentials"]}},
-    {"name": "refresh token 失效", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "登录已失效（HTTP 400：invalid_grant），需要用这个账号重新登录 Claude Code 后 cam import"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["login_invalid"]}},
-    {"name": "没有 refresh token", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "登录已过期且没有 refresh token"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["login_invalid"]}},
-    {"name": "登录属于别的账号", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "这个账号保存的登录实际属于 b@x.com，可能被旧的 claude 会话覆盖了。"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["wrong_owner"]}},
-    {"name": "后台没替它续登录只是提示", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "登录已过期。后台不会替它续登录（避免和 Claude Code 抢 refresh token），手动刷新一次或切换到这个账号即可"}},
-     "expect": {"level": "info", "label": "正常", "kinds": ["stale"]}},
-    {"name": "网络错误", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "网络错误：timed out"}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["network"]}},
-    {"name": "续登录服务暂时失败", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "续登录失败（HTTP 503），稍后再试"}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["network"]}},
-    {"name": "服务端 5xx", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "HTTP 502：bad gateway"}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["network"]}},
-    {"name": "限流", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "HTTP 429：rate limited"}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["network"]}},
-    {"name": "其它报错", "has_creds": true, "days_left": null,
-     "account": {"kind": "claude_code", "usage": {"error": "HTTP 418：teapot"}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["usage_error"]}},
-    {"name": "订阅已过期", "has_creds": true, "days_left": -3,
-     "account": {"kind": "claude_code", "usage": {"error": null}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["expired"]}},
-    {"name": "今天到期不算过期", "has_creds": true, "days_left": 0,
-     "account": {"kind": "claude_code", "usage": {"error": null}},
-     "expect": {"level": "ok", "label": "正常", "kinds": []}},
-    {"name": "失效 + 过期：两条都列，取更严重的", "has_creds": true, "days_left": -1,
-     "account": {"kind": "claude_code", "usage": {"error": "登录已失效（HTTP 401），需要用这个账号重新登录 Claude Code 后 cam import"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["login_invalid", "expired"]}},
-    {"name": "网页号没填 sessionKey 是正常用法", "has_creds": false, "days_left": null,
-     "account": {"kind": "claude_web", "usage": {"error": "未填写 sessionKey。在浏览器登录 claude.ai 后复制 sessionKey"}},
-     "expect": {"level": "ok", "label": "正常", "kinds": []}},
-    {"name": "网页号 sessionKey 失效", "has_creds": false, "days_left": null,
-     "account": {"kind": "claude_web", "usage": {"error": "sessionKey 已过期或无效，请在浏览器里重新复制一次（见 cam set -h）。"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["session_invalid"]}},
-    {"name": "网页号被人机验证拦住", "has_creds": false, "days_left": null,
-     "account": {"kind": "claude_web", "usage": {"error": "claude.ai 返回了人机验证页（通常是网络被公司管控拦截，和账号无关）。"}},
-     "expect": {"level": "warn", "label": "注意", "kinds": ["network"]}},
-    {"name": "API Key 无效", "has_creds": false, "days_left": null,
-     "account": {"kind": "api", "usage": {"error": null, "key_valid": false}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["key_invalid"]}},
-    {"name": "没填 API Key", "has_creds": false, "days_left": null,
-     "account": {"kind": "api", "usage": {"error": "没有填写 API Key"}},
-     "expect": {"level": "error", "label": "异常", "kinds": ["key_invalid"]}},
-    {"name": "API Key 有效", "has_creds": false, "days_left": null,
-     "account": {"kind": "api", "usage": {"error": null, "key_valid": true, "cost_month_usd": 1.5}},
-     "expect": {"level": "ok", "label": "正常", "kinds": []}}
+    {
+      "name": "Claude Code 正常",
+      "has_creds": true,
+      "days_left": 20,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": null,
+          "five_hour": {
+            "utilization": 10
+          }
+        }
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "Claude Code 没有凭据",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": null
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "no_credentials"
+        ]
+      }
+    },
+    {
+      "name": "没有凭据的报错不重复",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "没有保存凭据"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "no_credentials"
+        ]
+      }
+    },
+    {
+      "name": "refresh token 失效",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "登录已失效（HTTP 400：invalid_grant），需要用这个账号重新登录 Claude Code 后 cam import"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "login_invalid"
+        ]
+      }
+    },
+    {
+      "name": "没有 refresh token",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "登录已过期且没有 refresh token"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "login_invalid"
+        ]
+      }
+    },
+    {
+      "name": "登录属于别的账号",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "这个账号保存的登录实际属于 b@x.com，可能被旧的 claude 会话覆盖了。"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "wrong_owner"
+        ]
+      }
+    },
+    {
+      "name": "后台没替它续登录只是提示",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "登录已过期。后台不会替它续登录（避免和 Claude Code 抢 refresh token），手动刷新一次或切换到这个账号即可"
+        }
+      },
+      "expect": {
+        "level": "info",
+        "label": "正常",
+        "kinds": [
+          "stale"
+        ]
+      }
+    },
+    {
+      "name": "网络错误",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "网络错误：timed out"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "network"
+        ]
+      }
+    },
+    {
+      "name": "续登录服务暂时失败",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "续登录失败（HTTP 503），稍后再试"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "network"
+        ]
+      }
+    },
+    {
+      "name": "服务端 5xx",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "HTTP 502：bad gateway"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "network"
+        ]
+      }
+    },
+    {
+      "name": "限流",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "HTTP 429：rate limited"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "network"
+        ]
+      }
+    },
+    {
+      "name": "其它报错",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "HTTP 418：teapot"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "usage_error"
+        ]
+      }
+    },
+    {
+      "name": "订阅已过期",
+      "has_creds": true,
+      "days_left": -3,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": null
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "expired"
+        ]
+      }
+    },
+    {
+      "name": "今天到期不算过期",
+      "has_creds": true,
+      "days_left": 0,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": null
+        }
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "失效 + 过期：两条都列，取更严重的",
+      "has_creds": true,
+      "days_left": -1,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "登录已失效（HTTP 401），需要用这个账号重新登录 Claude Code 后 cam import"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "login_invalid",
+          "expired"
+        ]
+      }
+    },
+    {
+      "name": "网页号没填 sessionKey 是正常用法",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "claude_web",
+        "usage": {
+          "error": "未填写 sessionKey。在浏览器登录 claude.ai 后复制 sessionKey"
+        }
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "网页号 sessionKey 失效",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "claude_web",
+        "usage": {
+          "error": "sessionKey 已过期或无效，请在浏览器里重新复制一次（见 cam set -h）。"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "session_invalid"
+        ]
+      }
+    },
+    {
+      "name": "网页号被人机验证拦住",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "claude_web",
+        "usage": {
+          "error": "claude.ai 返回了人机验证页（通常是网络被公司管控拦截，和账号无关）。"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "network"
+        ]
+      }
+    },
+    {
+      "name": "API Key 无效",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "api",
+        "usage": {
+          "error": null,
+          "key_valid": false
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "key_invalid"
+        ]
+      }
+    },
+    {
+      "name": "没填 API Key",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "api",
+        "usage": {
+          "error": "没有填写 API Key"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "key_invalid"
+        ]
+      }
+    },
+    {
+      "name": "API Key 有效",
+      "has_creds": false,
+      "days_left": null,
+      "account": {
+        "kind": "api",
+        "usage": {
+          "error": null,
+          "key_valid": true,
+          "cost_month_usd": 1.5
+        }
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "当前账号的登录过期了，等 Claude Code 自己续",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "当前登录的 access token 过期了，等 Claude Code 自己续"
+        }
+      },
+      "expect": {
+        "level": "info",
+        "label": "正常",
+        "kinds": [
+          "live_expired"
+        ]
+      }
+    }
   ]
 }
