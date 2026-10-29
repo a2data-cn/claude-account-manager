@@ -891,14 +891,14 @@ class CamTest(unittest.TestCase):
         lines = []
         cam_menu.render(store, {}, out=lines.append, rich=True)
         title = lines[0]
-        self.assertTrue(title.startswith("B | image="), title)  # 百分比画在环里，标题只剩名字
-        self.assertIn(" width=34 height=18", title)  # 额度环 18 + 空 3 + 信号格 13
+        self.assertTrue(title.startswith("B 75% | image="), title)  # 百分比是文字（系统字体清楚），图标只是四格信号
+        self.assertIn(" width=16 height=16", title)
         pics = re.search(r"image=(\S+)", title).group(1).split(",")
         self.assertEqual(len(pics), 2)
         for pic in pics:
             png = base64.b64decode(pic)
             self.assertTrue(png.startswith(b"\x89PNG"))
-            self.assertEqual(struct.unpack(">II", png[16:24]), (68, 36))  # 34 × 18 点，两倍像素
+            self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))  # 16 点，两倍像素
             self.assertIn(b"pHYs", png)
         # 红绿灯：没会话在跑、没问题时标题只有一行（右下角绿点），菜单第一行写“空闲 · 一切正常”
         self.assertEqual(lines[1], "---")
@@ -908,7 +908,7 @@ class CamTest(unittest.TestCase):
             busy = []
             cam_menu.render(store, {}, out=busy.append, rich=True)
         self.assertEqual(busy[2], "---", busy[:3])
-        self.assertTrue(busy[0].startswith("B | image=") and busy[1].startswith("B | image="), busy[:2])
+        self.assertTrue(busy[0].startswith("B 75% | image=") and busy[1].startswith("B 75% | image="), busy[:2])
         self.assertNotEqual(busy[0].split("image=")[1].split()[0], busy[1].split("image=")[1].split()[0])  # 两张图不一样
         self.assertTrue(all(" dropdown=false" in l for l in busy[:2]), busy[:2])
         self.assertIn(" shortcut=", busy[0])
@@ -924,18 +924,28 @@ class CamTest(unittest.TestCase):
             self.assertNotEqual(f0, f1)
             self.assertEqual(f0.split("\n---\n")[0].count("\n"), 0)  # 第一个 --- 前只有一行标题
             self.assertNotIn(" dropdown=false", f0)
-            self.assertTrue(f0.startswith("B | image="), f0[:40])
+            self.assertTrue(f0.startswith("B 75% | image="), f0[:40])
             # 模式两行当开关：打勾的是现在的模式，另一行点了就切
             self.assertIn('param2="mode" param3="classic"', f0)
-            self.assertIn("流式模式：插件常驻，信号格顺滑地涨落 | size=12 checked=true", f0)
+            self.assertIn("流式模式：插件常驻，动画顺滑 | size=12 checked=true", f0)
             self.assertTrue(any('param2="mode" param3="stream"' in l for l in lines), lines[-8:])
             self.assertTrue(any(l.startswith("经典模式：") and l.endswith(" checked=true") for l in lines), lines[-8:])
+            # 图标样式两行当开关：默认信号格打勾；选红绿灯后记在账号库 prefs 里，标题的图换了、红绿灯那行打勾
+            self.assertTrue(any(l.startswith("信号格") and l.endswith(" checked=true") for l in lines), lines[-4:])
+            self.assertTrue(any('param2="icon" param3="lamp"' in l for l in lines), lines[-4:])
+            self.assertEqual(cam_menu.set_icon_from_menu(store, "lamp"), 0)
+            self.assertEqual(store.load()["prefs"]["menu_icon"], "lamp")
+            lamp = []
+            cam_menu.render(store, {}, out=lamp.append, rich=True)
+            self.assertNotEqual(lamp[0].split("image=")[1].split()[0], lines[0].split("image=")[1].split()[0])
+            self.assertTrue(any(l.startswith("红绿灯") and l.endswith(" checked=true") for l in lamp), lamp[-4:])
+            cam_menu.set_icon_from_menu(store, "bars")
             i0, i1 = cam_menu.stream_frame(store, {}, 0.0), cam_menu.stream_frame(store, {}, 0.25)
             self.assertEqual(cam_menu.LAST_LIGHT[2], "")
             self.assertEqual(i0, i1)
         finally:
             cam_menu.STREAMING = False
-        rows = [l for l in lines[2:] if l.startswith(("A |", "B |"))]  # 标题行也是“B | image=…”，从 --- 后面数
+        rows = [l for l in lines[2:] if l.startswith(("A |", "B |"))]  # 从 --- 后面数，不算标题行
         self.assertEqual(len(rows), 2, lines)
         self.assertTrue(all('badge="Max' in l for l in rows), rows)
         # 全局快捷键：标题行 +C 打开菜单；账号行 +1 / +2 按添加顺序（当前号 B 排在最前，但它是第二个加的）
@@ -1019,7 +1029,8 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.run_cam("set", "B", "--label", "b@x.com"), 0)
         lines = []
         cam_menu.render(store, {}, out=lines.append, rich=True)
-        self.assertTrue(lines[0].startswith("2号 | image="), lines[0])
+        self.assertTrue(lines[0].startswith("2号 75% | image="), lines[0])
+        self.assertTrue(any(l.startswith("给“2号”起个短名") and 'param2="panel"' in l for l in lines), lines[:6])  # 显示序号时提示起名
         self.assertTrue(any(l.startswith("2 · b@x.com | sfimage=checkmark.circle.fill") and "shortcut=CTRL+OPTION+CMD+2" in l for l in lines), lines)
         self.assertEqual(self.run_cam("set", "2", "--label", "B"), 0)
         self.assertEqual([cam_menu.level_of(p) for p in (10, 70, 90)], ["ok", "warn", "bad"])

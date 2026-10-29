@@ -190,76 +190,67 @@ def quota_ring(p, dark, size=16, thick=2.5):
     return _png(S, S, _raster(S, S, [(ring, TRACK[dark]), (arc, (*FILL[level_of(p)][dark], 1.0))]))
 
 
-ICON_W, ICON_H = 34, 18  # 菜单栏图标（点）：额度环 18（百分比写在环里）+ 空 3 + 信号格 13
-INK = ((29, 28, 25), (242, 242, 240))  # 环里的数字，浅色 / 深色模式
-DIM = ((0, 0, 0, 0.2), (255, 255, 255, 0.3))  # 没亮的信号格
-# 环里的数字用的像素字：两位数 4×7，三位数（100）3×5
-FONT4 = {"0": ("0110", "1001", "1001", "1001", "1001", "1001", "0110"), "1": ("0010", "0110", "0010", "0010", "0010", "0010", "0111"),
-         "2": ("0110", "1001", "0001", "0010", "0100", "1000", "1111"), "3": ("1110", "0001", "0001", "0110", "0001", "0001", "1110"),
-         "4": ("0001", "0011", "0101", "1001", "1111", "0001", "0001"), "5": ("1111", "1000", "1110", "0001", "0001", "1001", "0110"),
-         "6": ("0110", "1000", "1110", "1001", "1001", "1001", "0110"), "7": ("1111", "0001", "0010", "0010", "0100", "0100", "0100"),
-         "8": ("0110", "1001", "1001", "0110", "1001", "1001", "0110"), "9": ("0110", "1001", "1001", "0111", "0001", "0001", "0110")}
-FONT3 = {"1": ("010", "110", "010", "010", "111"), "0": ("111", "101", "101", "101", "111")}
+ICON_W = ICON_H = 16  # 菜单栏图标（点）：四格信号
+DIM = ((0, 0, 0, 0.22), (255, 255, 255, 0.3))  # 没亮的信号格
+BODY = ((58, 58, 64, 0.88), (205, 205, 212, 0.6))  # 红绿灯样式的灯体，浅色 / 深色模式
+ICON_STYLES = (("bars", "信号格（像手机信号）"), ("lamp", "红绿灯（竖的三盏灯）"))
 
 
-def _glyphs(text, cx, cy, cell):
-    """一串数字摆在 (cx, cy) 正中，每个格子 cell 像素：返回 (在不在字里(x, y))。"""
-    font = FONT3 if len(text) > 2 else FONT4
-    gw, gh, gap = len(next(iter(font.values()))[0]), len(next(iter(font.values()))), 1
-    total = len(text) * gw + (len(text) - 1) * gap
-    x0, y0 = cx - total * cell / 2, cy - gh * cell / 2
+@functools.lru_cache(maxsize=256)
+def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
+    """菜单栏图标，两种样式：四格信号（像手机信号）或竖的小红绿灯，菜单里选。额度百分比用系统字体写在旁边的文字里，
+    菜单栏这么小，画出来的数字不如文字清楚。
 
-    def inside(px, py):
-        col, row = (px - x0) / cell, (py - y0) / cell
-        if row < 0 or row >= gh or col < 0 or col >= total:
-            return False
-        i, c = divmod(int(col), gw + gap)
-        return i < len(text) and c < gw and font.get(text[i], font["0"])[int(row)][c] == "1"
-    return inside
-
-
-@functools.lru_cache(maxsize=512)
-def status_icon(p, dark, level="ok", kind="", phase=0.0):
-    """菜单栏图标：左边额度环（已用比例画成弧，百分比写在环里），右边四格信号（像手机信号 📶）当红绿灯。
-
-    信号格的颜色是状态：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。kind="pulse"（工作中）时随 phase（0–1）
-    一格格涨上去再从头来，"blink"（等你确认）时全亮全灭；经典模式只有两帧（phase 0 和 0.5），流式模式每半秒一帧。画好的图按参数缓存。
+    颜色是状态：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。kind="pulse"（工作中）时随 phase（0–1）
+    信号格一格格涨上去再从头来 / 红绿灯的橙灯一呼一吸，"blink"（等你确认）时全亮全灭；经典模式只有两帧（phase 0 和 0.5），
+    流式模式每半秒一帧。画好的图按参数缓存。
     """
-    S, W = ICON_H * SCALE, ICON_W * SCALE
-    c, ro, ri = S / 2, S / 2, S / 2 - 2.2 * SCALE
-    sweep = 2 * math.pi * min(max(p or 0, 0), 100) / 100
+    S = ICON_H * SCALE
+    if style == "lamp":
+        bw, br, lr = 9 * SCALE, 3 * SCALE, 2.1 * SCALE  # 灯体宽、圆角，灯的半径
+        bx0, cx = (S - 9 * SCALE) / 2, S / 2
+        lamps = (("bad", 3.0 * SCALE), ("busy", 8.0 * SCALE), ("ok", 13.0 * SCALE))  # 红、橙、绿三盏灯的圆心 y
+        glow = 1.0
+        if kind == "pulse":
+            glow = 0.4 + 0.6 * (0.5 - 0.5 * math.cos(2 * math.pi * phase))
+        elif kind == "blink":
+            glow = 1.0 if phase < 0.5 else 0.2
+        base = BODY[dark]
 
-    def ring(px, py):
-        d = (px - c) ** 2 + (py - c) ** 2
-        return ri * ri <= d <= ro * ro
+        def body(px, py):
+            if not (bx0 <= px <= bx0 + bw):
+                return False
+            qx, qy = min(max(px, bx0 + br), bx0 + bw - br), min(max(py, br), S - br)
+            return (px - qx) ** 2 + (py - qy) ** 2 <= br * br
 
-    def arc(px, py):
-        return ring(px, py) and math.atan2(px - c, c - py) % (2 * math.pi) <= sweep
+        def lamp(cy):
+            return lambda px, py: (px - cx) ** 2 + (py - cy) ** 2 <= lr * lr
 
-    shapes = [(ring, TRACK[dark]), (arc, (*FILL[level_of(p or 0)][dark], 1.0))]
-    if p is not None:
-        shapes.append((_glyphs(str(int(round(min(p, 100)))), c, c, 2), (*INK[dark], 1.0)))
-    # 信号格：宽 2.5 点、间隔 1 点，高 5 / 8 / 11 / 14 点，底对齐，顶是圆的
+        def mix(tone, g):  # 从灯体色往灯色过渡 g；没亮的灯只透一点颜色
+            return (base[0] + (tone[0] - base[0]) * g, base[1] + (tone[1] - base[1]) * g, base[2] + (tone[2] - base[2]) * g,
+                    base[3] + (1 - base[3]) * g)
+
+        shapes = [(body, base)] + [(lamp(cy), mix(FILL[{"busy": "warn"}.get(lv, lv)][dark], glow if lv == level else 0.28)) for lv, cy in lamps]
+        return _png(S, S, _raster(S, S, shapes))
     lit = 4
     if kind == "pulse":
         lit = 1 + int(phase * 4) % 4
     elif kind == "blink":
         lit = 4 if phase < 0.5 else 0
-    bw, gap, r = 2.5 * SCALE, 1 * SCALE, 1.25 * SCALE
-    x0, bottom = (ICON_H + 3) * SCALE, S - 1 * SCALE
+    bw, gap, r = 3 * SCALE, 1 * SCALE, 1.5 * SCALE  # 格子宽 3 点、间隔 1 点、顶是圆的
+    bottom = S - 1 * SCALE
     tone = (*FILL[{"busy": "warn"}.get(level, level)][dark], 1.0)
 
     def bar(i, h):
-        cx, top = x0 + i * (bw + gap) + bw / 2, bottom - h * SCALE
+        cx, top = i * (bw + gap) + bw / 2, bottom - h * SCALE
 
         def inside(px, py):
             qy = min(max(py, top + r), bottom - r)
             return (px - cx) ** 2 + (py - qy) ** 2 <= r * r
         return inside
 
-    for i, h in enumerate((5, 8, 11, 14)):
-        shapes.append((bar(i, h), tone if i < lit else DIM[dark]))
-    return _png(W, S, _raster(W, S, shapes))
+    shapes = [(bar(i, h), tone if i < lit else DIM[dark]) for i, h in enumerate((4.5, 7.5, 10.5, 13.5))]
+    return _png(S, S, _raster(S, S, shapes))
 
 
 def image_param(draw, p, w, h):
@@ -553,7 +544,7 @@ def render(store, st, out=print, rich=None, phase=None):
             title_acc = web_with_usage[0]
 
     # ---- 菜单栏标题（标题行上的快捷键是“打开菜单”）
-    # rich 时图标是额度环加一个小信号灯；要动画时（工作中、等你确认）经典模式放两帧在标题里让 SwiftBar 每 5 秒轮换，
+    # rich 时图标是四格信号（红绿灯）；要动画时（工作中、等你确认）经典模式放两帧在标题里让 SwiftBar 每 5 秒轮换，
     # 流式模式（phase 给定）每帧只有一行标题，由 stream() 每半秒推一帧
     global LAST_LIGHT
     light = status_light(store, data, accs, active, st) if accs else None
@@ -561,8 +552,10 @@ def render(store, st, out=print, rich=None, phase=None):
     kind = light[2] if light else ""
     phases = [phase] if phase is not None else ([0.0, 0.5] if kind else [0.0])
 
-    def ring_icon(p, ph):
-        return image_param(lambda v, dark: status_icon(None if v is None else int(round(v)), dark, light[0], kind, ph), p, ICON_W, ICON_H)
+    style = (data.get("prefs") or {}).get("menu_icon") or "bars"  # 菜单里选的图标样式
+
+    def bars_icon(ph):
+        return image_param(lambda _v, dark: status_icon(dark, light[0], kind, ph, style), None, ICON_W, ICON_H)
 
     heads = []
     if not accs:
@@ -572,14 +565,14 @@ def render(store, st, out=print, rich=None, phase=None):
         # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
         # 不 rich 时用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
         name = title_name(title_acc, pos[title_acc["id"]]) if rich else short(title_acc.get("label") or title_acc.get("email"))
-        tail = f" color={color_for(p)}" if color_for(p) else ""
-        if rich:  # 百分比写在环里，标题只剩名字
-            heads += [f"{esc(name)} | " + ring_icon(p, ph) + tail for ph in phases]
+        text, tail = f"{esc(name)} {p:.0f}% | ", (f" color={color_for(p)}" if color_for(p) else "")
+        if rich:
+            heads += [text + bars_icon(ph) + tail for ph in phases]
         else:
-            heads.append(f"{esc(name)} {p:.0f}% | sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + tail)
+            heads.append(text + f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + tail)
     elif active:
         name = title_name(active, pos[active["id"]]) if rich else short(active.get("label") or active.get("email"))
-        heads += [f"{esc(name)} | " + ring_icon(None, ph) for ph in phases] if rich else [f"{esc(name)} | sfimage=person.2.circle"]
+        heads += [f"{esc(name)} | " + bars_icon(ph) for ph in phases] if rich else [f"{esc(name)} | sfimage=person.2.circle"]
     else:
         heads.append("Claude | sfimage=person.2.circle")
     extra = (mini_href(store, accs) if rich else "") + (" dropdown=false" if len(heads) > 1 else "")  # 多行标题不进下拉菜单
@@ -590,6 +583,8 @@ def render(store, st, out=print, rich=None, phase=None):
         c = {"ok": GREEN, "busy": YELLOW, "bad": RED}[light[0]]
         more = f"（还有 {light[3]} 项，见下面）" if light[3] else ""
         out(f"● {esc(light[1])}{more} | size=12 color={c} length={LINE}")
+        if rich and title_acc is not None and needs_number(title_acc):  # 菜单栏显示的是序号：提示起个短名（面板“编辑”里有昵称一键选）
+            out(f"给“{title_name(title_acc, pos[title_acc['id']])}”起个短名，菜单栏就显示名字（打开面板改） | size=12 sfimage=pencil {action('panel', refresh=False)}")
 
     if not accs:
         out("还没有账号 | color=gray")
@@ -753,10 +748,13 @@ def render(store, st, out=print, rich=None, phase=None):
         out(f"更新（{upd['behind']} 个新改动） | {action('update', script=MENU_PY)} sfimage=arrow.down.circle")
     out(f"检查更新 | {action('update-check', script=MENU_PY)} sfimage=arrow.triangle.2.circlepath")
     if rich:  # 经典 / 流式在菜单里切：两行当开关，打勾的是现在的模式，点另一行就切（重写启动脚本后重启 SwiftBar）
-        out(heading("信号格动画"))
-        for mode, label in (("classic", "经典模式：每分钟刷新一次，动画 5 秒一帧"), ("stream", "流式模式：插件常驻，信号格顺滑地涨落")):
+        out(heading("动画模式"))
+        for mode, label in (("classic", "经典模式：每分钟刷新一次，动画 5 秒一帧"), ("stream", "流式模式：插件常驻，动画顺滑")):
             on = (mode == "stream") == STREAMING
             out(f"{label} | size=12" + (" checked=true" if on else f" {action('mode', mode, script=MENU_PY, refresh=False)}"))
+        out(heading("图标样式"))
+        for key, label in ICON_STYLES:  # 打勾的是现在的样式，点另一行就换（记在账号库里）
+            out(f"{label} | size=12" + (" checked=true" if key == style else f" {action('icon', key, script=MENU_PY)}"))
     if st.get("bg_owner") == "other":
         out("自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
     elif st.get("last_refresh"):
@@ -860,10 +858,21 @@ def set_mode_from_menu(mode):
     return 0
 
 
+def set_icon_from_menu(store, style):
+    """菜单里选图标样式：记到账号库的 prefs 里（走 cam 的 Store），插件下一次渲染就换。"""
+    with store.lock():
+        data = store.load()
+        data.setdefault("prefs", {})["menu_icon"] = style
+        store.save(data)
+    return 0
+
+
 def main():
     store = cam.Store()
     if sys.argv[1:2] == ["stream"]:
         return stream(store)
+    if sys.argv[1:2] == ["icon"] and sys.argv[2:3] and sys.argv[2] in dict(ICON_STYLES):
+        sys.exit(set_icon_from_menu(store, sys.argv[2]))
     if sys.argv[1:2] == ["mode"] and sys.argv[2:3] and sys.argv[2] in ("stream", "classic"):
         sys.exit(set_mode_from_menu(sys.argv[2]))
     if sys.argv[1:2] == ["switch"] and len(sys.argv) > 2:  # 菜单里点了切换，见 switch_action
