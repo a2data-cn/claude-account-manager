@@ -44,7 +44,9 @@ PLUGIN_DIR="${PLUGIN_DIR/#\~/$HOME}"
 mkdir -p "$PLUGIN_DIR"
 
 # 4. 写入启动脚本（文件名里的 1m 表示每分钟刷新一次菜单）
-PLUGIN="$PLUGIN_DIR/claude-accounts.1m.sh"
+# 文件名就是弹窗的标题（“SwiftBar: Claude 账号”）；旧版本叫 claude-accounts.1m.sh，装新的时顺手删掉，免得出现两个图标
+PLUGIN="$PLUGIN_DIR/Claude 账号.1m.sh"
+rm -f "$PLUGIN_DIR/claude-accounts.1m.sh"
 cat > "$PLUGIN" <<EOF
 #!/bin/bash
 # <xbar.title>Claude 账号</xbar.title>

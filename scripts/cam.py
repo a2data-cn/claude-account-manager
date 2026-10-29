@@ -2285,22 +2285,28 @@ def owner_finder(data):
 
 
 def local_usage(data, days=30):
+    """本机 Claude Code 记录按天汇总：rows 按 (日期, 账号)，models 按 (日期, 模型)——面板用前者画每天的柱子、后者画按模型的分布。"""
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
     owner_of = owner_finder(data)
-    daily = {}  # (date, acc_id) -> dict
-    for ts, model, u in local_events(since):
-        owner = owner_of(ts) or "unattributed"
-        day = ts.astimezone().date().isoformat()
-        rec = daily.setdefault((day, owner), {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
-                                              "messages": 0, "cost_usd": 0.0})
+    daily, by_model = {}, {}  # (date, acc_id) -> dict；(date, model) -> dict
+
+    def add(table, key, u, cost):
+        rec = table.setdefault(key, {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "messages": 0, "cost_usd": 0.0})
         rec["input"] += int(u.get("input_tokens") or 0)
         rec["output"] += int(u.get("output_tokens") or 0)
         rec["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
         rec["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
         rec["messages"] += 1
-        rec["cost_usd"] += message_cost(model, u) or 0.0
-    out = [{"date": d, "account_id": a, **v, "cost_usd": round(v["cost_usd"], 4)} for (d, a), v in sorted(daily.items())]
-    return {"days": days, "rows": out}
+        rec["cost_usd"] += cost
+
+    for ts, model, u in local_events(since):
+        day = ts.astimezone().date().isoformat()
+        cost = message_cost(model, u) or 0.0
+        add(daily, (day, owner_of(ts) or "unattributed"), u, cost)
+        add(by_model, (day, model or "unknown"), u, cost)
+    rows = [{"date": d, "account_id": a, **v, "cost_usd": round(v["cost_usd"], 4)} for (d, a), v in sorted(daily.items())]
+    models = [{"date": d, "model": m, **v, "cost_usd": round(v["cost_usd"], 4)} for (d, m), v in sorted(by_model.items())]
+    return {"days": days, "rows": rows, "models": models}
 
 
 WINDOW_SECS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
@@ -2852,7 +2858,24 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "generated_at": now_iso()}
+            "risk_score": risk_score(risks), "sessions": {"count": session_count()}, "generated_at": now_iso()}
+
+
+_SESSION_CACHE = [0.0, 0]  # [上次数的时间, 个数]
+
+
+def session_count(max_age=20):
+    """正在运行的 Claude Code 会话数，给面板和卡片小面板的红绿灯显示用。
+
+    查进程表要几百毫秒（Windows 上要一秒多），所以缓存 max_age 秒；切换前的判断不走这里，用 running_claude_processes 现查。
+    """
+    now = time.monotonic()
+    if now - _SESSION_CACHE[0] > max_age:
+        try:
+            _SESSION_CACHE[:] = [now, len(running_claude_processes())]
+        except Exception:  # noqa: BLE001  数不出来就沿用上次的
+            _SESSION_CACHE[0] = now
+    return _SESSION_CACHE[1]
 
 
 def mask(s):

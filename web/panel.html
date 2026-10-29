@@ -33,6 +33,7 @@
   --hot-soft: #F6E3DD;
   --accent-soft: #F0D8CC;
   --focus: #C6613F;
+  --c1: #B5532F; --c2: #3E6EA8; --c3: #2F8F4E; --c4: #7656B4; --c5: #C07A12; --c6: #1A8FB0;  /* 图表的六个分类色，经色觉校验 */
   --radius-lg: 10px;
   --radius-sm: 7px;
   --control-h: 30px;
@@ -45,6 +46,7 @@
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
     --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
+    --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
     color-scheme: dark;
   }
 }
@@ -52,6 +54,7 @@
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
     --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
+    --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
     color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -216,6 +219,15 @@ section.block { margin-top: 22px; }
 section.block h2 { font-size: 14.5px; font-weight: 650; margin: 0 0 10px; }
 section.block .sec-head h2 { margin: 0; }
 .hint { color: var(--muted); font-size: 12.5px; }
+/* 起名助手：内置昵称一键选 */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -6px 0 4px; }
+.chips .lab { font-size: 11.5px; color: var(--muted); align-self: center; }
+.chips button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+.chips button:hover { border-color: var(--muted); }
+.name-tip { font-size: 11.5px; color: var(--muted); margin: 0 0 12px; }
+.name-tip.warn { color: var(--warn); }
+/* 切号规则现在的状态 */
+.rules-status { margin: 0 0 10px; padding: 8px 12px; border-radius: var(--radius-sm); background: var(--paper); font-size: 12.5px; line-height: 1.6; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 12px 14px; box-shadow: var(--shadow); }
 .panel > :first-child { margin-top: 0; }
 .panel > :last-child { margin-bottom: 0; }
@@ -318,23 +330,45 @@ details.src[open] summary::before { content: "▾"; }
   .env-facts div { white-space: normal; }
 }
 
-/* 本地消耗柱状图 */
-.bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 8px; }
-.bars .day { flex: 1; display: flex; flex-direction: column-reverse; min-width: 0; height: 100%; position: relative; }
-.bars .seg { width: 100%; }
-.bars .seg:last-child { border-radius: 2px 2px 0 0; }
-.bars .day:hover::after {
-  content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
-  background: var(--ink); color: var(--paper); font-size: 12px; padding: 4px 8px; border-radius: 4px; white-space: pre; z-index: 2;
-}
-.axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; }
-.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); margin-top: 10px; }
-.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+/* 本地消耗：顶上一排数字格，左边每天的柱子（按账号叠），右边按模型的占比 */
+.local-sum { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.local-sum .st { background: var(--paper); border-radius: var(--radius-sm); padding: 8px 12px; min-width: 0; }
+.local-sum b { display: block; font-size: 20px; font-weight: 650; letter-spacing: -.02em; line-height: 1.2; white-space: nowrap; }
+.local-sum span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
+.legend:empty { display: none; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .legend b { color: var(--ink); font-weight: 600; margin-left: 2px; }
-.local-sum { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
-.local-sum b { font-size: 22px; font-weight: 650; letter-spacing: -.02em; }
-.local-sum span { font-size: 12px; color: var(--muted); }
-.legend + .hint { margin: 10px 0 0; }
+.local-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(220px, 2fr); gap: 18px 28px; }
+.local-grid.solo { grid-template-columns: 1fr; }
+@media (max-width: 720px) { .local-grid { grid-template-columns: 1fr; } }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.chart-head span:first-child { color: var(--ink); font-weight: 600; }
+.bars-wrap { position: relative; height: 150px; }
+.grid-lines { position: absolute; inset: 0; pointer-events: none; }
+.grid-lines div { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--line); font-size: 10.5px; color: var(--muted); }
+.grid-lines div span { position: absolute; right: 0; top: -15px; }
+.bars { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 3px; }
+.bars .day { flex: 1; display: flex; flex-direction: column-reverse; gap: 2px; min-width: 0; height: 100%; position: relative; border-radius: 4px 4px 0 0; }
+.bars .day:hover { background: var(--paper); }
+.bars .seg { width: 100%; flex: none; }
+.bars .seg:last-child { border-radius: 4px 4px 0 0; }
+.bars .day:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 4px;
+  background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.5; padding: 5px 9px; border-radius: 6px; white-space: pre; z-index: 2; pointer-events: none; }
+.bars .day:first-child:hover::after, .bars .day:nth-child(2):hover::after, .bars .day:nth-child(3):hover::after { left: 0; transform: none; }
+.bars .day:last-child:hover::after, .bars .day:nth-last-child(2):hover::after, .bars .day:nth-last-child(3):hover::after { left: auto; right: 0; transform: none; }
+.axis { position: relative; height: 16px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.axis span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.axis span:first-child { transform: none; }
+.axis span:last-child { transform: translateX(-100%); }
+.models { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; align-content: start; }
+.models li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; font-size: 12.5px; align-items: baseline; }
+.models li b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.models li .v { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.models li .bar { grid-column: 1 / -1; height: 6px; background: var(--track); border-radius: 999px; overflow: hidden; }
+.models li .bar i { display: block; height: 100%; background: var(--bar); border-radius: 999px; min-width: 3px; }
+.models li .d { grid-column: 1 / -1; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.local-grid + .hint { margin: 12px 0 0; }
 
 /* 空状态 / 登录 */
 .empty { text-align: left; padding: 22px; }
@@ -456,9 +490,18 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <span class="sec-acts"><span class="seg-mini" role="group" aria-label="时间范围" id="local-range"></span></span></div>
     <div class="panel">
       <div class="local-sum" id="local-sum"></div>
-      <div class="bars" id="bars" role="img" aria-label="每日消耗柱状图"></div>
-      <div class="axis" id="axis"></div>
       <div class="legend" id="legend"></div>
+      <div class="local-grid" id="local-grid">
+        <div id="local-chart">
+          <div class="chart-head"><span>每天的折算金额</span><span>按账号叠，悬停看明细</span></div>
+          <div class="bars-wrap"><div class="grid-lines" id="gridlines" aria-hidden="true"></div><div class="bars" id="bars" role="img" aria-label="每日消耗柱状图"></div></div>
+          <div class="axis" id="axis" aria-hidden="true"></div>
+        </div>
+        <div id="local-models">
+          <div class="chart-head"><span>按模型</span><span>占折算金额的比例</span></div>
+          <ul class="models" id="models"></ul>
+        </div>
+      </div>
       <p class="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小。按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
     </div>
   </section>
@@ -466,6 +509,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   <section class="block" id="rules-block" hidden>
     <h2>切号规则</h2>
     <div class="panel">
+      <p class="rules-status" id="rules-status"></p>
       <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p>
       <ul class="rules" id="rules-list"></ul>
       <form class="rule-form" id="rule-form">
@@ -515,7 +559,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 <dialog id="dlg-edit">
   <form method="dialog" id="form-edit">
     <h3 id="edit-title">账号信息</h3>
-    <div class="field"><label for="f-label">名称</label><input id="f-label" name="label" maxlength="60"></div>
+    <div class="field"><label for="f-label">名称</label><input id="f-label" name="label" maxlength="60" autocomplete="off"></div>
+    <div class="chips" id="f-names"></div>
+    <p class="name-tip" id="f-name-tip"></p>
     <div class="row2">
       <div class="field"><label for="f-plan">套餐（自动获取失败时填）</label>
         <select id="f-plan" name="plan"><option value="">自动</option><option value="pro">Pro</option><option value="max">Max</option><option value="team">Team</option><option value="enterprise">Enterprise</option><option value="free">Free</option></select></div>
@@ -558,7 +604,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <p>当前账号的凭据会在导入前自动保存，不会丢。</p>
     </div>
     <div id="add-other" hidden>
-      <div class="field"><label for="a-label">名称</label><input id="a-label" name="label" maxlength="60"></div>
+      <div class="field"><label for="a-label">名称</label><input id="a-label" name="label" maxlength="60" autocomplete="off"></div>
+      <div class="chips" id="a-names"></div>
+      <p class="name-tip" id="a-name-tip"></p>
       <div class="field" id="aw-email"><label for="a-email">邮箱（可选）</label><input id="a-email" name="email" type="email"></div>
       <div id="add-desktop" class="hint" hidden>
         <p>只用 Claude 客户端时，每个账号首次登录一次即可；读取本地额度无需登录 Code 或网页版。每个账号使用独立的本机配置，会话过期后可能需要重新登录。切换和重新打开都会退出并重启电脑上的 Claude 桌面版，请先处理好其中正在运行的任务。打开 Claude 的“设置 → 用量”后可读取额度缓存更新；Claude Code 命令行账号单独切换。</p>
@@ -1058,7 +1106,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     };
   }
 
-  const COLORS = ["var(--accent)", "var(--ok)", "var(--live)", "var(--violet)", "var(--warn)", "#2D9BB0", "var(--muted)"];
+  // 图表的六个分类色（CSS 变量 --c1…--c6，浅色 / 深色各一套，经色觉校验）：颜色跟着账号走，按账号列表的顺序固定分配，换时间范围也不重排
+  const CHART = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
   const RANGES = [["1", "今天"], ["7", "7 天"], ["30", "30 天"]];
   let localRange = "7", localRep = null;
   try { localRange = RANGES.some(([v]) => v === localStorage.getItem("cam-local-range")) ? localStorage.getItem("cam-local-range") : "7"; } catch (_) {}
@@ -1067,36 +1116,71 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     catch (_) { localRep = null; }
     renderLocal();
   }
-  // 今天只看今天的记录（接口按“最近 N 天”取，会带上昨天的）；7 天 / 30 天画每天的柱子
+  // 模型 id 变成好认的名字：claude-opus-4-1-20250805 → Opus 4.1，claude-3-5-sonnet-20241022 → Sonnet 3.5
+  function modelName(m) {
+    const s = String(m || "").replace(/^.*?claude-/, "").replace(/-\d{8}$/, "");
+    const parts = s.split("-"), fam = parts.filter((p) => /^[a-z]+$/i.test(p)), ver = parts.filter((p) => /^\d+$/.test(p));
+    if (!fam.length) return !m || m === "unknown" ? "未知模型" : m;
+    return fam.map((f) => f[0].toUpperCase() + f.slice(1)).join(" ") + (ver.length ? " " + ver.join(".") : "");
+  }
+  // 参考线的间隔：1 / 2 / 5 × 10ⁿ，大约画三条
+  const niceStep = (max) => { const raw = max / 3, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p; };
+  // 今天只看今天的记录（接口按“最近 N 天”取，会带上昨天的）；7 天 / 30 天画每天的柱子（按账号叠）；右边按模型的占比
   function renderLocal() {
     const today = new Date().toLocaleDateString("sv-SE");
-    const rows = localRep ? localRep.rows.filter((r) => localRange !== "1" || r.date === today) : [];
+    const inRange = (r) => localRange !== "1" || r.date === today;
+    const rows = localRep ? localRep.rows.filter(inRange) : [];
+    const mrows = localRep ? (localRep.models || []).filter(inRange) : [];
     if (!state || !localRep || (!rows.length && localRange !== "1")) { $("#local-block").hidden = true; return; }
     $("#local-range").innerHTML = RANGES.map(([v, t]) => `<button type="button" data-range="${v}" aria-pressed="${v === localRange}">${t}</button>`).join("");
     const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
     const label = (id) => names[id] || "未归属";
-    const ids = [...new Set(rows.map((r) => r.account_id))];
-    const color = Object.fromEntries(ids.map((id, i) => [id, id === "unattributed" ? "var(--muted)" : COLORS[i % (COLORS.length - 1)]]));
+    const order = state.accounts.map((a) => a.id);
+    const rank = (id) => (order.indexOf(id) + 1 || 99);
+    const ids = [...new Set(rows.map((r) => r.account_id))].sort((a, b) => rank(a) - rank(b));
+    const color = Object.fromEntries(ids.map((id) => [id, order.includes(id) ? CHART[order.indexOf(id) % CHART.length] : "var(--muted)"]));
     const cost = (rs) => rs.reduce((n, r) => n + (r.cost_usd || 0), 0);
-    const sum = (k) => rows.reduce((n, r) => n + r[k], 0);
+    const sum = (k, rs = rows) => rs.reduce((n, r) => n + (r[k] || 0), 0);
+    const cr = sum("cache_read"), inp = sum("input") + sum("cache_write"), hit = inp + cr > 0 ? Math.round((cr / (inp + cr)) * 100) : null;
     $("#local-sum").innerHTML = rows.length
-      ? `<b>≈ ${usd(cost(rows))}</b><span>输出 ${wan(sum("output"))} · 输入和缓存写入 ${wan(sum("input") + sum("cache_write"))} · 缓存读取 ${wan(sum("cache_read"))} tokens · ${sum("messages")} 条消息</span>`
-      : `<b>≈ $0.00</b><span>今天还没有用过</span>`;
-    const days = [];
-    const n = Number(localRange);
+      ? `<div class="st"><b>≈ ${usd(cost(rows))}</b><span>${sum("messages")} 条消息 · 按 API 价折算</span></div>
+         <div class="st"><b>${wan(sum("output"))}</b><span>输出 tokens</span></div>
+         <div class="st"><b>${wan(inp)}</b><span>输入和缓存写入 tokens</span></div>
+         <div class="st"><b>${hit === null ? "–" : hit + "%"}</b><span>缓存命中 · 读取 ${wan(cr)}</span></div>`
+      : `<div class="st"><b>≈ $0.00</b><span>今天还没有用过</span></div>`;
+    $("#legend").innerHTML = ids.length > 1 || (ids.length === 1 && ids[0] === "unattributed")
+      ? ids.map((id) => `<span><i style="background:${color[id]}"></i>${esc(label(id))} <b>${usd(cost(rows.filter((r) => r.account_id === id)))}</b></span>`).join("") : "";
+    const days = [], n = Number(localRange);
     for (let i = n - 1; i >= 0 && n > 1; i--) days.push(new Date(Date.now() - i * 86400e3).toLocaleDateString("sv-SE"));
     const byDay = Object.fromEntries(days.map((d) => [d, []]));
     rows.forEach((r) => { if (byDay[r.date]) byDay[r.date].push(r); });
-    const max = Math.max(0.01, ...days.map((d) => cost(byDay[d])));
-    $("#bars").hidden = $("#axis").hidden = !days.length;
-    $("#bars").innerHTML = days.map((d) => {
-      const rs = byDay[d];
-      const tip = d + (rs.length ? "\n" + rs.map((r) => `${label(r.account_id)}：${usd(r.cost_usd || 0)} · 输出 ${wan(r.output)}`).join("\n") : "\n无");
-      return `<div class="day" data-tip="${esc(tip)}">${rs.map((r) =>
-        `<div class="seg" style="height:${((r.cost_usd || 0) / max) * 100}%;background:${color[r.account_id]}"></div>`).join("")}</div>`;
-    }).join("");
-    if (days.length) $("#axis").innerHTML = `<span>${days[0].slice(5)}</span><span>单日最多 ${usd(max)}</span><span>${days[days.length - 1].slice(5)}</span>`;
-    $("#legend").innerHTML = ids.map((id) => `<span><i style="background:${color[id]}"></i>${esc(label(id))} <b>${usd(cost(rows.filter((r) => r.account_id === id)))}</b></span>`).join("");
+    const max = Math.max(0.01, ...days.map((d) => cost(byDay[d]))), top = max * 1.12;  // 顶上留一点空，最高的柱子不顶到边
+    $("#local-chart").hidden = !days.length;
+    $("#local-grid").classList.toggle("solo", !days.length);
+    if (days.length) {
+      const step = niceStep(top), ticks = [];
+      for (let v = step; v <= top; v += step) ticks.push(v);
+      $("#gridlines").innerHTML = ticks.map((v) => `<div style="bottom:${(v / top) * 100}%"><span>${v >= 10 ? "$" + Math.round(v) : usd(v)}</span></div>`).join("");
+      const lab = (d) => d.slice(5).replace("-", "/");
+      $("#bars").innerHTML = days.map((d) => {
+        const rs = byDay[d].slice().sort((a, b) => rank(a.account_id) - rank(b.account_id));
+        const tip = `${lab(d)} · ${usd(cost(rs))}` + (rs.length ? "\n" + rs.map((r) => `${label(r.account_id)}：${usd(r.cost_usd || 0)} · 输出 ${wan(r.output)} · ${r.messages} 条`).join("\n") : "\n没有记录");
+        return `<div class="day" data-tip="${esc(tip)}">${rs.map((r) => `<div class="seg" style="height:${((r.cost_usd || 0) / top) * 100}%;background:${color[r.account_id]}"></div>`).join("")}</div>`;
+      }).join("");
+      const marks = (n > 7 ? [0, 7, 14, 21, n - 1] : [0, n - 1]).filter((i) => i < n);
+      $("#axis").innerHTML = marks.map((i) => `<span style="left:${i === 0 ? 0 : i === n - 1 ? 100 : ((i + .5) / n) * 100}%">${lab(days[i])}</span>`).join("");
+    }
+    const byModel = {};
+    mrows.forEach((r) => {
+      const m = byModel[r.model] || (byModel[r.model] = { cost: 0, output: 0, messages: 0, tokens: 0 });
+      m.cost += r.cost_usd || 0; m.output += r.output || 0; m.messages += r.messages || 0;
+      m.tokens += (r.input || 0) + (r.output || 0) + (r.cache_write || 0) + (r.cache_read || 0);
+    });
+    const models = Object.entries(byModel).sort((a, b) => b[1].cost - a[1].cost);
+    const mtotal = models.reduce((t, [, m]) => t + m.cost, 0) || 1;
+    $("#local-models").hidden = !models.length;
+    $("#models").innerHTML = models.slice(0, 8).map(([m, v]) => `<li title="${esc(m)}"><b>${esc(modelName(m))}</b><span class="v">${usd(v.cost)} · ${Math.round((v.cost / mtotal) * 100)}%</span>
+      <span class="bar"><i style="width:${(v.cost / mtotal) * 100}%"></i></span><span class="d">输出 ${wan(v.output)} · 共 ${wan(v.tokens)} tokens · ${v.messages} 条</span></li>`).join("");
     $("#local-block").hidden = false;
   }
   $("#local-range").addEventListener("click", (e) => {
@@ -1277,6 +1361,39 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     doSwitch(id, btn, mode);
   });
 
+  // ---- 起名：内置昵称一键选，也可以自己填。规范：6 个字以内（菜单栏才放得下，超过就显示成“1号”这样的序号）、不用邮箱、一个号一个名
+  const NICKS = ["工作号", "个人号", "公司号", "团队号", "备用号", "测试号", "主号", "副号", "海外号", "家里号"];
+  const cpLen = (s) => [...String(s || "")].length;
+  function nameSuggestions(acc) {
+    const used = new Set(state.accounts.filter((a) => !acc || a.id !== acc.id).map((a) => a.label));
+    const base = [];
+    const plan = acc && PLAN[acc.plan_display];
+    if (plan && plan !== "API") base.push(`${plan}号`);
+    base.push(...NICKS);
+    const out = [];
+    for (const n of base) {
+      let v = n;
+      for (let i = 2; used.has(v) && i < 10; i++) v = n.replace(/号$/, "") + i + "号";  // 工作号用过了就 工作2号
+      if (!used.has(v) && !out.includes(v)) out.push(v);
+    }
+    return out.slice(0, 8);
+  }
+  function nameTip(v, acc) {
+    if (!v) return ["不填就用邮箱当名字，菜单栏会显示成序号", ""];
+    if (v.includes("@")) return ["邮箱太长，菜单栏会显示成“1号”这样的序号；起个短名更好认", "warn"];
+    if (cpLen(v) > 6) return [`${cpLen(v)} 个字，菜单栏放不下会显示成序号；6 个字以内最好`, "warn"];
+    if (state.accounts.some((a) => a.label === v && (!acc || a.id !== acc.id))) return ["已经有一个号叫这个名字了，会分不清", "warn"];
+    return [`菜单栏、命令行（cam switch ${v}）、聊天机器人里都用这个名字`, ""];
+  }
+  function wireNames(box, input, tip, acc) {
+    const sug = nameSuggestions(acc);
+    box.innerHTML = sug.length ? `<span class="lab">一键选：</span>` + sug.map((n) => `<button type="button" data-name="${esc(n)}">${esc(n)}</button>`).join("") : "";
+    box.onclick = (e) => { const b = e.target.closest("[data-name]"); if (!b) return; input.value = b.dataset.name; input.dispatchEvent(new Event("input")); input.focus(); };
+    const upd = () => { const [t, cls] = nameTip(input.value.trim(), acc); tip.textContent = t; tip.className = "name-tip " + cls; };
+    input.oninput = upd;
+    upd();
+  }
+
   // ---- 编辑
   let editing = null;
   function openEdit(a) {
@@ -1284,6 +1401,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const m = a.manual || {};
     $("#edit-title").textContent = `编辑：${a.label || a.email || ""}`;
     $("#f-label").value = a.label || "";
+    wireNames($("#f-names"), $("#f-label"), $("#f-name-tip"), a);
     $("#f-plan").value = m.plan || "";
     document.querySelector('label[for="f-plan"]').textContent = a.kind === "claude_desktop" ? "套餐（手动记录）" : "套餐（自动获取失败时填）";
     $("#f-plan").options[0].textContent = a.kind === "claude_desktop" ? "未填写" : "自动";
@@ -1357,7 +1475,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     $("#btn-add-ok").textContent = k === "claude_code" ? "导入当前登录" : "添加";
   }
   $("#a-kind").onchange = syncAddKind;
-  function openAdd() { $("#form-add").reset(); syncAddKind(); $("#dlg-add").returnValue = ""; $("#dlg-add").showModal(); }
+  function openAdd() {
+    $("#form-add").reset(); syncAddKind();
+    wireNames($("#a-names"), $("#a-label"), $("#a-name-tip"), null);
+    $("#dlg-add").returnValue = ""; $("#dlg-add").showModal();
+  }
   $("#dlg-add").addEventListener("close", async () => {
     if ($("#dlg-add").returnValue !== "ok") return;
     const kind = $("#a-kind").value;
@@ -1410,6 +1532,43 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const prev = ((wd + 5) % 7) + 1;
     return (r.days.includes(wd) && mins >= st) || (r.days.includes(prev) && mins < en);
   }
+  // 下一次会自动切换的时间段（7 天内）
+  function nextWindow(rs, now = new Date()) {
+    let best = null;
+    for (const r of rs) {
+      const [h, m] = r.start.split(":").map(Number);
+      for (let d = 0; d <= 7; d++) {
+        const t = new Date(now.getFullYear(), now.getMonth(), now.getDate() + d, h, m);
+        const wd = t.getDay() === 0 ? 7 : t.getDay();
+        if (t > now && r.days.includes(wd) && (!best || t < best.at)) best = { at: t, rule: r };
+      }
+    }
+    if (!best) return null;
+    const days = Math.round((new Date(best.at).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 86400000);
+    return { ...best, text: `${days === 0 ? "今天" : days === 1 ? "明天" : "周" + "一二三四五六日"[(best.at.getDay() + 6) % 7]} ${best.rule.start}` };
+  }
+  // 规则现在处于什么状态：没规则时默认是什么、在不在时间段里、下一次什么时候切
+  function rulesStatus(names) {
+    const timeRules = rules.rules.filter((r) => r.type === "time"), dirRules = rules.rules.filter((r) => r.type === "dir");
+    const live = timeRules.find((r) => inWindow(r)), nxt = nextWindow(timeRules), pend = state.pending_switch;
+    const lines = [];
+    if (!rules.rules.length) {
+      lines.push(`<b>现在：没有规则</b>，不会自动切号，换不换都由你点。默认只做一件事：当前号 5 小时额度超过 <b>${rules.alert_threshold}%</b> 时提醒（不自动换号）。`);
+    } else {
+      if (live) {
+        const on = state.active && state.active.claude_code === live.account;
+        lines.push(`<b>现在：</b>在“${esc(dayText(live.days))} ${esc(live.start)}–${esc(live.end)}”时间段里，该用 <b>${esc(names[live.account] || "已删除的账号")}</b>`
+          + (on ? "（正在用）" : pend && pend.account === live.account ? "（有会话在跑，等它们退出再切）" : "（你手动换了号，时间段内不会改回去）"));
+      } else {
+        lines.push(`<b>现在：</b>${timeRules.length ? "不在任何时间段里，用的是你手动选的号" : "没有时间规则，用的是你手动选的号"}`
+          + (nxt ? `；下一次自动切换：${esc(nxt.text)} → <b>${esc(names[nxt.rule.account] || "已删除的账号")}</b>` : ""));
+      }
+      if (dirRules.length) lines.push(`${dirRules.length} 条目录规则只在用 <code>cam claude</code> 启动时生效。`);
+      lines.push(`额度超过 <b>${rules.alert_threshold}%</b> 时提醒，不自动换号。`);
+    }
+    lines.push("规则改完马上保存，后台每分钟检查一次；只在进入时间段那一刻切一次。");
+    return lines.join("<br>");
+  }
   function renderRules() {
     const codeAccs = state.accounts.filter((a) => a.kind === "claude_code");
     const block = $("#rules-block");
@@ -1423,6 +1582,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         → <b>${esc(names[r.account] || "已删除的账号")}</b>${firstLive && firstLive.id === r.id ? '<span class="now">当前时间段</span>' : ""}</span>
       <button class="btn quiet" data-act="rule-rm" data-id="${esc(r.id)}">删除</button></li>`).join("")
       : `<li class="hint">还没有规则。比如：工作日 9:00–18:00 自动用工作号。</li>`;
+    $("#rules-status").innerHTML = rulesStatus(names);
     const sel = $("#r-acc"), keep = sel.value;
     sel.innerHTML = codeAccs.map((a) => `<option value="${esc(a.id)}">${esc(nameOf(a))}</option>`).join("");
     if (keep && codeAccs.some((a) => a.id === keep)) sel.value = keep;

@@ -42,7 +42,16 @@ REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
 HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
 # 点菜单栏图标弹出的卡片小面板（SwiftBar 的 webview，页面是 cam serve 的 /mini）；CAM_MENU_MINI=0 关掉，只用系统菜单
 MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
-MINI_SIZE = (340, 470)
+MINI_WIDTH = 340
+# 量出来的高度：一个账号（红绿灯 + 当前号卡片 + 两个按钮 + 页脚）、“其它账号”标题、每行两张药丸卡（含间距）；到上限后整页上下滑
+MINI_BASE, MINI_SEC, MINI_ROW, MINI_MAX = 394, 24, 66, 600
+
+
+def mini_size(accs):
+    """弹窗的宽、高：按卡片里要放的账号数算（API 账号不在卡片里），账号多了到上限后整页上下滑。"""
+    n = sum(1 for a in accs if a.get("kind") != "api")
+    rows = (max(0, n - 1) + 1) // 2
+    return MINI_WIDTH, min(MINI_MAX, MINI_BASE + (MINI_SEC + rows * MINI_ROW if rows else 0))
 LINE = 40  # 提醒、建议这类长句最多显示多少个字（SwiftBar 的 length 参数：截短，完整内容放鼠标悬停提示），免得把菜单撑得很宽
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
 
@@ -355,7 +364,7 @@ def _background_work(store):
     return st
 
 
-def mini_href(store):
+def mini_href(store, accs):
     """标题行的 href + webview 参数：左键点图标弹出卡片小面板，右键还是系统菜单。
 
     要本机有 cam serve 在跑，没有就在后台起一个（只监听 127.0.0.1）；在跑的是桌面版的服务时没有这个页面，就不加。
@@ -374,7 +383,8 @@ def mini_href(store):
             notify("面板已更新", "后台的 cam serve 用的是旧代码，已重启（自己用 cam serve --lan 开的要重开一次）")
     except Exception:  # noqa: BLE001  起不来就只用系统菜单
         return ""
-    return f" href=http://127.0.0.1:{port}/mini?t={token} webview=true webvieww={MINI_SIZE[0]} webviewh={MINI_SIZE[1]}"
+    w, h = mini_size(accs)
+    return f" href=http://127.0.0.1:{port}/mini?t={token} webview=true webvieww={w} webviewh={h}"
 
 
 def bg_error(store, st):
@@ -427,7 +437,7 @@ def render(store, st, out=print, rich=None):
         head = f"{esc(name)} | sfimage=person.2.circle"
     else:
         head = "Claude | sfimage=person.2.circle"
-    out(head + (mini_href(store) if rich else "") + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
+    out(head + (mini_href(store, accs) if rich else "") + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
     out("---")
 
     if not accs:

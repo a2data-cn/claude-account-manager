@@ -905,22 +905,40 @@ fn round4(x: f64) -> f64 {
 pub fn local_usage(data: &Value, days: i64) -> Value {
     let since = Utc::now() - chrono::Duration::days(days);
     let owner_of = owner_finder(data);
-    // (日期, 账号) -> ([input, output, cache_write, cache_read, messages], 金额)
-    let mut daily: std::collections::BTreeMap<(String, String), ([i64; 5], f64)> =
-        Default::default();
+    // (日期, 账号) -> ([input, output, cache_write, cache_read, messages], 金额)；按 (日期, 模型) 的一份给面板画模型分布
+    type Rec = ([i64; 5], f64);
+    let mut daily: std::collections::BTreeMap<(String, String), Rec> = Default::default();
+    let mut by_model: std::collections::BTreeMap<(String, String), Rec> = Default::default();
+    let add = |rec: &mut Rec, u: &Value, cost: f64| {
+        rec.0[0] += count(u, "input_tokens");
+        rec.0[1] += count(u, "output_tokens");
+        rec.0[2] += count(u, "cache_creation_input_tokens");
+        rec.0[3] += count(u, "cache_read_input_tokens");
+        rec.0[4] += 1;
+        rec.1 += cost;
+    };
     for (ts, model, u) in local_events(since) {
         let owner = owner_of(ts).unwrap_or_else(|| "unattributed".to_string());
         let day = ts
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d")
             .to_string();
-        let (rec, cost) = daily.entry((day, owner)).or_insert(([0; 5], 0.0));
-        rec[0] += count(&u, "input_tokens");
-        rec[1] += count(&u, "output_tokens");
-        rec[2] += count(&u, "cache_creation_input_tokens");
-        rec[3] += count(&u, "cache_read_input_tokens");
-        rec[4] += 1;
-        *cost += message_cost(&model, &u).unwrap_or(0.0);
+        let cost = message_cost(&model, &u).unwrap_or(0.0);
+        let name = if model.is_empty() {
+            "unknown".to_string()
+        } else {
+            model
+        };
+        add(
+            daily.entry((day.clone(), owner)).or_insert(([0; 5], 0.0)),
+            &u,
+            cost,
+        );
+        add(
+            by_model.entry((day, name)).or_insert(([0; 5], 0.0)),
+            &u,
+            cost,
+        );
     }
     let rows: Vec<Value> = daily
         .into_iter()
@@ -929,7 +947,14 @@ pub fn local_usage(data: &Value, days: i64) -> Value {
                    "cache_read": r[3], "messages": r[4], "cost_usd": round4(cost)})
         })
         .collect();
-    json!({"days": days, "rows": rows})
+    let models: Vec<Value> = by_model
+        .into_iter()
+        .map(|((d, m), (r, cost))| {
+            json!({"date": d, "model": m, "input": r[0], "output": r[1], "cache_write": r[2],
+                   "cache_read": r[3], "messages": r[4], "cost_usd": round4(cost)})
+        })
+        .collect();
+    json!({"days": days, "rows": rows, "models": models})
 }
 
 const WINDOW_SECS: [(&str, i64); 2] = [("five_hour", 5 * 3600), ("seven_day", 7 * 86400)];

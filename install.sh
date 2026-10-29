@@ -67,7 +67,7 @@ swiftbar_plugin() {
   local dir="${CAM_SWIFTBAR_DIR:-}"  # 测试时指到临时目录
   [[ -n "$dir" ]] || dir="$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)"
   dir="${dir:-$HOME/Library/Application Support/SwiftBar/Plugins}"
-  echo "${dir/#\~/$HOME}/claude-accounts.1m.sh"
+  echo "${dir/#\~/$HOME}/Claude 账号.1m.sh"
 }
 
 # 后台 cam serve 的 systemd 用户服务：不加 --lan，只监听 127.0.0.1
@@ -121,8 +121,9 @@ uninstall() {
     step "菜单栏小工具"
     local plugin
     plugin="$(swiftbar_plugin)"
-    if [[ -f "$plugin" ]]; then
-      rm -f "$plugin"
+    old_plugin="$(dirname "$plugin")/claude-accounts.1m.sh"  # 旧版本的文件名
+    if [[ -f "$plugin" || -f "$old_plugin" ]]; then
+      rm -f "$plugin" "$old_plugin"
       open -g "swiftbar://refreshallplugins" 2>/dev/null || true
       ok "已删除插件 ${plugin}（SwiftBar 本身留着，不用了可以把它从“应用程序”里删掉）"
     else

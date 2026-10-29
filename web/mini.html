@@ -5,27 +5,47 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude 账号</title>
 <style>
-/* 菜单栏小工具点开的卡片小面板：340 宽，照 macOS 控制中心的样子——大圆角的玻璃卡片、左边圆形图标、滑杆式的额度条 */
+/* 菜单栏小工具点开的卡片小面板：340 宽，高度由插件按账号数算，账号多了整页上下滑。
+   照 macOS 控制中心的样子——大圆角的玻璃卡片、左边圆形图标、滑杆式的额度条；顶上一条红绿灯状态 */
 :root {
   --paper: #E8E6E0; --tile: rgba(255, 255, 255, .62); --tile-line: rgba(255, 255, 255, .7); --tile-hover: rgba(255, 255, 255, .8);
+  --toast: rgba(255, 255, 255, .94);
   --ink: #1D1C19; --muted: #6E6857; --track: rgba(0, 0, 0, .1); --fill: #1D1C19;
   --accent: #D97757; --accent-ink: #FFF6EE; --circle: rgba(0, 0, 0, .08);
   --warn: #C7801A; --hot: #D64B3A; --live: #2F8A55; --violet: #7656B4; --ok: #3E6EA8;
+  --g: #34C759; --y: #FF9F0A; --r: #FF3B30;
   --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root { --paper: #1C1C1E; --tile: rgba(255, 255, 255, .09); --tile-line: rgba(255, 255, 255, .1); --tile-hover: rgba(255, 255, 255, .15);
+    --toast: rgba(44, 44, 46, .96);
     --ink: #F2F2F0; --muted: #A5A39C; --track: rgba(255, 255, 255, .16); --fill: #F2F2F0; --circle: rgba(255, 255, 255, .14);
-    --warn: #F0A742; --hot: #F07A6A; --live: #6FD08E; --violet: #B49AEF; --ok: #7FA6E0; color-scheme: dark; }
+    --warn: #F0A742; --hot: #F07A6A; --live: #6FD08E; --violet: #B49AEF; --ok: #7FA6E0;
+    --g: #30D158; --y: #FF9F0A; --r: #FF453A; color-scheme: dark; }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--paper); color: var(--ink); }
 body { font: 13px/1.45 var(--sans); font-variant-numeric: tabular-nums; padding: 10px; -webkit-user-select: none; user-select: none; }
 button { font: inherit; color: inherit; }
-.grid { display: grid; gap: 8px; }
-.tile { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 22px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); padding: 12px 14px;
+.grid { display: grid; gap: 8px; align-content: start; }
+.glass { background: var(--tile); border: 1px solid var(--tile-line); box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
   -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+.tile { border-radius: 22px; padding: 12px 14px; }
+/* 红绿灯：绿 = 空闲正常，黄 = 工作中 / 要注意 / 等你确认，红 = 要处理 */
+.light { display: flex; align-items: center; gap: 9px; padding: 7px 12px 7px 11px; border-radius: 999px; font-size: 12px; }
+.light .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--g); box-shadow: 0 0 0 3px rgba(52, 199, 89, .22); }
+.light.busy .dot { background: var(--y); box-shadow: 0 0 0 3px rgba(255, 159, 10, .24); }
+.light.bad .dot { background: var(--r); box-shadow: 0 0 0 3px rgba(255, 59, 48, .22); }
+.light .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.light .more { flex: none; font-size: 10.5px; color: var(--muted); background: var(--circle); border-radius: 999px; padding: 1px 6px; }
+.light.ask { flex-wrap: wrap; border-radius: 18px; padding: 9px 12px; }
+.light.ask .txt { white-space: normal; flex-basis: calc(100% - 19px); line-height: 1.4; }
+.light .btns { display: flex; gap: 6px; flex-basis: 100%; justify-content: flex-end; }
+.light .btns button { font-size: 11.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--tile-line); background: var(--circle); cursor: pointer; }
+.light .btns button.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.light .btns button:disabled { opacity: .6; cursor: progress; }
+/* 当前账号：左边圆形里是额度环 */
 .who { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 12px; align-items: center; }
 .circle { width: 56px; height: 56px; border-radius: 50%; background: var(--circle); display: grid; place-items: center; }
 .circle.on { background: var(--accent); }
@@ -58,22 +78,28 @@ button { font: inherit; color: inherit; }
 .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--fill); min-width: 7px; }
 .bar i.warn { background: var(--warn); }
 .bar i.hot { background: var(--hot); }
+/* 本机今天的消耗：三个小格 */
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
+.stat { background: var(--circle); border-radius: 12px; padding: 7px 9px; min-width: 0; }
+.stat b { display: block; font-size: 15px; font-weight: 650; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat span { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat.note { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); padding: 6px 10px; }
 /* 其它账号：药丸形的小卡，左边圆圈里是小环 */
 .pills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .pills.one { grid-template-columns: 1fr; }
 .acc { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 0 10px; align-items: center; width: 100%; text-align: left; cursor: pointer;
-  background: var(--tile); border: 1px solid var(--tile-line); border-radius: 999px; padding: 8px 12px 8px 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
-  transition: background-color .12s, transform .12s; -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+  border-radius: 999px; padding: 8px 12px 8px 8px; transition: background-color .12s, transform .12s; }
 .acc:hover { background: var(--tile-hover); transform: translateY(-1px); }
 .acc:disabled { cursor: progress; opacity: .6; transform: none; }
 .acc .circle { width: 40px; height: 40px; }
 .acc .name b { font-size: 13px; }
+.acc .chip { font-size: 9.5px; padding: 0 6px; }
 .acc > span:last-child { display: grid; min-width: 0; }
 .acc .sub { font-size: 11px; }
 /* 底下一排圆按钮，像控制中心的那种 */
 .acts { display: flex; justify-content: center; gap: 18px; margin: 4px 0 2px; }
 .act { display: grid; justify-items: center; gap: 4px; background: none; border: 0; cursor: pointer; color: var(--ink); padding: 0; }
-.act .circle { width: 48px; height: 48px; background: var(--tile); border: 1px solid var(--tile-line); box-shadow: 0 1px 3px rgba(0, 0, 0, .06); transition: background-color .12s, transform .12s; }
+.act .circle { width: 48px; height: 48px; transition: background-color .12s, transform .12s; }
 .act:hover .circle { background: var(--tile-hover); transform: translateY(-1px); }
 .act:disabled { cursor: progress; opacity: .6; }
 .act svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -82,7 +108,9 @@ button { font: inherit; color: inherit; }
 .foot { display: flex; justify-content: space-between; gap: 8px; margin: 2px 6px 0; font-size: 11px; color: var(--muted); }
 .foot .risk.medium { color: var(--warn); }
 .foot .risk.high { color: var(--hot); font-weight: 600; }
-.msg { padding: 8px 12px; border-radius: 14px; font-size: 12px; background: var(--tile); border: 1px solid var(--tile-line); color: var(--live); }
+/* 操作结果：浮在底部，不把布局往下挤 */
+.msg { position: fixed; left: 10px; right: 10px; bottom: 10px; z-index: 9; padding: 8px 12px; border-radius: 14px; font-size: 12px;
+  background: var(--toast); border: 1px solid var(--tile-line); color: var(--live); box-shadow: 0 4px 14px rgba(0, 0, 0, .14); }
 .msg.bad { color: var(--hot); }
 .msg.wait { color: var(--ink); }
 .empty { text-align: center; color: var(--muted); font-size: 12.5px; padding: 6px 0; }
@@ -90,7 +118,7 @@ button { font: inherit; color: inherit; }
 </style>
 </head>
 <body>
-<main id="main" class="grid"><div class="tile empty">正在读取…</div></main>
+<main id="main" class="grid"><div class="tile glass empty">正在读取…</div></main>
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
@@ -102,7 +130,7 @@ button { font: inherit; color: inherit; }
     refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>',
     panel: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 9h18"/><circle cx="6.5" cy="7" r=".6"/></svg>',
   };
-  let state = null, busy = false, msg = null;
+  let state = null, local = null, busy = false, msg = null, ask = null;  // ask：点了别的号、有会话在跑，等用户选怎么切
 
   async function api(method, path, body) {
     const res = await fetch(path, { method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
@@ -126,6 +154,13 @@ button { font: inherit; color: inherit; }
   }
   const pct = (w) => w && w.utilization !== null && w.utilization !== undefined ? Math.max(0, Math.min(100, w.utilization)) : null;
   const lv = (p) => p >= 90 ? "hot" : p >= 70 ? "warn" : "";
+  const wan = (n) => n >= 1e8 ? `${(n / 1e8).toFixed(1)}亿` : n >= 1e4 ? `${(n / 1e4).toFixed(n < 1e5 ? 1 : 0)}万` : String(Math.round(n));
+  const usd = (v) => v >= 100 ? `$${v.toFixed(0)}` : v >= 10 ? `$${v.toFixed(1)}` : `$${v.toFixed(2)}`;
+  const pad = (n) => String(n).padStart(2, "0");
+  const cpLen = (s) => [...String(s || "")].length;
+  // 和菜单栏插件一个规则：名字是邮箱、没有名字或超过 6 个字时显示成“1号”这样的序号（按添加顺序，和快捷键的数字一致）
+  const needsNumber = (a) => !a.label || a.label.includes("@") || cpLen(a.label) > 6;
+  const nameOf = (a, pos) => needsNumber(a) ? `${pos[a.id]}号` : a.label;
   function ring(p, size, stroke) {
     const r = size / 2 - stroke / 2 - 1, c = 2 * Math.PI * r, v = p === null ? 0 : p;
     return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
@@ -144,43 +179,94 @@ button { font: inherit; color: inherit; }
     if (p === null) return "";
     return `<div class="meter"><div class="lab"><span>${esc(label)}${tail ? ` · ${esc(tail)}` : ""}</span><b>${p.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p)}" style="width:${p}%"></i></div></div>`;
   }
+  // 本机今天的消耗（Claude Code 的本地记录，按 API 价折算）：tokens、缓存命中率、折算金额
+  function todayStats(cur) {
+    if (!local) return null;
+    const d = new Date(), key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const rows = (local.rows || []).filter((r) => r.date === key && r.account_id === cur.id);
+    if (!rows.length) return { none: true };
+    const s = (k) => rows.reduce((n, r) => n + (r[k] || 0), 0);
+    const inp = s("input") + s("cache_write"), rd = s("cache_read"), out = s("output");
+    return { tokens: inp + rd + out, out, rd, hit: inp + rd > 0 ? Math.round(rd / (inp + rd) * 100) : null, msgs: s("messages"), cost: s("cost_usd") };
+  }
+  function statsHtml(cur) {
+    if (cur.kind !== "claude_code") return "";
+    const st = todayStats(cur);
+    if (st === null) return `<div class="stats"><div class="stat note">正在读本机记录…</div></div>`;
+    if (st.none) return `<div class="stats"><div class="stat note">今天这台电脑还没用过这个号（本机 Claude Code 记录）</div></div>`;
+    const tip = `本机 Claude Code 今天的记录：${st.msgs} 条消息 · 输出 ${wan(st.out)} · 缓存读取 ${wan(st.rd)} tokens\n金额按 API 价折算，订阅不按这个收费`;
+    return `<div class="stats" title="${esc(tip)}">
+      <div class="stat"><b>${wan(st.tokens)}</b><span>今天 tokens</span></div>
+      <div class="stat"><b>${st.hit === null ? "–" : st.hit + "%"}</b><span>缓存命中</span></div>
+      <div class="stat"><b>${usd(st.cost)}</b><span>折算费用</span></div></div>`;
+  }
+  // 红绿灯：按严重程度排，只显示最要紧的一条，其余在悬停提示里
+  function lightHtml(cur, pos) {
+    const items = [];
+    const h = cur.health || {}, u = cur.usage || {}, issue = (h.issues || [])[0] || {};
+    const p5 = pct(u.five_hour), p7 = pct(u.seven_day);
+    const n = state.sessions ? state.sessions.count : null, pend = state.pending_switch;
+    if (state.warning) items.push({ lv: "bad", text: state.warning });
+    if (h.level === "error") items.push({ lv: "bad", text: `当前号${issue.text ? "：" + issue.text : "有问题"}`, tip: issue.advice });
+    if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: `5 小时额度用完了，${resetShort(u.five_hour.resets_at)}` });
+    if (ask) items.push({ lv: "busy", ask: true, text: `有 ${ask.running} 个 Claude Code 会话在跑，切到 ${ask.label}？`,
+      btns: [["ask-wait", "等它们退出再切"], ["ask-now", "现在就切", "go"], ["ask-no", "取消"]] });
+    if (pend) items.push({ lv: "busy", ask: true, text: pend.message, btns: [["pend-now", "现在就切", "go"], ["pend-cancel", "取消"]] });
+    if (n > 0) items.push({ lv: "busy", text: `工作中 · ${n} 个 Claude Code 会话在跑` });
+    if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${p5.toFixed(0)}%，快满了` });
+    else if (p7 !== null && p7 >= 90) items.push({ lv: "busy", text: `7 天额度 ${p7.toFixed(0)}%，快满了` });
+    if (h.level === "warn") items.push({ lv: "busy", text: `当前号：${issue.text || h.label || "要注意"}`, tip: issue.advice });
+    for (const a of state.accounts) {
+      if (a.id !== cur.id && (a.health || {}).level === "error") items.push({ lv: "busy", text: `${nameOf(a, pos)}：${((a.health.issues || [])[0] || {}).text || "登录有问题"}` });
+    }
+    if (!items.length) items.push({ lv: "ok", text: n === 0 ? "空闲 · 一切正常" : "一切正常" });
+    const top = items[0], tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
+    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}" ${busy ? "disabled" : ""}>${label}</button>`).join("")}</span>` : ""}</div>`;
+  }
   function render() {
     const main = $("#main");
     if (!state) return;
     const accs = state.accounts || [];
     if (!accs.length) {
-      main.innerHTML = `<div class="tile empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
+      main.innerHTML = `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
       return;
     }
+    const pos = Object.fromEntries(accs.map((a, i) => [a.id, i + 1]));
     const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs[0];
     const others = accs.filter((a) => a.id !== cur.id && a.kind !== "api");
     const u = cur.usage || {}, h = cur.health || {};
-    const p5 = pct(u.five_hour);
-    const curTile = `<div class="tile"><div class="who"><div class="circle on">${ring(p5, 44, 5)}</div>
-      <div><div class="name"><b>${esc(cur.label || cur.email || "未命名")}</b>${planChip(cur)}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}</div>
-        <div class="sub">${cur.is_active ? "正在用 · " : ""}${esc(cur.email && cur.email !== cur.label ? cur.email : (p5 === null ? "还没有用量" : ""))}</div></div></div>
+    const p5 = pct(u.five_hour), curName = nameOf(cur, pos);
+    const sub = cur.email && cur.email !== curName ? cur.email : (p5 === null ? "还没有用量" : "");
+    const curTile = `<div class="tile glass"><div class="who"><div class="circle on">${ring(p5, 44, 5)}</div>
+      <div><div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">正在用</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}</div>
+        <div class="sub">${esc(sub)}</div></div></div>
       ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
-      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}</div>`;
+      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}</div>`;
     const pills = others.map((a) => {
-      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {};
-      const sub = q5 === null ? (a.kind === "claude_web" ? "网页版 · 打开" : a.kind === "claude_desktop" ? "桌面版 · 打开" : "点一下切换")
+      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos);
+      const line = q5 === null ? (a.kind === "claude_web" ? "网页版 · 打开" : a.kind === "claude_desktop" ? "桌面版 · 打开" : "点一下切换")
         : `5 小时 ${q5.toFixed(0)}%`;  // 药丸卡太窄，7 天的切过去后在大卡里看
-      return `<button type="button" class="acc" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" ${busy ? "disabled" : ""} title="${a.kind === "claude_code" ? "切换到这个账号" : "打开"}">
+      return `<button type="button" class="acc glass" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" ${busy ? "disabled" : ""} title="${esc(a.email || "")}${a.kind === "claude_code" ? "\n切换到这个账号" : "\n打开"}">
         <span class="circle">${ring(q5, 32, 4)}</span>
-        <span><span class="name"><b>${esc(a.label || a.email || "未命名")}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : ""}</span><span class="sub">${esc(sub)}</span></span></button>`;
+        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(line)}</span></span></button>`;
     }).join("");
     const sc = state.risk_score, reg = state.region || {};
-    const foot = `<div class="foot"><span>${esc(state.host || "")}${reg.loc ? ` · 出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : ""}</span>
-      <span>${sc && reg.status ? `<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span> · ` : ""}${state.generated_at ? new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
-    main.innerHTML = curTile
+    const left = (reg.loc ? `出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : "")
+      + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
+    const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
+    main.innerHTML = lightHtml(cur, pos) + curTile
       + (pills ? `<div class="sec">其它账号 · 点一下切换</div><div class="pills${others.length === 1 ? " one" : ""}">${pills}</div>` : "")
-      + `<div class="acts"><button class="act" data-act="refresh" ${busy ? "disabled" : ""}><span class="circle">${ICON.refresh}</span><span>刷新用量</span></button>
-          <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle">${ICON.panel}</span><span>管理面板</span></button></div>`
-      + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "") + foot;
+      + `<div class="acts"><button class="act" data-act="refresh" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
+          <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button></div>`
+      + foot + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "");
   }
   async function load() {
     try { state = await api("GET", "/api/state"); render(); }
-    catch (e) { $("#main").innerHTML = `<div class="tile empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+    catch (e) { $("#main").innerHTML = `<div class="tile glass empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+  }
+  async function loadLocal() {  // 本机记录要扫日志文件，比 /api/state 慢，单独读、少读几次
+    try { local = await api("GET", "/api/local-usage?days=1"); } catch (_) { local = { rows: [] }; }
+    render();
   }
   function say(text, cls) { msg = text ? { text, cls: cls || "" } : null; render(); if (text && cls !== "bad") setTimeout(() => { msg = null; render(); }, 6000); }
   async function run(fn) {
@@ -189,28 +275,38 @@ button { font: inherit; color: inherit; }
     try { await fn(); } catch (e) { say(e.message, "bad"); }
     finally { busy = false; render(); }
   }
+  async function switchTo(id, mode) {
+    const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/switch`, mode ? { mode } : {});
+    if (r.choice_required) { ask = { id, label: r.label, running: r.running_claude }; return; }  // 有会话在跑：红绿灯那里问怎么切
+    ask = null;
+    state = await api("GET", "/api/state");
+    say(r.message, r.deferred || !r.changed ? "wait" : "");
+  }
   document.addEventListener("click", (ev) => {
     const acc = ev.target.closest(".acc");
     if (acc) {
       const id = acc.dataset.id, kind = acc.dataset.kind;
       return run(async () => {
-        if (kind === "claude_code") {
-          const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/switch`, { mode: "wait" });  // 有会话在跑就等它们退出再切
-          state = await api("GET", "/api/state");
-          say(r.message, r.deferred ? "wait" : r.changed ? "" : "wait");
-        } else {
-          const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/open`);
-          say(r.message || "已打开");
-        }
+        if (kind === "claude_code") return switchTo(id);
+        const r = await api("POST", `/api/accounts/${encodeURIComponent(id)}/open`);
+        say(r.message || "已打开");
       });
     }
     const btn = ev.target.closest("[data-act]");
     if (!btn) return;
-    if (btn.dataset.act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); });
-    if (btn.dataset.act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已在浏览器打开管理面板"); });
+    const act = btn.dataset.act;
+    if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadLocal(); });
+    if (act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已在浏览器打开管理面板"); });
+    if (act === "ask-wait" && ask) run(() => switchTo(ask.id, "wait"));
+    if (act === "ask-now" && ask) run(() => switchTo(ask.id, "now"));
+    if (act === "ask-no") { ask = null; render(); }
+    if (act === "pend-now" && state.pending_switch) run(() => switchTo(state.pending_switch.account, "now"));
+    if (act === "pend-cancel") run(async () => { state = await api("DELETE", "/api/pending-switch"); say("已取消等待中的切换", "wait"); });
   });
   load();
+  loadLocal();
   setInterval(load, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
+  setInterval(loadLocal, 120000);
   window.addEventListener("focus", load);
   window.addEventListener("pageshow", load);
 })();

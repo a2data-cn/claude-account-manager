@@ -566,14 +566,14 @@ class CamTest(unittest.TestCase):
                            {"id": "bbbb", "at": (now - dt.timedelta(hours=1)).isoformat()}]
         self.cam.Store().save(d)
 
-        def ev(mid, hours_ago, out):
+        def ev(mid, hours_ago, out, model="claude-opus-4-1-20250805"):
             return json.dumps({"type": "assistant", "requestId": "r" + mid,
                                "timestamp": (now - dt.timedelta(hours=hours_ago)).isoformat().replace("+00:00", "Z"),
-                               "message": {"id": mid, "usage": {"input_tokens": 1, "output_tokens": out,
-                                                                "cache_read_input_tokens": 5}}})
+                               "message": {"id": mid, "model": model, "usage": {"input_tokens": 1, "output_tokens": out,
+                                                                                "cache_read_input_tokens": 5}}})
         p = os.path.join(self.tmp, ".claude", "projects", "proj1", "x.jsonl")
         with open(p, "w") as f:
-            f.write("\n".join([ev("m1", 3, 100), ev("m1", 3, 100), ev("m2", 0.5, 7), ev("m0", 10, 1000),
+            f.write("\n".join([ev("m1", 3, 100), ev("m1", 3, 100), ev("m2", 0.5, 7), ev("m0", 10, 1000, "claude-sonnet-4-5"),
                                "not json", '{"type":"user"}']) + "\n")
         rep = self.cam.local_usage(self.data(), 7)
         by = {}
@@ -583,6 +583,11 @@ class CamTest(unittest.TestCase):
         self.assertEqual(by.get(a_id), 100)  # 去重
         self.assertEqual(by.get("bbbb"), 7)
         self.assertEqual(by.get("unattributed"), 1000)
+        # 按模型的分布（给面板画占比），同样去重、同样按天
+        by_model = {}
+        for r in rep["models"]:
+            by_model[r["model"]] = by_model.get(r["model"], 0) + r["output"]
+        self.assertEqual(by_model, {"claude-opus-4-1-20250805": 107, "claude-sonnet-4-5": 1000})
 
     def test_local_window_usage(self):
         """当前窗口里本机用了多少：按切换记录归属、按窗口起点截断、按模型的周额度只算那个模型。"""
@@ -858,7 +863,18 @@ class CamTest(unittest.TestCase):
                  mock.patch.object(cam_menu.cam, "mini_available", return_value=True):
                 lines2 = []
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
-            self.assertIn(" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww=340 webviewh=470 shortcut=", lines2[0])
+            w, h = cam_menu.mini_size(store.load()["accounts"])
+            self.assertIn(f" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww={w} webviewh={h} shortcut=", lines2[0])
+            # 弹窗高度按账号数算：一个号最矮，每多两个号加一行药丸卡，到上限就整页上下滑；API 账号不在卡片里
+            code = {"kind": "claude_code"}
+            one = cam_menu.mini_size([code])[1]
+            self.assertEqual(w, cam_menu.MINI_WIDTH)
+            self.assertEqual(cam_menu.mini_size([code, {"kind": "api"}])[1], one)
+            two = cam_menu.mini_size([code] * 2)[1]
+            self.assertGreater(two, one)
+            self.assertEqual(cam_menu.mini_size([code] * 3)[1], two)
+            self.assertGreater(cam_menu.mini_size([code] * 4)[1], two)
+            self.assertEqual(cam_menu.mini_size([code] * 40)[1], cam_menu.MINI_MAX)
             with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
                  mock.patch.object(cam_menu.cam, "mini_available", return_value=False), \
                  mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=False):
@@ -3562,6 +3578,16 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(r.status, 200)
         self.assertIn("Claude 账号", html)
         self.assertIn("/api/open-panel", html)
+        # /api/state 带正在跑的会话数（红绿灯用），数进程表的结果缓存 20 秒
+        self.cam._SESSION_CACHE[0] = 0.0
+        with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude"), (2, "claude")]):
+            self.assertEqual(self.cam.session_count(), 2)
+        with mock.patch.object(self.cam, "running_claude_processes", return_value=[]):
+            self.assertEqual(self.cam.session_count(), 2)  # 还在缓存期
+            self.assertEqual(self.cam.session_count(max_age=0), 0)
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + token})
+            with opener.open(req) as r:
+                self.assertEqual(json.load(r)["sessions"], {"count": 0})
         self.assertTrue(self.cam.mini_available(port, token))
         self.assertFalse(self.cam.mini_available(1, token))  # 没人听的端口
         opened = []
