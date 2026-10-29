@@ -831,7 +831,11 @@ def stream(store):
     STREAMING, SESSION_MAX_AGE = True, 5
     st, last_bg, last, phase, stamp = {}, None, None, 0.0, source_stamp()
     while True:
-        if source_stamp() != stamp:  # 代码更新了：原地换成新代码（pid 和 stdout 不变，SwiftBar 继续读）
+        if os.getppid() == 1:  # SwiftBar 没了（进程被 launchd 收养）：别留着一直跑后台任务
+            return
+        now_stamp = source_stamp()
+        if now_stamp and stamp and now_stamp != stamp:  # 代码更新了：原地换成新代码（pid 和 stdout 不变，SwiftBar 继续读）
+            time.sleep(1)  # git / cam update 可能还在写文件，等一秒再换；写到一半时 stamp 是 None，这轮跳过
             sys.stdout.flush()
             os.execv(sys.executable, [sys.executable, MENU_PY, "stream"])
         now = time.monotonic()

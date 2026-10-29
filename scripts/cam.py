@@ -2956,10 +2956,10 @@ def diagnostic_text(rep):
     """诊断报告的 Markdown，给人看、也方便发给别人。"""
     a, reg, env, sc = rep["account"], rep["region"], rep["env"], rep["risk_score"]
 
-    def exit_line(r):
+    def exit_line(r):  # 旧版本记的出口只有地区，没有 IP；检测失败的现场可能什么都没有
         ip_type = IP_TYPE_NAMES.get(r.get("ip_type"), r.get("ip_type") or "类型未知")
-        bits = [region_label(r.get("loc"))] + ([r["ip"]] if r.get("ip") else []) + [f"{r.get('org') or '运营商未知'}，{ip_type}"]
-        return " ".join(bits[:2]) + f"（{bits[2]}" + (f"，{r['city']}" if r.get("city") else "") + "）"
+        head = " ".join(x for x in (region_label(r.get("loc")), r.get("ip")) if x)
+        return f"{head}（{r.get('org') or '运营商未知'}，{ip_type}" + (f"，{r['city']}" if r.get("city") else "") + "）"
 
     def env_line(e):
         px = e.get("proxy") or []
@@ -4866,10 +4866,22 @@ def system_dns_servers():
 PROXY_ENV_KEYS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy")
 
 
+def mask_proxy(v):
+    """代理地址里的账号密码不露出来：http://user:pass@host:port → http://***@host:port。这些字会进面板、通知和导出的诊断。"""
+    try:
+        u = urllib.parse.urlsplit(v if "://" in v else "http://" + v)
+    except ValueError:
+        return v
+    if not (u.username or u.password):
+        return v
+    host = (u.hostname or "") + (f":{u.port}" if u.port else "")
+    return f"{u.scheme}://***@{host}" if "://" in v else f"***@{host}"
+
+
 def proxy_parts():
-    """当前生效的代理：环境变量 + 系统设置，例如 ["HTTPS_PROXY=…", "系统设置 HTTPS 127.0.0.1:7890"]。"""
-    return ([f"{k}={os.environ[k]}" for k in PROXY_ENV_KEYS if os.environ.get(k)]
-            + [f"系统设置 {p}" for p in system_proxy()])
+    """当前生效的代理：环境变量 + 系统设置，例如 ["HTTPS_PROXY=…", "系统设置 HTTPS 127.0.0.1:7890"]。账号密码遮掉。"""
+    return ([f"{k}={mask_proxy(os.environ[k])}" for k in PROXY_ENV_KEYS if os.environ.get(k)]
+            + [f"系统设置 {mask_proxy(p)}" for p in system_proxy()])
 
 
 def local_env():

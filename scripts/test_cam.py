@@ -618,6 +618,20 @@ class CamTest(unittest.TestCase):
             self.assertNotIn(secret, json.dumps(rep, ensure_ascii=False))
         for s in ("# cam 账号诊断：A", "登录已失效", "1.2.3.4", "Singtel", "家庭 / 公司宽带", "Asia/Shanghai", "出问题时的现场（最近 1 次）"):
             self.assertIn(s, text)
+        # 旧版本记的出口只有地区没有 IP、检测失败时现场是空的：报告照样生成
+        d = self.data()
+        d["accounts"][0]["regions"].append({"loc": "US", "at": self.cam.now_iso()})
+        d["accounts"][0]["incidents"].append({"at": self.cam.now_iso(), "kind": "login_invalid", "error": "x", "region": {}, "env": {}, "sessions": 0})
+        store.save(d)
+        bare = self.cam.diagnostic_text(self.cam.account_diagnostic(store, store.load(), "A"))
+        self.assertIn("US（美国）（运营商未知，类型未知）", bare)
+        # 代理地址里的账号密码不进报告、不进面板
+        with mock.patch.dict(os.environ, {"HTTPS_PROXY": "http://alice:S3cretPass@proxy.local:8080"}):
+            parts = self.cam.proxy_parts()
+        self.assertTrue(any(p == "HTTPS_PROXY=http://***@proxy.local:8080" for p in parts), parts)
+        self.assertFalse(any("S3cretPass" in p for p in parts))
+        self.assertEqual(self.cam.mask_proxy("user:pw@10.0.0.1:3128"), "***@10.0.0.1:3128")
+        self.assertEqual(self.cam.mask_proxy("HTTPS 127.0.0.1:7890"), "HTTPS 127.0.0.1:7890")
         self.assertTrue(self.cam.diagnostic_filename(rep).startswith("cam-诊断-A-"))
         pub = self.cam.public_state(store, store.load())["accounts"][0]  # 面板账号详情里直接显示的摘要
         self.assertEqual((pub["last_incident"]["ip"], pub["last_incident"]["text"], pub["exits"][0]["ip"], pub["exits"][0]["times"]),

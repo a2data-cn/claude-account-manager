@@ -838,7 +838,20 @@ const PROXY_ENV_KEYS: &[&str] = &[
     "http_proxy",
 ];
 
-/// 当前生效的代理：环境变量 + 系统设置。与 cam.py 的 proxy_parts 一致。
+/// 代理地址里的账号密码不露出来：http://user:pass@host:port → http://***@host:port。与 cam.py 的 mask_proxy 一致。
+pub fn mask_proxy(v: &str) -> String {
+    let (scheme, rest) = match v.find("://") {
+        Some(i) => (&v[..i + 3], &v[i + 3..]),
+        None => ("", v),
+    };
+    let auth = &rest[..rest.find('/').unwrap_or(rest.len())];
+    match auth.rfind('@') {
+        Some(at) => format!("{}***@{}", scheme, &auth[at + 1..]),
+        None => v.to_string(),
+    }
+}
+
+/// 当前生效的代理：环境变量 + 系统设置。与 cam.py 的 proxy_parts 一致，账号密码遮掉。
 pub fn proxy_parts() -> Vec<String> {
     let mut parts: Vec<String> = PROXY_ENV_KEYS
         .iter()
@@ -846,13 +859,13 @@ pub fn proxy_parts() -> Vec<String> {
             std::env::var(k)
                 .ok()
                 .filter(|v| !v.is_empty())
-                .map(|v| format!("{}={}", k, v))
+                .map(|v| format!("{}={}", k, mask_proxy(&v)))
         })
         .collect();
     parts.extend(
         system_proxy()
             .into_iter()
-            .map(|p| format!("系统设置 {}", p)),
+            .map(|p| format!("系统设置 {}", mask_proxy(&p))),
     );
     parts
 }
@@ -2388,4 +2401,20 @@ pub fn clear_region_history(store: &Store) -> R<Value> {
         store.save(&mut data)?;
     }
     privacy_view(store)
+}
+
+#[cfg(test)]
+mod proxy_mask_tests {
+    use super::mask_proxy;
+
+    #[test]
+    fn hides_credentials_only() {
+        assert_eq!(
+            mask_proxy("http://alice:S3cretPass@proxy.local:8080"),
+            "http://***@proxy.local:8080"
+        );
+        assert_eq!(mask_proxy("user:pw@10.0.0.1:3128"), "***@10.0.0.1:3128");
+        assert_eq!(mask_proxy("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(mask_proxy("HTTPS 127.0.0.1:7890"), "HTTPS 127.0.0.1:7890");
+    }
 }

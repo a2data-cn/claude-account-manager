@@ -248,7 +248,10 @@ function Toggle-Card {
   $hh = [int]$script:mini.h + 40  # 标题栏
   $x = $wa.Right - $w - 12
   $y = $wa.Bottom - $hh - 12
-  Start-Process -FilePath $browser -ArgumentList @("--app=$url", "--window-size=$w,$hh", "--window-position=$x,$y")
+  # 单独的浏览器配置目录：浏览器已经开着时，新开的窗口会交给老进程，尺寸和位置参数就不认了；另起一个进程才听话
+  $cardDir = Join-Path $env:LOCALAPPDATA "cam\card-browser"
+  Start-Process -FilePath $browser -ArgumentList @("--app=$url", "--user-data-dir=`"$cardDir`"", "--no-first-run", "--no-default-browser-check",
+    "--window-size=$w,$hh", "--window-position=$x,$y")
 }
 
 function Update-Tray($res) {
