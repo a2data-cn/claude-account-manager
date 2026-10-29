@@ -47,22 +47,22 @@ MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
 MINI_WIDTH = 340
 # 量出来的高度：一个账号（红绿灯 + 当前号卡片 + 两个按钮 + 页脚）、“其它账号”标题、每行两张药丸卡（含间距）；到上限后整页上下滑
 MINI_BASE, MINI_SEC, MINI_ROW, MINI_MAX = 428, 24, 66, 620  # Mac 上苹方字体比这边量的高一截，基数多留 34
-MINI_BTN = 18  # 大卡是网页 / 桌面号时：少了本机消耗那块、多了“打开”按钮，净多出来的高度
+MINI_DESK = -18  # 大卡是桌面号时：没有本机消耗那三格，多一个“打开”按钮，净矮了这么多
 
 
 def mini_size(accs):
-    """弹窗的宽、高：按卡片里要放的账号算（API 账号不在卡片里），账号多了到上限后整页上下滑。
+    """弹窗的宽、高：按卡片里要放的账号算（只放 Claude Code 的号和桌面版的号，网页号、API 号不在卡片里），账号多了到上限后整页上下滑。
 
-    和 mini.html 一个规则：大卡是当前的 Claude Code 号（一个都没有时是第一个网页 / 桌面号，多一个“打开”按钮）；
-    其余的 Claude Code 号一组（两张一行），网页版和桌面版一组（一行一个，名字、额度和箭头才放得下）。
+    和 mini.html 一个规则：大卡是当前的 Claude Code 号（一个都没有时是第一个桌面号，多一个“打开”按钮）；
+    其余的 Claude Code 号一组（两张一行），桌面版一组（一行一个，名字、额度和箭头才放得下）。
     """
     code = [a for a in accs if a.get("kind") == "claude_code"]
-    opens = [a for a in accs if a.get("kind") in ("claude_web", "claude_desktop")]
+    opens = [a for a in accs if a.get("kind") == "claude_desktop"]
     h = MINI_BASE
     if code:
         code = code[1:]
     elif opens:
-        opens, h = opens[1:], h + MINI_BTN
+        opens, h = opens[1:], h + MINI_DESK
     if code:
         h += MINI_SEC + (len(code) + 1) // 2 * MINI_ROW
     if opens:
