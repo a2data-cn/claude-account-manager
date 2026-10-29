@@ -731,6 +731,11 @@ def render(store, st, out=print, rich=None, phase=None):
     if upd and upd.get("behind"):
         out(f"更新（{upd['behind']} 个新改动） | {action('update', script=MENU_PY)} sfimage=arrow.down.circle")
     out(f"检查更新 | {action('update-check', script=MENU_PY)} sfimage=arrow.triangle.2.circlepath")
+    if rich:  # 经典 / 流式在菜单里切：重写启动脚本后重启 SwiftBar
+        if STREAMING:
+            out(f"信号灯动画：流式 → 换回经典模式（每分钟刷新一次） | {action('mode', 'classic', script=MENU_PY, refresh=False)} sfimage=tortoise")
+        else:
+            out(f"信号灯动画：经典 → 换成流式模式（顺滑呼吸） | {action('mode', 'stream', script=MENU_PY, refresh=False)} sfimage=hare")
     if st.get("bg_owner") == "other":
         out("自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
     elif st.get("last_refresh"):
@@ -802,10 +807,30 @@ def stream(store):
             time.sleep(5)
 
 
+def set_mode_from_menu(mode):
+    """菜单里切换经典 / 流式：重跑安装脚本改写 SwiftBar 的启动脚本（插件类型写在里面），再重启 SwiftBar 让它按新模式加载。"""
+    script = os.path.join(os.path.dirname(MENU_PY), "install.sh")
+    try:
+        r = subprocess.run(["bash", script, f"--{mode}"], capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as e:
+        notify("切换失败", str(e)[:200])
+        return 1
+    if r.returncode != 0:
+        notify("切换失败", (r.stderr or r.stdout).strip()[-200:] or "安装脚本出错")
+        return 1
+    notify("菜单栏小工具", f"已切换到{'流式' if mode == 'stream' else '经典'}模式，SwiftBar 正在重新打开")
+    # SwiftBar 只在加载插件时看类型，所以退出再打开一次；放到独立进程里，别跟着本进程一起被收掉
+    subprocess.Popen(["bash", "-c", "sleep 1; osascript -e 'quit app \"SwiftBar\"'; sleep 1; open -a SwiftBar"],
+                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 0
+
+
 def main():
     store = cam.Store()
     if sys.argv[1:2] == ["stream"]:
         return stream(store)
+    if sys.argv[1:2] == ["mode"] and sys.argv[2:3] and sys.argv[2] in ("stream", "classic"):
+        sys.exit(set_mode_from_menu(sys.argv[2]))
     if sys.argv[1:2] == ["switch"] and len(sys.argv) > 2:  # 菜单里点了切换，见 switch_action
         sys.exit(switch_from_menu(store, sys.argv[2]))
     if sys.argv[1:2] == ["update-check"]:

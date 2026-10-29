@@ -875,6 +875,8 @@ class CamTest(unittest.TestCase):
             self.assertEqual(f0.split("\n---\n")[0].count("\n"), 0)  # 第一个 --- 前只有一行标题
             self.assertNotIn(" dropdown=false", f0)
             self.assertTrue(f0.startswith("B 75% | image="), f0[:40])
+            self.assertIn('param2="mode" param3="classic"', f0)  # 流式里是“换回经典”，经典里是“换成流式”
+            self.assertTrue(any('param2="mode" param3="stream"' in l for l in lines), lines[-8:])
             i0, i1 = cam_menu.stream_frame(store, {}, 0.0), cam_menu.stream_frame(store, {}, 0.25)
             self.assertEqual(cam_menu.LAST_LIGHT[2], "")
             self.assertEqual(i0, i1)
