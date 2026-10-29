@@ -40,6 +40,7 @@ PY = sys.executable
 REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
 # 全局快捷键的前缀（SwiftBar 注册，任何应用里按都生效）：+C 打开菜单，+1 / 2 / 3… 切到第几个号（按添加顺序）。设成空就不注册
 HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
+LINE = 40  # 提醒、建议这类长句最多显示多少个字（SwiftBar 的 length 参数：截短，完整内容放鼠标悬停提示），免得把菜单撑得很宽
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
 
 # 浅色 / 深色模式各一个颜色
@@ -336,6 +337,17 @@ def _background_work(store):
     return st
 
 
+def bg_error(store, st):
+    """后台上一轮的错误：自己做的看 st，归桌面版 / cam serve 做的看它们记的心跳。"""
+    if st.get("bg_owner") != "other":
+        return st.get("last_error")
+    try:
+        with open(os.path.join(store.root, cam.SERVE_STATE)) as f:
+            return json.load(f).get("last_error")
+    except (OSError, ValueError):
+        return None
+
+
 def health_of(store, a):
     """账号健康状态（正常 / 注意 / 异常），规则见 cam.account_health。"""
     has = a["kind"] == "claude_code" and bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
@@ -378,8 +390,13 @@ def render(store, st, out=print, rich=None):
 
     if not accs:
         out("还没有账号 | color=gray")
-        out("用 Claude Code：运行 claude 登录，回来自动保存 | size=12 color=gray")
-        out("用网页版：终端运行 cam add-web --label 名字 | size=12 color=gray")
+        err = bg_error(store, st)
+        if err:  # 自动保存没成功的原因，完整内容在鼠标悬停提示里
+            out(f"⚠ {esc(err)} | color={RED} length={LINE}")
+        # 点一下就在终端里跑，结果看得见；存好后菜单一分钟内刷新
+        out(f"存下现在登录的 Claude Code 账号 | sfimage=square.and.arrow.down {action('import', terminal=True)}")
+        out(f"登录另一个账号（在浏览器里登录） | sfimage=person.badge.plus {action('login', terminal=True)}")
+        out("网页版账号：终端运行 cam add-web --label 名字 | size=12 color=gray")
         out("---")
 
     # ---- Claude Code 账号
@@ -537,24 +554,25 @@ def render(store, st, out=print, rich=None):
         out(f"用量更新于 {t} | size=12 color=gray")
     notice = (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message")
     if notice:
-        out(f"⚠ {esc(notice)[:90]} | size=12 color=#B87A08,#E0A93B")
+        out(f"⚠ {esc(notice)} | size=12 color=#B87A08,#E0A93B length={LINE}")
     pend = cam.pending_switch_view(data)
     if pend:
-        out(f"⏳ {esc(pend['message'])[:90]} | size=12 color=#5A6676,#94A0AF")
+        out(f"⏳ {esc(pend['message'])} | size=12 color=#5A6676,#94A0AF length={LINE}")
     risks = cam.risk_items(data)
     if cam.region_view(data)["status"]:  # 后台检测过才有评分
         sc = cam.risk_score(risks)
         c = {"low": GREEN, "medium": YELLOW, "high": RED}[sc["grade"]]
         icon = "checkmark.shield.fill" if sc["grade"] == "low" else "exclamationmark.shield.fill"
-        out(f"环境评分 {sc['score']}/100：{esc(sc['label'])[:60]} | size=12 color={c} sfimage={icon} sfcolor={c}")
+        out(f"环境评分 {sc['score']}/100：{esc(sc['label'])} | size=12 color={c} sfimage={icon} sfcolor={c} length={LINE}")
     for r in risks:  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
         if r["level"] not in ("warn", "bad"):
             continue
-        out(f"⚠ {esc(r['text'])[:90]} | size=12 color=#BF3B33,#E06C66")
+        out(f"⚠ {esc(r['text'])} | size=12 color=#BF3B33,#E06C66 length={LINE}")
         if r["advice"]:
-            out(f"   {esc(r['advice'])[:90]} | size=11 color=#5A6676,#94A0AF")
-    if st.get("last_error"):
-        out(f"⚠ {esc(st['last_error'])[:90]} | size=12 color=#B87A08,#E0A93B")
+            out(f"{esc(r['advice'])} | size=11 color=#5A6676,#94A0AF length={LINE}")
+    err = bg_error(store, st)
+    if err and accs:  # 没账号时已经放在最上面了
+        out(f"⚠ {esc(err)} | size=12 color=#B87A08,#E0A93B length={LINE}")
 
 
 def main():

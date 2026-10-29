@@ -3322,6 +3322,12 @@ def notify(title, body):
         pass
 
 
+def errtext(e):
+    """错误的一句话；CamError 带的“怎么办”也接在后面。"""
+    advice = getattr(e, "advice", "")
+    return f"{e}。{advice}" if advice else str(e)
+
+
 def background_round(store, st, refresh_min, tell, import_live=True):
     """后台任务跑一轮：自动导入新登录、时间规则、等待切换、定时刷新用量和额度提醒。
 
@@ -3336,21 +3342,21 @@ def background_round(store, st, refresh_min, tell, import_live=True):
                 tell("发现新账号", f"已自动保存：{acc['label']}")
                 st["last_refresh"] = 0
         except Exception as e:  # noqa: BLE001
-            st["last_error"] = f"自动导入：{e}"
+            st["last_error"] = f"自动导入：{errtext(e)}"
     try:
         res = apply_time_rules(store)
         if res and res[2]:
             warn = running_warning(running_claude_processes()) or "正在运行的会话需要重启。"
             tell("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}。{warn}")
     except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"时间规则：{e}"
+        st["last_error"] = f"时间规则：{errtext(e)}"
     try:
         res = apply_pending_switch(store)
         if res:
             tell("已切换账号", f"claude 会话已退出，Claude Code 已切换到 {res[0]['label']}"
                  + ("（时间规则）" if res[2] == "rule" else ""))
     except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"等待切换：{e}"
+        st["last_error"] = f"等待切换：{errtext(e)}"
         try:
             if not store.load().get("pending_switch"):  # 登记已作废（目标账号的登录失效了），不会再试，告诉用户一声
                 tell("等待中的切换没有完成", str(e))
@@ -3364,7 +3370,7 @@ def background_round(store, st, refresh_min, tell, import_live=True):
             try:
                 check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
             except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
-                st["last_error"] = f"环境检测：{e}"
+                st["last_error"] = f"环境检测：{errtext(e)}"
             data = refresh_usage(store, allow_token_refresh=False)
             st.pop("last_error", None)
             limit = rules_view(data)["alert_threshold"]
@@ -3383,7 +3389,7 @@ def background_round(store, st, refresh_min, tell, import_live=True):
                     tell(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", fmt_reset(w.get("resets_at")))
             st["warned"] = sorted(warned)[-50:]
         except Exception as e:  # noqa: BLE001
-            st["last_error"] = f"刷新用量：{e}"
+            st["last_error"] = f"刷新用量：{errtext(e)}"
     return st
 
 
