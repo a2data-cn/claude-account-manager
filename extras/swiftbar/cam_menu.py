@@ -20,11 +20,15 @@
 由 install.sh 生成的启动脚本调用，不需要手动运行。
 Windows 托盘小工具（extras/windows-tray/cam_tray.py）也用这里的 render 和各个命令，改菜单时两边一起生效。
 """
+import base64
 import datetime as dt
 import json
+import math
 import os
+import struct
 import subprocess
 import sys
+import zlib
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "scripts"))
@@ -93,6 +97,98 @@ def bar(p, n=10):
     """额度小进度条，例如 ▰▰▰▰▱▱▱▱▱▱ 42%。"""
     k = min(n, max(0, round(p / 100 * n)))
     return "▰" * k + "▱" * (n - k) + f" {p:.0f}%"
+
+
+# ---- 画给 SwiftBar 的小图：菜单栏的额度环、账号行下面的进度条
+# 只用标准库写 PNG：按 Retina 画两倍像素，PNG 里标成 144 dpi，再用 width / height 定成点数。
+# 颜色是苹果的系统色，浅色 / 深色模式各一组（SwiftBar 的 image 参数可以写“浅色图,深色图”两张）。
+SCALE = 2
+FILL = {"ok": ((52, 199, 89), (48, 209, 88)), "warn": ((255, 159, 10), (255, 179, 64)), "bad": ((255, 59, 48), (255, 105, 97))}
+TRACK = ((0, 0, 0, 0.13), (255, 255, 255, 0.24))
+
+
+def level_of(p):
+    """额度分级：<70% 绿（ok）、70–89% 橙（warn）、≥90% 红（bad），和 color_for 一致。"""
+    return "bad" if p >= 90 else "warn" if p >= 70 else "ok"
+
+
+def _png(w, h, rows):
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    dpm = round(72 * SCALE / 0.0254)  # 像素 / 米：标成两倍 dpi，macOS 就按一半的点数显示
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"pHYs", struct.pack(">IIB", dpm, dpm, 1)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def _raster(w, h, shapes, ss=4):
+    """把几个形状画成 RGBA 像素行。shapes 按先后叠放，每个是 (在不在形状里(x, y), (r, g, b, a))；每个像素采 ss×ss 个点抗锯齿。"""
+    rows = []
+    for y in range(h):
+        row = bytearray()
+        for x in range(w):
+            r = g = b = a = 0.0
+            for j in range(ss):
+                for i in range(ss):
+                    px, py = x + (i + 0.5) / ss, y + (j + 0.5) / ss
+                    for inside, (cr, cg, cb, ca) in reversed(shapes):
+                        if inside(px, py):
+                            r, g, b, a = r + cr * ca, g + cg * ca, b + cb * ca, a + ca
+                            break
+            row += bytes((round(r / a), round(g / a), round(b / a), round(255 * a / (ss * ss)))) if a else b"\0\0\0\0"
+        rows.append(row)
+    return rows
+
+
+def _pill(x0, x1, cy, r):
+    """两端是圆的横条：从 x0 到 x1，粗 2r。"""
+    def inside(px, py):
+        qx = min(max(px, x0 + r), x1 - r)
+        return (px - qx) ** 2 + (py - cy) ** 2 <= r * r
+    return inside
+
+
+def quota_bar(p, dark, w=56, h=6):
+    """账号行下面的进度条：淡灰的底，已用的部分按额度上色。"""
+    W, H = w * SCALE, h * SCALE
+    r = H / 2
+    x1 = max(H, W * min(max(p, 0), 100) / 100)  # 再少也画一个圆点
+    return _png(W, H, _raster(W, H, [(_pill(0, W, r, r), TRACK[dark]), (_pill(0, x1, r, r), (*FILL[level_of(p)][dark], 1.0))]))
+
+
+def quota_ring(p, dark, size=16, thick=2.5):
+    """菜单栏的额度环：淡灰的底环，从 12 点开始顺时针画出已用的比例。"""
+    S = size * SCALE
+    c, ro, ri = S / 2, S / 2, S / 2 - thick * SCALE
+    sweep = 2 * math.pi * min(max(p, 0), 100) / 100
+
+    def ring(px, py):
+        d = (px - c) ** 2 + (py - c) ** 2
+        return ri * ri <= d <= ro * ro
+
+    def arc(px, py):
+        return ring(px, py) and math.atan2(px - c, c - py) % (2 * math.pi) <= sweep
+
+    return _png(S, S, _raster(S, S, [(ring, TRACK[dark]), (arc, (*FILL[level_of(p)][dark], 1.0))]))
+
+
+def image_param(draw, p, w, h):
+    """SwiftBar 的 image 参数：浅色、深色两张图，以及显示成多少点。"""
+    pics = ",".join(base64.b64encode(draw(p, dark)).decode() for dark in (0, 1))
+    return f"image={pics} width={w} height={h}"
+
+
+def detail_line(a):
+    """账号行下面那行小字：5 小时已用多少、多久后重置、7 天已用多少。"""
+    f5, f7 = pct(a, "five_hour"), pct(a, "seven_day")
+    parts = []
+    if f5 is not None:
+        reset = cam.fmt_reset(((a.get("usage") or {}).get("five_hour") or {}).get("resets_at"))
+        parts.append(f"5 小时 {f5:.0f}%" + (f"，{reset.split('（')[0]}" if reset else ""))
+    if f7 is not None:
+        parts.append(f"7 天 {f7:.0f}%")
+    return " · ".join(parts)
 
 
 def usage_nums(a):
@@ -244,7 +340,9 @@ def health_of(store, a):
     return cam.account_health(a, has, cam.days_left(a))
 
 
-def render(store, st, out=print):
+def render(store, st, out=print, rich=None):
+    """rich：菜单栏画额度环、账号下面画进度条图（SwiftBar 认 image 参数；Windows 托盘不认，用文字进度条）。默认 macOS 上开。"""
+    rich = cam.IS_MAC if rich is None else rich
     data = store.load()
     accs = data["accounts"]
     act_id = data["active"].get("claude_code")
@@ -264,9 +362,11 @@ def render(store, st, out=print):
         out("Claude ⚠ | sfimage=person.2.circle")
     elif title_acc is not None and pct(title_acc, "five_hour") is not None:
         p = pct(title_acc, "five_hour")
-        # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色
-        out(f"{esc(short(title_acc.get('label') or title_acc.get('email')))} {p:.0f}% | "
-            f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + (f" color={color_for(p)}" if color_for(p) else ""))
+        # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
+        # rich 时图标是画出已用比例的额度环；不然用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
+        icon = image_param(quota_ring, p, 16, 16) if rich else f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}"
+        out(f"{esc(short(title_acc.get('label') or title_acc.get('email')))} {p:.0f}% | {icon}"
+            + (f" color={color_for(p)}" if color_for(p) else ""))
     elif active:
         out(f"{esc(short(active.get('label') or active.get('email')))} | sfimage=person.2.circle")
     else:
@@ -291,12 +391,15 @@ def render(store, st, out=print):
             flag = f"  ⚠ {h['label']}" if h["level"] in ("warn", "error") else ""
 
             def text(name):
-                return f"{esc(name)}{('  ' + plan) if plan else ''}{flag}{usage_nums(a)}"
+                # rich 时套餐放进右边的小标签（badge），额度画成下面一行的进度条
+                return f"{esc(name)}{('  ' + plan) if plan and not rich else ''}{flag}{'' if rich else usage_nums(a)}"
 
             params = row_icon(a["id"] == act_id, h["level"])
             if a["id"] != act_id:
                 c = RED if h["level"] == "error" else color_for(pct(a, "five_hour"))
                 params += f" {switch_action(a['id'])}" + (f" color={c}" if c else "")
+            if rich and plan:
+                params += f" badge={q(plan)}"
             out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
             for i in h["issues"]:
                 out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={RED if i['level'] == 'error' else YELLOW if i['level'] == 'warn' else 'gray'}")
@@ -324,6 +427,8 @@ def render(store, st, out=print):
             if a.get("email") and a.get("email") != a.get("label"):
                 # 按住 Option 时这一行换成邮箱；要紧跟在上一行（及其子菜单）后面才会配成一对
                 out(f"{text(a['email'])} | {params} alternate=true")
+            if rich and pct(a, "five_hour") is not None:
+                out(f"{detail_line(a)} | {image_param(quota_bar, pct(a, 'five_hour'), 56, 6)} size=11 color={GRAY}")
         out("---")
 
     # ---- 网页版
@@ -338,10 +443,10 @@ def render(store, st, out=print):
             u = a.get("usage") or {}
 
             def text(name):
-                return f"{esc(name)}{('  ' + plan) if plan else ''}{usage_nums(a)}"
+                return f"{esc(name)}{('  ' + plan) if plan and not rich else ''}{'' if rich else usage_nums(a)}"
 
             params = (row_icon(False, "warn" if u.get("error") else "ok") + f" {action('open', a['id'], refresh=False)}"
-                      + (f" color={color_for(f5)}" if color_for(f5) else ""))
+                      + (f" color={color_for(f5)}" if color_for(f5) else "") + (f" badge={q(plan)}" if rich and plan else ""))
             out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
             # 子菜单
             out(f"--打开浏览器窗口 | {action('open', a['id'], refresh=False)}")
@@ -361,6 +466,8 @@ def render(store, st, out=print):
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
             if a.get("email") and a.get("email") != a.get("label"):
                 out(f"{text(a['email'])} | {params} alternate=true")  # 按住 Option 显示邮箱
+            if rich and f5 is not None:
+                out(f"{detail_line(a)} | {image_param(quota_bar, f5, 56, 6)} size=11 color={GRAY}")
         out("---")
 
     # ---- Claude 桌面版

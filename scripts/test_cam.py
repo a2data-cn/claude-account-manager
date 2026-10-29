@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -812,6 +813,45 @@ class CamTest(unittest.TestCase):
         switch_lines = [l for l in lines if 'param2="switch"' in l]
         self.assertTrue(switch_lines, lines)
         self.assertTrue(all("|" in l for l in lines if l != "---"))
+
+    def test_menubar_rich_layout(self):
+        # macOS 上菜单栏图标是额度环、每个账号下面一行进度条图：SwiftBar 的 image 参数，浅色、深色两张 PNG，
+        # 画两倍像素再用 width / height 定成点数（Retina 上才清楚）；套餐放进 badge。Windows 托盘不认这些，仍用文字进度条
+        cam_menu = self._menu_plugin()
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+        self._two_accounts()  # 当前是 B
+        self.assertEqual(self.run_cam("usage"), 0)
+        store = self.cam.Store()
+        lines = []
+        cam_menu.render(store, {}, out=lines.append, rich=True)
+        title = lines[0]
+        self.assertTrue(title.startswith("B 75% | image="), title)
+        self.assertIn(" width=16 height=16", title)
+        pics = re.search(r"image=(\S+)", title).group(1).split(",")
+        self.assertEqual(len(pics), 2)
+        for pic in pics:
+            png = base64.b64decode(pic)
+            self.assertTrue(png.startswith(b"\x89PNG"))
+            self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))  # 16 点 × 2
+            self.assertIn(b"pHYs", png)
+        rows = [l for l in lines if l.startswith(("A |", "B |"))]
+        self.assertEqual(len(rows), 2, lines)
+        self.assertTrue(all('badge="Max' in l for l in rows), rows)
+        bars = [l for l in lines if "size=11" in l and "| image=" in l]
+        self.assertEqual(len(bars), 2, lines)
+        self.assertTrue(any(l.startswith("5 小时 75%，") and "7 天 30%" in l for l in bars), bars)
+        self.assertTrue(all(" width=56 height=6" in l for l in bars), bars)
+        self.assertNotIn("▰", "\n".join(lines))
+        self.assertEqual([cam_menu.level_of(p) for p in (10, 70, 90)], ["ok", "warn", "bad"])
+        self.assertNotEqual(cam_menu.quota_ring(10, 0), cam_menu.quota_ring(90, 0))
+        self.assertNotEqual(cam_menu.quota_bar(75, 0), cam_menu.quota_bar(75, 1))  # 深色模式另一张
+        # 不传 rich：macOS 上开，别处关
+        lines = []
+        cam_menu.render(store, {}, out=lines.append)
+        self.assertEqual("| image=" in lines[0], self.cam.IS_MAC)  # sfimage= 里也有 image=，要连竖线一起比
+        if not self.cam.IS_MAC:
+            self.assertIn("▰", "\n".join(lines))
 
     # ---- 锁
 
