@@ -1171,7 +1171,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (!state || !localRep || (!rows.length && localRange !== "1")) { $("#local-block").hidden = true; return; }
     $("#local-range").innerHTML = RANGES.map(([v, t]) => `<button type="button" data-range="${v}" aria-pressed="${v === localRange}">${t}</button>`).join("");
     const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
-    const label = (id) => names[id] || "未归属";
+    const label = (id) => names[id] || "未归属（装 cam 之前）";  // 最早一次切换 / 导入之前的记录算不出是哪个号的
     const order = state.accounts.map((a) => a.id);
     const rank = (id) => (order.indexOf(id) + 1 || 99);
     const ids = [...new Set(rows.map((r) => r.account_id))].sort((a, b) => rank(a) - rank(b));
@@ -1398,9 +1398,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     doSwitch(id, btn, mode);
   });
 
-  // ---- 起名：内置昵称一键选，也可以自己填。规范：6 个字以内（菜单栏才放得下，超过就显示成“1号”这样的序号）、不用邮箱、一个号一个名
+  // ---- 起名：内置昵称一键选，也可以自己填。规范：6 个汉字或 12 个字母以内（菜单栏才放得下，超过就显示成“1号”这样的序号）、不用邮箱、一个号一个名
   const NICKS = ["工作号", "个人号", "公司号", "团队号", "备用号", "测试号", "主号", "副号", "海外号", "家里号"];
-  const cpLen = (s) => [...String(s || "")].length;
+  const nameWidth = (s) => [...String(s || "")].reduce((n, c) => n + (c.codePointAt(0) > 0x2e7f ? 2 : 1), 0);  // 汉字算 2、字母算 1，和菜单栏插件一致
   function nameSuggestions(acc) {
     const used = new Set(state.accounts.filter((a) => !acc || a.id !== acc.id).map((a) => a.label));
     const base = [];
@@ -1418,7 +1418,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   function nameTip(v, acc) {
     if (!v) return ["不填就用邮箱当名字，菜单栏会显示成序号", ""];
     if (v.includes("@")) return ["邮箱太长，菜单栏会显示成“1号”这样的序号；起个短名更好认", "warn"];
-    if (cpLen(v) > 6) return [`${cpLen(v)} 个字，菜单栏放不下会显示成序号；6 个字以内最好`, "warn"];
+    if (nameWidth(v) > 12) return ["太长了，菜单栏放不下会显示成序号；6 个汉字或 12 个字母以内最好", "warn"];
     if (state.accounts.some((a) => a.label === v && (!acc || a.id !== acc.id))) return ["已经有一个号叫这个名字了，会分不清", "warn"];
     return [`菜单栏、命令行（cam switch ${v}）、聊天机器人里都用这个名字`, ""];
   }

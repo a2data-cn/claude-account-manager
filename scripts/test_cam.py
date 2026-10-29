@@ -1010,8 +1010,11 @@ class CamTest(unittest.TestCase):
             cam_menu.MINI = False
         self.assertTrue(rows[0].startswith("B |") and rows[0].endswith(" shortcut=CTRL+OPTION+CMD+2"), rows)
         self.assertTrue(rows[1].endswith(" shortcut=CTRL+OPTION+CMD+1"), rows)
-        alts = [l for l in lines if "alternate=true" in l]
-        self.assertTrue(alts and not any("shortcut=" in l for l in alts), alts)
+        self.assertFalse(any("alternate=true" in l for l in lines), lines)  # 不再有按 Option 才显示的邮箱行：macOS 26 上会和正常行一起显示
+        # 名字宽度规则：汉字算 2、字母算 1，12 以内直接显示；邮箱或太宽就显示序号
+        for label, numbered in (("工作号", False), ("Pro号-CC", False), ("主力Max号", False), ("一二三四五六", False),
+                                ("一二三四五六七", True), ("abcdefghijklm", True), ("b@x.com", True), ("", True)):
+            self.assertEqual(cam_menu.needs_number({"label": label}), numbered, label)
         bars = [l for l in lines if "size=11" in l and "| image=" in l]
         self.assertEqual(len(bars), 2, lines)
         self.assertTrue(any(l.startswith("5 小时 75%，") and "7 天 30%" in l for l in bars), bars)

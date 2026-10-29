@@ -150,7 +150,7 @@ button { font: inherit; color: inherit; }
     const plan = PLAN[a.plan_display];
     const sug = [...(plan && plan !== "API" ? [`${plan}号`] : []), ...NICKS].filter((n) => !used.has(n)).slice(0, 6);
     const cur = a.label && a.label.includes("@") ? "" : (a.label || "");
-    return `<form class="rn" data-id="${esc(a.id)}"><input name="label" maxlength="60" value="${esc(cur)}" placeholder="起个短名，6 个字以内" autocomplete="off">
+    return `<form class="rn" data-id="${esc(a.id)}"><input name="label" maxlength="60" value="${esc(cur)}" placeholder="起个短名：6 个汉字或 12 个字母以内" autocomplete="off">
       <button type="submit" class="go" ${busy ? "disabled" : ""}>保存</button><button type="button" data-act="rn-cancel">取消</button></form>
       <div class="chips">${sug.map((n) => `<button type="button" data-nick="${esc(n)}">${esc(n)}</button>`).join("")}</div>`;
   }
@@ -181,8 +181,9 @@ button { font: inherit; color: inherit; }
   const usd = (v) => v >= 100 ? `$${v.toFixed(0)}` : v >= 10 ? `$${v.toFixed(1)}` : `$${v.toFixed(2)}`;
   const pad = (n) => String(n).padStart(2, "0");
   const cpLen = (s) => [...String(s || "")].length;
-  // 和菜单栏插件一个规则：名字是邮箱、没有名字或超过 6 个字时显示成“1号”这样的序号（按添加顺序，和快捷键的数字一致）
-  const needsNumber = (a) => !a.label || a.label.includes("@") || cpLen(a.label) > 6;
+  // 和菜单栏插件一个规则：名字是邮箱、没有名字或太宽（汉字算 2、字母算 1，超过 12）时显示成“1号”这样的序号（按添加顺序，和快捷键的数字一致）
+  const width = (s) => [...String(s || "")].reduce((n, c) => n + (c.codePointAt(0) > 0x2e7f ? 2 : 1), 0);
+  const needsNumber = (a) => !a.label || a.label.includes("@") || width(a.label) > 12;
   const nameOf = (a, pos) => needsNumber(a) ? `${pos[a.id]}号` : a.label;
   function ring(p, size, stroke) {
     const r = size / 2 - stroke / 2 - 1, c = 2 * Math.PI * r, v = p === null ? 0 : p;

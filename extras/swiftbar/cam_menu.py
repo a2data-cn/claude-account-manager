@@ -306,10 +306,18 @@ def short(label, n=8):
     return label if len(label) <= n else label[: n - 1] + "…"
 
 
+def display_width(s):
+    """名字占多宽：汉字、全角算 2，字母数字算 1。"""
+    return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
+
+
+NAME_WIDTH = 12  # 菜单栏放得下的名字宽度：6 个汉字或 12 个字母
+
+
 def needs_number(acc):
-    """名字是邮箱、没有名字或超过 6 个字时，菜单栏放不下，用序号代替。"""
+    """名字是邮箱、没有名字或太宽（超过 6 个汉字 / 12 个字母）时，菜单栏放不下，用序号代替。面板和卡片小面板用同一条规则。"""
     label = acc.get("label") or ""
-    return not label or "@" in label or len(label) > 6
+    return not label or "@" in label or display_width(label) > NAME_WIDTH
 
 
 def title_name(acc, n):
@@ -647,9 +655,6 @@ def render(store, st, out=print, rich=None, phase=None):
             if a["id"] != act_id:
                 out(f"--切换到这个账号 | {switch_action(a['id'])}")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
-            if a.get("email") and a.get("email") != a.get("label"):
-                # 按住 Option 时这一行换成邮箱；要紧跟在上一行（及其子菜单）后面才会配成一对
-                out(f"{text(a['email'])} | {params} alternate=true")
             if rich and pct(a, "five_hour") is not None:  # 不加 color：带 color 的行会丢图片（见 heading）
                 out(f"{detail_line(a)} | {image_param(quota_bar, pct(a, 'five_hour'), 56, 6)} size=11")
         out("---")
@@ -687,8 +692,6 @@ def render(store, st, out=print, rich=None, phase=None):
             elif not u:
                 out("--填入 sessionKey 可显示额度（见 README） | color=gray")
             out(f"--只刷新这个账号 | {action('usage', a['id'])}")
-            if a.get("email") and a.get("email") != a.get("label"):
-                out(f"{text(a['email'])} | {params} alternate=true")  # 按住 Option 显示邮箱
             if rich and f5 is not None:
                 out(f"{detail_line(a)} | {image_param(quota_bar, f5, 56, 6)} size=11")
         out("---")
