@@ -895,6 +895,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       a.kind === "claude_code" || a.kind === "claude_desktop" ? [a.kind === "claude_desktop" ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"] : null,
       a.kind === "claude_desktop" ? ["额度来源", u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"] : ["用量更新", ago(u.fetched_at)],
       a.kind === "claude_desktop" ? ["记录时间", ago(u.fetched_at)] : null,
+      a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${a.last_incident.sessions} 个会话在跑`] : null,
+      a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${e.times} 次`).join(" · ")] : null,
       a.kind === "claude_desktop" ? ["最近读取", ago(u.checked_at)] : null,
       m.note ? ["备注", esc(m.note)] : null,
     ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");

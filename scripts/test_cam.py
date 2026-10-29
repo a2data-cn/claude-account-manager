@@ -618,6 +618,9 @@ class CamTest(unittest.TestCase):
         for s in ("# cam 账号诊断：A", "登录已失效", "1.2.3.4", "Singtel", "家庭 / 公司宽带", "Asia/Shanghai", "出问题时的现场（最近 1 次）"):
             self.assertIn(s, text)
         self.assertTrue(self.cam.diagnostic_filename(rep).startswith("cam-诊断-A-"))
+        pub = self.cam.public_state(store, store.load())["accounts"][0]  # 面板账号详情里直接显示的摘要
+        self.assertEqual((pub["last_incident"]["ip"], pub["last_incident"]["text"], pub["exits"][0]["ip"], pub["exits"][0]["times"]),
+                         ("1.2.3.4", "登录已失效，无法续期", "1.2.3.4", 2))
         # 命令行和接口
         self.assertEqual(self.run_cam("diag", "A"), 0)
         out = os.path.join(self.tmp, "diag.md")

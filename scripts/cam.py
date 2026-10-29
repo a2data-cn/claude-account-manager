@@ -2876,6 +2876,13 @@ def public_state(store, data):
             has_creds = bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
         p["health"] = account_health(dict(a, usage=None) if legacy_desktop else a,
                                      has_creds, p["days_left"])
+        inc = (a.get("incidents") or [None])[0]  # 上次出问题的现场摘要，面板账号详情直接显示；完整的在“导出诊断”里
+        ir, ie = (inc or {}).get("region") or {}, (inc or {}).get("env") or {}
+        p["last_incident"] = {"at": inc["at"], "text": HEALTH_TEXT.get(inc["kind"], ("", inc["kind"], ""))[1], "loc": ir.get("loc"),
+                              "ip": ir.get("ip"), "org": ir.get("org"), "ip_type": IP_TYPE_NAMES.get(ir.get("ip_type")),
+                              "proxy": bool(ie.get("proxy")), "tunnel": bool(ie.get("tunnel")), "sessions": inc.get("sessions") or 0} if inc else None
+        p["exits"] = [{"loc": r.get("loc"), "ip": r.get("ip"), "org": r.get("org"), "at": r.get("at"), "times": r.get("times") or 1}
+                      for r in (a.get("regions") or [])[:3]]
         if a["kind"] == "api":
             sec = store.load_secret(a["id"])
             p["api_key_hint"] = mask(sec.get("api_key"))
