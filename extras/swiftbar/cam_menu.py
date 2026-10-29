@@ -215,14 +215,29 @@ def row_icon(active, level):
     return "sfimage=circle"
 
 
-def heading(text, icon):
-    """分区标题：灰色小字加图标。"""
-    return f"{text} | size=12 color=gray sfimage={icon} sfcolor={GRAY}"
+def heading(text):
+    """分区标题：灰色小字，像系统菜单的分组标题。
+
+    不带图标：macOS 26 上 SwiftBar 高亮菜单项时会给带 color 的行重排标题，图标和图片就丢了（它的
+    menu(_:willHighlight:) 只重建 attributedTitle）。所以带 color 的行一律不放图标、图片。
+    """
+    return f"{text} | size=12 color=gray"
 
 
 def short(label, n=8):
     label = label or ""
     return label if len(label) <= n else label[: n - 1] + "…"
+
+
+def needs_number(acc):
+    """名字是邮箱、没有名字或超过 6 个字时，菜单栏放不下，用序号代替。"""
+    label = acc.get("label") or ""
+    return not label or "@" in label or len(label) > 6
+
+
+def title_name(acc, n):
+    """菜单栏上的名字：短名字直接显示；不然显示“1号”这样的序号（和 cam 列表、快捷键的数字一致），详细的在菜单里看。"""
+    return f"{n}号" if needs_number(acc) else acc["label"]
 
 
 def state_path(store):
@@ -359,6 +374,7 @@ def render(store, st, out=print, rich=None):
     rich = cam.IS_MAC if rich is None else rich
     data = store.load()
     accs = data["accounts"]
+    pos = {a["id"]: n for n, a in enumerate(accs, 1)}  # 和 cam 列表里的序号一致；菜单栏的“1号”、快捷键的数字都用它
     act_id = data["active"].get("claude_code")
     active = next((a for a in accs if a["id"] == act_id), None)
 
@@ -379,10 +395,11 @@ def render(store, st, out=print, rich=None):
         # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
         # rich 时图标是画出已用比例的额度环；不然用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
         icon = image_param(quota_ring, p, 16, 16) if rich else f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}"
-        head = (f"{esc(short(title_acc.get('label') or title_acc.get('email')))} {p:.0f}% | {icon}"
-                + (f" color={color_for(p)}" if color_for(p) else ""))
+        name = title_name(title_acc, pos[title_acc["id"]]) if rich else short(title_acc.get("label") or title_acc.get("email"))
+        head = f"{esc(name)} {p:.0f}% | {icon}" + (f" color={color_for(p)}" if color_for(p) else "")
     elif active:
-        head = f"{esc(short(active.get('label') or active.get('email')))} | sfimage=person.2.circle"
+        name = title_name(active, pos[active["id"]]) if rich else short(active.get("label") or active.get("email"))
+        head = f"{esc(name)} | sfimage=person.2.circle"
     else:
         head = "Claude | sfimage=person.2.circle"
     out(head + (f" shortcut={HOTKEY}+C" if HOTKEY else ""))
@@ -402,8 +419,7 @@ def render(store, st, out=print, rich=None):
     # ---- Claude Code 账号
     code = [a for a in accs if a["kind"] == "claude_code"]
     if code:
-        out(heading("Claude Code 账号", "terminal"))
-        order = {a["id"]: n for n, a in enumerate(code, 1)}  # 快捷键的数字按添加顺序，不跟着下面的排序变
+        out(heading("Claude Code 账号"))
         code.sort(key=lambda a: (a["id"] != act_id, pct(a, "five_hour") if pct(a, "five_hour") is not None else 999))
         for a in code:
             plan = PLAN.get(a.get("plan") or (a.get("manual") or {}).get("plan") or "", "")
@@ -411,18 +427,21 @@ def render(store, st, out=print, rich=None):
             h = health_of(store, a)
             flag = f"  ⚠ {h['label']}" if h["level"] in ("warn", "error") else ""
 
+            num = f"{pos[a['id']]} · " if rich and needs_number(a) else ""  # 菜单栏显示的是“1号”时，这里标上 1
+
             def text(name):
                 # rich 时套餐放进右边的小标签（badge），额度画成下面一行的进度条
-                return f"{esc(name)}{('  ' + plan) if plan and not rich else ''}{flag}{'' if rich else usage_nums(a)}"
+                return f"{num}{esc(name)}{('  ' + plan) if plan and not rich else ''}{flag}{'' if rich else usage_nums(a)}"
 
             params = row_icon(a["id"] == act_id, h["level"])
             if a["id"] != act_id:
                 c = RED if h["level"] == "error" else color_for(pct(a, "five_hour"))
-                params += f" {switch_action(a['id'])}" + (f" color={c}" if c else "")
+                # 整行上色只给 Windows 托盘：macOS 26 上带 color 的行会丢图标（见 heading），rich 时颜色由图标和进度条表达
+                params += f" {switch_action(a['id'])}" + (f" color={c}" if c and not rich else "")
             if rich and plan:
                 params += f" badge={q(plan)}"
             # 快捷键只挂在这一行（按住 Option 的那行是同一项，不重复注册）；当前号没有切换动作，按了不做事
-            hk = f" shortcut={HOTKEY}+{order[a['id']]}" if HOTKEY and order[a["id"]] <= 9 else ""
+            hk = f" shortcut={HOTKEY}+{pos[a['id']]}" if HOTKEY and pos[a["id"]] <= 9 else ""
             out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}{hk}")
             for i in h["issues"]:
                 out(f"--{'⚠' if i['level'] != 'info' else '·'} {esc(i['text'])[:60]} | color={RED if i['level'] == 'error' else YELLOW if i['level'] == 'warn' else 'gray'}")
@@ -450,14 +469,14 @@ def render(store, st, out=print, rich=None):
             if a.get("email") and a.get("email") != a.get("label"):
                 # 按住 Option 时这一行换成邮箱；要紧跟在上一行（及其子菜单）后面才会配成一对
                 out(f"{text(a['email'])} | {params} alternate=true")
-            if rich and pct(a, "five_hour") is not None:
-                out(f"{detail_line(a)} | {image_param(quota_bar, pct(a, 'five_hour'), 56, 6)} size=11 color={GRAY}")
+            if rich and pct(a, "five_hour") is not None:  # 不加 color：带 color 的行会丢图片（见 heading）
+                out(f"{detail_line(a)} | {image_param(quota_bar, pct(a, 'five_hour'), 56, 6)} size=11")
         out("---")
 
     # ---- 网页版
     web = [a for a in accs if a["kind"] == "claude_web"]
     if web:
-        out(heading("网页版", "globe"))
+        out(heading("网页版"))
         web.sort(key=lambda a: pct(a, "five_hour") if pct(a, "five_hour") is not None else 999)
         for a in web:
             f5 = pct(a, "five_hour")
@@ -469,7 +488,7 @@ def render(store, st, out=print, rich=None):
                 return f"{esc(name)}{('  ' + plan) if plan and not rich else ''}{'' if rich else usage_nums(a)}"
 
             params = (row_icon(False, "warn" if u.get("error") else "ok") + f" {action('open', a['id'], refresh=False)}"
-                      + (f" color={color_for(f5)}" if color_for(f5) else "") + (f" badge={q(plan)}" if rich and plan else ""))
+                      + (f" color={color_for(f5)}" if color_for(f5) and not rich else "") + (f" badge={q(plan)}" if rich and plan else ""))
             out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}")
             # 子菜单
             out(f"--打开浏览器窗口 | {action('open', a['id'], refresh=False)}")
@@ -490,13 +509,13 @@ def render(store, st, out=print, rich=None):
             if a.get("email") and a.get("email") != a.get("label"):
                 out(f"{text(a['email'])} | {params} alternate=true")  # 按住 Option 显示邮箱
             if rich and f5 is not None:
-                out(f"{detail_line(a)} | {image_param(quota_bar, f5, 56, 6)} size=11 color={GRAY}")
+                out(f"{detail_line(a)} | {image_param(quota_bar, f5, 56, 6)} size=11")
         out("---")
 
     # ---- Claude 桌面版
     desk = [a for a in accs if a["kind"] == "claude_desktop"]
     if desk:
-        out(heading("Claude 桌面版", "desktopcomputer"))
+        out(heading("Claude 桌面版"))
         act = (data.get("active") or {}).get("claude_desktop")
         for a in desk:
             name = esc(a.get("label") or a.get("email") or "未命名")
@@ -527,7 +546,7 @@ def render(store, st, out=print, rich=None):
     # ---- API
     api = [a for a in accs if a["kind"] == "api"]
     if api:
-        out(heading("API", "key"))
+        out(heading("API"))
         for a in api:
             u = a.get("usage") or {}
             cost = f"    本月 ${u['cost_month_usd']:.2f}" if u.get("cost_month_usd") is not None else ""
@@ -562,8 +581,8 @@ def render(store, st, out=print, rich=None):
     if cam.region_view(data)["status"]:  # 后台检测过才有评分
         sc = cam.risk_score(risks)
         c = {"low": GREEN, "medium": YELLOW, "high": RED}[sc["grade"]]
-        icon = "checkmark.shield.fill" if sc["grade"] == "low" else "exclamationmark.shield.fill"
-        out(f"环境评分 {sc['score']}/100：{esc(sc['label'])} | size=12 color={c} sfimage={icon} sfcolor={c} length={LINE}")
+        mark = "✓" if sc["grade"] == "low" else "⚠"  # 不用 sfimage：带 color 的行会丢图标（见 heading）
+        out(f"{mark} 环境评分 {sc['score']}/100：{esc(sc['label'])} | size=12 color={c} length={LINE}")
     for r in risks:  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
         if r["level"] not in ("warn", "bad"):
             continue

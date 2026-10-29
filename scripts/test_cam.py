@@ -858,6 +858,21 @@ class CamTest(unittest.TestCase):
         self.assertTrue(any(l.startswith("5 小时 75%，") and "7 天 30%" in l for l in bars), bars)
         self.assertTrue(all(" width=56 height=6" in l for l in bars), bars)
         self.assertNotIn("▰", "\n".join(lines))
+        # macOS 26 上 SwiftBar 高亮时会给带 color 的行重排标题，图标、图片就丢了：rich 模式里带图的行一律不带 color
+        for l in lines[1:]:  # 标题行是菜单栏按钮，不是菜单项，带 color 没事
+            text, _, params = l.partition(" | ")
+            if "image=" in params:
+                self.assertFalse(re.search(r"(^| )color=", params), l)
+        # 菜单栏放不下长名字：名字是邮箱或超过 6 个字时显示序号（和 cam 列表、快捷键的数字一致），账号行前面也标上序号
+        self.assertEqual(cam_menu.title_name({"label": "工作号"}, 1), "工作号")
+        self.assertEqual(cam_menu.title_name({"label": "a@x.com", "email": "a@x.com"}, 2), "2号")
+        self.assertEqual(cam_menu.title_name({"label": "一二三四五六七"}, 3), "3号")
+        self.assertEqual(self.run_cam("set", "B", "--label", "b@x.com"), 0)
+        lines = []
+        cam_menu.render(store, {}, out=lines.append, rich=True)
+        self.assertTrue(lines[0].startswith("2号 75% | image="), lines[0])
+        self.assertTrue(any(l.startswith("2 · b@x.com | sfimage=checkmark.circle.fill") and "shortcut=CTRL+OPTION+CMD+2" in l for l in lines), lines)
+        self.assertEqual(self.run_cam("set", "2", "--label", "B"), 0)
         self.assertEqual([cam_menu.level_of(p) for p in (10, 70, 90)], ["ok", "warn", "bad"])
         self.assertNotEqual(cam_menu.quota_ring(10, 0), cam_menu.quota_ring(90, 0))
         self.assertNotEqual(cam_menu.quota_bar(75, 0), cam_menu.quota_bar(75, 1))  # 深色模式另一张
