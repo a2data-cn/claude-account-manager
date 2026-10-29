@@ -135,7 +135,7 @@ def menu(store, notes):
     except Exception as e:  # noqa: BLE001  和菜单栏小工具一样，后台出错不影响菜单
         st = {"last_error": str(e)}
     lines = []
-    cam_menu.render(store, st, out=lines.append)
+    cam_menu.render(store, st, out=lines.append, rich=False)  # 托盘菜单不认图片，用文字进度条（不管在哪个系统上跑）
     title, items = convert(lines)
     badge, level, tip = badge_of(title)
     return {"tip": tip, "badge": badge, "level": level, "items": items, "notes": notes.items}

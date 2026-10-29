@@ -800,7 +800,7 @@ class CamTest(unittest.TestCase):
         cam_menu.cam = self.cam
         store = self.cam.Store()
         lines = []
-        cam_menu.render(store, cam_menu.background_work(store), out=lines.append)
+        cam_menu.render(store, cam_menu.background_work(store), out=lines.append, rich=False)  # 这里测文字版；图形版见 test_menubar_rich_layout
         self.assertTrue(lines[0].startswith("Claude ⚠"))
         # 没账号时给两个点了就在终端里跑的入口：存下当前登录（cam import）、登录另一个号（cam login）
         self.assertTrue(any('param2="import" terminal=true' in l for l in lines), lines)
@@ -808,18 +808,18 @@ class CamTest(unittest.TestCase):
         # 后台归 cam serve 做时，它记的错误也显示出来：没账号时放在最上面，截短、完整内容在悬停提示里
         write(os.path.join(store.root, self.cam.SERVE_STATE), json.dumps({"pid": 1, "last_error": "自动导入：没有权限读 x。sudo chown me x"}))
         lines = []
-        cam_menu.render(store, {"bg_owner": "other"}, out=lines.append)
+        cam_menu.render(store, {"bg_owner": "other"}, out=lines.append, rich=False)
         self.assertIn(f"⚠ 自动导入：没有权限读 x。sudo chown me x | color={cam_menu.RED} length={cam_menu.LINE}", lines)
         os.remove(os.path.join(store.root, self.cam.SERVE_STATE))
         # 登录后插件运行一次就自动保存，标题显示账号
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
         self.login_then = None
         lines = []
-        cam_menu.render(store, cam_menu.background_work(store), out=lines.append)
+        cam_menu.render(store, cam_menu.background_work(store), out=lines.append, rich=False)
         self.assertIn("a@x.com", lines[0])
         self.login("at-B1", "rt-B1", "uuid-B", "b@x.com")
         lines = []
-        cam_menu.render(store, cam_menu.background_work(store), out=lines.append)
+        cam_menu.render(store, cam_menu.background_work(store), out=lines.append, rich=False)
         switch_lines = [l for l in lines if 'param2="switch"' in l]
         self.assertTrue(switch_lines, lines)
         self.assertTrue(all("|" in l for l in lines if l != "---"))
