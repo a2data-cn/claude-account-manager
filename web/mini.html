@@ -5,81 +5,92 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude 账号</title>
 <style>
-/* 菜单栏小工具点开的卡片小面板：340 宽，像系统小组件那样一张张卡片。配色和 panel.html 一致 */
+/* 菜单栏小工具点开的卡片小面板：340 宽，照 macOS 控制中心的样子——大圆角的玻璃卡片、左边圆形图标、滑杆式的额度条 */
 :root {
-  --paper: #F4F2EC; --surface: #FBFAF7; --ink: #2E2C27; --muted: #6E6857; --line: #E7E3D9; --track: #ECE8DE;
-  --accent: #B5532F; --accent-ink: #FFFFFF; --bar: #6E685A; --warn: #96600F; --hot: #B5432E; --live: #3B7A52; --live-soft: #E2EDDF;
-  --violet: #7656B4; --ok: #3E6EA8; --shadow: 0 1px 2px rgba(60, 45, 25, .06);
+  --paper: #E8E6E0; --tile: rgba(255, 255, 255, .62); --tile-line: rgba(255, 255, 255, .7); --tile-hover: rgba(255, 255, 255, .8);
+  --ink: #1D1C19; --muted: #6E6857; --track: rgba(0, 0, 0, .1); --fill: #1D1C19;
+  --accent: #D97757; --accent-ink: #FFF6EE; --circle: rgba(0, 0, 0, .08);
+  --warn: #C7801A; --hot: #D64B3A; --live: #2F8A55; --violet: #7656B4; --ok: #3E6EA8;
   --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --track: #3B3A36;
-    --accent: #D97757; --accent-ink: #1F1E1D; --bar: #BDB7A8; --warn: #E0A548; --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30;
-    --violet: #B49AEF; --ok: #7FA6E0; --shadow: none; color-scheme: dark; }
+  :root { --paper: #1C1C1E; --tile: rgba(255, 255, 255, .09); --tile-line: rgba(255, 255, 255, .1); --tile-hover: rgba(255, 255, 255, .15);
+    --ink: #F2F2F0; --muted: #A5A39C; --track: rgba(255, 255, 255, .16); --fill: #F2F2F0; --circle: rgba(255, 255, 255, .14);
+    --warn: #F0A742; --hot: #F07A6A; --live: #6FD08E; --violet: #B49AEF; --ok: #7FA6E0; color-scheme: dark; }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--paper); color: var(--ink); }
-body { font: 13px/1.5 var(--sans); font-variant-numeric: tabular-nums; padding: 12px 12px 10px; -webkit-user-select: none; user-select: none; }
+body { font: 13px/1.45 var(--sans); font-variant-numeric: tabular-nums; padding: 10px; -webkit-user-select: none; user-select: none; }
 button { font: inherit; color: inherit; }
-.head { display: flex; align-items: center; gap: 8px; margin: 0 2px 10px; }
-.head .logo { width: 20px; height: 20px; border-radius: 5px; flex: none; }
-.head b { font-size: 14px; font-weight: 650; }
-.head .when { margin-left: auto; font-size: 11px; color: var(--muted); }
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 12px 14px; margin-bottom: 8px; }
-.cur { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 0 14px; align-items: center; }
+.grid { display: grid; gap: 8px; }
+.tile { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 22px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); padding: 12px 14px;
+  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+.who { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 12px; align-items: center; }
+.circle { width: 56px; height: 56px; border-radius: 50%; background: var(--circle); display: grid; place-items: center; }
+.circle.on { background: var(--accent); }
 .ring { display: block; }
-.ring circle { fill: none; stroke-width: 5; }
-.ring .rt { stroke: var(--track); }
-.ring .rf { stroke: var(--bar); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.ring circle { fill: none; }
+.ring .rt { stroke: rgba(0, 0, 0, .12); }
+.ring .rf { stroke: var(--fill); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.circle.on .ring .rt { stroke: rgba(255, 246, 238, .3); }
+.circle.on .ring .rf { stroke: var(--accent-ink); }
 .ring .rf.warn { stroke: var(--warn); }
 .ring .rf.hot { stroke: var(--hot); }
-.ring text { fill: var(--ink); font: 650 15px var(--sans); }
-.ring text tspan { font-size: 9px; font-weight: 600; }
-.ring.sm circle { stroke-width: 3.5; }
-.ring.sm text { font-size: 10px; }
-.ring.sm text tspan { font-size: 6.5px; }
+.circle.on .ring .rf.warn, .circle.on .ring .rf.hot { stroke: var(--accent-ink); }
+.ring text { fill: var(--fill); font: 650 12px var(--sans); }
+.circle.on .ring text { fill: var(--accent-ink); }
+.ring text tspan { font-size: 7.5px; font-weight: 600; }
 .name { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.name b { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip { font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; line-height: 1.5; flex: none; }
-.chip.live { background: var(--live-soft); border-color: transparent; color: var(--live); }
-.chip.p-pro { color: var(--ok); border-color: currentColor; }
-.chip.p-max { color: var(--violet); border-color: currentColor; }
-.chip.p-team { color: var(--live); border-color: currentColor; }
-.chip.bad { background: var(--hot); border-color: var(--hot); color: #fff; }
-.sub { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.line { font-size: 12px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.line b { color: var(--ink); font-weight: 650; }
-.bar { position: relative; height: 5px; background: var(--track); border-radius: 999px; margin-top: 4px; overflow: hidden; }
-.bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--bar); min-width: 5px; }
+.name b { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { font-size: 10px; font-weight: 650; padding: 1px 7px; border-radius: 999px; background: var(--circle); color: var(--muted); white-space: nowrap; flex: none; }
+.chip.live { color: var(--live); }
+.chip.p-pro { color: var(--ok); }
+.chip.p-max { color: var(--violet); }
+.chip.bad { background: var(--hot); color: #fff; }
+.sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+/* 滑杆式的额度条：左边标题、右边百分比，下面一根粗条 */
+.meter { margin-top: 10px; }
+.meter + .meter { margin-top: 8px; }
+.meter .lab { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
+.meter .lab b { color: var(--ink); font-size: 13px; font-weight: 650; }
+.bar { position: relative; height: 7px; background: var(--track); border-radius: 999px; margin-top: 5px; overflow: hidden; }
+.bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--fill); min-width: 7px; }
 .bar i.warn { background: var(--warn); }
 .bar i.hot { background: var(--hot); }
-.sec { font-size: 11px; color: var(--muted); margin: 10px 4px 6px; font-weight: 600; letter-spacing: .02em; }
-.acc { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 0 10px; align-items: center; width: 100%; text-align: left;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); padding: 9px 12px; margin-bottom: 6px; cursor: pointer;
-  transition: border-color .12s, transform .12s, box-shadow .12s; }
-.acc:hover { border-color: var(--muted); transform: translateY(-1px); box-shadow: 0 3px 10px rgba(40, 30, 20, .08); }
+/* 其它账号：药丸形的小卡，左边圆圈里是小环 */
+.pills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pills.one { grid-template-columns: 1fr; }
+.acc { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 0 10px; align-items: center; width: 100%; text-align: left; cursor: pointer;
+  background: var(--tile); border: 1px solid var(--tile-line); border-radius: 999px; padding: 8px 12px 8px 8px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
+  transition: background-color .12s, transform .12s; -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+.acc:hover { background: var(--tile-hover); transform: translateY(-1px); }
 .acc:disabled { cursor: progress; opacity: .6; transform: none; }
-.acc .go { font-size: 11.5px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.acc .circle { width: 40px; height: 40px; }
 .acc .name b { font-size: 13px; }
-.acc.web .go { color: var(--muted); }
-.acts { display: flex; gap: 6px; margin-top: 10px; }
-.btn { flex: 1; border: 1px solid var(--line); background: var(--surface); border-radius: 9px; padding: 6px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
-.btn:hover { border-color: var(--muted); }
-.btn:disabled { opacity: .5; cursor: progress; }
-.foot { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; font-size: 11px; color: var(--muted); }
+.acc > span:last-child { display: grid; min-width: 0; }
+.acc .sub { font-size: 11px; }
+/* 底下一排圆按钮，像控制中心的那种 */
+.acts { display: flex; justify-content: center; gap: 18px; margin: 4px 0 2px; }
+.act { display: grid; justify-items: center; gap: 4px; background: none; border: 0; cursor: pointer; color: var(--ink); padding: 0; }
+.act .circle { width: 48px; height: 48px; background: var(--tile); border: 1px solid var(--tile-line); box-shadow: 0 1px 3px rgba(0, 0, 0, .06); transition: background-color .12s, transform .12s; }
+.act:hover .circle { background: var(--tile-hover); transform: translateY(-1px); }
+.act:disabled { cursor: progress; opacity: .6; }
+.act svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.act span { font-size: 11px; color: var(--muted); }
+.sec { font-size: 11px; color: var(--muted); margin: 2px 6px -2px; font-weight: 600; }
+.foot { display: flex; justify-content: space-between; gap: 8px; margin: 2px 6px 0; font-size: 11px; color: var(--muted); }
 .foot .risk.medium { color: var(--warn); }
 .foot .risk.high { color: var(--hot); font-weight: 600; }
-.msg { margin-top: 8px; padding: 7px 10px; border-radius: 9px; font-size: 12px; background: var(--live-soft); color: var(--live); }
-.msg.bad { background: var(--hot); color: #fff; }
-.msg.wait { background: var(--track); color: var(--ink); }
-.empty { padding: 14px; text-align: center; color: var(--muted); font-size: 12.5px; }
-.empty code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+.msg { padding: 8px 12px; border-radius: 14px; font-size: 12px; background: var(--tile); border: 1px solid var(--tile-line); color: var(--live); }
+.msg.bad { color: var(--hot); }
+.msg.wait { color: var(--ink); }
+.empty { text-align: center; color: var(--muted); font-size: 12.5px; padding: 6px 0; }
+.empty code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--circle); padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
-<div class="head"><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7.7" fill="#D97757"/><circle cx="16" cy="16" r="6.72" fill="none" stroke="#FFF6EE" stroke-width="4" stroke-linecap="round" stroke-dasharray="31.67 42.22" transform="rotate(45 16 16)"/></svg><b>Claude 账号</b><span class="when" id="when"></span></div>
-<main id="main"><div class="empty">正在读取…</div></main>
+<main id="main" class="grid"><div class="tile empty">正在读取…</div></main>
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
@@ -87,6 +98,10 @@ button { font: inherit; color: inherit; }
   const token = new URL(location.href).searchParams.get("t") || "";
   const PLAN = { free: "Free", pro: "Pro", max: "Max", team: "Team", enterprise: "Enterprise", api: "API" };
   const PLAN_CLASS = { pro: "p-pro", max: "p-max", team: "p-team" };
+  const ICON = {
+    refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>',
+    panel: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3 9h18"/><circle cx="6.5" cy="7" r=".6"/></svg>',
+  };
   let state = null, busy = false, msg = null;
 
   async function api(method, path, body) {
@@ -111,12 +126,12 @@ button { font: inherit; color: inherit; }
   }
   const pct = (w) => w && w.utilization !== null && w.utilization !== undefined ? Math.max(0, Math.min(100, w.utilization)) : null;
   const lv = (p) => p >= 90 ? "hot" : p >= 70 ? "warn" : "";
-  function ring(p, size, small) {
-    const r = size / 2 - 4, c = 2 * Math.PI * r, v = p === null ? 0 : p;
-    return `<svg class="ring${small ? " sm" : ""}" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
-      <circle class="rt" cx="${size / 2}" cy="${size / 2}" r="${r}"/>
-      <circle class="rf ${lv(v)}" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - v / 100)).toFixed(2)}"/>
-      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central">${p === null ? "–" : `${Math.round(p)}<tspan>%</tspan>`}</text></svg>`;
+  function ring(p, size, stroke) {
+    const r = size / 2 - stroke / 2 - 1, c = 2 * Math.PI * r, v = p === null ? 0 : p;
+    return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
+      <circle class="rt" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
+      <circle class="rf ${lv(v)}" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - v / 100)).toFixed(2)}"/>
+      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central"${size < 48 ? ' style="font-size:10px"' : ""}>${p === null ? "–" : `${Math.round(p)}<tspan>%</tspan>`}</text></svg>`;
   }
   function planChip(a) {
     const p = a.plan_display;
@@ -124,46 +139,48 @@ button { font: inherit; color: inherit; }
     const tier = (a.rate_limit_tier || "").match(/max_(\d+)x/);
     return `<span class="chip ${PLAN_CLASS[p] || ""}">${esc(PLAN[p] || p)}${tier ? " " + tier[1] + "x" : ""}</span>`;
   }
-  function usageLines(a) {
-    const u = a.usage || {}, p5 = pct(u.five_hour), p7 = pct(u.seven_day);
-    if (p5 === null && p7 === null) return `<div class="line">${a.kind === "claude_web" && !a.has_session_key ? "不自动读取用量" : "还没有用量"}</div>`;
-    const when = resetShort((u.five_hour || {}).resets_at);
-    return (p5 === null ? "" : `<div class="line">5 小时 <b>${p5.toFixed(0)}%</b>${when ? ` · ${esc(when)}` : ""}</div>`)
-      + (p7 === null ? "" : `<div class="line">7 天 <b>${p7.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p7)}" style="width:${p7}%"></i></div>`);
+  function meter(label, w, tail) {
+    const p = pct(w);
+    if (p === null) return "";
+    return `<div class="meter"><div class="lab"><span>${esc(label)}${tail ? ` · ${esc(tail)}` : ""}</span><b>${p.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p)}" style="width:${p}%"></i></div></div>`;
   }
   function render() {
     const main = $("#main");
     if (!state) return;
-    $("#when").textContent = state.generated_at ? "更新于 " + new Date(state.generated_at).toTimeString().slice(0, 5) : "";
     const accs = state.accounts || [];
     if (!accs.length) {
-      main.innerHTML = `<div class="card empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
+      main.innerHTML = `<div class="tile empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
       return;
     }
     const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs[0];
     const others = accs.filter((a) => a.id !== cur.id && a.kind !== "api");
-    const h = cur.health || {};
-    const curCard = `<div class="card cur">${ring(pct((cur.usage || {}).five_hour), 64)}
-      <div><div class="name"><b>${esc(cur.label || cur.email || "未命名")}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">正在用</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}</div>
-        ${cur.email && cur.email !== cur.label ? `<div class="sub">${esc(cur.email)}</div>` : ""}${usageLines(cur)}</div></div>`;
-    const rows = others.map((a) => {
-      const u = a.usage || {}, p5 = pct(u.five_hour), p7 = pct(u.seven_day), hh = a.health || {};
-      const web = a.kind !== "claude_code";
-      return `<button type="button" class="acc${web ? " web" : ""}" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" ${busy ? "disabled" : ""}>${ring(p5, 36, true)}
-        <span><span class="name"><b>${esc(a.label || a.email || "未命名")}</b>${planChip(a)}${hh.level === "error" ? `<span class="chip bad">异常</span>` : ""}</span>
-          <span class="line">${p5 === null ? (a.kind === "claude_web" ? "网页版" : a.kind === "claude_desktop" ? "桌面版" : "还没有用量") : `5 小时 <b>${p5.toFixed(0)}%</b>${p7 === null ? "" : ` · 7 天 <b>${p7.toFixed(0)}%</b>`}`}</span></span>
-        <span class="go">${a.kind === "claude_code" ? "切换 ›" : a.kind === "claude_desktop" ? "打开 ›" : "打开 ›"}</span></button>`;
+    const u = cur.usage || {}, h = cur.health || {};
+    const p5 = pct(u.five_hour);
+    const curTile = `<div class="tile"><div class="who"><div class="circle on">${ring(p5, 44, 5)}</div>
+      <div><div class="name"><b>${esc(cur.label || cur.email || "未命名")}</b>${planChip(cur)}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}</div>
+        <div class="sub">${cur.is_active ? "正在用 · " : ""}${esc(cur.email && cur.email !== cur.label ? cur.email : (p5 === null ? "还没有用量" : ""))}</div></div></div>
+      ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
+      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}</div>`;
+    const pills = others.map((a) => {
+      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {};
+      const sub = q5 === null ? (a.kind === "claude_web" ? "网页版 · 打开" : a.kind === "claude_desktop" ? "桌面版 · 打开" : "点一下切换")
+        : `5 小时 ${q5.toFixed(0)}%`;  // 药丸卡太窄，7 天的切过去后在大卡里看
+      return `<button type="button" class="acc" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" ${busy ? "disabled" : ""} title="${a.kind === "claude_code" ? "切换到这个账号" : "打开"}">
+        <span class="circle">${ring(q5, 32, 4)}</span>
+        <span><span class="name"><b>${esc(a.label || a.email || "未命名")}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : ""}</span><span class="sub">${esc(sub)}</span></span></button>`;
     }).join("");
     const sc = state.risk_score, reg = state.region || {};
     const foot = `<div class="foot"><span>${esc(state.host || "")}${reg.loc ? ` · 出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : ""}</span>
-      ${sc && reg.status ? `<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : ""}</div>`;
-    main.innerHTML = curCard + (rows ? `<div class="sec">其它账号 · 点一下切换</div>${rows}` : "")
-      + `<div class="acts"><button class="btn" data-act="refresh" ${busy ? "disabled" : ""}>刷新用量</button><button class="btn" data-act="panel" ${busy ? "disabled" : ""}>打开管理面板</button></div>`
+      <span>${sc && reg.status ? `<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span> · ` : ""}${state.generated_at ? new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
+    main.innerHTML = curTile
+      + (pills ? `<div class="sec">其它账号 · 点一下切换</div><div class="pills${others.length === 1 ? " one" : ""}">${pills}</div>` : "")
+      + `<div class="acts"><button class="act" data-act="refresh" ${busy ? "disabled" : ""}><span class="circle">${ICON.refresh}</span><span>刷新用量</span></button>
+          <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle">${ICON.panel}</span><span>管理面板</span></button></div>`
       + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "") + foot;
   }
   async function load() {
     try { state = await api("GET", "/api/state"); render(); }
-    catch (e) { $("#main").innerHTML = `<div class="card empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+    catch (e) { $("#main").innerHTML = `<div class="tile empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
   }
   function say(text, cls) { msg = text ? { text, cls: cls || "" } : null; render(); if (text && cls !== "bad") setTimeout(() => { msg = null; render(); }, 6000); }
   async function run(fn) {
