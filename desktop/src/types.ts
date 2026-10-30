@@ -137,7 +137,11 @@ export interface ServiceCheckItem {
 
 export interface RegionInfo {
   loc: string | null;
+  loc_name?: string | null; // 出口地区的中文名（名单里有的才有）
   ip?: string | null;
+  asn?: number | string | null; // 出口 IP 的 ASN 号
+  reg_loc?: string | null; // 出口 IP 的注册国（和 loc 不同就是广播 IP）
+  reg_loc_name?: string | null;
   status: "supported" | "unsupported" | "unknown" | null; // null = 还没检测过
   checked_at: string | null;
   message: string;

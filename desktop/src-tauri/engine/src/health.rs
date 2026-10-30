@@ -413,6 +413,11 @@ pub fn region_label(loc: Option<&str>) -> String {
     }
 }
 
+/// 地区的中文名（界面上单独显示用），名单里没有的返回 None
+pub fn region_name(loc: Option<&str>) -> Option<&'static str> {
+    loc.and_then(|l| REGION_NAMES.iter().find(|(c, _)| *c == l).map(|(_, n)| *n))
+}
+
 /// supported / unsupported / unknown
 pub fn region_status(loc: Option<&str>) -> &'static str {
     match loc {
@@ -1282,18 +1287,21 @@ pub fn cached_region_loc(data: &Value, max_age: i64) -> Option<String> {
 pub fn region_view(data: &Value) -> Value {
     let c = data.get("region").cloned().unwrap_or(Value::Null);
     let Some(checked) = s(&c, "checked_at").map(String::from) else {
-        return json!({"loc": null, "ip": null, "status": null, "checked_at": null,
+        return json!({"loc": null, "loc_name": null, "ip": null, "status": null, "checked_at": null,
                       "message": "还没有检测过出口地区", "advice": "", "warp": false, "prev_loc": null, "changed_at": null,
-                      "org": null, "city": null, "ip_type": null, "meta_source": null, "lookup_mode": null});
+                      "org": null, "asn": null, "city": null, "ip_type": null, "reg_loc": null, "reg_loc_name": null,
+                      "meta_source": null, "lookup_mode": null});
     };
     let loc = s(&c, "loc").map(String::from);
     let status = region_status(loc.as_deref());
+    let reg_loc = s(&c, "reg_loc").map(String::from);
     json!({
-        "loc": loc, "ip": s(&c, "ip"), "status": status, "checked_at": checked,
+        "loc": loc, "loc_name": region_name(loc.as_deref()), "ip": s(&c, "ip"), "status": status, "checked_at": checked,
         "message": region_message(loc.as_deref(), status), "advice": region_advice(status),
         "warp": c.get("warp").and_then(|v| v.as_bool()).unwrap_or(false),
         "prev_loc": s(&c, "prev_loc"), "changed_at": s(&c, "changed_at"),
-        "org": s(&c, "org"), "city": s(&c, "city"), "ip_type": s(&c, "ip_type"),
+        "org": s(&c, "org"), "asn": c.get("asn").cloned().unwrap_or(Value::Null), "city": s(&c, "city"), "ip_type": s(&c, "ip_type"),
+        "reg_loc": reg_loc, "reg_loc_name": region_name(s(&c, "reg_loc")),
         "meta_source": s(&c, "meta_source"), "lookup_mode": s(&c, "lookup_mode")
     })
 }

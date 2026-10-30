@@ -60,6 +60,7 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
     <section className="block">
       <div className="sec-head">
         <h2>本机 Claude Code 消耗</h2>
+        <span className="hint">这台电脑上 claude 的用量，按天、按账号</span>
         <span className="sec-acts">
           <span className="seg-mini" role="group" aria-label="时间范围">
             {RANGES.map(([v, t]) => (
@@ -70,8 +71,12 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
           </span>
         </span>
       </div>
-      <div className="panel">
-        <div className="local-sum">
+      <div className="cards local">
+        <div className="panel ecard wide">
+          <h3>
+            <span className="eico">💰</span>汇总<span className="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span>
+          </h3>
+          <div className="local-sum">
           <b>≈ {usd(cost(shown))}</b>
           <span>
             {shown.length
@@ -79,8 +84,20 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
               : "今天还没有用过"}
           </span>
         </div>
+          <div className="legend">
+            {ids.map((id) => (
+              <span key={id}>
+                <i style={{ background: color[id] }} />
+                {label(id)} <b>{usd(cost(shown.filter((r) => r.account_id === id)))}</b>
+              </span>
+            ))}
+          </div>
+        </div>
         {days.length > 0 && (
-          <>
+          <div className="panel ecard wide">
+            <h3>
+              <span className="eico">📅</span>每天的折算金额<span className="hint">按账号叠，悬停看明细</span>
+            </h3>
             <div className="bars" role="img" aria-label="每日消耗柱状图">
               {days.map((d) => {
                 const tip =
@@ -99,18 +116,12 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
               <span>单日最多 {usd(max)}</span>
               <span>{days[days.length - 1].slice(5)}</span>
             </div>
-          </>
+          </div>
         )}
-        <div className="legend">
-          {ids.map((id) => (
-            <span key={id}>
-              <i style={{ background: color[id] }} />
-              {label(id)} <b>{usd(cost(shown.filter((r) => r.account_id === id)))}</b>
-            </span>
-          ))}
-        </div>
-        <p className="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小。按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
       </div>
+      <p className="hint" style={{ margin: "10px 0 0" }}>
+        按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。
+      </p>
     </section>
   );
 }

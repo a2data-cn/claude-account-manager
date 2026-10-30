@@ -267,7 +267,11 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
           {" 切换或重新打开会退出并重启 Claude 桌面版，请先处理好其中正在运行的任务。首次打开和会话过期后需要登录；Claude Code 命令行账号单独切换。"}
         </p>
       )}
-      <div className="d-body">
+      <div className="cards d-body">
+        <div className="ecard sub">
+        <h3>
+          <span className="eico">📊</span>额度
+        </h3>
         <div className="gauges">
           {windows.map((g) => (
             <Gauge key={g.name} g={g} snapshot={a.kind === "claude_desktop"} />
@@ -292,67 +296,73 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
           )}
           {!windows.length && !hasCost && <div className="g-empty">{empty}</div>}
         </div>
-        <dl className="d-info">
+        </div>
+        <div className="ecard sub">
+        <h3>
+          <span className="eico">👤</span>账号信息
+        </h3>
+        <dl className="kv d-info">
           <dt>类型</dt>
-          <dd>
+          <dd><span className="v">
             {KIND[a.kind]}
             {a.org_name ? ` · ${a.org_name}` : ""}
-          </dd>
+          </span></dd>
           {due && (
             <>
               <dt>到期</dt>
-              <dd>
+              <dd><span className="v">
                 <span className={due.cls}>
                   {due.short}
                   {m.expires_at ? `（${m.expires_at}）` : ""}
                 </span>
                 {m.auto_renew ? " · 自动续期" : ""}
-              </dd>
+              </span></dd>
             </>
           )}
           {m.price && (
             <>
               <dt>价格</dt>
-              <dd>{m.price}</dd>
+              <dd><span className="v">{m.price}</span></dd>
             </>
           )}
           {a.kind === "api" && a.api_key_hint && (
             <>
               <dt>Key</dt>
-              <dd>
+              <dd><span className="v">
                 {a.api_key_hint}
                 {u.key_valid === true ? " · 有效" : u.key_valid === false ? " · 无效" : ""}
-              </dd>
+              </span></dd>
             </>
           )}
           {(a.kind === "claude_code" || a.kind === "claude_desktop") && (
             <>
               <dt>{a.kind === "claude_desktop" ? "最近打开" : "最近切换"}</dt>
-              <dd>{a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"}</dd>
+              <dd><span className="v">{a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"}</span></dd>
             </>
           )}
           {a.kind === "claude_desktop" ? (
             <>
               <dt>额度来源</dt>
-              <dd>{u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"}</dd>
+              <dd><span className="v">{u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"}</span></dd>
               <dt>记录时间</dt>
-              <dd>{ago(u.fetched_at)}</dd>
+              <dd><span className="v">{ago(u.fetched_at)}</span></dd>
               <dt>最近读取</dt>
-              <dd>{ago(u.checked_at)}</dd>
+              <dd><span className="v">{ago(u.checked_at)}</span></dd>
             </>
           ) : (
             <>
               <dt>用量更新</dt>
-              <dd>{ago(u.fetched_at)}</dd>
+              <dd><span className="v">{ago(u.fetched_at)}</span></dd>
             </>
           )}
           {m.note && (
             <>
               <dt>备注</dt>
-              <dd>{m.note}</dd>
+              <dd><span className="v">{m.note}</span></dd>
             </>
           )}
         </dl>
+        </div>
       </div>
     </section>
   );

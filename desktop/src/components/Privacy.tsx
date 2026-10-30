@@ -51,12 +51,20 @@ export function Privacy({
   const third = p.sources.filter((s) => s.group === "third").length;
   return (
     <section className="block">
-      <h2>隐私与数据源</h2>
-      <div className="panel">
-        <p className="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。</p>
-        <p className="pv-label">
-          外部 IP 查询{p.env_override && <span> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span>}
-        </p>
+      <div className="sec-head">
+        <h2>隐私与数据源</h2>
+        <span className="hint">环境检测用哪些服务、要不要填 key，以及账号的使用地区记录</span>
+      </div>
+      <div className="cards">
+        <div className="panel ecard wide">
+        <h3>
+          <span className="eico">🔍</span>外部 IP 查询<span className="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据</span>
+        </h3>
+        {p.env_override && (
+          <p className="hint" style={{ margin: "0 0 8px" }}>
+            被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了
+          </p>
+        )}
         <div
           className="pv-modes"
           role="radiogroup"
@@ -132,6 +140,11 @@ export function Privacy({
             ))}
           </div>
         )}
+        </div>
+        <div className="panel ecard">
+        <h3>
+          <span className="eico">🔗</span>会访问的服务
+        </h3>
         <details className="src">
           <summary>
             {third
@@ -158,6 +171,11 @@ export function Privacy({
             ) : null;
           })}
         </details>
+        </div>
+        <div className="panel ecard">
+        <h3>
+          <span className="eico">📍</span>地区记录
+        </h3>
         <div className="pv-foot">
           <span>地区记录：{p.history.accounts} 个账号记过使用地区，用来提醒"同一账号多地区使用"</span>
           <button
@@ -167,6 +185,7 @@ export function Privacy({
           >
             清除地区记录
           </button>
+        </div>
         </div>
       </div>
     </section>

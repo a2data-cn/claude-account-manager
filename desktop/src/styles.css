@@ -149,10 +149,7 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .d-acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .btn.danger { color: var(--hot); }
 .btn.danger:hover { border-color: var(--hot); }
-.d-body { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px 32px; margin-top: 14px; }
-.d-info { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; font-size: 12.5px; align-content: start; }
-.d-info dt { color: var(--muted); }
-.d-info dd { margin: 0; overflow-wrap: anywhere; }
+.d-body { margin-top: 14px; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
 .d-info .due-soon { color: var(--warn); font-weight: 600; }
 .d-info .due-now { color: var(--hot); font-weight: 600; }
 .issues { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; }
@@ -213,10 +210,7 @@ section.block .sec-head h2 { margin: 0; }
 .toc a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
 .toc a:hover { color: var(--ink); border-color: var(--muted); }
 /* 底部“状态和颜色说明”：正常的区块，图例用界面上真的标签和色块，不折叠 */
-.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; font-size: 12.5px; }
-.help h3 { font-size: 13px; margin: 0 0 8px; }
-.help .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
-.lg { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 10px; margin: 0; align-items: center; }
+.lg { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 9px 14px; margin: 0; align-items: center; font-size: 13px; }
 .lg dt { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .lg dd { margin: 0; color: var(--muted); line-height: 1.5; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
@@ -255,7 +249,6 @@ section.block .sec-head h2 { margin: 0; }
 .host .risk.low { color: var(--live); }
 .host .risk.medium { color: var(--warn); }
 .host .risk.high { color: var(--hot); border-color: var(--hot); }
-.checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* 隐私与数据源 */
 .pv-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 .pv-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
@@ -298,42 +291,68 @@ details.src[open] summary::before { content: "▾"; }
   .key-row { grid-template-columns: 1fr; }
   .sources li { grid-template-columns: 1fr; gap: 0; }
 }
-.check-groups .checks { margin: 0; }
-.check-groups h4, .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
-.checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
+/* 环境区块：两张卡（出口 IP、环境评分），下面是完整检测 / 全面体检的结果。只提示，不拦 */
+/* 各区块统一：几张卡排成两列（图标 + 标题，可带一句说明），卡里左标签右值；.wide 通栏 */
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cards.env { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+.cards.local { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+.cards .wide { grid-column: 1 / -1; }
+.ecard.sub { background: var(--paper); border-color: transparent; box-shadow: none; }
+.ecard h3 .hint { font-weight: 400; font-size: 12px; }
+.ecard .local-sum, .ecard .rules, .ecard .keys, .ecard .pv-modes { margin-bottom: 0; }
+.ecard .legend { margin: 10px 0 0; }
+.ecard .keys:not([hidden]) { margin-top: 14px; }
+.ecard .alert-row, .ecard .pv-foot { margin: 0; padding: 0; border: 0; }
+.ecard .rules + .hint { margin-top: 12px; }
+@media (max-width: 760px) {
+  .cards, .cards.env, .cards.local { grid-template-columns: 1fr; }
+}
+.ecard h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; font-weight: 650; margin: 0 0 12px; }
+.ecard h3 .chip { font-weight: 600; }
+.eico { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--paper); font-size: 13px; }
+.ecard > .hint { margin: 12px 0 0; font-size: 12px; line-height: 1.55; }
+/* 左边标签右边值的小表；值前面可以带一个状态色点 */
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 9px 14px; margin: 0; font-size: 13px; }
+.kv dt { color: var(--muted); white-space: nowrap; line-height: 1.45; }
+.kv dd { margin: 0; min-width: 0; display: flex; align-items: flex-start; gap: 7px; line-height: 1.45; }
+.kv .v { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.kv .v > div + div { margin-top: 6px; }
+.kv .ip { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.kv .sub { display: block; color: var(--muted); font-size: 12px; }
+.kv .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.kv .bad { color: var(--hot); font-weight: 600; }
+.kv .chip { vertical-align: 1px; margin-left: 4px; }
+.flag { font-size: 15px; margin-right: 5px; }
+.dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--muted); }
+.dot.ok { background: var(--live); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--hot); }
+/* 评分：大圆环在左，右边每个信号一行 */
+.score-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 20px; align-items: start; }
+.score-ring svg { width: 92px; height: 92px; display: block; }
+.score-ring circle { fill: none; stroke-width: 6; }
+.score-ring .rt { stroke: var(--track); }
+.score-ring .rf { stroke: var(--live); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.score-ring text { fill: var(--ink); font: 650 25px var(--sans); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.score-ring .lab { fill: var(--live); font: 600 10.5px var(--sans); letter-spacing: 0; }
+.score-ring.medium .rf { stroke: var(--warn); } .score-ring.medium .lab { fill: var(--warn); }
+.score-ring.high .rf { stroke: var(--hot); } .score-ring.high .lab { fill: var(--hot); }
+.score-ring.none .rf { stroke: transparent; } .score-ring.none text { fill: var(--muted); } .score-ring.none .lab { fill: var(--muted); }
+/* 完整检测 / 全面体检：每组一张卡，每条前面一个“正常 / 注意 / 异常 / 说明”的小标 */
+.check-groups { margin-top: 12px; }
+.checks { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 7px; }
+.checks li { display: flex; gap: 10px; align-items: flex-start; overflow-wrap: anywhere; line-height: 1.45; }
+.checks li.grp { margin-top: 4px; }
+.checks li.grp b { font-weight: 650; }
+.checks .mark { flex: none; min-width: 2.8em; text-align: center; font-size: 10.5px; font-weight: 600; line-height: 1.6; margin-top: 1px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.checks .ok .mark { color: var(--live); border-color: currentColor; }
+.checks .warn .mark { color: var(--warn); border-color: currentColor; }
+.checks .bad .mark { color: var(--on-hot); background: var(--hot); border-color: var(--hot); }
+.checks .v { min-width: 0; flex: 1; }
+.checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.checks li.summary { font-weight: 600; }
 .checks li.summary .advice { font-weight: 400; }
-/* 环境状态卡：分数、出口、网络类型、上次检测、风险提醒。只提示，不拦 */
-.env { background: var(--surface); border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 12px; box-shadow: var(--shadow);
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 20px; grid-template-areas: "score facts acts" "risks risks risks"; align-items: center; }
-.env.low { border-left-color: var(--live); }
-.env.medium { border-left-color: var(--warn); }
-.env.high { border-left-color: var(--hot); }
-.env-score { grid-area: score; text-align: center; min-width: 72px; }
-.env-num { font-size: 24px; font-weight: 650; line-height: 1; letter-spacing: -.03em; }
-.env-num small { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
-.env.low .env-num { color: var(--live); }
-.env.medium .env-num { color: var(--warn); }
-.env.high .env-num { color: var(--hot); }
-.env-lab { font-size: 11px; color: var(--muted); margin-top: 4px; }
-.env-facts { grid-area: facts; display: grid; gap: 2px; font-size: 12.5px; min-width: 0; }
-.env-facts div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.env-facts .k { display: inline-block; min-width: 3em; color: var(--muted); }
-.env-facts .bad { color: var(--hot); font-weight: 600; }
-.env-acts { grid-area: acts; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.env-risks, .env-checks { grid-area: risks; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); }
-.env-risks { list-style: none; font-size: 13px; display: grid; gap: 6px; }
-.env-risks > li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
-.env-risks > li::before { content: "! "; font-weight: 700; color: var(--warn); }
-.env-risks > li.bad::before { color: var(--hot); }
-.env-risks .advice { display: block; text-indent: 0; color: var(--muted); font-size: 12px; margin-top: 2px; }
-.env-checks .checks { margin-top: 0; }
-.env-empty { grid-area: facts; font-size: 13px; color: var(--muted); }
 @media (max-width: 680px) {
-  .env { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "score acts" "facts facts" "risks risks"; gap: 10px 16px; padding: 12px 14px; }
-  .env-score { text-align: left; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  .env-lab { margin-top: 0; }
-  .env-acts { justify-self: end; }
-  .env-facts div { white-space: normal; }
+  .score-row { gap: 10px 14px; }
+  .score-ring svg { width: 80px; height: 80px; }
 }
 
 /* 本地消耗：顶上一排数字格，左边每天的柱子（按账号叠），右边按模型的占比 */
@@ -443,12 +462,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   .rule-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
 }
 /* Claude 服务检测结果 */
-.checks { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13px; }
-.checks li { display: flex; gap: 8px; padding: 3px 0; overflow-wrap: anywhere; }
-.checks .mark { flex: none; width: 1.2em; text-align: center; font-weight: 700; color: var(--muted); }
-.checks .ok .mark { color: var(--live); }
-.checks .bad .mark { color: var(--hot); }
-.checks .warn .mark { color: var(--warn); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 /* 本地账号库与邮箱 */
 .vault .panel + .panel { margin-top: 14px; }

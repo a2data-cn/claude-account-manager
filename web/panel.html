@@ -162,10 +162,7 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .d-acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .btn.danger { color: var(--hot); }
 .btn.danger:hover { border-color: var(--hot); }
-.d-body { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px 32px; margin-top: 14px; }
-.d-info { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; font-size: 12.5px; align-content: start; }
-.d-info dt { color: var(--muted); }
-.d-info dd { margin: 0; overflow-wrap: anywhere; }
+.d-body { margin-top: 14px; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
 .d-info .due-soon { color: var(--warn); font-weight: 600; }
 .d-info .due-now { color: var(--hot); font-weight: 600; }
 .issues { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; }
@@ -226,10 +223,7 @@ section.block .sec-head h2 { margin: 0; }
 .toc a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
 .toc a:hover { color: var(--ink); border-color: var(--muted); }
 /* 底部“状态和颜色说明”：正常的区块，图例用界面上真的标签和色块，不折叠 */
-.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; font-size: 12.5px; }
-.help h3 { font-size: 13px; margin: 0 0 8px; }
-.help .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
-.lg { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 10px; margin: 0; align-items: center; }
+.lg { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 9px 14px; margin: 0; align-items: center; font-size: 13px; }
 .lg dt { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .lg dd { margin: 0; color: var(--muted); line-height: 1.5; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
@@ -268,7 +262,6 @@ section.block .sec-head h2 { margin: 0; }
 .host .risk.low { color: var(--live); }
 .host .risk.medium { color: var(--warn); }
 .host .risk.high { color: var(--hot); border-color: var(--hot); }
-.checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* 隐私与数据源 */
 .pv-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 .pv-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
@@ -311,42 +304,68 @@ details.src[open] summary::before { content: "▾"; }
   .key-row { grid-template-columns: 1fr; }
   .sources li { grid-template-columns: 1fr; gap: 0; }
 }
-.check-groups .checks { margin: 0; }
-.check-groups h4, .checks h4 { margin: 12px 0 2px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
-.checks li.summary { font-weight: 600; padding: 8px 10px; margin-bottom: 4px; border-radius: var(--radius-sm); background: var(--paper); }
+/* 环境区块：两张卡（出口 IP、环境评分），下面是完整检测 / 全面体检的结果。只提示，不拦 */
+/* 各区块统一：几张卡排成两列（图标 + 标题，可带一句说明），卡里左标签右值；.wide 通栏 */
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cards.env { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+.cards.local { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+.cards .wide { grid-column: 1 / -1; }
+.ecard.sub { background: var(--paper); border-color: transparent; box-shadow: none; }
+.ecard h3 .hint { font-weight: 400; font-size: 12px; }
+.ecard .local-sum, .ecard .rules, .ecard .keys, .ecard .pv-modes { margin-bottom: 0; }
+.ecard .legend { margin: 10px 0 0; }
+.ecard .keys:not([hidden]) { margin-top: 14px; }
+.ecard .alert-row, .ecard .pv-foot { margin: 0; padding: 0; border: 0; }
+.ecard .rules + .hint { margin-top: 12px; }
+@media (max-width: 760px) {
+  .cards, .cards.env, .cards.local { grid-template-columns: 1fr; }
+}
+.ecard h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; font-weight: 650; margin: 0 0 12px; }
+.ecard h3 .chip { font-weight: 600; }
+.eico { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: var(--paper); font-size: 13px; }
+.ecard > .hint { margin: 12px 0 0; font-size: 12px; line-height: 1.55; }
+/* 左边标签右边值的小表；值前面可以带一个状态色点 */
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 9px 14px; margin: 0; font-size: 13px; }
+.kv dt { color: var(--muted); white-space: nowrap; line-height: 1.45; }
+.kv dd { margin: 0; min-width: 0; display: flex; align-items: flex-start; gap: 7px; line-height: 1.45; }
+.kv .v { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.kv .v > div + div { margin-top: 6px; }
+.kv .ip { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.kv .sub { display: block; color: var(--muted); font-size: 12px; }
+.kv .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.kv .bad { color: var(--hot); font-weight: 600; }
+.kv .chip { vertical-align: 1px; margin-left: 4px; }
+.flag { font-size: 15px; margin-right: 5px; }
+.dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--muted); }
+.dot.ok { background: var(--live); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--hot); }
+/* 评分：大圆环在左，右边每个信号一行 */
+.score-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 20px; align-items: start; }
+.score-ring svg { width: 92px; height: 92px; display: block; }
+.score-ring circle { fill: none; stroke-width: 6; }
+.score-ring .rt { stroke: var(--track); }
+.score-ring .rf { stroke: var(--live); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.score-ring text { fill: var(--ink); font: 650 25px var(--sans); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.score-ring .lab { fill: var(--live); font: 600 10.5px var(--sans); letter-spacing: 0; }
+.score-ring.medium .rf { stroke: var(--warn); } .score-ring.medium .lab { fill: var(--warn); }
+.score-ring.high .rf { stroke: var(--hot); } .score-ring.high .lab { fill: var(--hot); }
+.score-ring.none .rf { stroke: transparent; } .score-ring.none text { fill: var(--muted); } .score-ring.none .lab { fill: var(--muted); }
+/* 完整检测 / 全面体检：每组一张卡，每条前面一个“正常 / 注意 / 异常 / 说明”的小标 */
+.check-groups { margin-top: 12px; }
+.checks { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 7px; }
+.checks li { display: flex; gap: 10px; align-items: flex-start; overflow-wrap: anywhere; line-height: 1.45; }
+.checks li.grp { margin-top: 4px; }
+.checks li.grp b { font-weight: 650; }
+.checks .mark { flex: none; min-width: 2.8em; text-align: center; font-size: 10.5px; font-weight: 600; line-height: 1.6; margin-top: 1px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+.checks .ok .mark { color: var(--live); border-color: currentColor; }
+.checks .warn .mark { color: var(--warn); border-color: currentColor; }
+.checks .bad .mark { color: var(--on-hot); background: var(--hot); border-color: var(--hot); }
+.checks .v { min-width: 0; flex: 1; }
+.checks .advice { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.checks li.summary { font-weight: 600; }
 .checks li.summary .advice { font-weight: 400; }
-/* 环境状态卡：分数、出口、网络类型、上次检测、风险提醒。只提示，不拦 */
-.env { background: var(--surface); border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius-lg); padding: 10px 14px; margin-bottom: 12px; box-shadow: var(--shadow);
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px 20px; grid-template-areas: "score facts acts" "risks risks risks"; align-items: center; }
-.env.low { border-left-color: var(--live); }
-.env.medium { border-left-color: var(--warn); }
-.env.high { border-left-color: var(--hot); }
-.env-score { grid-area: score; text-align: center; min-width: 72px; }
-.env-num { font-size: 24px; font-weight: 650; line-height: 1; letter-spacing: -.03em; }
-.env-num small { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
-.env.low .env-num { color: var(--live); }
-.env.medium .env-num { color: var(--warn); }
-.env.high .env-num { color: var(--hot); }
-.env-lab { font-size: 11px; color: var(--muted); margin-top: 4px; }
-.env-facts { grid-area: facts; display: grid; gap: 2px; font-size: 12.5px; min-width: 0; }
-.env-facts div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.env-facts .k { display: inline-block; min-width: 3em; color: var(--muted); }
-.env-facts .bad { color: var(--hot); font-weight: 600; }
-.env-acts { grid-area: acts; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.env-risks, .env-checks { grid-area: risks; margin: 8px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); }
-.env-risks { list-style: none; font-size: 13px; display: grid; gap: 6px; }
-.env-risks > li { padding-left: 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
-.env-risks > li::before { content: "! "; font-weight: 700; color: var(--warn); }
-.env-risks > li.bad::before { color: var(--hot); }
-.env-risks .advice { display: block; text-indent: 0; color: var(--muted); font-size: 12px; margin-top: 2px; }
-.env-checks .checks { margin-top: 0; }
-.env-empty { grid-area: facts; font-size: 13px; color: var(--muted); }
 @media (max-width: 680px) {
-  .env { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "score acts" "facts facts" "risks risks"; gap: 10px 16px; padding: 12px 14px; }
-  .env-score { text-align: left; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  .env-lab { margin-top: 0; }
-  .env-acts { justify-self: end; }
-  .env-facts div { white-space: normal; }
+  .score-row { gap: 10px 14px; }
+  .score-ring svg { width: 80px; height: 80px; }
 }
 
 /* 本地消耗：顶上一排数字格，左边每天的柱子（按账号叠），右边按模型的占比 */
@@ -456,12 +475,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   .rule-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
 }
 /* Claude 服务检测结果 */
-.checks { list-style: none; margin: 12px 0 0; padding: 0; font-size: 13px; }
-.checks li { display: flex; gap: 8px; padding: 3px 0; overflow-wrap: anywhere; }
-.checks .mark { flex: none; width: 1.2em; text-align: center; font-weight: 700; color: var(--muted); }
-.checks .ok .mark { color: var(--live); }
-.checks .bad .mark { color: var(--hot); }
-.checks .warn .mark { color: var(--warn); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 /* 本地账号库与邮箱 */
 .vault .panel + .panel { margin-top: 14px; }
@@ -508,90 +521,91 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   <section class="block" id="local-block" hidden>
     <div class="sec-head"><h2>本机 Claude Code 消耗</h2><span class="hint">这台电脑上 claude 的用量，按天、按账号、按模型</span>
       <span class="sec-acts"><span class="seg-mini" role="group" aria-label="时间范围" id="local-range"></span></span></div>
-    <div class="panel">
-      <div class="local-sum" id="local-sum"></div>
-      <div class="legend" id="legend"></div>
-      <div class="local-grid" id="local-grid">
-        <div id="local-chart">
-          <div class="chart-head"><span>每天的折算金额</span><span>按账号叠，悬停看明细</span></div>
-          <div class="bars-wrap"><div class="grid-lines" id="gridlines" aria-hidden="true"></div><div class="bars" id="bars" role="img" aria-label="每日消耗柱状图"></div></div>
-          <div class="axis" id="axis" aria-hidden="true"></div>
-        </div>
-        <div id="local-models">
-          <div class="chart-head"><span>按模型</span><span>占折算金额的比例</span></div>
-          <ul class="models" id="models"></ul>
-        </div>
-      </div>
-      <p class="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小。按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
+    <div class="cards local">
+      <div class="panel ecard wide"><h3><span class="eico">💰</span>汇总<span class="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span></h3>
+        <div class="local-sum" id="local-sum"></div>
+        <div class="legend" id="legend"></div></div>
+      <div class="panel ecard" id="local-chart"><h3><span class="eico">📅</span>每天的折算金额<span class="hint">按账号叠，悬停看明细</span></h3>
+        <div class="bars-wrap"><div class="grid-lines" id="gridlines" aria-hidden="true"></div><div class="bars" id="bars" role="img" aria-label="每日消耗柱状图"></div></div>
+        <div class="axis" id="axis" aria-hidden="true"></div></div>
+      <div class="panel ecard" id="local-models"><h3><span class="eico">🧩</span>按模型<span class="hint">占折算金额的比例</span></h3>
+        <ul class="models" id="models"></ul></div>
     </div>
+    <p class="hint" style="margin:10px 0 0">按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
   </section>
 
   <section class="block" id="rules-block" hidden>
     <div class="sec-head"><h2>切号规则</h2><span class="hint">按时间段或项目目录自动换号，以及额度提醒的阈值</span></div>
-    <div class="panel">
-      <p class="rules-status" id="rules-status"></p>
-      <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p>
-      <ul class="rules" id="rules-list"></ul>
-      <form class="rule-form" id="rule-form">
-        <div class="field"><label for="r-type">规则</label>
-          <select id="r-type"><option value="time">按时间段</option><option value="dir">按项目目录</option></select></div>
-        <div class="field grow" id="rw-path" hidden><label for="r-path">目录（含子目录）</label><input id="r-path" placeholder="~/work"></div>
-        <div class="field" id="rw-days"><label for="r-days">星期</label>
-          <select id="r-days"><option value="1-5">工作日</option><option value="6,7">周末</option><option value="1-7">每天</option></select></div>
-        <div class="field" id="rw-start"><label for="r-start">从</label><input id="r-start" type="time" value="09:00"></div>
-        <div class="field" id="rw-end"><label for="r-end">到</label><input id="r-end" type="time" value="18:00"></div>
-        <div class="field"><label for="r-acc">切到</label><select id="r-acc"></select></div>
-        <button class="btn primary" type="submit">添加规则</button>
-      </form>
-      <form class="alert-row" id="alert-form">
-        <label for="alert-pct">当前账号 5 小时额度超过</label>
-        <span class="unit"><input id="alert-pct" type="number" min="1" max="100" step="1"><span>% 时提醒，并告诉你多久后重置</span></span>
-        <button class="btn" type="submit">保存</button>
-      </form>
+    <div class="cards">
+      <div class="panel ecard wide"><h3><span class="eico">⏱️</span>现在的规则</h3>
+        <p class="rules-status" id="rules-status"></p>
+        <ul class="rules" id="rules-list"></ul>
+        <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p></div>
+      <div class="panel ecard"><h3><span class="eico">➕</span>添加规则</h3>
+        <form class="rule-form" id="rule-form">
+          <div class="field"><label for="r-type">规则</label>
+            <select id="r-type"><option value="time">按时间段</option><option value="dir">按项目目录</option></select></div>
+          <div class="field grow" id="rw-path" hidden><label for="r-path">目录（含子目录）</label><input id="r-path" placeholder="~/work"></div>
+          <div class="field" id="rw-days"><label for="r-days">星期</label>
+            <select id="r-days"><option value="1-5">工作日</option><option value="6,7">周末</option><option value="1-7">每天</option></select></div>
+          <div class="field" id="rw-start"><label for="r-start">从</label><input id="r-start" type="time" value="09:00"></div>
+          <div class="field" id="rw-end"><label for="r-end">到</label><input id="r-end" type="time" value="18:00"></div>
+          <div class="field"><label for="r-acc">切到</label><select id="r-acc"></select></div>
+          <button class="btn primary" type="submit">添加规则</button>
+        </form></div>
+      <div class="panel ecard"><h3><span class="eico">🔔</span>额度提醒</h3>
+        <form class="alert-row" id="alert-form">
+          <label for="alert-pct">当前账号 5 小时额度超过</label>
+          <span class="unit"><input id="alert-pct" type="number" min="1" max="100" step="1"><span>% 时提醒，并告诉你多久后重置</span></span>
+          <button class="btn" type="submit">保存</button>
+        </form></div>
     </div>
   </section>
 
 
   <section class="block" id="privacy-block" hidden>
     <div class="sec-head"><h2>隐私与数据源</h2><span class="hint">环境检测用哪些服务、要不要填 key，以及账号的使用地区记录</span></div>
-    <div class="panel">
-      <p class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。</p>
-      <p class="pv-label">外部 IP 查询<span id="pv-env" hidden> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span></p>
-      <div class="pv-modes" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
-      <div class="keys" id="pv-keys"></div>
-      <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details>
-      <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div>
+    <div class="cards">
+      <div class="panel ecard wide"><h3><span class="eico">🔍</span>外部 IP 查询<span class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据</span></h3>
+        <p class="hint" id="pv-env" hidden style="margin:0 0 8px">被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</p>
+        <div class="pv-modes" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
+        <div class="keys" id="pv-keys"></div></div>
+      <div class="panel ecard"><h3><span class="eico">🔗</span>会访问的服务</h3>
+        <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details></div>
+      <div class="panel ecard"><h3><span class="eico">📍</span>地区记录</h3>
+        <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div></div>
     </div>
   </section>
 
   <section class="block" id="update-block" hidden>
-    <div class="sec-head"><h2>软件更新</h2><span class="hint">看代码仓库有没有新版本，更不更新由你点</span></div>
-    <div class="panel">
-      <p class="hint">只在点“检查更新”时联网看一眼代码仓库，不会自动更新。更新只做快进，更新后自检没过会自动退回原来的版本；账号数据不受影响。桌面版是单独的安装包，不跟着更新。</p>
+    <div class="sec-head"><h2>软件更新</h2><span class="hint">看代码仓库有没有新版本，更不更新由你点</span>
+      <span class="sec-acts"><button class="btn" type="button" id="up-check">检查更新</button><button class="btn primary" type="button" id="up-apply" hidden>更新</button></span></div>
+    <div class="panel ecard"><h3><span class="eico">🔄</span>版本</h3>
+      <dl class="kv"><dt>当前</dt><dd><span class="v" id="up-when"></span></dd></dl>
       <div id="up-result"></div>
-      <div class="pv-foot"><span id="up-when"></span><span class="key-acts"><button class="btn" type="button" id="up-check">检查更新</button><button class="btn primary" type="button" id="up-apply" hidden>更新</button></span></div>
+      <p class="hint">只在点“检查更新”时联网看一眼代码仓库，不会自动更新。更新只做快进，更新后自检没过会自动退回原来的版本；账号数据不受影响。桌面版是单独的安装包，不跟着更新。</p>
     </div>
   </section>
 
   <section class="block help" id="help-block" aria-label="状态和颜色说明">
     <div class="sec-head"><h2>状态和颜色说明</h2><span class="hint">账号卡上的标签、额度环、菜单栏图标和环境评分各是什么意思</span></div>
-    <div class="panel help-grid">
-      <div><h3>账号状态标签</h3><dl class="lg">
+    <div class="cards help">
+      <div class="panel ecard"><h3><span class="eico">🏷️</span>账号状态标签</h3><dl class="lg">
         <dt><span class="chip live">正在用</span></dt><dd>Claude Code 当前登录的号；桌面版的号显示“上次打开”</dd>
         <dt><span class="chip st-warn">注意</span></dt><dd>用量暂时拿不到、订阅已过期、登录过期了后台没替它续</dd>
         <dt><span class="chip st-error">异常</span></dt><dd>登录失效、凭据属于别的号、sessionKey 或 API Key 无效；点进详情看怎么办</dd>
         <dt><span class="chip due-soon">3 天后到期</span></dt><dd>套餐 7 天内到期，2 天内变红；到期日在“编辑”里记</dd></dl></div>
-      <div><h3>额度环和进度条</h3><dl class="lg">
+      <div class="panel ecard"><h3><span class="eico">📊</span>额度环和进度条</h3><dl class="lg">
         <dt><i class="sw bar"></i>70% 以下</dt><dd>正常</dd>
         <dt><i class="sw warn"></i>70–89%</dt><dd>快满了，留意重置时间</dd>
         <dt><i class="sw hot"></i>90% 以上</dt><dd>基本用完，等重置或换号</dd></dl>
         <p class="hint">画的是已用比例，切到“剩余”显示时数字反过来、颜色不变。5 小时和 7 天是 Anthropic 的两个额度窗口，到时间自动重置；按模型的周额度接口给了才显示。</p></div>
-      <div><h3>菜单栏图标（macOS）</h3><dl class="lg">
+      <div class="panel ecard"><h3><span class="eico">🚦</span>菜单栏图标（macOS）</h3><dl class="lg">
         <dt><i class="sw g"></i>绿</dt><dd>空闲，一切正常</dd>
         <dt><i class="sw o"></i>橙</dt><dd>有 claude 会话在跑（信号格一格格涨）、额度快满、等你确认切换（一闪一闪）</dd>
         <dt><i class="sw r"></i>红</dt><dd>要处理：登录失效、额度用完、后台出错</dd></dl>
         <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
-      <div><h3>环境评分</h3><dl class="lg">
+      <div class="panel ecard"><h3><span class="eico">🛡️</span>环境评分</h3><dl class="lg">
         <dt><i class="sw live"></i>90 以上</dt><dd>低风险</dd>
         <dt><i class="sw warn"></i>70–89</dt><dd>有风险</dd>
         <dt><i class="sw hot"></i>70 以下</dt><dd>高风险</dd></dl>
@@ -940,11 +954,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       a.kind === "claude_code" || a.kind === "claude_desktop" ? [a.kind === "claude_desktop" ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"] : null,
       a.kind === "claude_desktop" ? ["额度来源", u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"] : ["用量更新", ago(u.fetched_at)],
       a.kind === "claude_desktop" ? ["记录时间", ago(u.fetched_at)] : null,
-      a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${a.last_incident.sessions} 个会话在跑`] : null,
-      a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${e.times} 次`).join(" · ")] : null,
+      a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${flag(a.last_incident.loc)}${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${a.last_incident.sessions} 个会话在跑`] : null,
+      a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${flag(e.loc)}${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${e.times} 次`).join(" · ")] : null,
       a.kind === "claude_desktop" ? ["最近读取", ago(u.checked_at)] : null,
       m.note ? ["备注", esc(m.note)] : null,
-    ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+    ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd><span class="v">${v}</span></dd>`).join("");
     const issues = (h.issues || []).map((i) => `<li class="issue ${esc(i.level)}"><b>${esc(i.text)}</b><span class="advice">${esc(i.advice)}</span>${i.detail ? `<span class="raw">${esc(i.detail)}</span>` : ""}</li>`).join("");
     const acts = [];
     if (a.kind === "claude_code" && !a.is_active) acts.push(`<button class="btn primary" data-act="switch" data-id="${esc(a.id)}">切换到这个账号</button>`);
@@ -962,7 +976,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       </div>
       ${issues ? `<ul class="issues">${issues}</ul>` : ""}
       ${a.kind === "claude_desktop" ? `<p class="hint">${esc(u.notice || "额度来自这个配置的 Claude 本地记录；打开客户端用量页后可读取更新。")}${u.source === "desktop_history" ? " 历史记录未提供重置时间。" : ""}${u.fetched_at && desktopStale(a) ? " 这份快照已超过 30 分钟，请结合记录时间查看。" : ""} 切换或重新打开会退出并重启电脑上的 Claude 桌面版，请先处理好其中正在运行的任务。首次打开和会话过期后需要登录；Claude Code 命令行账号单独切换。</p>` : ""}
-      <div class="d-body"><div class="gauges">${gauges}</div><dl class="d-info">${info}</dl></div>
+      <div class="cards d-body"><div class="ecard sub"><h3><span class="eico">📊</span>额度</h3><div class="gauges">${gauges}</div></div>
+        <div class="ecard sub"><h3><span class="eico">👤</span>账号信息</h3><dl class="kv d-info">${info}</dl></div></div>
     </section>`;
   }
   // 选中的卡不在可见范围时，把账号条滑到它（重绘会把滚动位置清零）
@@ -990,25 +1005,26 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   ];
   const IP_TYPE = { residential: "家庭 / 公司宽带", hosting: "机房 / 云服务器", proxy: "代理 / VPN 出口", tor: "Tor 出口节点", mobile: "手机网络" };
   function checkItem(it, cls) {
-    return `<li class="${esc(it.level)}${cls ? " " + cls : ""}"><span class="mark">${CHECK_MARK[it.level] || "·"}</span><span>${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`;
+    return `<li class="${esc(it.level)}${cls ? " " + cls : ""}"><span class="mark">${CHECK_MARK[it.level] || "说明"}</span><span class="v">${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`;
   }
-  function renderChecks(items) {  // 返回放进 .check-groups 的内容：总体结论一个列表，每组一个标题 + 列表
+  const checkCard = (name, body, cls) => `<div class="panel ecard${cls ? " " + cls : ""}">${name ? `<h3>${esc(name)}</h3>` : ""}${body}</div>`;
+  function renderChecks(items) {  // 返回放进 .check-groups 的内容：总体结论一张通栏的卡，其余每组一张卡
     const summary = items.filter((i) => i.kind === "summary");
     const rest = items.filter((i) => i.kind !== "summary");
     const list = (rows, cls) => `<ul class="checks">${rows.map((i) => checkItem(i, cls)).join("")}</ul>`;
-    let html = summary.length ? list(summary, "summary") : "";
+    let html = summary.length ? checkCard("", list(summary, "summary"), "wide") : "";
     const used = new Set();
     for (const [name, kinds] of CHECK_GROUPS) {
       const rows = rest.filter((i) => kinds.includes(i.kind));
       if (!rows.length) continue;
       rows.forEach((i) => used.add(i));
-      html += `<h4>${name}</h4>` + list(rows);
+      html += checkCard(name, list(rows));
     }
     const other = rest.filter((i) => !used.has(i));
-    if (other.length) html += `<h4>其它</h4>` + list(other);
+    if (other.length) html += checkCard("其它", list(other));
     return html;
   }
-  // “重新检测”的完整结果直接展开在环境状态卡里（和桌面版一样），重绘时保留
+  // “重新检测”的完整结果直接展开在环境区块里（和桌面版一样），重绘时保留
   let envChecks = null, envChecking = false;
   const CHECK_TIP = "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
   // “全面体检”（同 cam doctor）只有脚本版 cam serve 有：桌面版内置的服务返回 404，按钮不显示。结果展开在同一个位置
@@ -1017,25 +1033,25 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   function envButton(label) {
     const fold = (envChecks || checkup) && !envChecking && !checkupBusy ? `<button class="btn quiet" data-act="env-fold">收起</button>` : "";
     const full = checkupAvail ? `<button class="btn" data-act="checkup" title="${CHECKUP_TIP}"${checkupBusy ? " disabled" : ""}>${checkupBusy ? "体检中，要等十几秒…" : "全面体检"}</button>` : "";
-    return `<div class="env-acts">${fold}${full}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></div>`;
+    return `<span class="sec-acts env-acts">${fold}${full}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></span>`;
   }
-  function renderCheckup(r) {  // 分区一个标题；账号的条目前面先列账号名
+  function renderCheckup(r) {  // 总体结论一张通栏的卡，每个分区一张卡；账号的条目前面先列账号名
     const s = r.summary || {};
     const head = { level: s.bad ? "bad" : s.warn ? "warn" : "ok", text: `全面体检：${s.text}${s.bad || s.warn ? "" : "，一切正常"}`,
                    advice: s.first ? mail(s.first) : "" };
-    let html = `<ul class="checks">${checkItem(head, "summary")}</ul>`;
+    let html = checkCard("", `<ul class="checks">${checkItem(head, "summary")}</ul>`, "wide");
     for (const sec of r.sections || []) {
       let rows = "", group = null;
       for (const it of sec.items || []) {
-        if (it.group && it.group !== group) { group = it.group; rows += `<li class="info"><span class="mark"></span><b>${esc(mail(group))}</b></li>`; }
+        if (it.group && it.group !== group) { group = it.group; rows += `<li class="grp"><b>${esc(mail(group))}</b></li>`; }
         rows += checkItem({ ...it, text: mail(it.text) });
       }
-      html += `<h4>${esc(sec.title)}</h4><ul class="checks">${rows}</ul>`;
+      html += checkCard(sec.title, `<ul class="checks">${rows}</ul>`);
     }
     return html;
   }
-  const envChecksHtml = () => checkup ? `<div class="env-checks check-groups">${renderCheckup(checkup)}</div>`
-    : envChecks ? `<div class="env-checks check-groups">${renderChecks(envChecks)}</div>` : "";
+  const envChecksHtml = () => checkup ? `<div class="cards check-groups">${renderCheckup(checkup)}</div>`
+    : envChecks ? `<div class="cards check-groups">${renderChecks(envChecks)}</div>` : "";
   async function runCheckup() {
     if (checkupBusy) return;
     checkupBusy = true; render();
@@ -1057,28 +1073,87 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     finally { envChecking = false; }
     load(); // 检测会刷新后台缓存，分数跟着更新
   }
+  // ---- 环境区块：出口 IP 一张卡、环境评分一张卡（每个信号一行），下面是完整检测结果。只提醒，不拦任何操作
+  const flag = (cc) => /^[A-Z]{2}$/.test(cc || "") ? `<span class="flag">${String.fromCodePoint(...[...cc].map((ch) => 0x1F1E6 + ch.charCodeAt(0) - 65))}</span>` : "";
+  const regName = (code, name) => esc(name || code || "未知");
+  // 评分卡上的行：每行归并哪些风险项；没有风险项时显示“正常”的那句
+  const ENV_ROWS = [
+    ["region", "出口地区", ["region", "region_unknown", "region_mismatch", "ipv6_mismatch", "warp"]],
+    ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
+    ["proxy", "代理 / VPN", ["proxy", "vpn"]],
+    ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
+    ["dns", "DNS", ["dns", "dns_resolver", "dns_servers"]],
+    ["change", "出口变化", ["region_change"]],
+    ["account", "账号", ["account_regions", "accounts"]],
+    ["service", "Claude 服务", ["api", "web", "tls", "status"]],
+  ];
+  const LEVEL_RANK = { bad: 3, warn: 2, info: 1, ok: 0 };
+  function envRows(st) {
+    const reg = st.region || {}, risks = st.risks || [];
+    const okText = {
+      region: `${regName(reg.loc, reg.loc_name)} · 在 Anthropic 支持名单内`,
+      iptype: reg.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
+      proxy: "没发现代理，默认路由没走隧道",
+      local: "没发现和出口地区不一致的设置",
+      dns: "没发现问题",
+      change: reg.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${esc(reg.prev_loc)} 换到 ${esc(reg.loc)}，已过了观察期` : "最近没变",
+      account: "当前账号最近没在多个地区用过",
+      service: "正常",
+    };
+    const used = new Set();
+    const rows = ENV_ROWS.map(([key, title, kinds]) => {
+      const hits = risks.filter((r) => kinds.includes(r.kind));
+      hits.forEach((r) => used.add(r));
+      return { title, hits, ok: okText[key] };
+    });
+    const other = risks.filter((r) => !used.has(r));
+    if (other.length) rows.push({ title: "其它", hits: other, ok: "" });
+    return rows.map(({ title, hits, ok }) => {
+      const level = hits.reduce((m, r) => LEVEL_RANK[r.level] > LEVEL_RANK[m] ? r.level : m, "ok");
+      const body = hits.length ? hits.map((r) => `<div>${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</div>`).join("") : ok;
+      return `<dt>${title}</dt><dd><i class="dot ${esc(level)}"></i><span class="v">${body}</span></dd>`;
+    }).join("");
+  }
+  function exitCard(reg) {
+    const h3 = (extra) => `<h3><span class="eico">🌐</span>出口 IP${extra || ""}</h3>`;
+    if (!reg.status) return `<div class="panel ecard">${h3()}<p class="hint" style="margin:0">还没有检测过。后台每隔几分钟自动检测一次出口地区和环境风险，也可以点“立即检测”现在就测。</p></div>`;
+    const off = reg.lookup_mode === "off";
+    const status = reg.status === "supported" ? `<span class="chip c-ok">支持名单内</span>`
+      : reg.status === "unsupported" ? `<span class="chip st-error">不在支持名单</span>` : `<span class="chip st-warn">查不到</span>`;
+    const where = [reg.loc ? regName(reg.loc, reg.loc_name) : "", esc(reg.city || ""), esc(reg.org || "")].filter(Boolean).join(" · ");
+    const native = reg.reg_loc && reg.loc ? (reg.reg_loc === reg.loc ? `<span class="chip c-ok">原生 IP</span>` : `<span class="chip st-warn">广播 IP</span>`) : "";
+    const rows = [
+      ["出口", reg.ip ? `<b class="ip">${flag(reg.loc)}${esc(reg.ip)}</b>${where ? `<span class="sub">${where}</span>` : ""}`
+        : reg.status === "unknown" ? `<span class="bad">查不到</span><span class="sub">上次检测连不上 claude.ai 和 Cloudflare</span>` : `${flag(reg.loc)}${regName(reg.loc, reg.loc_name)}`],
+      ["IP 类型", off ? "外部 IP 查询已关闭" : `${reg.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记"}${native}`],
+      off || !reg.org ? null : ["运营商", `${reg.asn ? "AS" + esc(reg.asn) + " · " : ""}${esc(reg.org)}`],
+      off || !reg.reg_loc ? null : ["注册地", `${flag(reg.reg_loc)}${regName(reg.reg_loc, reg.reg_loc_name)}${reg.loc ? (reg.reg_loc === reg.loc ? " · 和定位一致" : ` · 定位在 ${regName(reg.loc, reg.loc_name)}`) : ""}`],
+      reg.warp ? ["WARP", "出口经过 Cloudflare WARP / Zero Trust，上面是 WARP 的出口，不是本机网络的真实出口"] : null,
+      ["检测", `${ago(reg.checked_at)} · 后台每隔几分钟自动检测${reg.meta_source ? " · 数据来自 " + esc(reg.meta_source) : ""}`],
+    ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd><span class="v">${v}</span></dd>`).join("");
+    return `<div class="panel ecard">${h3(status)}<dl class="kv">${rows}</dl></div>`;
+  }
+  function scoreCard(st) {
+    const sc = st.risk_score, reg = st.region || {};
+    const has = !!(reg.status && sc);
+    const r = 40, c = 2 * Math.PI * r, pct = has ? sc.score : 0;
+    const ring = `<div class="score-ring ${has ? esc(sc.grade) : "none"}"><svg viewBox="0 0 92 92" aria-hidden="true"><circle class="rt" cx="46" cy="46" r="${r}"/>
+      <circle class="rf" cx="46" cy="46" r="${r}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - pct / 100)).toFixed(2)}"/>
+      <text x="46" y="41" text-anchor="middle" dominant-baseline="central">${has ? esc(sc.score) : "–"}</text>
+      <text class="lab" x="46" y="61" text-anchor="middle" dominant-baseline="central">${has ? esc(sc.label.split("，")[0]) : "还没检测"}</text></svg></div>`;
+    const rows = has ? `<dl class="kv">${envRows(st)}</dl>`
+      : `<p class="hint" style="margin:0">检测过一次后这里按项列出：出口地区、IP 类型、代理 / VPN、时区语言、DNS、出口变化、账号地区、Claude 服务。</p>`;
+    return `<div class="panel ecard"><h3><span class="eico">🛡️</span>环境评分 <span class="chip">只提醒，不拦任何操作</span></h3>
+      <div class="score-row">${ring}${rows}</div>
+      <p class="hint">100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70 以下高风险。${has ? esc(sc.advice) : ""}</p></div>`;
+  }
   function envCard(st) {
     const reg = st.region || {};
-    const sc = st.risk_score;
-    if (!reg.status || !sc) {
-      return `<section class="env" id="env" aria-label="环境状态"><div class="env-score"><div class="env-num">–</div><div class="env-lab">还没检测</div></div>
-        <div class="env-empty">后台每隔几分钟自动检测一次出口地区和环境风险；也可以现在就测。只提醒，不拦任何操作。</div>
-        ${envButton("立即检测")}${envChecksHtml()}</section>`;
-    }
-    const risks = (st.risks || []).filter((r) => r.level === "warn" || r.level === "bad");
-    const exitTxt = reg.status === "unknown" ? "查不到" : `${esc(reg.loc)}${reg.city ? " · " + esc(reg.city) : ""}`;
-    const exitCls = reg.status === "unsupported" ? "bad" : "";
-    const net = reg.lookup_mode === "off" ? "外部 IP 查询已关闭"
-      : reg.org ? `${esc(reg.org)}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}${reg.meta_source ? " · 数据：" + esc(reg.meta_source) : ""}` : "查不到";
-    return `<section class="env ${esc(sc.grade)}" id="env" aria-label="环境状态">
-      <div class="env-score"><div class="env-num">${esc(sc.score)}<small>/100</small></div><div class="env-lab">${esc(sc.label.split("，")[0])}</div></div>
-      <div class="env-facts">
-        <div><span class="k">出口</span><span class="${exitCls}">${exitTxt}${reg.status === "unsupported" ? " · 不在支持名单" : reg.status === "supported" ? " · 支持名单内" : ""}</span></div>
-        <div><span class="k">网络</span>${net}</div>
-        <div><span class="k">检测</span>${ago(reg.checked_at)} · 后台每隔几分钟自动检测</div>
-      </div>
-      ${envButton("重新检测")}
-      ${envChecks || checkup ? envChecksHtml() : risks.length ? `<ul class="env-risks">${risks.map((r) => `<li class="${esc(r.level)}">${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</li>`).join("")}</ul>` : ""}
+    const ready = !!(reg.status && st.risk_score);
+    return `<section class="block" id="env" aria-label="环境状态">
+      <div class="sec-head"><h2>环境</h2><span class="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>${envButton(ready ? "重新检测" : "立即检测")}</div>
+      <div class="cards env">${exitCard(reg)}${scoreCard(st)}</div>
+      ${envChecksHtml()}
     </section>`;
   }
 
@@ -1204,7 +1279,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     rows.forEach((r) => { if (byDay[r.date]) byDay[r.date].push(r); });
     const max = Math.max(0.01, ...days.map((d) => cost(byDay[d]))), top = max * 1.12;  // 顶上留一点空，最高的柱子不顶到边
     $("#local-chart").hidden = !days.length;
-    $("#local-grid").classList.toggle("solo", !days.length);
     if (days.length) {
       const step = niceStep(top), ticks = [];
       for (let v = step; v <= top; v += step) ticks.push(v);
@@ -1676,7 +1750,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   };
 
   // ---- 检测结果的标记
-  const CHECK_MARK = { ok: "✓", bad: "✗", warn: "!", info: "·" };
+  const CHECK_MARK = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 
   // ---- 事件委托
   document.addEventListener("click", async (e) => {

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, command, inTauri, onEvent } from "./api";
 import { ago } from "./format";
 import { AccountDetail, AccountTile } from "./components/AccountCard";
@@ -18,11 +18,11 @@ import { Privacy } from "./components/Privacy";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
-import type { Account, ServiceCheckItem, State, SwitchResult } from "./types";
+import type { Account, RegionInfo, ServiceCheckItem, State, SwitchResult } from "./types";
 
 type Tab = "accounts" | "vault" | "settings";
 const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
-const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "✓", bad: "✗", warn: "!", info: "·" };
+const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 /** 检测结果分组（和手机面板同样的分组） */
 const CHECK_GROUPS: [string, string[]][] = [
   ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
@@ -36,8 +36,8 @@ const IP_TYPE: Record<string, string> = { residential: "家庭 / 公司宽带", 
 function CheckRow({ it, cls }: { it: ServiceCheckItem; cls?: string }) {
   return (
     <li className={`${it.level}${cls ? " " + cls : ""}`}>
-      <span className="mark">{CHECK_MARK[it.level] || "·"}</span>
-      <span>
+      <span className="mark">{CHECK_MARK[it.level] || "说明"}</span>
+      <span className="v">
         {it.text}
         {it.advice && <span className="advice">→ {it.advice}</span>}
       </span>
@@ -45,7 +45,7 @@ function CheckRow({ it, cls }: { it: ServiceCheckItem; cls?: string }) {
   );
 }
 
-/** 服务检测结果：总体结论在最上面，其余按网络 / 本机 / 服务 / 账号分组 */
+/** 服务检测结果：总体结论一张通栏的卡，其余按网络 / 本机 / 服务 / 账号每组一张卡 */
 function CheckList({ items }: { items: ServiceCheckItem[] }) {
   const rest = items.filter((i) => i.kind !== "summary");
   const used = new Set<ServiceCheckItem>();
@@ -59,17 +59,19 @@ function CheckList({ items }: { items: ServiceCheckItem[] }) {
   return (
     <div className="check-groups">
       {summary.length > 0 && (
-        <ul className="checks">
-          {summary.map((it, i) => <CheckRow key={`s${i}`} it={it} cls="summary" />)}
-        </ul>
+        <div className="panel ecard summary-card">
+          <ul className="checks">
+            {summary.map((it, i) => <CheckRow key={`s${i}`} it={it} cls="summary" />)}
+          </ul>
+        </div>
       )}
       {[...groups, ...(other.length ? [["其它", other] as [string, ServiceCheckItem[]]] : [])].map(([name, rows]) => (
-        <Fragment key={name}>
-          <h4>{name}</h4>
+        <div className="panel ecard" key={name}>
+          <h3>{name}</h3>
           <ul className="checks">
             {rows.map((it, i) => <CheckRow key={`${name}${i}`} it={it} />)}
           </ul>
-        </Fragment>
+        </div>
       ))}
     </div>
   );
@@ -99,7 +101,7 @@ const CHECK_TIP =
 
 function EnvActs({ label, sc: { items, checking, check, reset } }: { label: string; sc: ServiceCheckState }) {
   return (
-    <div className="env-acts">
+    <span className="sec-acts env-acts">
       {items && !checking && (
         <button className="btn quiet" onClick={reset}>
           收起
@@ -108,84 +110,229 @@ function EnvActs({ label, sc: { items, checking, check, reset } }: { label: stri
       <button className="btn" disabled={checking} title={CHECK_TIP} onClick={check}>
         {checking ? "检测中，要等几秒…" : label}
       </button>
+    </span>
+  );
+}
+
+/** 国家代码变成国旗 emoji；不是两个字母的（比如 Tor 的 T1）不显示 */
+const flagOf = (cc?: string | null) =>
+  /^[A-Z]{2}$/.test(cc || "") ? String.fromCodePoint(...[...(cc as string)].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65)) : "";
+const regName = (code?: string | null, name?: string | null) => name || code || "未知";
+function Flag({ cc }: { cc?: string | null }) {
+  const f = flagOf(cc);
+  return f ? <span className="flag">{f}</span> : null;
+}
+
+/** 评分卡上的行：每行归并哪些风险项；没有风险项时显示“正常”的那句 */
+const ENV_ROWS: [string, string, string[]][] = [
+  ["region", "出口地区", ["region", "region_unknown", "region_mismatch", "ipv6_mismatch", "warp"]],
+  ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
+  ["proxy", "代理 / VPN", ["proxy", "vpn"]],
+  ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
+  ["dns", "DNS", ["dns", "dns_resolver", "dns_servers"]],
+  ["change", "出口变化", ["region_change"]],
+  ["account", "账号", ["account_regions", "accounts"]],
+  ["service", "Claude 服务", ["api", "web", "tls", "status"]],
+];
+const LEVEL_RANK: Record<string, number> = { bad: 3, warn: 2, info: 1, ok: 0 };
+
+/** 出口 IP 卡：国旗 + IP、地区 / 城市 / 运营商、IP 类型、ASN、注册地、上次检测 */
+function ExitCard({ reg }: { reg: RegionInfo | null | undefined }) {
+  const head = (extra?: ReactNode) => (
+    <h3>
+      <span className="eico">🌐</span>出口 IP{extra}
+    </h3>
+  );
+  if (!reg?.status) {
+    return (
+      <div className="panel ecard">
+        {head()}
+        <p className="hint" style={{ margin: 0 }}>
+          还没有检测过。后台每隔几分钟自动检测一次出口地区和环境风险，也可以点“立即检测”现在就测。
+        </p>
+      </div>
+    );
+  }
+  const off = reg.lookup_mode === "off";
+  const status =
+    reg.status === "supported" ? (
+      <span className="chip c-ok">支持名单内</span>
+    ) : reg.status === "unsupported" ? (
+      <span className="chip st-error">不在支持名单</span>
+    ) : (
+      <span className="chip st-warn">查不到</span>
+    );
+  const where = [reg.loc ? regName(reg.loc, reg.loc_name) : "", reg.city || "", reg.org || ""].filter(Boolean).join(" · ");
+  const native =
+    reg.reg_loc && reg.loc ? (reg.reg_loc === reg.loc ? <span className="chip c-ok">原生 IP</span> : <span className="chip st-warn">广播 IP</span>) : null;
+  const rows: ([string, ReactNode] | null)[] = [
+    [
+      "出口",
+      reg.ip ? (
+        <>
+          <b className="ip">
+            <Flag cc={reg.loc} />
+            {reg.ip}
+          </b>
+          {where && <span className="sub">{where}</span>}
+        </>
+      ) : reg.status === "unknown" ? (
+        <>
+          <span className="bad">查不到</span>
+          <span className="sub">上次检测连不上 claude.ai 和 Cloudflare</span>
+        </>
+      ) : (
+        <>
+          <Flag cc={reg.loc} />
+          {regName(reg.loc, reg.loc_name)}
+        </>
+      ),
+    ],
+    [
+      "IP 类型",
+      off ? (
+        "外部 IP 查询已关闭"
+      ) : (
+        <>
+          {reg.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记"}
+          {native}
+        </>
+      ),
+    ],
+    off || !reg.org ? null : ["运营商", `${reg.asn ? "AS" + reg.asn + " · " : ""}${reg.org}`],
+    off || !reg.reg_loc
+      ? null
+      : [
+          "注册地",
+          <>
+            <Flag cc={reg.reg_loc} />
+            {regName(reg.reg_loc, reg.reg_loc_name)}
+            {reg.loc ? (reg.reg_loc === reg.loc ? " · 和定位一致" : ` · 定位在 ${regName(reg.loc, reg.loc_name)}`) : ""}
+          </>,
+        ],
+    reg.warp ? ["WARP", "出口经过 Cloudflare WARP / Zero Trust，上面是 WARP 的出口，不是本机网络的真实出口"] : null,
+    ["检测", `${ago(reg.checked_at)} · 后台每隔几分钟自动检测${reg.meta_source ? " · 数据来自 " + reg.meta_source : ""}`],
+  ];
+  return (
+    <div className="panel ecard">
+      {head(status)}
+      <dl className="kv">
+        {rows
+          .filter((r): r is [string, ReactNode] => !!r)
+          .map(([k, v]) => (
+            <Fragment key={k}>
+              <dt>{k}</dt>
+              <dd>
+                <span className="v">{v}</span>
+              </dd>
+            </Fragment>
+          ))}
+      </dl>
     </div>
   );
 }
 
-/** 环境状态卡：分数、出口、网络类型、上次检测时间、风险提醒，点"重新检测"在卡下展开完整服务检测结果。只提醒，不拦 */
-function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
-  const { items } = sc;
+/** 环境评分卡：大圆环 + 每个信号一行（有风险项就列风险项和建议，没有就一句“正常”） */
+function ScoreCard({ state }: { state: State }) {
+  const sc = state.risk_score;
   const reg = state.region;
-  const score = state.risk_score;
-  if (!reg?.status || !score) {
-    return (
-      <section className="env" aria-label="环境状态">
-        <div className="env-score">
-          <div className="env-num">–</div>
-          <div className="env-lab">还没检测</div>
-        </div>
-        <div className="env-empty">后台每隔几分钟自动检测一次出口地区和环境风险；也可以现在就测。只提醒，不拦任何操作。</div>
-        <EnvActs label="立即检测" sc={sc} />
-        {items && (
-          <div className="env-checks">
-            <CheckList items={items} />
-          </div>
-        )}
-      </section>
-    );
-  }
-  const risks = (state.risks ?? []).filter((r) => r.level === "warn" || r.level === "bad");
+  const has = !!(reg?.status && sc);
+  const r = 40;
+  const c = 2 * Math.PI * r;
+  const pct = has && sc ? sc.score : 0;
+  const risks = state.risks ?? [];
+  const okText: Record<string, string> = {
+    region: `${regName(reg?.loc, reg?.loc_name)} · 在 Anthropic 支持名单内`,
+    iptype: reg?.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg?.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
+    proxy: "没发现代理，默认路由没走隧道",
+    local: "没发现和出口地区不一致的设置",
+    dns: "没发现问题",
+    change: reg?.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${reg.prev_loc} 换到 ${reg.loc}，已过了观察期` : "最近没变",
+    account: "当前账号最近没在多个地区用过",
+    service: "正常",
+  };
+  const used = new Set<ServiceCheckItem>();
+  const rows = ENV_ROWS.map(([key, title, kinds]) => {
+    const hits = risks.filter((x) => kinds.includes(x.kind || ""));
+    hits.forEach((x) => used.add(x));
+    return { title, hits, ok: okText[key] };
+  });
+  const other = risks.filter((x) => !used.has(x));
+  if (other.length) rows.push({ title: "其它", hits: other, ok: "" });
   return (
-    <section className={`env ${score.grade}`} aria-label="环境状态">
-      <div className="env-score">
-        <div className="env-num">
-          {score.score}
-          <small>/100</small>
+    <div className="panel ecard">
+      <h3>
+        <span className="eico">✦</span>环境评分 <span className="chip">只提醒，不拦任何操作</span>
+      </h3>
+      <div className="score-row">
+        <div className={`score-ring ${has && sc ? sc.grade : "none"}`}>
+          <svg viewBox="0 0 92 92" aria-hidden="true">
+            <circle className="rt" cx="46" cy="46" r={r} />
+            <circle className="rf" cx="46" cy="46" r={r} strokeDasharray={c.toFixed(2)} strokeDashoffset={(c * (1 - pct / 100)).toFixed(2)} />
+            <text x="46" y="41" textAnchor="middle" dominantBaseline="central">
+              {has && sc ? sc.score : "–"}
+            </text>
+            <text className="lab" x="46" y="61" textAnchor="middle" dominantBaseline="central">
+              {has && sc ? sc.label.split("，")[0] : "还没检测"}
+            </text>
+          </svg>
         </div>
-        <div className="env-lab">{score.label.split("，")[0]}</div>
+        {has ? (
+          <dl className="kv">
+            {rows.map(({ title, hits, ok }) => {
+              const level = hits.reduce<string>((m, x) => (LEVEL_RANK[x.level] > LEVEL_RANK[m] ? x.level : m), "ok");
+              return (
+                <Fragment key={title}>
+                  <dt>{title}</dt>
+                  <dd>
+                    <i className={`dot ${level}`} />
+                    <span className="v">
+                      {hits.length
+                        ? hits.map((x, i) => (
+                            <div key={i}>
+                              {x.text}
+                              {x.advice && <span className="advice">{x.advice}</span>}
+                            </div>
+                          ))
+                        : ok}
+                    </span>
+                  </dd>
+                </Fragment>
+              );
+            })}
+          </dl>
+        ) : (
+          <p className="hint" style={{ margin: 0 }}>
+            检测过一次后这里按项列出：出口地区、IP 类型、代理 / VPN、时区语言、DNS、出口变化、账号地区、Claude 服务。
+          </p>
+        )}
       </div>
-      <div className="env-facts">
-        <div>
-          <span className="k">出口</span>
-          <span className={reg.status === "unsupported" ? "bad" : ""}>
-            {reg.status === "unknown" ? "查不到" : `${reg.loc}${reg.city ? " · " + reg.city : ""}`}
-            {reg.status === "unsupported" ? " · 不在支持名单" : reg.status === "supported" ? " · 支持名单内" : ""}
-          </span>
-        </div>
-        <div>
-          <span className="k">网络</span>
-          {reg.lookup_mode === "off"
-            ? "外部 IP 查询已关闭"
-            : reg.org
-              ? `${reg.org}${reg.ip_type ? " · " + IP_TYPE[reg.ip_type] : ""}${reg.meta_source ? " · 数据：" + reg.meta_source : ""}`
-              : "查不到"}
-        </div>
-        <div>
-          <span className="k">检测</span>
-          {ago(reg.checked_at)} · 后台每隔几分钟自动检测
-        </div>
-      </div>
-      <EnvActs label="重新检测" sc={sc} />
-      {items ? (
-        <div className="env-checks">
-          <CheckList items={items} />
-        </div>
-      ) : (
-        risks.length > 0 && (
-          <ul className="env-risks">
-            {risks.map((r, i) => (
-              <li key={`${r.kind}-${i}`} className={r.level}>
-                {r.text}
-                {r.advice && <span className="advice">{r.advice}</span>}
-              </li>
-            ))}
-          </ul>
-        )
-      )}
-    </section>
+      <p className="hint">
+        100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70
+        以下高风险。{has && sc ? sc.advice : ""}
+      </p>
+    </div>
   );
 }
 
+/** 环境区块：出口 IP 一张卡、环境评分一张卡（每个信号一行），点“重新检测”在下面展开完整检测结果。只提醒，不拦 */
+function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
+  const ready = !!(state.region?.status && state.risk_score);
+  return (
+    <section className="block" id="env" aria-label="环境状态">
+      <div className="sec-head">
+        <h2>环境</h2>
+        <span className="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>
+        <EnvActs label={ready ? "重新检测" : "立即检测"} sc={sc} />
+      </div>
+      <div className="env-grid">
+        <ExitCard reg={state.region} />
+        <ScoreCard state={state} />
+      </div>
+      {sc.items && <CheckList items={sc.items} />}
+    </section>
+  );
+}
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
@@ -266,6 +413,7 @@ export default function App() {
   const envSc = useServiceCheck(toast, load);
   // 环境有风险时把环境状态卡放到最上面，没风险时放到账号详情下面
   const risky = !!(state?.risk_score && state.region?.status && state.risk_score.grade !== "low");
+  const firstRisk = (state?.risks ?? []).find((x) => x.level === "bad" || x.level === "warn")?.text;
   // 选中的卡不在可见范围时，把账号条滑到它
   useEffect(() => {
     const strip = document.querySelector<HTMLElement>(".strip");
@@ -448,7 +596,17 @@ export default function App() {
               <p className="hint">{error}</p>
             </div>
           )}
-          {state && risky && <EnvCard state={state} sc={envSc} />}
+          {state && risky && state.risk_score && (
+            <div className={`notice env-brief ${state.risk_score.grade}`} role="status">
+              <span className="n-text">
+                环境评分 <b>{state.risk_score.score}/100</b>：{state.risk_score.label}
+                {firstRisk ? ` · ${firstRisk}` : ""}
+              </span>
+              <a className="btn quiet" href="#env">
+                查看详情
+              </a>
+            </div>
+          )}
           {state && !state.accounts.length && (
             <div className="panel empty">
               <h2>还没有账号</h2>
@@ -525,7 +683,7 @@ export default function App() {
               />
             </>
           )}
-          {state && !risky && <EnvCard state={state} sc={envSc} />}
+          {state && <EnvCard state={state} sc={envSc} />}
           {state && <LocalUsage accounts={state.accounts} stamp={state.generated_at} />}
           {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
           {state && (

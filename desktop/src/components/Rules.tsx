@@ -88,11 +88,15 @@ export function Rules({
 
   return (
     <section className="block">
-      <h2>切号规则</h2>
-      <div className="panel">
-        <p className="hint">
-          时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。
-        </p>
+      <div className="sec-head">
+        <h2>切号规则</h2>
+        <span className="hint">按时间段或项目目录自动换号，以及额度提醒的阈值</span>
+      </div>
+      <div className="cards">
+        <div className="panel ecard wide">
+        <h3>
+          <span className="eico">⏱️</span>现在的规则
+        </h3>
         <ul className="rules">
           {view.rules.length ? (
             view.rules.map((r) => (
@@ -111,6 +115,14 @@ export function Rules({
             <li className="hint">还没有规则。比如：工作日 9:00–18:00 自动用工作号。</li>
           )}
         </ul>
+        <p className="hint">
+          时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。
+        </p>
+        </div>
+        <div className="panel ecard">
+        <h3>
+          <span className="eico">➕</span>添加规则
+        </h3>
         <form className="rule-form" onSubmit={add}>
           <div className="field">
             <label htmlFor="r-type">规则</label>
@@ -158,6 +170,11 @@ export function Rules({
             添加规则
           </button>
         </form>
+        </div>
+        <div className="panel ecard">
+        <h3>
+          <span className="eico">🔔</span>额度提醒
+        </h3>
         <form
           className="alert-row"
           onSubmit={(e) => {
@@ -174,6 +191,7 @@ export function Rules({
             保存
           </button>
         </form>
+        </div>
       </div>
     </section>
   );

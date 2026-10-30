@@ -1767,7 +1767,7 @@ def note_incident(data, acc, new_usage):
         score = None
     acc.setdefault("incidents", []).insert(0, {
         "at": now_iso(), "kind": kind, "error": err,
-        "region": {k: reg.get(k) for k in ("loc", "ip", "org", "city", "ip_type", "warp", "colo", "skew", "lookup_mode", "checked_at")},
+        "region": {k: reg.get(k) for k in ("loc", "ip", "org", "asn", "city", "ip_type", "reg_loc", "warp", "colo", "skew", "lookup_mode", "checked_at")},
         "env": {k: env.get(k) for k in ("tz", "locale", "dns", "proxy", "tunnel")},
         "sessions": session_count(), "active": (data.get("active") or {}).get("claude_code") == acc["id"], "risk_score": score})
     acc["incidents"] = acc["incidents"][:INCIDENT_KEEP]
@@ -2973,7 +2973,9 @@ def diagnostic_text(rep):
     def exit_line(r):  # 旧版本记的出口只有地区，没有 IP；检测失败的现场可能什么都没有
         ip_type = IP_TYPE_NAMES.get(r.get("ip_type"), r.get("ip_type") or "类型未知")
         head = " ".join(x for x in (region_label(r.get("loc")), r.get("ip")) if x)
-        return f"{head}（{r.get('org') or '运营商未知'}，{ip_type}" + (f"，{r['city']}" if r.get("city") else "") + "）"
+        reg_loc = f"，注册在 {region_label(r['reg_loc'])}" if r.get("reg_loc") and r.get("reg_loc") != r.get("loc") else ""
+        return (f"{head}（{r.get('org') or '运营商未知'}" + (f"，{asn_label(r['asn'])}" if r.get("asn") else "") + f"，{ip_type}"
+                + (f"，{r['city']}" if r.get("city") else "") + reg_loc + "）")
 
     def env_line(e):
         px = e.get("proxy") or []
@@ -4669,6 +4671,11 @@ def region_label(loc):
     return f"{loc}（{REGION_NAMES[loc]}）" if loc in REGION_NAMES else (loc or "未知")
 
 
+def region_name(loc):
+    """地区的中文名（界面上单独显示用），名单里没有的返回 None。"""
+    return REGION_NAMES.get(loc) if loc else None
+
+
 def region_status(loc):
     """supported / unsupported / unknown。"""
     if not loc:
@@ -5209,15 +5216,16 @@ def region_view(data):
     """界面常显用的出口地区状态（不联网，用后台上次检测的结果）。没检测过时 status 为 None。"""
     c = data.get("region") or {}
     if not c.get("checked_at"):
-        return {"loc": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
-                "warp": False, "prev_loc": None, "changed_at": None, "org": None, "city": None, "ip_type": None,
-                "meta_source": None, "lookup_mode": None}
+        return {"loc": None, "loc_name": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
+                "warp": False, "prev_loc": None, "changed_at": None, "org": None, "asn": None, "city": None, "ip_type": None,
+                "reg_loc": None, "reg_loc_name": None, "meta_source": None, "lookup_mode": None}
     status = region_status(c.get("loc"))
-    return {"loc": c.get("loc"), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
+    return {"loc": c.get("loc"), "loc_name": region_name(c.get("loc")), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
             "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
             "warp": bool(c.get("warp")), "prev_loc": c.get("prev_loc"), "changed_at": c.get("changed_at"),
-            "org": c.get("org"), "city": c.get("city"), "ip_type": c.get("ip_type"), "meta_source": c.get("meta_source"),
-            "lookup_mode": c.get("lookup_mode")}
+            "org": c.get("org"), "asn": c.get("asn"), "city": c.get("city"), "ip_type": c.get("ip_type"),
+            "reg_loc": c.get("reg_loc"), "reg_loc_name": region_name(c.get("reg_loc")),
+            "meta_source": c.get("meta_source"), "lookup_mode": c.get("lookup_mode")}
 
 
 def check_region(store, max_age=300):
