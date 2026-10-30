@@ -3722,14 +3722,17 @@ def port_free(port):
             return False
 
 
-def ensure_panel(store, port=8787):
+def ensure_panel(store, port=8787, need_mini=False):
     """确保本机有面板在跑（cam serve 或桌面版），返回 (端口, 令牌)。
 
     没有就在后台起一个只监听 127.0.0.1 的 cam serve，它一直运行到注销或重启。端口被别的程序占了就往后找。
+    need_mini：要的是有卡片小面板页（/mini）的面板——在跑的是桌面版的服务时跳过它，在下一个空端口起一个 cam serve。
     """
     token = server_token(store)
     for p in range(port, port + 10):
         if panel_running(p, token):
+            if need_mini and not mini_available(p, token):
+                continue
             return p, token
         if not port_free(p):
             continue
@@ -3773,7 +3776,8 @@ def serve_outdated(port, token):
 def restart_stale_serve(store, port, token):
     """port 上在跑的是旧代码的 cam serve（没有 /mini 页）：代码更新后它没重启。
 
-    只动 cam serve（桌面版的服务不碰）：按它记的心跳找到 pid、确认命令行是 cam serve，结束它并等端口空出来。
+    只动 cam serve（桌面版的服务不碰）：按进程表里的命令行（cam.py serve --port 这个端口）找到它的 pid，结束它并等端口空出来。
+    心跳文件里的 pid 不能用来找它：只有拿到后台锁的 serve 才写心跳，流式模式的菜单栏插件拿着锁时它一次都没写过。
     返回有没有结束掉，调用方再用 ensure_panel 起新的。
     """
     try:
@@ -3783,8 +3787,8 @@ def restart_stale_serve(store, port, token):
                 return False
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
         return False
-    pid = _read_json_quiet(os.path.join(store.root, SERVE_STATE)).get("pid")
-    if not pid or not any(p == pid and _is_cam_serve(cmd) for p, cmd in process_table()):
+    pid = serve_pid_on(port)
+    if not pid:
         return False
     try:
         os.kill(pid, signal.SIGTERM)
@@ -5733,6 +5737,20 @@ def _is_cam_serve(cmd):
     return bool(re.search(r"cam\.py[\"']?\s+serve(\s|$)", cmd))
 
 
+def serve_port_of(cmd):
+    """cam serve 命令行里听的端口（没写 --port 就是默认的 8787）。"""
+    m = re.search(r"--port[=\s]+(\d+)", cmd)
+    return int(m.group(1)) if m else 8787
+
+
+def serve_pid_on(port):
+    """本机 port 上那个 cam serve 的 pid（按进程表里的命令行找），没有就是 None。"""
+    for pid, cmd in process_table():
+        if _is_cam_serve(cmd) and serve_port_of(cmd) == port:
+            return pid
+    return None
+
+
 def _is_cam_desktop(cmd):
     low = cmd.replace("\\", "/").lower()
     return "/claude accounts.app/" in low or bool(re.search(r"(^|/)(claude-accounts|claude accounts)(\.exe)?([\s\"]|$)", low))
@@ -6204,7 +6222,7 @@ def usage_freshness(data, running, refresh_min):
 def checkup_cam(store, data):
     out = [ck("info", f"数据目录：{store.root}，已保存 {len(data['accounts'])} 个账号")]
     running, refresh_min, items = background_status(store, data)
-    out += items + usage_freshness(data, running, refresh_min)
+    out += items + usage_freshness(data, running, refresh_min) + panel_items(store)
     pend = pending_switch_view(data)
     if pend:
         out.append(ck("info", pend["message"], "cam switch --cancel-wait 可取消"))
@@ -6235,6 +6253,31 @@ def checkup_cam(store, data):
         out.append(ck("warn", str(e)))
     out += permission_items(store)
     return out + backup_items(store)
+
+
+def panel_items(store, first=8787):
+    """体检里的“面板”一行：本机哪个端口上有面板（cam serve / 桌面版）、菜单栏 / 托盘的卡片能不能用、后台的 cam serve 是不是旧代码。
+
+    只问本机端口，不起新的，不显示令牌；令牌文件也不新建（--offline 不改任何东西）。
+    """
+    try:
+        with open(os.path.join(store.root, "server-token")) as f:
+            token = f.read().strip()
+    except OSError:
+        token = ""
+    for p in range(first, first + 10):
+        if not cam_panel_at(p):
+            continue
+        if not panel_running(p, token):
+            return [ck("warn", f"本机 {p} 端口上有个面板，但不认这台电脑的访问令牌",
+                       "可能是另一个用户或另一份数据目录（CAM_HOME）开的；cam panel 会往后找空端口再开一个")]
+        if serve_outdated(p, token):
+            return [ck("warn", f"后台的 cam serve（{p} 端口）跑的还是旧代码：更新代码后它没重启",
+                       "菜单栏 / 托盘小工具点开卡片时会自动把它重启；手动的话结束它再 cam panel 重开（macOS / Linux：pkill -f 'cam.py serve'）")]
+        if mini_available(p, token):
+            return [ck("ok", f"面板：cam serve 在 {p} 端口，卡片小面板可用")]
+        return [ck("ok", f"面板：桌面版的服务在 {p} 端口（菜单栏 / 托盘的卡片会在下一个端口另开一个 cam serve）")]
+    return []
 
 
 def permission_items(store):

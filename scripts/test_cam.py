@@ -1023,24 +1023,19 @@ class CamTest(unittest.TestCase):
             self.assertEqual(cam_menu.mini_size([desk])[1], one + cam_menu.MINI_DESK)  # 没有 Code 号：大卡是桌面号（没有本机消耗、多一个“打开”按钮）
             self.assertEqual(cam_menu.mini_size([desk, desk])[1], one + cam_menu.MINI_DESK + cam_menu.MINI_SEC + cam_menu.MINI_ROW)
             self.assertEqual(cam_menu.mini_size([code, desk, desk])[1], one + cam_menu.MINI_SEC + 2 * cam_menu.MINI_ROW)  # 桌面号一行一个
-            with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
-                 mock.patch.object(cam_menu.cam, "mini_available", return_value=False), \
-                 mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=False):
-                lines2 = []
-                cam_menu.render(store, {}, out=lines2.append, rich=True)
-            self.assertNotIn("webview=", lines2[0])
-            # 旧代码的 cam serve：重启后再探到 /mini，就带上
+            # 8787 上是桌面版的服务（没有 /mini 页）：在下一个空端口另起一个 cam serve 给卡片用，不是干脆不给卡片；桌面版的服务不动
             told = []
             cam_menu.notify = lambda title, body: told.append(title)
-            with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
-                 mock.patch.object(cam_menu.cam, "mini_available", side_effect=[False, True]), \
-                 mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=True):
+            ensure = lambda store, port=8787, need_mini=False: (8788, "tok") if need_mini else (8787, "tok")
+            with mock.patch.object(cam_menu.cam, "ensure_panel", side_effect=ensure), \
+                 mock.patch.object(cam_menu.cam, "mini_available", lambda port, token: port == 8788), \
+                 mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=False) as rs:
                 lines2 = []
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
-            self.assertIn("webview=true", lines2[0])
-            self.assertEqual(told, ["面板已更新"])
-            # 后台 cam serve 有 /mini 但代码过时（code_stamp 对不上）：一样重启
-            told.clear()
+            self.assertIn("href=http://127.0.0.1:8788/mini?t=tok webview=true", lines2[0])
+            self.assertFalse(rs.called)
+            self.assertEqual(told, [])
+            # 后台 cam serve 的代码过时（code_stamp 对不上）：结束它、起新的，通知一次
             with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
                  mock.patch.object(cam_menu.cam, "mini_available", return_value=True), \
                  mock.patch.object(cam_menu.cam, "serve_outdated", return_value=True), \
@@ -1050,6 +1045,19 @@ class CamTest(unittest.TestCase):
             self.assertTrue(rs.called)
             self.assertIn("webview=true", lines2[0])
             self.assertEqual(told, ["面板已更新"])
+            # 过时但没能重启（找不到它的进程）：先用旧的那份卡片，提醒一次怎么手动弄，之后不再每轮提醒；不是干脆不给卡片
+            told.clear()
+            cam_menu._STALE_TOLD = False
+            for _ in range(2):
+                with mock.patch.object(cam_menu.cam, "ensure_panel", return_value=(8787, "tok")), \
+                     mock.patch.object(cam_menu.cam, "mini_available", return_value=True), \
+                     mock.patch.object(cam_menu.cam, "serve_outdated", return_value=True), \
+                     mock.patch.object(cam_menu.cam, "restart_stale_serve", return_value=False):
+                    lines2 = []
+                    cam_menu.render(store, {}, out=lines2.append, rich=True)
+                self.assertIn("href=http://127.0.0.1:8787/mini?t=tok webview=true", lines2[0])
+            self.assertEqual(told, ["卡片用的还是旧代码"])
+            cam_menu._STALE_TOLD = False
             # 流式模式靠源文件的修改时间认出代码更新
             self.assertEqual(len(cam_menu.source_stamp()), 2)
             with mock.patch.object(cam_menu.cam, "ensure_panel", side_effect=self.cam.CamError("起不来")):
@@ -3879,19 +3887,44 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(opened, [f"http://127.0.0.1:{port}/?t={token}"])  # 用的就是这个在跑的面板，不另起
         self.assertEqual(body["url"], opened[0])
         self.assertEqual((self.cam.ensure_panel(store, port)), (port, token))
-        # 旧代码的 cam serve（没有 /mini）：按心跳里的 pid 认出是 cam serve 才结束它；pid 对不上、不是 cam serve、桌面版的服务都不动
+        # 旧代码的 cam serve：按进程表里“cam.py serve --port 这个端口”的命令行找到它才结束它（心跳文件里的 pid 不可靠：
+        # 只有拿到后台锁的 serve 才写，流式模式的菜单栏插件拿着锁时它一次都没写过）；别的端口的 cam serve、不是 cam serve、桌面版的服务都不动
+        self.assertEqual(self.cam.serve_port_of("python3 /a b/scripts/cam.py serve"), 8787)
+        self.assertEqual(self.cam.serve_port_of('"C:\\py\\python.exe" "C:\\cam\\scripts\\cam.py" serve --port 8790'), 8790)
         write(os.path.join(store.root, self.cam.SERVE_STATE), json.dumps({"pid": 4242}))
         killed = []
-        with mock.patch.object(self.cam, "process_table", return_value=[(4242, "python3 cam.py serve --port 8787")]), \
+        table = [(4242, "python3 cam.py serve --port 9999"), (4243, f"python3 cam.py serve --port {port}"), (4244, "python3 other.py")]
+        with mock.patch.object(self.cam, "process_table", return_value=table), \
              mock.patch.object(self.cam.os, "kill", lambda pid, sig: killed.append((pid, sig))), \
              mock.patch.object(self.cam, "port_free", return_value=True):
+            self.assertEqual(self.cam.serve_pid_on(port), 4243)
+            self.assertIsNone(self.cam.serve_pid_on(1))
             self.assertTrue(self.cam.restart_stale_serve(store, port, token))
-        self.assertEqual(killed, [(4242, signal.SIGTERM)])
+        self.assertEqual(killed, [(4243, signal.SIGTERM)])  # 心跳里记的 4242 是别的端口的，不动
         with mock.patch.object(self.cam, "process_table", return_value=[(4242, "python3 other.py")]), \
              mock.patch.object(self.cam.os, "kill", lambda pid, sig: killed.append((pid, sig))):
             self.assertFalse(self.cam.restart_stale_serve(store, port, token))
         self.assertFalse(self.cam.restart_stale_serve(store, 1, token))  # 没人听的端口
         self.assertEqual(len(killed), 1)
+        # 卡片要的面板（need_mini）：在跑的面板没有 /mini 页（桌面版的服务）就跳过它找下一个端口
+        self.assertEqual(self.cam.ensure_panel(store, port, need_mini=True), (port, token))
+        with mock.patch.object(self.cam, "mini_available", return_value=False), \
+             mock.patch.object(self.cam, "port_free", return_value=False):
+            with self.assertRaises(self.cam.CamError):
+                self.cam.ensure_panel(store, port, need_mini=True)
+        # 体检的“面板”一行：只问本机端口、不起新的；旧代码的 cam serve 说怎么重启；桌面版的服务说卡片会另开一个；不认令牌的提醒
+        texts = lambda items: [(i["level"], i["text"]) for i in items]
+        self.assertEqual(texts(self.cam.panel_items(store, first=port)), [("ok", f"面板：cam serve 在 {port} 端口，卡片小面板可用")])
+        with mock.patch.object(self.cam, "serve_outdated", return_value=True):
+            items = self.cam.panel_items(store, first=port)
+        self.assertEqual(texts(items), [("warn", f"后台的 cam serve（{port} 端口）跑的还是旧代码：更新代码后它没重启")])
+        self.assertIn("pkill -f 'cam.py serve'", items[0]["advice"])
+        with mock.patch.object(self.cam, "mini_available", return_value=False):
+            self.assertEqual(texts(self.cam.panel_items(store, first=port)),
+                             [("ok", f"面板：桌面版的服务在 {port} 端口（菜单栏 / 托盘的卡片会在下一个端口另开一个 cam serve）")])
+        with mock.patch.object(self.cam, "panel_running", return_value=False):
+            self.assertEqual(texts(self.cam.panel_items(store, first=port)), [("warn", f"本机 {port} 端口上有个面板，但不认这台电脑的访问令牌")])
+        self.assertEqual(self.cam.panel_items(store, first=1), [])  # 没人听
 
     def test_http_api_and_menu(self):
         store = self.cam.Store()

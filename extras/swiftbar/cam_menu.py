@@ -483,17 +483,26 @@ def mini_endpoint(store):
     return ep
 
 
+_STALE_TOLD = False  # “旧代码的 cam serve 没能重启”只提醒一次
+
+
 def _probe_mini(store):
+    global _STALE_TOLD
     try:
         port, token = cam.ensure_panel(store)
-        if not cam.mini_available(port, token) or cam.serve_outdated(port, token):
-            # 在跑的是旧代码的 cam serve（git pull / cam update 之后没重启）：结束它再起一个新的；桌面版的服务就算了
-            if not cam.restart_stale_serve(store, port, token):
-                return None
+        stale = cam.serve_outdated(port, token)
+        if stale and cam.restart_stale_serve(store, port, token):
+            # 在跑的是旧代码的 cam serve（git pull / cam update 之后没重启）：结束它再起一个新的
             port, token = cam.ensure_panel(store)
-            if not cam.mini_available(port, token):
-                return None
             notify("面板已更新", "后台的 cam serve 用的是旧代码，已重启（自己用 cam serve --lan 开的要重开一次）")
+            stale = False
+        if not cam.mini_available(port, token):
+            # 没有卡片页：桌面版的服务，或者旧得没有这页又没能重启的 cam serve——在下一个空端口起一个 cam serve 给卡片用
+            port, token = cam.ensure_panel(store, need_mini=True)
+            stale = False
+        if stale and not _STALE_TOLD:  # 没能重启（没找到它的进程）：先用旧的那份卡片，说一次怎么手动弄，别干脆不给卡片
+            _STALE_TOLD = True
+            notify("卡片用的还是旧代码", "后台的 cam serve 没能自动重启：终端运行 pkill -f 'cam.py serve' 结束它，再点一下图标就会起新的")
     except Exception:  # noqa: BLE001  起不来就只用系统菜单
         return None
     return port, token
