@@ -73,8 +73,8 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: .5; cursor: progress; }
-.btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
-.btn.quiet:hover { color: var(--ink); }
+.btn.quiet { background: transparent; color: var(--muted); }  /* 次要按钮也带边框：看得出是能点的 */
+.btn.quiet:hover { color: var(--ink); border-color: var(--muted); }
 
 /* 标签：套餐、状态 */
 .chip { font-family: var(--sans); font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; line-height: 1.5; }
@@ -204,21 +204,24 @@ header.top .host { color: var(--muted); font-size: 12px; }
 }
 
 /* 区块 */
-section.block { margin-top: 22px; }
+section.block { margin-top: 26px; scroll-margin-top: 12px; }
 section.block h2 { font-size: 14.5px; font-weight: 650; margin: 0 0 10px; }
 section.block .sec-head h2 { margin: 0; }
 .hint { color: var(--muted); font-size: 12.5px; }
-/* 底部“状态和颜色说明”：折叠块 */
-.help summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
-.help summary::-webkit-details-marker { display: none; }
-.help summary::before { content: "▸"; color: var(--muted); font-size: 12px; }
-.help[open] summary::before { content: "▾"; }
-.help summary h2 { margin: 0; }
-.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 28px; font-size: 12.5px; margin-top: 10px; }
-.help h3 { font-size: 13px; margin: 0 0 6px; }
-.help ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.6; }
-.sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+/* 页面目录：一排能点的小胶囊，跳到各个区块；还没显示的区块不列 */
+.toc { display: flex; flex-wrap: wrap; gap: 4px; margin: -6px 0 14px; }
+.toc a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
+.toc a:hover { color: var(--ink); border-color: var(--muted); }
+/* 底部“状态和颜色说明”：正常的区块，图例用界面上真的标签和色块，不折叠 */
+.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; font-size: 12.5px; }
+.help h3 { font-size: 13px; margin: 0 0 8px; }
+.help .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
+.lg { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 10px; margin: 0; align-items: center; }
+.lg dt { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.lg dd { margin: 0; color: var(--muted); line-height: 1.5; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .sw.g { background: #34C759; } .sw.o { background: #FF9F0A; } .sw.r { background: #FF3B30; }
+.sw.bar { background: var(--bar); } .sw.warn { background: var(--warn); } .sw.hot { background: var(--hot); } .sw.live { background: var(--live); }
 /* 起名助手：内置昵称一键选 */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -6px 0 4px; }
 .chips .lab { font-size: 11.5px; color: var(--muted); align-self: center; }
@@ -275,9 +278,12 @@ section.block .sec-head h2 { margin: 0; }
 .key-acts { display: flex; gap: 6px; }
 .chip.c-ok { color: var(--live); border-color: currentColor; }
 details.src { border-top: 1px solid var(--line); padding-top: 10px; }
-details.src summary { cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none; }
+details.src summary { cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 7px; }
+details.src summary:hover { color: var(--ink); }
 details.src summary::-webkit-details-marker { display: none; }
-details.src summary::before { content: "▸"; display: inline-block; width: 1.1em; }
+/* 折叠块的开关画成带边的小圆钮，看得出能点 */
+details.src summary::before { content: "▸"; flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); font-size: 10px; line-height: 1; transition: border-color .12s; }
+details.src summary:hover::before { border-color: var(--muted); }
 details.src[open] summary::before { content: "▾"; }
 .src-group { margin-top: 10px; }
 .src-group h5 { margin: 0 0 4px; font-size: 11.5px; font-weight: 600; color: var(--muted); }

@@ -86,8 +86,8 @@ header.top .host { color: var(--muted); font-size: 12px; }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: .5; cursor: progress; }
-.btn.quiet { border-color: transparent; background: transparent; color: var(--muted); }
-.btn.quiet:hover { color: var(--ink); }
+.btn.quiet { background: transparent; color: var(--muted); }  /* 次要按钮也带边框：看得出是能点的 */
+.btn.quiet:hover { color: var(--ink); border-color: var(--muted); }
 
 /* 标签：套餐、状态 */
 .chip { font-family: var(--sans); font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; line-height: 1.5; }
@@ -217,21 +217,24 @@ header.top .host { color: var(--muted); font-size: 12px; }
 }
 
 /* 区块 */
-section.block { margin-top: 22px; }
+section.block { margin-top: 26px; scroll-margin-top: 12px; }
 section.block h2 { font-size: 14.5px; font-weight: 650; margin: 0 0 10px; }
 section.block .sec-head h2 { margin: 0; }
 .hint { color: var(--muted); font-size: 12.5px; }
-/* 底部“状态和颜色说明”：折叠块 */
-.help summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
-.help summary::-webkit-details-marker { display: none; }
-.help summary::before { content: "▸"; color: var(--muted); font-size: 12px; }
-.help[open] summary::before { content: "▾"; }
-.help summary h2 { margin: 0; }
-.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 28px; font-size: 12.5px; margin-top: 10px; }
-.help h3 { font-size: 13px; margin: 0 0 6px; }
-.help ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.6; }
-.sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+/* 页面目录：一排能点的小胶囊，跳到各个区块；还没显示的区块不列 */
+.toc { display: flex; flex-wrap: wrap; gap: 4px; margin: -6px 0 14px; }
+.toc a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
+.toc a:hover { color: var(--ink); border-color: var(--muted); }
+/* 底部“状态和颜色说明”：正常的区块，图例用界面上真的标签和色块，不折叠 */
+.help-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 32px; font-size: 12.5px; }
+.help h3 { font-size: 13px; margin: 0 0 8px; }
+.help .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
+.lg { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 10px; margin: 0; align-items: center; }
+.lg dt { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.lg dd { margin: 0; color: var(--muted); line-height: 1.5; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .sw.g { background: #34C759; } .sw.o { background: #FF9F0A; } .sw.r { background: #FF3B30; }
+.sw.bar { background: var(--bar); } .sw.warn { background: var(--warn); } .sw.hot { background: var(--hot); } .sw.live { background: var(--live); }
 /* 起名助手：内置昵称一键选 */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -6px 0 4px; }
 .chips .lab { font-size: 11.5px; color: var(--muted); align-self: center; }
@@ -288,9 +291,12 @@ section.block .sec-head h2 { margin: 0; }
 .key-acts { display: flex; gap: 6px; }
 .chip.c-ok { color: var(--live); border-color: currentColor; }
 details.src { border-top: 1px solid var(--line); padding-top: 10px; }
-details.src summary { cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none; }
+details.src summary { cursor: pointer; font-size: 12.5px; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 7px; }
+details.src summary:hover { color: var(--ink); }
 details.src summary::-webkit-details-marker { display: none; }
-details.src summary::before { content: "▸"; display: inline-block; width: 1.1em; }
+/* 折叠块的开关画成带边的小圆钮，看得出能点 */
+details.src summary::before { content: "▸"; flex: none; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); font-size: 10px; line-height: 1; transition: border-color .12s; }
+details.src summary:hover::before { border-color: var(--muted); }
 details.src[open] summary::before { content: "▾"; }
 .src-group { margin-top: 10px; }
 .src-group h5 { margin: 0 0 4px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
@@ -488,6 +494,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     <button class="btn quiet" id="btn-vault" type="button">账号资料与邮箱</button>
     <button class="btn" id="btn-refresh" type="button">刷新用量</button>
   </header>
+  <nav class="toc" id="toc" aria-label="页面目录"><a href="#list">账号</a><a href="#env">环境</a><a href="#local-block" data-for="local-block" hidden>本机消耗</a><a href="#rules-block" data-for="rules-block" hidden>切号规则</a><a href="#privacy-block" data-for="privacy-block" hidden>隐私与数据源</a><a href="#update-block" data-for="update-block" hidden>软件更新</a><a href="#help-block">说明</a></nav>
 
   <main id="list" aria-live="polite"></main>
 
@@ -499,7 +506,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   </section>
 
   <section class="block" id="local-block" hidden>
-    <div class="sec-head"><h2>本机 Claude Code 消耗</h2>
+    <div class="sec-head"><h2>本机 Claude Code 消耗</h2><span class="hint">这台电脑上 claude 的用量，按天、按账号、按模型</span>
       <span class="sec-acts"><span class="seg-mini" role="group" aria-label="时间范围" id="local-range"></span></span></div>
     <div class="panel">
       <div class="local-sum" id="local-sum"></div>
@@ -520,7 +527,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   </section>
 
   <section class="block" id="rules-block" hidden>
-    <h2>切号规则</h2>
+    <div class="sec-head"><h2>切号规则</h2><span class="hint">按时间段或项目目录自动换号，以及额度提醒的阈值</span></div>
     <div class="panel">
       <p class="rules-status" id="rules-status"></p>
       <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p>
@@ -546,7 +553,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 
 
   <section class="block" id="privacy-block" hidden>
-    <h2>隐私与数据源</h2>
+    <div class="sec-head"><h2>隐私与数据源</h2><span class="hint">环境检测用哪些服务、要不要填 key，以及账号的使用地区记录</span></div>
     <div class="panel">
       <p class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据。</p>
       <p class="pv-label">外部 IP 查询<span id="pv-env" hidden> · 被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</span></p>
@@ -558,7 +565,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   </section>
 
   <section class="block" id="update-block" hidden>
-    <h2>软件更新</h2>
+    <div class="sec-head"><h2>软件更新</h2><span class="hint">看代码仓库有没有新版本，更不更新由你点</span></div>
     <div class="panel">
       <p class="hint">只在点“检查更新”时联网看一眼代码仓库，不会自动更新。更新只做快进，更新后自检没过会自动退回原来的版本；账号数据不受影响。桌面版是单独的安装包，不跟着更新。</p>
       <div id="up-result"></div>
@@ -566,27 +573,31 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     </div>
   </section>
 
-  <details class="block help" id="help-block">
-    <summary><h2>状态和颜色说明</h2></summary>
+  <section class="block help" id="help-block" aria-label="状态和颜色说明">
+    <div class="sec-head"><h2>状态和颜色说明</h2><span class="hint">账号卡上的标签、额度环、菜单栏图标和环境评分各是什么意思</span></div>
     <div class="panel help-grid">
-      <div><h3>菜单栏图标（macOS）</h3><ul>
-        <li><i class="sw g"></i>绿：空闲，一切正常</li>
-        <li><i class="sw o"></i>橙：有 claude 会话在跑（信号格一格格涨）、额度快满、等你确认切换（一闪一闪）</li>
-        <li><i class="sw r"></i>红：要处理——登录失效、额度用完、后台出错</li>
-        <li>文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况</li>
-        <li>样式在菜单底部“图标样式”里选：四格信号或竖的红绿灯，颜色含义一样</li></ul></div>
-      <div><h3>额度环和进度条</h3><ul>
-        <li>画的是已用比例：70% 以下绿、70–89% 橙、90% 以上红；切到“剩余”显示时数字反过来，颜色不变</li>
-        <li>5 小时和 7 天是 Anthropic 的两个额度窗口，到时间自动重置；按模型的周额度接口给了才显示</li></ul></div>
-      <div><h3>账号状态标签</h3><ul>
-        <li>正在用：Claude Code 当前登录的号</li>
-        <li>注意（黄）：用量暂时拿不到、订阅已过期、登录过期了后台没替它续</li>
-        <li>异常（红）：登录失效、凭据属于别的号、sessionKey 或 API Key 无效；点进详情看怎么办</li></ul></div>
-      <div><h3>环境评分</h3><ul>
-        <li>100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、出口变化、同一账号多地区等各扣一些</li>
-        <li>90 以上低风险，70–89 有风险，70 以下高风险；只提醒，不拦任何操作</li></ul></div>
+      <div><h3>账号状态标签</h3><dl class="lg">
+        <dt><span class="chip live">正在用</span></dt><dd>Claude Code 当前登录的号；桌面版的号显示“上次打开”</dd>
+        <dt><span class="chip st-warn">注意</span></dt><dd>用量暂时拿不到、订阅已过期、登录过期了后台没替它续</dd>
+        <dt><span class="chip st-error">异常</span></dt><dd>登录失效、凭据属于别的号、sessionKey 或 API Key 无效；点进详情看怎么办</dd>
+        <dt><span class="chip due-soon">3 天后到期</span></dt><dd>套餐 7 天内到期，2 天内变红；到期日在“编辑”里记</dd></dl></div>
+      <div><h3>额度环和进度条</h3><dl class="lg">
+        <dt><i class="sw bar"></i>70% 以下</dt><dd>正常</dd>
+        <dt><i class="sw warn"></i>70–89%</dt><dd>快满了，留意重置时间</dd>
+        <dt><i class="sw hot"></i>90% 以上</dt><dd>基本用完，等重置或换号</dd></dl>
+        <p class="hint">画的是已用比例，切到“剩余”显示时数字反过来、颜色不变。5 小时和 7 天是 Anthropic 的两个额度窗口，到时间自动重置；按模型的周额度接口给了才显示。</p></div>
+      <div><h3>菜单栏图标（macOS）</h3><dl class="lg">
+        <dt><i class="sw g"></i>绿</dt><dd>空闲，一切正常</dd>
+        <dt><i class="sw o"></i>橙</dt><dd>有 claude 会话在跑（信号格一格格涨）、额度快满、等你确认切换（一闪一闪）</dd>
+        <dt><i class="sw r"></i>红</dt><dd>要处理：登录失效、额度用完、后台出错</dd></dl>
+        <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
+      <div><h3>环境评分</h3><dl class="lg">
+        <dt><i class="sw live"></i>90 以上</dt><dd>低风险</dd>
+        <dt><i class="sw warn"></i>70–89</dt><dd>有风险</dd>
+        <dt><i class="sw hot"></i>70 以下</dt><dd>高风险</dd></dl>
+        <p class="hint">100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、出口变化、同一账号多地区等各扣一些。只提醒，不拦任何操作。</p></div>
     </div>
-  </details>
+  </section>
   <p class="hint foot" id="footer"></p>
 </div>
 
@@ -1859,6 +1870,14 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       finally { vaultJobPolling = false; }
     }, 2000);
   }
+  // 页面目录：只列出现在显示着的区块（本机消耗、规则这些要等数据来了才显示）
+  (() => {
+    const links = [...document.querySelectorAll("#toc a[data-for]")];
+    const sync = () => links.forEach((a) => { a.hidden = $("#" + a.dataset.for).hidden; });
+    const mo = new MutationObserver(sync);
+    links.forEach((a) => mo.observe($("#" + a.dataset.for), { attributes: true, attributeFilter: ["hidden"] }));
+    sync();
+  })();
   $("#btn-vault").onclick = async () => { $("#vault-block").hidden = false; $("#vault-block").scrollIntoView({ block: "start" }); await loadVault(); };
   $("#v-reload").onclick = loadVault;
   $("#v-close").onclick = () => { $("#vault-block").hidden = true; clearVaultPrivate(); renderVault(); };
