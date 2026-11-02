@@ -239,8 +239,8 @@ section.block .sec-head h2 { margin: 0; }
 .lgd .sm { display: flex; justify-content: center; align-items: center; min-height: 28px; }
 .lgd .t { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .lgd .t b { color: var(--ink); font-weight: 650; margin-right: 8px; }
-.lgd.row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 16px; }
-.lgd.row li { border-top: 0; padding: 2px 0; grid-template-columns: 48px minmax(0, 1fr); }
+.lgd.row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 12px; }
+.lgd.row li { border-top: 0; padding: 2px 0; gap: 10px; grid-template-columns: 44px minmax(0, 1fr); }
 .mring { width: 28px; height: 28px; display: block; }
 .mring circle { fill: none; stroke-width: 4; }
 .mring .rt { stroke: var(--track); }
@@ -673,7 +673,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>检测结果里的标记<span class="hint">“全面体检”“重新检测”列出来的每一行前面</span></h3>
         <ul class="lgd row">
           <li><span class="sm"><span class="mark ok">正常</span></span><span class="t">这一项没问题</span></li>
-          <li><span class="sm"><span class="mark warn">注意</span></span><span class="t">有风险或查不到，看建议</span></li>
+          <li><span class="sm"><span class="mark warn">注意</span></span><span class="t">有风险，看后面建议</span></li>
           <li><span class="sm"><span class="mark bad">异常</span></span><span class="t">有问题，要处理</span></li>
           <li><span class="sm"><span class="mark info">说明</span></span><span class="t">只是信息，不算问题</span></li>
         </ul></div>
