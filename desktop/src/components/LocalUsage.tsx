@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Ico } from "./Icon";
 import { api } from "../api";
 import { usd, wan } from "../format";
 import { maskMail, usePrefs } from "../prefs";
@@ -74,7 +75,7 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
       <div className="cards local">
         <div className="panel ecard wide">
           <h3>
-            <span className="eico">💰</span>汇总<span className="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span>
+            <Ico name="receipt" />汇总<span className="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span>
           </h3>
           <div className="local-sum">
           <b>≈ {usd(cost(shown))}</b>
@@ -96,7 +97,7 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
         {days.length > 0 && (
           <div className="panel ecard wide">
             <h3>
-              <span className="eico">📅</span>每天的折算金额<span className="hint">按账号叠，悬停看明细</span>
+              <Ico name="calendar" />每天的折算金额<span className="hint">按账号叠，悬停看明细</span>
             </h3>
             <div className="bars" role="img" aria-label="每日消耗柱状图">
               {days.map((d) => {

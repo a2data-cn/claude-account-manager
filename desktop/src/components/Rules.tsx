@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { Ico } from "./Icon";
 import { api } from "../api";
 import { maskMail, usePrefs } from "../prefs";
 import type { Account } from "../types";
@@ -95,7 +96,7 @@ export function Rules({
       <div className="cards">
         <div className="panel ecard wide">
         <h3>
-          <span className="eico">⏱️</span>现在的规则
+          <Ico name="clock" />现在的规则
         </h3>
         <ul className="rules">
           {view.rules.length ? (
@@ -121,7 +122,7 @@ export function Rules({
         </div>
         <div className="panel ecard">
         <h3>
-          <span className="eico">➕</span>添加规则
+          <Ico name="plus" />添加规则
         </h3>
         <form className="rule-form" onSubmit={add}>
           <div className="field">
@@ -173,7 +174,7 @@ export function Rules({
         </div>
         <div className="panel ecard">
         <h3>
-          <span className="eico">🔔</span>额度提醒
+          <Ico name="bell" />额度提醒
         </h3>
         <form
           className="alert-row"

@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Ico } from "./components/Icon";
 import { api, command, inTauri, onEvent } from "./api";
 import { ago } from "./format";
 import { AccountDetail, AccountTile } from "./components/AccountCard";
@@ -140,7 +141,7 @@ const LEVEL_RANK: Record<string, number> = { bad: 3, warn: 2, info: 1, ok: 0 };
 function ExitCard({ reg }: { reg: RegionInfo | null | undefined }) {
   const head = (extra?: ReactNode) => (
     <h3>
-      <span className="eico">🌐</span>出口 IP{extra}
+      <Ico name="globe" />出口 IP{extra}
     </h3>
   );
   if (!reg?.status) {
@@ -262,7 +263,7 @@ function ScoreCard({ state }: { state: State }) {
   return (
     <div className="panel ecard">
       <h3>
-        <span className="eico">✦</span>环境评分 <span className="chip">只提醒，不拦任何操作</span>
+        <Ico name="shield" />环境评分 <span className="chip">只提醒，不拦任何操作</span>
       </h3>
       <div className="score-row">
         <div className={`score-ring ${has && sc ? sc.grade : "none"}`}>

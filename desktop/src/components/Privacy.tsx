@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Ico } from "./Icon";
 import { api } from "../api";
 import type { PrivacyInfo } from "../types";
 
@@ -58,7 +59,7 @@ export function Privacy({
       <div className="cards">
         <div className="panel ecard wide">
         <h3>
-          <span className="eico">🔍</span>外部 IP 查询<span className="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据</span>
+          <Ico name="search" />外部 IP 查询<span className="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据</span>
         </h3>
         {p.env_override && (
           <p className="hint" style={{ margin: "0 0 8px" }}>
@@ -143,7 +144,7 @@ export function Privacy({
         </div>
         <div className="panel ecard">
         <h3>
-          <span className="eico">🔗</span>会访问的服务
+          <Ico name="link" />会访问的服务
         </h3>
         <details className="src">
           <summary>
@@ -174,7 +175,7 @@ export function Privacy({
         </div>
         <div className="panel ecard">
         <h3>
-          <span className="eico">📍</span>地区记录
+          <Ico name="pin" />地区记录
         </h3>
         <div className="pv-foot">
           <span>地区记录：{p.history.accounts} 个账号记过使用地区，用来提醒"同一账号多地区使用"</span>

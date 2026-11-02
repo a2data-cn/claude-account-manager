@@ -1,4 +1,5 @@
 import type { Account, LocalWindow, Window5, WindowKey } from "../types";
+import { Ico } from "./Icon";
 import { BREAKDOWN, KIND, PLAN, WINDOW_KEYS, WINDOW_MS, WINDOW_NAME, ago, dur, planTier, resetText, usd, wan } from "../format";
 import { maskMail, usePrefs } from "../prefs";
 
@@ -270,7 +271,7 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
       <div className="cards d-body">
         <div className="ecard sub">
         <h3>
-          <span className="eico">📊</span>额度
+          <Ico name="gauge" />额度
         </h3>
         <div className="gauges">
           {windows.map((g) => (
@@ -299,7 +300,7 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
         </div>
         <div className="ecard sub">
         <h3>
-          <span className="eico">👤</span>账号信息
+          <Ico name="user" />账号信息
         </h3>
         <dl className="kv d-info">
           <dt>类型</dt>
