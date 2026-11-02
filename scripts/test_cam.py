@@ -591,6 +591,35 @@ class CamTest(unittest.TestCase):
             by_model[r["model"]] = by_model.get(r["model"], 0) + r["output"]
         self.assertEqual(by_model, {"claude-opus-4-1-20250805": 107, "claude-sonnet-4-5": 1000})
 
+    def test_local_events_cache_reads_only_new_lines(self):
+        """日志按文件缓存：没变不重读，追加了只读新加的行，没写完的最后一行留到下次，文件被重写就从头读。"""
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def ev(mid, out):
+            return json.dumps({"type": "assistant", "requestId": "r" + mid, "timestamp": now.isoformat().replace("+00:00", "Z"),
+                               "message": {"id": mid, "model": "claude-opus-4-1-20250805", "usage": {"input_tokens": 1, "output_tokens": out}}})
+        p = os.path.join(self.tmp, ".claude", "projects", "proj2", "y.jsonl")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        since = now - dt.timedelta(days=1)
+        self.cam._LOCAL_CACHE.clear()
+        outs = lambda: sorted(u["output_tokens"] for _, _, u in self.cam.local_events(since))  # noqa: E731
+        with open(p, "w") as f:
+            f.write(ev("a", 10) + "\n" + ev("b", 20))  # 第二行还没写完（没有换行）
+        self.assertEqual(outs(), [10])
+        with open(p, "a") as f:
+            f.write("\n" + ev("c", 30) + "\n")
+        self.assertEqual(outs(), [10, 20, 30])
+        self.assertEqual(self.cam._LOCAL_CACHE[p][0], os.path.getsize(p))  # 读到了文件末尾
+        with mock.patch.object(self.cam, "open", create=True, side_effect=AssertionError("文件没变不该重读")):
+            self.assertEqual(outs(), [10, 20, 30])
+        with open(p, "w") as f:  # 文件被重写、变短：从头读
+            f.write(ev("d", 40) + "\n")
+        self.assertEqual(outs(), [40])
+        os.remove(p)
+        self.assertEqual(outs(), [])
+        self.assertNotIn(p, self.cam._LOCAL_CACHE)  # 删掉的文件不留在缓存里
+
     def test_incident_and_diagnostic(self):
         """账号刚出问题那一刻记现场（出口 IP、环境、会话数），同一问题持续着不重复记；用过的出口补 IP 和次数；导出的诊断不含密钥。"""
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")

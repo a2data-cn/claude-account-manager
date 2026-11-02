@@ -2275,37 +2275,74 @@ def run_claude(store, args):
 
 # --------------------------------------------------------------------------- 本地用量统计
 
+_LOCAL_CACHE = {}  # 日志文件 -> [读到的字节位置, 文件大小, mtime, [(时间, 模型, usage, 去重键)]]
+_LOCAL_CACHE_LOCK = threading.Lock()
+
+
+def _scan_jsonl(path, entry):
+    """从 entry 记录的位置接着读 path 到最后一个完整的行，带用量的消息追加进 entry；文件变小（被重写）就从头读。
+
+    Claude Code 的记录是只追加的，正在写的最后一行可能还没写完：没换行符就留到下次（文件一分钟没动过的除外）。
+    """
+    st = os.stat(path)
+    if entry is None or st.st_size < entry[0]:
+        entry = [0, 0, 0.0, []]
+    if st.st_size == entry[1] and st.st_mtime == entry[2]:
+        return entry
+    stale = time.time() - st.st_mtime > 60
+    pos = entry[0]
+    with open(path, "rb") as f:
+        f.seek(pos)
+        for raw in f:
+            if not raw.endswith(b"\n") and not stale:
+                break
+            pos += len(raw)
+            if b'"usage"' not in raw:
+                continue
+            try:
+                ev = json.loads(raw.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            msg = ev.get("message") if isinstance(ev, dict) else None
+            if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+                continue
+            ts = parse_iso(ev.get("timestamp"))
+            if not ts:
+                continue
+            entry[3].append((ts, msg.get("model") or "", msg["usage"], (msg.get("id"), ev.get("requestId"))))
+    entry[0], entry[1], entry[2] = pos, st.st_size, st.st_mtime
+    return entry
+
+
 def local_events(since):
-    """本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)。同一条消息只算一次。"""
+    """本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)。同一条消息只算一次。
+
+    按文件缓存在进程里：没变的文件不重读，只追加了的只读新加的部分。cam serve 常驻，卡片小面板每两分钟要一次今天的
+    消耗，一天的记录几百 MB，每次从头读要一两秒，会把整个服务拖住。
+    """
     root = os.path.join(claude_config_dir(), "projects")
     seen = set()
-    for path in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+    paths = glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True)
+    with _LOCAL_CACHE_LOCK:
+        for gone in set(_LOCAL_CACHE) - set(paths):
+            del _LOCAL_CACHE[gone]
+    for path in paths:
         try:
             if dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc) < since:
                 continue
-            f = open(path, "r", encoding="utf-8", errors="replace")
+            with _LOCAL_CACHE_LOCK:
+                entry = _LOCAL_CACHE[path] = _scan_jsonl(path, _LOCAL_CACHE.get(path))
+                events = list(entry[3])
         except OSError:
             continue
-        with f:
-            for line in f:
-                if '"usage"' not in line:
+        for ts, model, u, key in events:
+            if ts < since:
+                continue
+            if key != (None, None):
+                if key in seen:
                     continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                msg = ev.get("message") if isinstance(ev, dict) else None
-                if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
-                    continue
-                ts = parse_iso(ev.get("timestamp"))
-                if not ts or ts < since:
-                    continue
-                key = (msg.get("id"), ev.get("requestId"))
-                if key != (None, None):
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                yield ts, msg.get("model") or "", msg["usage"]
+                seen.add(key)
+            yield ts, model, u
 
 
 def owner_finder(data):

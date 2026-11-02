@@ -356,7 +356,8 @@ button { font: inherit; color: inherit; }
     try { state = await api("GET", "/api/state"); render(); }
     catch (e) { $("#main").innerHTML = `<div class="tile glass empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
   }
-  async function loadLocal() {  // 本机记录要扫日志文件，比 /api/state 慢，单独读、少读几次
+  async function loadLocal() {  // 本机记录要扫日志文件，比 /api/state 慢：等卡片先画出来再要，弹窗没显示时不要
+    if (document.hidden) return;
     try { local = await api("GET", "/api/local-usage?days=1"); } catch (_) { local = { rows: [] }; }
     render();
   }
@@ -442,12 +443,12 @@ button { font: inherit; color: inherit; }
       say("已修改");
     });
   });
-  load();
-  loadLocal();
-  setInterval(load, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
+  load().then(loadLocal);  // 先把账号和额度画出来，再要本机消耗
+  setInterval(() => { if (!document.hidden) load(); }, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
   setInterval(loadLocal, 120000);
   window.addEventListener("focus", load);
   window.addEventListener("pageshow", load);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); if (!local) loadLocal(); } });
 })();
 </script>
 </body>
