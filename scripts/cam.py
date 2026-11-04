@@ -6554,14 +6554,22 @@ def menubar_settings(store):
             mode = None
     prefs = store.load().get("prefs") or {}
     return {"available": IS_MAC or bool(os.environ.get("CAM_SWIFTBAR_DIR")), "installed": installed, "mode": mode,
-            "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars", "plugin": path}
+            "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars",
+            "confirm_switch": bool(prefs.get("confirm_switch")), "plugin": path}  # confirm_switch：卡片里点其它号先问一句再切
 
 
 def save_menubar_settings(store, body):
-    """改图标样式（记到 prefs，插件下次渲染就换）、改动画模式（重跑 extras/swiftbar/install.sh 改写启动脚本，再重开 SwiftBar）。"""
+    """改图标样式（记到 prefs，插件下次渲染就换）、卡片的“切换前确认”开关（prefs）、改动画模式（重跑 extras/swiftbar/install.sh 改写启动脚本，再重开 SwiftBar）。"""
     if not isinstance(body, dict):
         raise CamError("请求体应为 JSON 对象")
     restarting = False
+    if "confirm_switch" in body:
+        if not isinstance(body["confirm_switch"], bool):
+            raise CamError("confirm_switch 只能是 true 或 false")
+        with store.lock():
+            data = store.load()
+            data.setdefault("prefs", {})["confirm_switch"] = body["confirm_switch"]
+            store.save(data)
     if "icon" in body:
         if body["icon"] not in ICON_STYLES:
             raise CamError("图标样式只能是 bars（信号格）或 lamp（红绿灯）")

@@ -3502,6 +3502,12 @@ exit 2""")
             sk.sendall(f"POST /api/refresh HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: -1\r\n\r\n".encode())
             self.assertIn(b" 400 ", sk.recv(200))
         self.assertEqual(call("PUT", "/api/menubar", {"mode": "stream"})[0], 400)  # 没装插件：不跑安装脚本
+        # 卡片的“切换前确认”开关：记在 prefs 里，卡片再打开还在；只能是 true / false
+        self.assertEqual(call("PUT", "/api/menubar", {"confirm_switch": "yes"})[0], 400)
+        st, body, _ = call("PUT", "/api/menubar", {"confirm_switch": True})
+        self.assertEqual((st, body["confirm_switch"]), (200, True))
+        self.assertTrue(call("GET", "/api/menubar")[1]["confirm_switch"])
+        self.assertFalse(call("PUT", "/api/menubar", {"confirm_switch": False})[1]["confirm_switch"])
 
 
 SHARED = os.path.join(HERE, "..", "tests", "shared")

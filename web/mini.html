@@ -206,8 +206,12 @@ button { font: inherit; color: inherit; }
     if (!showSettings) return "";
     if (!settings) return `<div class="tile glass set"><div class="hint">正在读设置…</div></div>`;
     const s = settings, dis = busy ? "disabled" : "";
-    if (!s.installed) return `<div class="tile glass set"><div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh</div><div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
-    return `<div class="tile glass set">
+    // 第一行是卡片自己的开关（Windows 托盘也有）；后面几行是菜单栏小工具的，没装就只给一句提示
+    const confirmRow = `<div class="row"><div class="lab"><b>切换前确认</b><span>${s.confirm_switch ? "点其它号的卡片先问一句，点“切换”才切" : "点其它号的卡片直接切；有 claude 会话在跑时本来就会先问"}</span></div>
+        <label class="sw"><input type="checkbox" data-set="confirm" ${s.confirm_switch ? "checked" : ""} ${dis}><i></i></label></div>`;
+    if (!s.available) return `<div class="tile glass set">${confirmRow}<div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
+    if (!s.installed) return `<div class="tile glass set">${confirmRow}<div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh。<a href="#" data-act="set-close">收起</a></div></div>`;
+    return `<div class="tile glass set">${confirmRow}
       <div class="row"><div class="lab"><b>流式动画</b><span>${s.mode === "stream" ? "插件常驻，信号格 / 红绿灯顺滑地动" : "关着是经典模式：每分钟刷新，动画 5 秒一帧"}</span></div>
         <label class="sw"><input type="checkbox" data-set="mode" ${s.mode === "stream" ? "checked" : ""} ${dis}><i></i></label></div>
       <div class="row"><div class="lab"><b>图标样式</b><span>菜单栏图标用哪种当红绿灯</span></div>
@@ -325,7 +329,8 @@ button { font: inherit; color: inherit; }
     if (state.warning) items.push({ lv: "bad", text: state.warning });
     if (h.level === "error") items.push({ lv: "bad", text: `当前号${issue.text ? "：" + issue.text : "有问题"}`, tip: issue.advice });
     if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: `5 小时额度用完了，${resetShort(u.five_hour.resets_at)}` });
-    if (ask && ask.id) items.push({ lv: "busy", ask: true, text: `有 ${ask.running} 个 Claude Code 会话在跑，切到 ${ask.label}？`,
+    if (ask && ask.confirm) items.push({ lv: "busy", ask: true, text: `切换到 ${ask.label}？`, btns: [["ask-go", "切换", "go"], ["ask-no", "取消"]] });  // 设置里开了“切换前确认”
+    if (ask && ask.id && !ask.confirm) items.push({ lv: "busy", ask: true, text: `有 ${ask.running} 个 Claude Code 会话在跑，切到 ${ask.label}？`,
       btns: [["ask-wait", "等它们退出再切"], ["ask-now", "现在就切", "go"], ["ask-no", "取消"]] });
     if (ask && ask.open) items.push({ lv: "busy", ask: true, text: `打开 ${ask.label} 会退出并重启电脑上的 Claude 桌面版，里面在跑的先处理好。继续？`,
       btns: [["open-now", "打开", "go"], ["ask-no", "取消"]] });
@@ -511,10 +516,16 @@ button { font: inherit; color: inherit; }
     });
   }
   document.addEventListener("click", (ev) => {
-    const acc = ev.target.closest(".acc");
+    const acc = ev.target.closest(".acc, .card");
     if (acc) {
       const { id, kind, name } = acc.dataset;
-      return kind === "claude_code" ? run(() => switchTo(id)) : openAcc(id, kind, name);
+      if (kind !== "claude_code") return openAcc(id, kind, name);
+      // 设置里开了“切换前确认”：先在红绿灯那里问一句。有会话在跑时不多问一遍，switchTo 本来就会问怎么切
+      if (settings && settings.confirm_switch && !(state && state.sessions && state.sessions.count > 0)) {
+        if (!busy) { ask = { id, label: name, confirm: true }; render(); }
+        return;
+      }
+      return run(() => switchTo(id));
     }
     const ic = ev.target.closest("[data-icon]");  // 设置页里的图标样式分段按钮（没有 data-act，要在下面那句 return 之前处理）
     if (ic) {
@@ -526,6 +537,7 @@ button { font: inherit; color: inherit; }
     const act = btn.dataset.act;
     if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadLocal(); });
     if (act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已打开"); });
+    if (act === "ask-go" && ask && ask.confirm) run(() => switchTo(ask.id));  // 确认后照常切；这时发现有会话在跑，switchTo 会接着问怎么切
     if (act === "ask-wait" && ask && ask.id) run(() => switchTo(ask.id, "wait"));
     if (act === "ask-now" && ask && ask.id) run(() => switchTo(ask.id, "now"));
     if (act === "ask-no") { ask = null; render(); }
@@ -543,6 +555,12 @@ button { font: inherit; color: inherit; }
     if (b && i) { i.value = b.dataset.nick; i.focus(); }
   });
   document.addEventListener("change", (ev) => {
+    const cf = ev.target.closest('[data-set="confirm"]');
+    if (cf && settings) {
+      const on = cf.checked;
+      run(async () => { settings = await api("PUT", "/api/menubar", { confirm_switch: on }); say(on ? "已打开：点卡片先问一句再切" : "已关闭：点卡片直接切"); });
+      return;
+    }
     const sw = ev.target.closest('[data-set="mode"]');
     if (!sw || !settings) return;
     const mode = sw.checked ? "stream" : "classic";
@@ -565,6 +583,7 @@ button { font: inherit; color: inherit; }
     });
   });
   load().then(loadLocal);  // 先把账号和额度画出来，再要本机消耗
+  loadSettings();  // “切换前确认”开关点卡片时就要用，一开始就读（设置页没打开时 render 不画它）
   setInterval(() => { if (!document.hidden) load(); }, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
   setInterval(loadLocal, 120000);
   window.addEventListener("focus", load);

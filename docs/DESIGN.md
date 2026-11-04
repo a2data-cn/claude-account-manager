@@ -95,7 +95,7 @@ React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同�
   { "id": "r2", "type": "dir",  "path": "~/work", "account": "a1b2c3" }
 ],
 "rule_state": { "time_rule": "r1" },   // 上一次检查时命中的时间规则
-"prefs": { "alert_threshold": 90, "risk_prompt": true, "risk_confirm_below": 60, "risk_strong_below": 30 }
+"prefs": { "alert_threshold": 90, "risk_prompt": true, "risk_confirm_below": 60, "risk_strong_below": 30, "menu_icon": "bars", "confirm_switch": false }
 ```
 
 - 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。进入时有 `claude` 会话在跑就登记成 `pending_switch`（见“切换流程”），会话退出后再切；时间段过了还没切成就作废。
