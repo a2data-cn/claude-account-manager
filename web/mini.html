@@ -283,10 +283,13 @@ button { font: inherit; color: inherit; }
   const nameOf = (a, pos) => needsNumber(a) ? `${pos[a.id]}号` : a.label;
   function ring(p, size, stroke) {
     const r = size / 2 - stroke / 2 - 1, c = 2 * Math.PI * r, v = p === null ? 0 : p;
+    // 小环（方卡、桌面号那行，34 / 32 px）里只放数字，不放 %：“100%”会贴到圈上，旁边那行本来就写着百分号；大环（44 px）照旧带 %
+    const small = size < 40, n = p === null ? "–" : String(Math.round(p));
+    const fs = small && n.length > 2 ? 9.5 : 10;
     return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
       <circle class="rt" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
       <circle class="rf ${lv(v)}" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - v / 100)).toFixed(2)}"/>
-      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central"${size < 48 ? ' style="font-size:10px"' : ""}>${p === null ? "–" : `${Math.round(p)}<tspan>%</tspan>`}</text></svg>`;
+      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central" style="font-size:${fs}px">${n}${small || p === null ? "" : "<tspan>%</tspan>"}</text></svg>`;
   }
   function planChip(a) {
     const p = a.plan_display;
