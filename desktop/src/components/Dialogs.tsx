@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { copyText, shellArg } from "../clipboard";
 import type { Account, Kind } from "../types";
 
 function useModal(open: boolean) {
@@ -176,6 +177,16 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
     }
   }, [open]);
 
+  // Claude Code 号：名字拼成 cam login 名字，点“复制”贴到终端（按钮上显示两秒“已复制”）
+  const loginCmd = `cam login ${shellArg(label.trim() || "工作号")}`;
+  const [copied, setCopied] = useState(false);
+  const copyCmd = async () => {
+    if (await copyText(loginCmd)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (kind === "claude_code") return onAdd({ kind, label: label.trim() || undefined });
@@ -204,18 +215,21 @@ export function AddDialog({ open, onClose, onAdd }: { open: boolean; onClose: ()
         </div>
         {kind === "claude_code" ? (
           <div className="hint">
-            <p>Claude Code 账号需要先在这台电脑上登录，这样切换时才拿得到完整凭据：</p>
-            <ol>
-              <li>
-                在终端运行 <code>claude</code>，输入 <code>/login</code> 登录要添加的账号
-              </li>
-              <li>回到这里点“导入当前登录”</li>
-            </ol>
-            <p>导入前会先保存上一个账号的最新凭据，不会丢。</p>
+            <p>Claude Code 账号要在这台电脑的终端里登录一次，cam 才拿得到完整凭据。起个名字，命令就拼好了：</p>
             <div className="field">
-              <label htmlFor="a-label0">名称（可选）</label>
-              <input id="a-label0" value={label} maxLength={60} onChange={(e) => setLabel(e.target.value)} />
+              <label htmlFor="a-label0">名字</label>
+              <input id="a-label0" value={label} maxLength={60} placeholder="工作号" onChange={(e) => setLabel(e.target.value)} />
             </div>
+            <div className="cmd">
+              <code>{loginCmd}</code>
+              <button type="button" className="btn" onClick={copyCmd}>
+                {copied ? "已复制" : "复制"}
+              </button>
+            </div>
+            <p>贴到终端运行：它先把当前号的登录存好，再打开浏览器让你登录要加的号，回到终端就保存好了，这个窗口可以直接关。</p>
+            <p>
+              已经在 <code>claude</code> 里 <code>/login</code> 换过号了？点下面的“导入当前登录”。
+            </p>
           </div>
         ) : (
           <>

@@ -428,7 +428,13 @@ details.src[open] summary::before { content: "▾"; }
 .empty { text-align: left; padding: 22px; }
 .empty h2 { margin: 0 0 8px; font-size: 16px; font-weight: 650; }
 .empty ol { padding-left: 20px; margin: 8px 0 0; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; background: var(--track); padding: 1px 5px; border-radius: 4px; cursor: copy; }  /* 页面上的命令点一下就复制 */
+code:hover { background: var(--line); }
+.vault-revealed code { cursor: text; }
+/* 添加账号：拼好的命令一行，右边“复制” */
+.cmd { display: flex; align-items: center; gap: 8px; margin: 8px 0 10px; }
+.cmd code { flex: 1; min-width: 0; padding: 7px 10px; font-size: 13px; overflow-wrap: anywhere; }
+.cmd .btn { flex: none; }
 
 /* 对话框 */
 dialog { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink); padding: 0; width: min(440px, calc(100vw - 32px));

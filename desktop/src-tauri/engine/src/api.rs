@@ -57,7 +57,7 @@ const HEALTH_LEVELS: [&str; 4] = ["ok", "info", "warn", "error"];
 /// kind → (level, 一句话, 怎么办)。规则和 cam.py 的 account_health 一致（tests/shared/health.json）
 fn health_text(kind: &str) -> (&'static str, &'static str, &'static str) {
     match kind {
-        "no_credentials" => ("error", "没有保存可用的凭据", "用这个账号登录 Claude Code（在 claude 里 /login）后点“导入当前登录”，或运行 cam import。"),
+        "no_credentials" => ("error", "没有保存可用的凭据", "终端运行 cam login 名字 用这个账号登录一次（会先存好当前号）；已经在 claude 里 /login 过的话点“导入当前登录”。"),
         "wrong_owner" => ("error", "保存的登录实际属于别的账号", "可能被旧的 claude 会话覆盖了。用这个账号重新登录 Claude Code 后导入，会自动修正。"),
         "login_invalid" => ("error", "登录已失效，无法续期", "用这个账号在 Claude Code 里重新登录一次（/login），会自动保存。在那之前切换到它也用不了。"),
         "session_invalid" => ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),

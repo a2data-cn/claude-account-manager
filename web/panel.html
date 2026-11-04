@@ -441,7 +441,13 @@ details.src[open] summary::before { content: "▾"; }
 .empty { text-align: left; padding: 22px; }
 .empty h2 { margin: 0 0 8px; font-size: 16px; font-weight: 650; }
 .empty ol { padding-left: 20px; margin: 8px 0 0; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; background: var(--track); padding: 1px 5px; border-radius: 4px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; background: var(--track); padding: 1px 5px; border-radius: 4px; cursor: copy; }  /* 页面上的命令点一下就复制 */
+code:hover { background: var(--line); }
+.vault-revealed code { cursor: text; }
+/* 添加账号：拼好的命令一行，右边“复制” */
+.cmd { display: flex; align-items: center; gap: 8px; margin: 8px 0 10px; }
+.cmd code { flex: 1; min-width: 0; padding: 7px 10px; font-size: 13px; overflow-wrap: anywhere; }
+.cmd .btn { flex: none; }
 
 /* 对话框 */
 dialog { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink); padding: 0; width: min(440px, calc(100vw - 32px));
@@ -722,12 +728,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         <option value="api">API Key</option>
       </select></div>
     <div id="add-code" class="hint">
-      <p>Claude Code 账号需要在电脑上登录后导入，这样切换时才拿得到完整凭据：</p>
-      <ol>
-        <li>在终端运行 <code>claude</code>，输入 <code>/login</code> 登录要添加的账号</li>
-        <li>回到这里点“导入当前登录”，或在终端运行 <code>cam import --label 名字</code></li>
-      </ol>
-      <p>当前账号的凭据会在导入前自动保存，不会丢。</p>
+      <p>Claude Code 账号要在这台电脑的终端里登录一次，cam 才拿得到完整凭据。起个名字，命令就拼好了：</p>
+      <div class="field"><label for="a-name0">名字</label><input id="a-name0" name="name0" maxlength="60" autocomplete="off" placeholder="工作号"></div>
+      <div class="chips" id="a-names0"></div>
+      <p class="name-tip" id="a-name-tip0"></p>
+      <div class="cmd"><code id="a-cmd">cam login 工作号</code><button type="button" class="btn" data-copy="#a-cmd">复制</button></div>
+      <p>贴到终端运行：它先把当前号的登录存好，再打开浏览器让你登录要加的号，回到终端就保存好了，这个窗口可以直接关。</p>
+      <p>已经在 <code>claude</code> 里 <code>/login</code> 换过号了？点下面的“导入当前登录”。</p>
     </div>
     <div id="add-other" hidden>
       <div class="field"><label for="a-label">名称</label><input id="a-label" name="label" maxlength="60" autocomplete="off"></div>
@@ -1251,7 +1258,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       + brief;
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
-        <p class="hint"><b>用 Claude Code（命令行）</b>：确认终端里 <code>claude</code> 已登录，点下面的按钮导入。以后 <code>/login</code> 换号会自动保存。</p>
+        <p class="hint"><b>用 Claude Code（命令行）</b>：终端里 <code>claude</code> 已经登录的话，点下面的按钮导入；还没登录就在终端运行 <code>cam login 工作号</code>（点一下命令就复制），浏览器里登录完自动保存。以后加号也用 <code>cam login 名字</code>，它会先把当前号存好。</p>
         <p><button class="btn primary" data-act="import">导入当前登录</button></p>
         <p class="hint" style="margin-top:14px"><b>用 Claude 桌面版、网页版 claude.ai 或 API Key</b>：<button class="btn" data-act="add">添加账号</button> 选对应类型。网页版每个号一个独立浏览器窗口。</p></div>` + env;
       syncAccountBusy();
@@ -1678,11 +1685,38 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     $("#btn-add-ok").textContent = k === "claude_code" ? "导入当前登录" : "添加";
   }
   $("#a-kind").onchange = syncAddKind;
+  // Claude Code 号：起名字 → 拼出 cam login 名字（有空格、引号之类的用单引号包起来）→ 点“复制”贴到终端
+  const shellArg = (s) => /^[A-Za-z0-9_.\-一-鿿]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+  function syncAddCmd() { $("#a-cmd").textContent = `cam login ${shellArg($("#a-name0").value.trim() || "工作号")}`; }
+  $("#a-name0").addEventListener("input", syncAddCmd);
   function openAdd() {
     $("#form-add").reset(); syncAddKind();
     wireNames($("#a-names"), $("#a-label"), $("#a-name-tip"), null);
+    wireNames($("#a-names0"), $("#a-name0"), $("#a-name-tip0"), null);
+    syncAddCmd();
     $("#dlg-add").returnValue = ""; $("#dlg-add").showModal();
   }
+  // 复制到剪贴板：手机面板走的是局域网 http，没有 navigator.clipboard，退到老办法（临时文本框 + execCommand）
+  async function copyText(text) {
+    try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; } } catch (_) {}
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;left:-9999px;top:0";
+      document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy"); ta.remove();
+      return ok;
+    } catch (_) { return false; }
+  }
+  async function copyAndSay(text) {
+    const ok = await copyText(text);
+    toast(ok ? `已复制：${text}` : "这里复制不了，手动选中复制吧", !ok);
+  }
+  document.addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-copy]");  // “复制”按钮：复制它指向的那段
+    if (b) { const el = $(b.dataset.copy); if (el && el.textContent.trim()) copyAndSay(el.textContent.trim()); return; }
+    const c = ev.target.closest("code");  // 页面上任何一段命令，点一下就复制（账号库里显示出来的密码有自己的“复制密码”按钮，不走这里）
+    if (c && !c.closest(".vault-revealed") && !c.closest("button, a") && c.textContent.trim()) copyAndSay(c.textContent.trim());
+  });
   $("#dlg-add").addEventListener("close", async () => {
     if ($("#dlg-add").returnValue !== "ok") return;
     const kind = $("#a-kind").value;

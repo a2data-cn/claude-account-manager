@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Ico } from "./components/Icon";
 import { api, command, inTauri, onEvent } from "./api";
+import { copyText } from "./clipboard";
 import { ago } from "./format";
 import { AccountDetail, AccountTile } from "./components/AccountCard";
 import {
@@ -389,10 +390,19 @@ export default function App() {
     const t = window.setInterval(() => tick((n) => n + 1), 60000); // 倒计时每分钟更新
     const vis = () => !document.hidden && load();
     document.addEventListener("visibilitychange", vis);
+    // 页面上任何一段命令（<code>），点一下就复制；账号库里显示出来的密码有自己的“复制密码”按钮，不走这里
+    const copyCode = (ev: MouseEvent) => {
+      const c = (ev.target as HTMLElement | null)?.closest?.("code");
+      if (!c || c.closest(".vault-revealed") || c.closest("button, a")) return;
+      const text = c.textContent?.trim();
+      if (text) void copyText(text).then((ok) => toast(ok ? `已复制：${text}` : "这里复制不了，手动选中复制吧", !ok));
+    };
+    document.addEventListener("click", copyCode);
     return () => {
       unsubs.forEach((p) => p.then((f) => f()));
       window.clearInterval(t);
       document.removeEventListener("visibilitychange", vis);
+      document.removeEventListener("click", copyCode);
     };
   }, [load, toast]);
 
