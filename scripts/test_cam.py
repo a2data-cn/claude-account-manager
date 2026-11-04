@@ -684,6 +684,37 @@ class CamTest(unittest.TestCase):
         self.assertIn("1.2.3.4", body["text"])
         self.assertTrue(body["filename"].endswith(".md"))
 
+    def test_menubar_launcher_fix(self):
+        """老版本写的启动脚本（弹窗不常驻，点一下卡半秒）：插件按当时的模式重跑一次安装脚本改写；没装、已是新版的不动，失败也只试一次。"""
+        plugins = os.path.join(self.tmp, "plugins")
+        os.makedirs(plugins)
+        store = self.cam.Store()
+        cam_menu = self._menu_plugin()
+        path = os.path.join(plugins, self.cam.MENUBAR_PLUGIN)
+        runs = []
+
+        def fake_run(cmd, **kw):
+            runs.append((cmd, kw.get("env", {}).get("CAM_PYTHON")))
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.dict(os.environ, {"CAM_SWIFTBAR_DIR": plugins}), mock.patch.object(cam_menu.subprocess, "run", side_effect=fake_run):
+            st = {}
+            cam_menu.launcher_fix(store, st)  # 没装
+            self.assertEqual(runs, [])
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("#!/bin/bash\n# <swiftbar.persistentWebView>false</swiftbar.persistentWebView>\n# <swiftbar.type>streamable</swiftbar.type>\nexec python3 cam_menu.py stream\n")
+            cam_menu.launcher_fix(store, st)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0][0][2], "--stream")  # 保持它现在的模式
+            self.assertTrue(runs[0][0][1].endswith(os.path.join("swiftbar", "install.sh")), runs[0])
+            self.assertEqual(runs[0][1], sys.executable)
+            cam_menu.launcher_fix(store, st)  # 假的安装脚本没改文件：不再重跑
+            cam_menu.launcher_fix(store, cam_menu.load_state(store))  # 下一分钟的新进程从状态文件里知道试过了
+            self.assertEqual(len(runs), 1)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("#!/bin/bash\n# <swiftbar.persistentWebView>true</swiftbar.persistentWebView>\nexec python3 cam_menu.py\n")
+            cam_menu.launcher_fix(store, {})  # 新版的启动脚本不动
+            self.assertEqual(len(runs), 1)
+
     def test_menubar_settings(self):
         """卡片小面板“设置”页：动画模式看启动脚本、图标样式记在 prefs；改模式重跑安装脚本（这里不真跑）。"""
         plugins = os.path.join(self.tmp, "plugins")
@@ -3901,6 +3932,20 @@ class UpdateTest(unittest.TestCase):
         with mock.patch.object(self.cam, "running_claude_processes", return_value=[]):
             self.assertEqual(self.cam.session_count(), 2)  # 还在缓存期
             self.assertEqual(self.cam.session_count(max_age=0), 0)
+        # 缓存过期了先把上次的数给出去、后台重数：/api/state 不等 ps（点开卡片小面板第一下不卡）
+        def slow_ps():
+            time.sleep(0.2)
+            return []
+        with mock.patch.object(self.cam, "running_claude_processes", side_effect=slow_ps):
+            self.cam._SESSION_CACHE[:] = [time.monotonic() - 100, 5]
+            self.assertEqual(self.cam.session_count(), 5)
+            self.assertEqual(self.cam.session_count(), 5)  # 后台还在数：接着给旧数，不再起线程
+            for _ in range(500):
+                if self.cam._SESSION_CACHE[1] == 0:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(self.cam.session_count(), 0)
+        with mock.patch.object(self.cam, "running_claude_processes", return_value=[]):
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + token})
             with opener.open(req) as r:
                 st = json.load(r)

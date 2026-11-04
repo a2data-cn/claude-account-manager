@@ -63,6 +63,7 @@ if [[ $MODE == stream ]]; then
   MODE_ARG=" stream"
 fi
 # 文件名就是弹窗的标题（“SwiftBar: Claude 账号”）；旧版本叫 claude-accounts.1m.sh，装新的时顺手删掉，免得出现两个图标
+# persistentWebView=true：卡片弹窗常驻，点开直接显示上次的页面（页面自己在点开时刷新数据），不是每次新建网页再加载——那样点一下要卡半秒
 PLUGIN="$PLUGIN_DIR/Claude 账号.1m.sh"
 rm -f "$PLUGIN_DIR/claude-accounts.1m.sh"
 cat > "$PLUGIN" <<EOF
@@ -74,7 +75,7 @@ cat > "$PLUGIN" <<EOF
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
 # <swiftbar.hideSwiftBar>false</swiftbar.hideSwiftBar>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
-# <swiftbar.persistentWebView>false</swiftbar.persistentWebView>
+# <swiftbar.persistentWebView>true</swiftbar.persistentWebView>
 $TYPE_LINE
 export PATH="\$PATH:/usr/local/bin:/opt/homebrew/bin:\$HOME/.local/bin:\$HOME/.npm-global/bin"
 exec "$PY" "$MENU_PY"$MODE_ARG "\$@"

@@ -911,6 +911,8 @@ def stream(store):
                 st = background_work(store)
             except Exception as e:  # noqa: BLE001
                 st = {"last_error": str(e)}
+            if last_bg is None:
+                launcher_fix(store, st)  # 启动脚本是老版本写的就改写一次（之后 SwiftBar 会重启这个进程）
             last_bg = now
         block = stream_frame(store, st, phase)
         if block != last:
@@ -947,6 +949,32 @@ def set_mode_from_menu(mode):
     return 0
 
 
+def launcher_fix(store, st):
+    """SwiftBar 插件目录里的启动脚本是老版本写的（persistentWebView=false：每次点开都新建网页再加载，点一下卡半秒）：
+    按它现在的模式重跑一次安装脚本改写（SwiftBar 看到文件变了会重新加载插件）。只试一次，失败也不每分钟重跑。"""
+    if not (cam.IS_MAC or os.environ.get("CAM_SWIFTBAR_DIR")):
+        return
+    path = os.path.join(cam.swiftbar_plugin_dir(), cam.MENUBAR_PLUGIN)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return  # 没装（比如在终端直接运行 cam_menu.py 看效果）
+    if "persistentWebView>false<" not in text or st.get("launcher_fixed") == path:
+        return
+    st["launcher_fixed"] = path
+    save_state(store, st)
+    mode = "stream" if "<swiftbar.type>streamable</swiftbar.type>" in text else "classic"
+    script = os.path.join(os.path.dirname(MENU_PY), "install.sh")
+    try:
+        r = subprocess.run(["bash", script, f"--{mode}"], capture_output=True, text=True, timeout=180,
+                           env=dict(os.environ, CAM_PYTHON=sys.executable))
+    except (OSError, subprocess.SubprocessError):
+        return
+    if r.returncode == 0:
+        notify("菜单栏小工具已更新", "卡片弹窗改成常驻，点开不再每次重新加载；SwiftBar 会重新加载一次插件")
+
+
 def set_icon_from_menu(store, style):
     """菜单里选图标样式：记到账号库的 prefs 里（走 cam 的 Store），插件下一次渲染就换。"""
     with store.lock():
@@ -977,6 +1005,7 @@ def main():
         st = background_work(store)
     except Exception as e:  # noqa: BLE001
         st = {"last_error": str(e)}
+    launcher_fix(store, st)
     try:
         render(store, st)
     except Exception as e:  # noqa: BLE001

@@ -2950,20 +2950,41 @@ def public_state(store, data):
 
 
 _SESSION_CACHE = [0.0, 0]  # [上次数的时间, 个数]
+_SESSION_COUNTING = threading.Lock()  # 后台线程正在数：同一时间只起一个
+
+
+def _count_sessions(now):
+    try:
+        _SESSION_CACHE[:] = [now, len(running_claude_processes())]
+    except Exception:  # noqa: BLE001  数不出来就沿用上次的
+        _SESSION_CACHE[0] = now
+
+
+def _count_sessions_bg(now):
+    try:
+        _count_sessions(now)
+    finally:
+        _SESSION_COUNTING.release()
 
 
 def session_count(max_age=20):
     """正在运行的 Claude Code 会话数，给面板和卡片小面板的红绿灯显示用。
 
-    查进程表要几百毫秒（Windows 上要一秒多），所以缓存 max_age 秒；切换前的判断不走这里，用 running_claude_processes 现查。
+    查进程表要几百毫秒（Windows 上要一秒多），所以缓存 max_age 秒。过期了先把上次的数给出去、在后台线程重数，
+    不让 /api/state 等它（点开卡片小面板第一下就卡在这上面）；还没数过和 max_age=0 时当场数。
+    切换前的判断不走这里，用 running_claude_processes 现查。
     """
     now = time.monotonic()
-    if now - _SESSION_CACHE[0] >= max_age:  # >=：Windows 的 monotonic 一格 15 毫秒，max_age=0 时两次调用可能在同一格里
-        try:
-            _SESSION_CACHE[:] = [now, len(running_claude_processes())]
-        except Exception:  # noqa: BLE001  数不出来就沿用上次的
-            _SESSION_CACHE[0] = now
-    return _SESSION_CACHE[1]
+    last = _SESSION_CACHE[1]
+    if now - _SESSION_CACHE[0] < max_age:
+        return last
+    if not _SESSION_CACHE[0] or max_age <= 0:  # 没数过（或要现数）：当场数。>=/<= 是因为 Windows 的 monotonic 一格 15 毫秒，max_age=0 时两次调用可能在同一格里
+        _count_sessions(now)
+        return _SESSION_CACHE[1]
+    if _SESSION_COUNTING.acquire(blocking=False):
+        _SESSION_CACHE[0] = now  # 先把时间记上：数的这几百毫秒里再来的请求直接拿旧数，不再起线程
+        threading.Thread(target=_count_sessions_bg, args=(now,), daemon=True).start()
+    return last
 
 
 KIND_NAMES = {"claude_code": "Claude Code", "claude_web": "claude.ai 网页版", "claude_desktop": "Claude 桌面版", "api": "API Key"}

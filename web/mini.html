@@ -29,8 +29,8 @@ html, body { margin: 0; background: var(--paper); color: var(--ink); }
 body { font: 13px/1.45 var(--sans); font-variant-numeric: tabular-nums; padding: 10px; -webkit-user-select: none; user-select: none; }
 button { font: inherit; color: inherit; }
 .grid { display: grid; gap: 8px; align-content: start; }
-.glass { background: var(--tile); border: 1px solid var(--tile-line); box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
-  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+.glass { background: var(--tile); border: 1px solid var(--tile-line); box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }  /* 不加 backdrop-filter：底下是纯色，模糊看不出来，却让每张卡片按下去的动画都卡 */
+.slot { display: contents; }  /* 页面分块更新用的壳，不占格子 */
 .tile { border-radius: 22px; padding: 12px 14px; }
 /* 红绿灯：绿 = 空闲正常，黄 = 工作中 / 要注意 / 等你确认，红 = 要处理 */
 .light { display: flex; align-items: center; gap: 9px; padding: 7px 12px 7px 11px; border-radius: 999px; font-size: 12px; }
@@ -205,17 +205,17 @@ button { font: inherit; color: inherit; }
   function settingsHtml() {
     if (!showSettings) return "";
     if (!settings) return `<div class="tile glass set"><div class="hint">正在读设置…</div></div>`;
-    const s = settings, dis = busy ? "disabled" : "";
-    // 第一行是卡片自己的开关（Windows 托盘也有）；后面几行是菜单栏小工具的，没装就只给一句提示
+    const s = settings;
+    // 第一行是卡片自己的开关（Windows 托盘也有）；后面几行是菜单栏小工具的，没装就只给一句提示。忙的时候的 disabled 由 applyBusy 统一加
     const confirmRow = `<div class="row"><div class="lab"><b>切换前确认</b><span>${s.confirm_switch ? "点其它号的卡片先问一句，点“切换”才切" : "点其它号的卡片直接切；有 claude 会话在跑时本来就会先问"}</span></div>
-        <label class="sw"><input type="checkbox" data-set="confirm" ${s.confirm_switch ? "checked" : ""} ${dis}><i></i></label></div>`;
+        <label class="sw"><input type="checkbox" data-set="confirm" ${s.confirm_switch ? "checked" : ""}><i></i></label></div>`;
     if (!s.available) return `<div class="tile glass set">${confirmRow}<div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
     if (!s.installed) return `<div class="tile glass set">${confirmRow}<div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh。<a href="#" data-act="set-close">收起</a></div></div>`;
     return `<div class="tile glass set">${confirmRow}
       <div class="row"><div class="lab"><b>流式动画</b><span>${s.mode === "stream" ? "插件常驻，信号格 / 红绿灯顺滑地动" : "关着是经典模式：每分钟刷新，动画 5 秒一帧"}</span></div>
-        <label class="sw"><input type="checkbox" data-set="mode" ${s.mode === "stream" ? "checked" : ""} ${dis}><i></i></label></div>
+        <label class="sw"><input type="checkbox" data-set="mode" ${s.mode === "stream" ? "checked" : ""}><i></i></label></div>
       <div class="row"><div class="lab"><b>图标样式</b><span>菜单栏图标用哪种当红绿灯</span></div>
-        <span class="seg"><button type="button" data-icon="bars" class="${s.icon === "bars" ? "on" : ""}" ${dis}>信号格</button><button type="button" data-icon="lamp" class="${s.icon === "lamp" ? "on" : ""}" ${dis}>红绿灯</button></span></div>
+        <span class="seg"><button type="button" data-icon="bars" class="${s.icon === "bars" ? "on" : ""}">信号格</button><button type="button" data-icon="lamp" class="${s.icon === "lamp" ? "on" : ""}">红绿灯</button></span></div>
       <div class="row"><div class="lab"><b>全局快捷键</b><span>⌃⌥⌘C 打开菜单，⌃⌥⌘1…9 切到第几个号</span></div></div>
       <div class="hint">切流式 / 经典会重写插件的启动脚本并重新打开 SwiftBar（几秒）。<a href="#" data-act="set-close">收起</a></div></div>`;
   }
@@ -232,7 +232,7 @@ button { font: inherit; color: inherit; }
     const sug = [...(plan && plan !== "API" ? [`${plan}号`] : []), ...NICKS].filter((n) => !used.has(n)).slice(0, 6);
     const cur = a.label && a.label.includes("@") ? "" : (a.label || "");
     return `<form class="rn" data-id="${esc(a.id)}"><input name="label" maxlength="60" value="${esc(cur)}" placeholder="起个短名：6 个汉字或 12 个字母以内" autocomplete="off">
-      <button type="submit" class="go" ${busy ? "disabled" : ""}>保存</button><button type="button" data-act="rn-cancel">取消</button></form>
+      <button type="submit" class="go">保存</button><button type="button" data-act="rn-cancel">取消</button></form>
       <div class="chips">${sug.map((n) => `<button type="button" data-nick="${esc(n)}">${esc(n)}</button>`).join("")}</div>`;
   }
 
@@ -348,7 +348,7 @@ button { font: inherit; color: inherit; }
     if (!items.length) items.push({ lv: "ok", text: n === 0 ? "空闲 · 一切正常" : "一切正常" });
     const top = items.find((i) => i.ask) || items[0];  // 等你确认的（切换、打开桌面版）要排在红色状态前面，不然按钮永远看不到
     const tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
-    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}" ${busy ? "disabled" : ""}>${label}</button>`).join("")}</span>` : ""}</div>`;
+    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}">${label}</button>`).join("")}</span>` : ""}</div>`;
   }
   // 鼠标放到账号上弹出的说明（放 350 毫秒才出，扫过去不闪）：邮箱、套餐、到期、每个额度窗口和重置时间、用量是几分钟前取的、最近切换、有问题时问题和怎么办
   let tipTimer = null, tipFor = null;
@@ -411,31 +411,47 @@ button { font: inherit; color: inherit; }
   window.addEventListener("scroll", hideTip, true);
   window.addEventListener("blur", hideTip);
   document.addEventListener("click", hideTip, true);  // 点了（切换、打开）就收起
-  function render() {
+  // 页面分成几块（红绿灯、大卡、其它 Code 号、桌面号、按钮、设置、页脚），每块记着上次画的 HTML：哪块变了只换那一块，没变的不动。
+  // 以前每次都整页重画：点开弹窗时 focus / pageshow / visibilitychange 连着来好几次，按着的卡片在手指下面被换掉、悬停说明被冲掉，看着就卡
+  const SLOTS = ["light", "cur", "code", "desk", "acts", "set", "foot"];
+  let lastParts = {};
+  function applyBusy() {  // 忙的时候把按钮都禁掉：只改属性，不重画
+    document.querySelectorAll("#main button, #main input").forEach((el) => { el.disabled = busy; });
+  }
+  function syncMsg() {
+    const old = $("#main .msg");
+    if (old) old.remove();
+    if (msg) $("#main").insertAdjacentHTML("beforeend", `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>`);
+  }
+  function paint(parts) {
     const main = $("#main");
+    if (!main.querySelector(".slot")) {  // 第一次（或“连不上后端”之后）先搭好各块的壳
+      main.innerHTML = SLOTS.map((k) => `<div class="slot" data-slot="${k}"></div>`).join("");
+      lastParts = {};
+    }
+    for (const k of SLOTS) {
+      const h = parts[k] || "";
+      if (h === lastParts[k]) continue;
+      const el = main.querySelector(`.slot[data-slot="${k}"]`);
+      if (tipFor && el.querySelector("[data-tip]")) hideTip();  // 悬停说明指着的账号在这块里：块换掉了说明也收起
+      el.innerHTML = h;
+      lastParts[k] = h;
+    }
+    syncMsg();
+    applyBusy();
+  }
+  function render() {
     if (!state) return;
-    if (renaming && $(".rn")) {  // 改名表单开着时不整页重画（会丢输入），只更新按钮状态和提示
-      document.querySelectorAll(".rn button, .rn input").forEach((el) => { el.disabled = busy; });
-      const old = $(".msg");
-      if (old) old.remove();
-      if (msg) main.insertAdjacentHTML("beforeend", `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>`);
-      return;
-    }
+    if (renaming && $(".rn")) { syncMsg(); applyBusy(); return; }  // 改名表单开着时不重画（会丢输入），只更新按钮状态和提示
     const accs = state.accounts || [];
-    if (!accs.length) {
-      main.innerHTML = `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>`;
-      return;
-    }
+    if (!accs.length) return paint({ cur: `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>` });
     const pos = Object.fromEntries(accs.map((a, i) => [a.id, i + 1]));
-    const acts = `<div class="acts"><button class="act" data-act="refresh" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
-          <button class="act" data-act="panel" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button>
-          <button class="act" data-act="settings" ${busy ? "disabled" : ""}><span class="circle glass">${ICON.gear}</span><span>设置</span></button></div>`;
+    const acts = `<div class="acts"><button class="act" data-act="refresh"><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
+          <button class="act" data-act="panel"><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button>
+          <button class="act" data-act="settings"><span class="circle glass">${ICON.gear}</span><span>设置</span></button></div>`;
     // 卡片只放 Claude Code 的号和桌面版的号（网页号、API 号在管理面板里）。大卡是当前的 Claude Code 号；一个 Code 号都没有时是第一个桌面号（多一个“打开”按钮）。和插件 mini_size 算高度的规则一致
     const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs.find((a) => a.kind === "claude_desktop");
-    if (!cur) {
-      main.innerHTML = `<div class="tile glass empty">卡片只放 Claude Code 和 Claude 桌面版的号<br>网页号、API 号在管理面板里</div>` + acts + settingsHtml() + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "");
-      return;
-    }
+    if (!cur) return paint({ cur: `<div class="tile glass empty">卡片只放 Claude Code 和 Claude 桌面版的号<br>网页号、API 号在管理面板里</div>`, acts, set: settingsHtml() });
     const codeOthers = accs.filter((a) => a.id !== cur.id && a.kind === "claude_code");
     const opens = accs.filter((a) => a.id !== cur.id && a.kind === "claude_desktop");  // 点一下打开，不是切换
     const u = cur.usage || {}, h = cur.health || {};
@@ -444,11 +460,10 @@ button { font: inherit; color: inherit; }
     const nameBlock = renaming === cur.id ? renameForm(cur)
       : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">${cur.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
         <div class="sub">${esc(sub)}</div>`;
-    hideTip();
     const curTile = `<div class="tile glass"><div class="who" data-tip="${esc(cur.id)}"><div class="circle on">${ring(p5, 44, 5)}</div>
       <div>${nameBlock}</div></div>
       ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
-      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}${cur.kind === "claude_code" ? "" : `<button type="button" class="open-btn" data-act="open" data-id="${esc(cur.id)}" data-kind="${esc(cur.kind)}" data-name="${esc(curName)}" ${busy ? "disabled" : ""}>用这个号打开 Claude 桌面版</button>`}</div>`;
+      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}${cur.kind === "claude_code" ? "" : `<button type="button" class="open-btn" data-act="open" data-id="${esc(cur.id)}" data-kind="${esc(cur.kind)}" data-name="${esc(curName)}">用这个号打开 Claude 桌面版</button>`}</div>`;
     // 其它 Claude Code 账号：方形小卡。5 小时、7 天各一根小条，下面写几点重置；窗口早该重置了就不拿旧数字骗人，写“已重置”
     const mini = (label, w) => {
       const p = pct(w);
@@ -460,7 +475,7 @@ button { font: inherit; color: inherit; }
     const card = (a) => {
       const uu = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), f = uu.five_hour, q5 = passed(f) ? null : pct(f);
       const body = mini("5 小时", uu.five_hour) + mini("7 天", uu.seven_day);
-      return `<button type="button" class="card glass" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}" ${busy ? "disabled" : ""}>
+      return `<button type="button" class="card glass" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}">
         <span class="head"><span class="circle">${ring(q5, 34, 4)}</span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span></span>
         ${body || `<span class="none">${hh.level === "error" ? esc(((hh.issues || [])[0] || {}).text || "登录有问题") : "还没有用量，点下面的刷新"}<br>点一下切换</span>`}</button>`;
     };
@@ -468,7 +483,7 @@ button { font: inherit; color: inherit; }
     const pill = (a) => {
       const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos);
       const q = q5 === null ? null : `5 小时 ${q5.toFixed(0)}%${resetShort((uu.five_hour || {}).resets_at) ? " · " + resetShort(uu.five_hour.resets_at) : ""}`;
-      return `<button type="button" class="acc glass open" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}" ${busy ? "disabled" : ""}>
+      return `<button type="button" class="acc glass open" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}">
         <span class="circle">${q5 === null ? ICON.desktop : ring(q5, 32, 4)}</span>
         <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(`桌面版 · ${q || "点一下打开"}`)}</span></span><span class="go">${ICON.open}</span></button>`;
     };
@@ -477,13 +492,25 @@ button { font: inherit; color: inherit; }
     const left = (reg.loc ? `出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : "")
       + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
     const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
-    main.innerHTML = lightHtml(cur, pos) + curTile
-      + group(codeOthers, "其它 Claude Code 账号 · 点一下切换") + group(opens, "Claude 桌面版 · 点一下打开", true)  // 一行一个：名字、套餐、额度和箭头才放得下
-      + acts + settingsHtml() + foot + (msg ? `<div class="msg ${esc(msg.cls)}">${esc(msg.text)}</div>` : "");
+    paint({ light: lightHtml(cur, pos), cur: curTile, code: group(codeOthers, "其它 Claude Code 账号 · 点一下切换"),
+      desk: group(opens, "Claude 桌面版 · 点一下打开", true),  // 一行一个：名字、套餐、额度和箭头才放得下
+      acts, set: settingsHtml(), foot });
   }
-  async function load() {
-    try { state = await api("GET", "/api/state"); render(); }
-    catch (e) { $("#main").innerHTML = `<div class="tile glass empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+  let loading = null, loadedAt = 0, stamp = null;
+  function load() {  // 点开弹窗时 focus、pageshow、visibilitychange 会连着触发：同一时间只发一个请求，刚取过的不再取
+    if (loading) return loading;
+    if (Date.now() - loadedAt < 1500) return Promise.resolve();
+    loading = (async () => {
+      try {
+        state = await api("GET", "/api/state"); loadedAt = Date.now();
+        if (stamp && state.code_stamp && state.code_stamp !== stamp) { location.reload(); return; }  // 弹窗常驻：代码更新、cam serve 换了新版后整页重新加载一次
+        stamp = state.code_stamp || stamp;
+        render();
+      }
+      catch (e) { $("#main").innerHTML = `<div class="tile glass empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+      finally { loading = null; }
+    })();
+    return loading;
   }
   async function loadLocal() {  // 本机记录要扫日志文件，比 /api/state 慢：等卡片先画出来再要，弹窗没显示时不要
     if (document.hidden) return;
@@ -589,9 +616,13 @@ button { font: inherit; color: inherit; }
   loadSettings();  // “切换前确认”开关点卡片时就要用，一开始就读（设置页没打开时 render 不画它）
   setInterval(() => { if (!document.hidden) load(); }, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
   setInterval(loadLocal, 120000);
-  window.addEventListener("focus", load);
-  window.addEventListener("pageshow", load);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); if (!local) loadLocal(); } });
+  window.addEventListener("focus", () => load());
+  window.addEventListener("pageshow", () => load());
+  document.addEventListener("visibilitychange", () => {  // 弹窗常驻：收起时藏掉悬停说明，再点开时刷新数据
+    if (document.hidden) { hideTip(); return; }
+    load();
+    if (!local) loadLocal();
+  });
 })();
 </script>
 </body>
