@@ -1035,20 +1035,20 @@ class CamTest(unittest.TestCase):
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
             w, h = cam_menu.mini_size(store.load()["accounts"])
             self.assertIn(f" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww={w} webviewh={h} shortcut=", lines2[0])
-            # 弹窗高度按账号数算：一个号最矮，每多两个号加一行药丸卡，到上限就整页上下滑；API 账号不在卡片里
+            # 弹窗高度按账号数算：一个号最矮，其它 Claude Code 号每多两个加一行方形小卡，到上限就整页上下滑；API 账号不在卡片里
             code = {"kind": "claude_code"}
             one = cam_menu.mini_size([code])[1]
             self.assertEqual(w, cam_menu.MINI_WIDTH)
             self.assertEqual(cam_menu.mini_size([code, {"kind": "api"}])[1], one)
             two = cam_menu.mini_size([code] * 2)[1]
-            self.assertGreater(two, one)
+            self.assertEqual(two, one + cam_menu.MINI_SEC + cam_menu.MINI_CARD)
             self.assertEqual(cam_menu.mini_size([code] * 3)[1], two)
-            self.assertGreater(cam_menu.mini_size([code] * 4)[1], two)
+            self.assertEqual(cam_menu.mini_size([code] * 4)[1], two + cam_menu.MINI_CARD)
             self.assertEqual(cam_menu.mini_size([code] * 40)[1], cam_menu.MINI_MAX)
             web, desk = {"kind": "claude_web"}, {"kind": "claude_desktop"}
             self.assertEqual(cam_menu.mini_size([code, web])[1], one)  # 网页号不进卡片
-            self.assertEqual(cam_menu.mini_size([code, desk])[1], two)  # 桌面号单独一组
-            self.assertGreater(cam_menu.mini_size([code, code, desk])[1], two)  # 两组各占一行
+            self.assertEqual(cam_menu.mini_size([code, desk])[1], one + cam_menu.MINI_SEC + cam_menu.MINI_ROW)  # 桌面号单独一组，药丸卡一行一个
+            self.assertEqual(cam_menu.mini_size([code, code, desk])[1], two + cam_menu.MINI_SEC + cam_menu.MINI_ROW)  # 两组各占一行
             self.assertEqual(cam_menu.mini_size([desk])[1], one + cam_menu.MINI_DESK)  # 没有 Code 号：大卡是桌面号（没有本机消耗、多一个“打开”按钮）
             self.assertEqual(cam_menu.mini_size([desk, desk])[1], one + cam_menu.MINI_DESK + cam_menu.MINI_SEC + cam_menu.MINI_ROW)
             self.assertEqual(cam_menu.mini_size([code, desk, desk])[1], one + cam_menu.MINI_SEC + 2 * cam_menu.MINI_ROW)  # 桌面号一行一个

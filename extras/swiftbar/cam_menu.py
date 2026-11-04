@@ -45,8 +45,9 @@ HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
 # 点菜单栏图标弹出的卡片小面板（SwiftBar 的 webview，页面是 cam serve 的 /mini）；CAM_MENU_MINI=0 关掉，只用系统菜单
 MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
 MINI_WIDTH = 340
-# 量出来的高度：一个账号（红绿灯 + 当前号卡片 + 两个按钮 + 页脚）、“其它账号”标题、每行两张药丸卡（含间距）；到上限后整页上下滑
-MINI_BASE, MINI_SEC, MINI_ROW, MINI_MAX = 428, 24, 66, 620  # Mac 上苹方字体比这边量的高一截，基数多留 34
+# 量出来的高度：一个账号（红绿灯 + 当前号卡片 + 两个按钮 + 页脚）、“其它账号”标题、其它 Claude Code 号每行两张方形小卡（含间距；
+# 卡里是 5 小时、7 天两根条和重置时间）、桌面号每行一张药丸卡（含间距）；到上限后整页上下滑
+MINI_BASE, MINI_SEC, MINI_CARD, MINI_ROW, MINI_MAX = 428, 24, 158, 66, 780  # Mac 上苹方字体比这边量的高一截，基数多留 34、方卡多留 9；上限放得下四张方卡
 MINI_DESK = -18  # 大卡是桌面号时：没有本机消耗那三格，多一个“打开”按钮，净矮了这么多
 
 
@@ -54,7 +55,7 @@ def mini_size(accs):
     """弹窗的宽、高：按卡片里要放的账号算（只放 Claude Code 的号和桌面版的号，网页号、API 号不在卡片里），账号多了到上限后整页上下滑。
 
     和 mini.html 一个规则：大卡是当前的 Claude Code 号（一个都没有时是第一个桌面号，多一个“打开”按钮）；
-    其余的 Claude Code 号一组（两张一行），桌面版一组（一行一个，名字、额度和箭头才放得下）。
+    其余的 Claude Code 号一组（方形小卡，两张一行），桌面版一组（药丸卡一行一个，名字、额度和箭头才放得下）。
     """
     code = [a for a in accs if a.get("kind") == "claude_code"]
     opens = [a for a in accs if a.get("kind") == "claude_desktop"]
@@ -64,7 +65,7 @@ def mini_size(accs):
     elif opens:
         opens, h = opens[1:], h + MINI_DESK
     if code:
-        h += MINI_SEC + (len(code) + 1) // 2 * MINI_ROW
+        h += MINI_SEC + (len(code) + 1) // 2 * MINI_CARD
     if opens:
         h += MINI_SEC + len(opens) * MINI_ROW
     return MINI_WIDTH, min(MINI_MAX, h)

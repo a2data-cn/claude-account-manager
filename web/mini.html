@@ -95,7 +95,37 @@ button { font: inherit; color: inherit; }
 .stat b { display: block; font-size: 15px; font-weight: 650; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat span { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat.note { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); padding: 6px 10px; }
-/* 其它账号：药丸形的小卡，左边圆圈里是小环 */
+/* 其它 Claude Code 账号：方形小卡，两张一行。上面是额度环、名字和套餐，下面 5 小时、7 天各一根小条和它们的重置时间 */
+.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.card { display: grid; gap: 7px; align-content: start; width: 100%; text-align: left; cursor: pointer; border-radius: 18px; padding: 10px 11px 11px;
+  transition: background-color .12s, transform .12s; }
+.card:hover { background: var(--tile-hover); transform: translateY(-1px); }
+.card:disabled { cursor: progress; opacity: .6; transform: none; }
+.card .head { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 0 8px; align-items: center; }
+.card .circle { width: 34px; height: 34px; }
+.card .name { flex-wrap: wrap; row-gap: 1px; }  /* 名字优先：和套餐标签放不下一行时标签换到下一行，不把名字截成“团…” */
+.card .name b { font-size: 13px; max-width: 100%; }
+.card .chip { font-size: 9.5px; padding: 0 6px; }
+.card .m { display: block; }
+.card .m .lab { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; color: var(--muted); }
+.card .m .lab b { color: var(--ink); font-weight: 650; font-size: 12px; }
+.card .m .lab b.off { color: var(--muted); font-weight: 600; }
+.card .m .bar { height: 5px; margin-top: 3px; }
+.card .m .bar i { min-width: 5px; }
+.card .m .when { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .none { font-size: 11px; color: var(--muted); line-height: 1.4; }
+/* 鼠标放到账号上弹出的说明：邮箱、套餐和到期、各个额度窗口和重置时间、用量什么时候取的、最近切换 */
+.tip { position: fixed; z-index: 8; width: 240px; padding: 10px 12px 9px; border-radius: 14px; background: var(--toast); color: var(--ink); border: 1px solid var(--tile-line);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .22); font-size: 11.5px; line-height: 1.45; pointer-events: none; -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
+.tip .t { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 650; margin-bottom: 5px; min-width: 0; }
+.tip .t b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0; }
+.tip dt { color: var(--muted); white-space: nowrap; }
+.tip dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.tip dd.hot { color: var(--hot); font-weight: 600; }
+.tip dd.warn { color: var(--warn); font-weight: 600; }
+.tip .do { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--track); color: var(--muted); font-size: 11px; }
+/* 桌面版的号：药丸形的一行，左边圆圈里是小环 */
 .pills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .pills.one { grid-template-columns: 1fr; }
 .acc { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 0 10px; align-items: center; width: 100%; text-align: left; cursor: pointer;
@@ -222,6 +252,21 @@ button { font: inherit; color: inherit; }
     const ms = new Date(iso) - Date.now();
     return isNaN(ms) ? "" : ms <= 0 ? "已重置" : `${dur(ms)}后重置`;
   }
+  const passed = (w) => !!(w && w.resets_at && new Date(w.resets_at) <= Date.now());  // 窗口早该重置了：存着的数字是旧的，刷新一次才知道现在多少
+  function ago(iso) {
+    if (!iso) return "还没有";
+    const s = (Date.now() - new Date(iso)) / 1000;
+    if (isNaN(s)) return "还没有";
+    if (s < 60) return "刚刚";
+    if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+    if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+    return `${Math.floor(s / 86400)} 天前`;
+  }
+  function dueInfo(a) {  // 和管理面板一个说法：7 天内提醒，2 天内和过期的标红
+    const d = a.days_left;
+    if (d === null || d === undefined) return null;
+    return { d, cls: d <= 2 ? "hot" : d <= 7 ? "warn" : "", text: d > 0 ? `${d} 天后到期` : d === 0 ? "今天到期" : `已过期 ${-d} 天` };
+  }
   const pct = (w) => w && w.utilization !== null && w.utilization !== undefined ? Math.max(0, Math.min(100, w.utilization)) : null;
   const lv = (p) => p >= 90 ? "hot" : p >= 70 ? "warn" : "";
   const wan = (n) => n >= 1e8 ? `${(n / 1e8).toFixed(1)}亿` : n >= 1e4 ? `${(n / 1e4).toFixed(n < 1e5 ? 1 : 0)}万` : String(Math.round(n));
@@ -297,6 +342,67 @@ button { font: inherit; color: inherit; }
     const tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
     return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}" ${busy ? "disabled" : ""}>${label}</button>`).join("")}</span>` : ""}</div>`;
   }
+  // 鼠标放到账号上弹出的说明（放 350 毫秒才出，扫过去不闪）：邮箱、套餐、到期、每个额度窗口和重置时间、用量是几分钟前取的、最近切换、有问题时问题和怎么办
+  let tipTimer = null, tipFor = null;
+  function tipHtml(a, pos) {
+    const u = a.usage || {}, h = a.health || {}, m = a.manual || {}, due = dueInfo(a), desk = a.kind === "claude_desktop";
+    const tier = (a.rate_limit_tier || "").match(/max_(\d+)x/);
+    const win = (label, w) => {
+      const p = pct(w);
+      if (p === null) return null;
+      return [label, passed(w) ? `上次 ${p.toFixed(0)}%，已重置，刷新看最新` : `${p.toFixed(0)}% · ${resetShort(w.resets_at) || "重置时间未知"}`, !passed(w) && p >= 90 ? "hot" : ""];
+    };
+    const rows = [
+      ["邮箱", a.email || "–"],
+      ["套餐", `${PLAN[a.plan_display] || a.plan_display || "未知"}${tier ? " " + tier[1] + "x" : ""}${a.org_name ? " · " + a.org_name : ""}`],
+      due ? ["到期", `${due.text}${m.expires_at ? `（${m.expires_at}）` : ""}${m.auto_renew ? " · 自动续期" : ""}`, due.cls] : ["到期", "没记到期日，管理面板里“编辑”可以填"],
+      m.price ? ["价格", m.price] : null,
+      win("5 小时", u.five_hour), win("7 天", u.seven_day), win("7 天 Opus", u.seven_day_opus), win("7 天 Sonnet", u.seven_day_sonnet),
+      ...(u.models || []).map((w) => win(w.name, w)),
+      [desk ? "记录时间" : "用量更新", ago(u.fetched_at)],
+      [desk ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : desk ? "还没打开过" : "还没切换过"],
+      m.note ? ["备注", m.note] : null,
+      ...(h.issues || []).map((i) => [i.level === "error" ? "问题" : "注意", `${i.text}${i.advice ? "。" + i.advice : ""}`, i.level === "error" ? "hot" : "warn"]),
+    ].filter(Boolean);
+    const act = desk ? "点一下：退出并用这个号重新打开 Claude 桌面版（会先问一句）" : a.is_active ? "正在用的号" : "点一下切换到这个号";
+    return `<div class="t"><b>${esc(nameOf(a, pos))}</b>${planChip(a)}</div><dl>${rows.map(([k, v, c]) => `<dt>${esc(k)}</dt><dd class="${esc(c || "")}">${esc(v)}</dd>`).join("")}</dl><div class="do">${esc(act)}</div>`;
+  }
+  function hideTip() {
+    clearTimeout(tipTimer);
+    tipTimer = null; tipFor = null;
+    document.querySelectorAll(".tip").forEach((t) => t.remove());
+  }
+  function showTip(el) {
+    const accs = (state && state.accounts) || [], a = accs.find((x) => x.id === el.dataset.tip);
+    if (!a || !el.isConnected) return;
+    hideTip();
+    tipFor = el.dataset.tip;
+    const t = document.createElement("div");
+    t.className = "tip";
+    t.innerHTML = tipHtml(a, Object.fromEntries(accs.map((x, i) => [x.id, i + 1])));
+    t.style.visibility = "hidden";
+    document.body.appendChild(t);
+    const r = el.getBoundingClientRect(), w = t.offsetWidth, hh = t.offsetHeight;
+    let top = r.bottom + 6;  // 先试放在账号下面，放不下就放上面；左右贴着卡片，不出窗口
+    if (top + hh > window.innerHeight - 6) top = Math.max(6, r.top - 6 - hh);
+    t.style.left = `${Math.max(10, Math.min(r.left, window.innerWidth - w - 10))}px`;
+    t.style.top = `${top}px`;
+    t.style.visibility = "";
+  }
+  document.addEventListener("mouseover", (ev) => {
+    const el = ev.target.closest("[data-tip]");
+    if (!el || renaming || el.dataset.tip === tipFor) return;
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => showTip(el), 350);
+  });
+  document.addEventListener("mouseout", (ev) => {
+    const el = ev.target.closest("[data-tip]");
+    if (!el || (ev.relatedTarget && el.contains(ev.relatedTarget))) return;
+    hideTip();
+  });
+  window.addEventListener("scroll", hideTip, true);
+  window.addEventListener("blur", hideTip);
+  document.addEventListener("click", hideTip, true);  // 点了（切换、打开）就收起
   function render() {
     const main = $("#main");
     if (!state) return;
@@ -330,20 +436,35 @@ button { font: inherit; color: inherit; }
     const nameBlock = renaming === cur.id ? renameForm(cur)
       : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">${cur.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
         <div class="sub">${esc(sub)}</div>`;
-    const curTile = `<div class="tile glass"><div class="who"><div class="circle on">${ring(p5, 44, 5)}</div>
+    hideTip();
+    const curTile = `<div class="tile glass"><div class="who" data-tip="${esc(cur.id)}"><div class="circle on">${ring(p5, 44, 5)}</div>
       <div>${nameBlock}</div></div>
       ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
       ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}${cur.kind === "claude_code" ? "" : `<button type="button" class="open-btn" data-act="open" data-id="${esc(cur.id)}" data-kind="${esc(cur.kind)}" data-name="${esc(curName)}" ${busy ? "disabled" : ""}>用这个号打开 Claude 桌面版</button>`}</div>`;
-    const pill = (a) => {
-      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos), open = a.kind !== "claude_code";
-      const q = q5 === null ? null : `5 小时 ${q5.toFixed(0)}%`;  // 药丸卡太窄，7 天的切过去后在大卡里看
-      const line = open ? `桌面版 · ${q || "点一下打开"}` : q || "点一下切换";
-      const tip = (a.email ? a.email + "\n" : "") + (open ? "退出并用这个号重新打开 Claude 桌面版（会先问一句）" : "切换到这个账号");
-      return `<button type="button" class="acc glass${open ? " open" : ""}" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" ${busy ? "disabled" : ""} title="${esc(tip)}">
-        <span class="circle">${q5 === null && open ? ICON.desktop : ring(q5, 32, 4)}</span>
-        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(line)}</span></span>${open ? `<span class="go">${ICON.open}</span>` : ""}</button>`;
+    // 其它 Claude Code 账号：方形小卡。5 小时、7 天各一根小条，下面写几点重置；窗口早该重置了就不拿旧数字骗人，写“已重置”
+    const mini = (label, w) => {
+      const p = pct(w);
+      if (p === null) return "";
+      const old = passed(w);
+      return `<span class="m"><span class="lab"><span>${label}</span>${old ? `<b class="off">已重置</b>` : `<b>${p.toFixed(0)}%</b>`}</span>
+        <span class="bar"><i class="${old ? "" : lv(p)}" style="width:${old ? 0 : p}%"></i></span><span class="when">${old ? "点下面的刷新看最新" : esc(resetShort(w.resets_at) || "重置时间未知")}</span></span>`;
     };
-    const group = (list, label, wide) => list.length ? `<div class="sec">${label}</div><div class="pills${wide || list.length === 1 ? " one" : ""}">${list.map(pill).join("")}</div>` : "";
+    const card = (a) => {
+      const uu = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), f = uu.five_hour, q5 = passed(f) ? null : pct(f);
+      const body = mini("5 小时", uu.five_hour) + mini("7 天", uu.seven_day);
+      return `<button type="button" class="card glass" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}" ${busy ? "disabled" : ""}>
+        <span class="head"><span class="circle">${ring(q5, 34, 4)}</span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span></span>
+        ${body || `<span class="none">${hh.level === "error" ? esc(((hh.issues || [])[0] || {}).text || "登录有问题") : "还没有用量，点下面的刷新"}<br>点一下切换</span>`}</button>`;
+    };
+    // 桌面版的号：一行一个，名字、额度和“打开”的箭头才放得下
+    const pill = (a) => {
+      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos);
+      const q = q5 === null ? null : `5 小时 ${q5.toFixed(0)}%${resetShort((uu.five_hour || {}).resets_at) ? " · " + resetShort(uu.five_hour.resets_at) : ""}`;
+      return `<button type="button" class="acc glass open" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}" ${busy ? "disabled" : ""}>
+        <span class="circle">${q5 === null ? ICON.desktop : ring(q5, 32, 4)}</span>
+        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(`桌面版 · ${q || "点一下打开"}`)}</span></span><span class="go">${ICON.open}</span></button>`;
+    };
+    const group = (list, label, wide) => list.length ? `<div class="sec">${label}</div>${wide ? `<div class="pills one">${list.map(pill).join("")}</div>` : `<div class="cards">${list.map(card).join("")}</div>`}` : "";
     const sc = state.risk_score, reg = state.region || {};
     const left = (reg.loc ? `出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : "")
       + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
