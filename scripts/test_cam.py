@@ -1189,19 +1189,22 @@ class CamTest(unittest.TestCase):
         S = cam_menu.SCALE
         self.assertEqual(S, 2)
         self.assertEqual((cam_menu.icon_size("lamp"), cam_menu.icon_size("bars")), ((12, 20), (16, 16)))
-        orange = lambda px: px[0] >= 200 and 100 <= px[1] <= 200 and px[2] <= 110 and px[3] >= 220  # noqa: E731  深色模式的灯体是浅灰，橙灯掺一点灰
+        orange = lambda px: px[0] >= 200 and 100 <= px[1] <= 200 and px[2] <= 110 and px[3] >= 180  # noqa: E731  呼吸到最暗是 75% 不透明
         for kind, phase in (("", 0), ("pulse", 0), ("pulse", 0.3), ("pulse", 0.5), ("blink", 0), ("blink", 0.5)):
             for dark in (0, 1):
                 w, h, px = pixels(cam_menu.status_icon(dark, "busy", kind, phase, "lamp"))
                 self.assertEqual((w, h), (12 * S, 20 * S))
                 mid = px(6 * S, 10 * S)  # 中间那盏（橙）的圆心：每一帧都是橙的，闪到暗的那拍也只是暗一点
                 dim = kind == "blink" and phase >= 0.5
-                self.assertTrue(orange(mid) if not dim else mid[0] >= 160 and mid[0] - mid[2] >= 100 and mid[3] >= 200, (kind, phase, dark, mid))
-                top = px(6 * S, round(3.6 * S))  # 上面那盏（红）没亮：不是鲜红，但和灯体分得开
-                self.assertLess(top[0] - top[1], 120, (kind, phase, dark, top))
-                self.assertGreater(abs(top[0] - cam_menu.BODY[dark][0]), 30, (kind, phase, dark, top))
+                self.assertTrue(orange(mid) if not dim else mid[0] >= 200 and mid[2] <= 110 and 110 <= mid[3] < 180, (kind, phase, dark, mid))
+                top = px(6 * S, round(4.2 * S))  # 上面那盏（红）没亮：和线框一个颜色的淡点（不是红的），不是全透明也不是实心
+                self.assertEqual((top[0], top[1], top[2]), tuple(cam_menu.GLYPH[dark][:3]), (kind, phase, dark, top))
+                self.assertTrue(40 <= top[3] <= 110, (kind, phase, dark, top))
+                self.assertEqual(px(0, 0)[3], 0, (kind, phase, dark))  # 圆角外面是透明的
+                self.assertGreaterEqual(px(round(0.6 * S), 10 * S)[3], 180, (kind, phase, dark))  # 左边的线框
+                self.assertEqual(px(round(2.2 * S), 10 * S)[3], 0, (kind, phase, dark))  # 线框和灯之间是空的
         w, h, px = pixels(cam_menu.status_icon(0, "ok", "", 0, "lamp"))
-        g = px(6 * S, round(16.4 * S))
+        g = px(6 * S, round(15.8 * S))
         self.assertTrue(g[1] >= 180 and g[0] <= 110, g)  # 空闲：下面那盏绿灯亮
         # 信号格呼吸到一半：前两格全亮、第三格半亮、第四格没亮
         w, h, px = pixels(cam_menu.status_icon(0, "busy", "pulse", 0.5, "bars"))
