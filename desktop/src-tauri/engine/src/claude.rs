@@ -1131,3 +1131,68 @@ pub fn claude_busy() -> bool {
             .unwrap_or(false)
     })
 }
+
+/// 有没有 Claude Code 会话在等你确认（权限提示 yes / no）：cam 的钩子（cam hooks install）把等着的会话记在
+/// CAM_HOME/attention.json 里；提示出现之后会话记录又写了的算答过了，超过两小时的算过期；没有 claude 进程在跑也不算。
+/// 和 cam.py 的 attention_view 对应。
+pub fn attention_view(procs_running: bool) -> Value {
+    if !procs_running {
+        return Value::Null;
+    }
+    let root = std::env::var_os("CAM_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".claude-accounts"));
+    let Ok(text) = fs::read_to_string(root.join("attention.json")) else {
+        return Value::Null;
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&text) else {
+        return Value::Null;
+    };
+    let Some(sessions) = data.get("sessions").and_then(|s| s.as_object()) else {
+        return Value::Null;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let mut live: Vec<&Value> = sessions
+        .values()
+        .filter(|s| {
+            let since = s.get("since_ts").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if now - since > 2.0 * 3600.0 {
+                return false;
+            }
+            let written = s
+                .get("transcript")
+                .and_then(|v| v.as_str())
+                .and_then(|p| fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64());
+            !matches!(written, Some(w) if w > since + 2.0)
+        })
+        .collect();
+    if live.is_empty() {
+        return Value::Null;
+    }
+    live.sort_by(|a, b| {
+        let f = |v: &Value| v.get("since_ts").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        f(a).partial_cmp(&f(b)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let first = live[0];
+    let tool = first.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+    let what = first.get("what").and_then(|v| v.as_str()).unwrap_or("");
+    let label = if what.is_empty() {
+        tool.to_string()
+    } else {
+        format!("{tool}：{what}")
+    };
+    let text = if live.len() > 1 {
+        format!("{} 个 Claude Code 会话在等你确认", live.len())
+    } else if label.is_empty() {
+        "Claude Code 在等你确认".to_string()
+    } else {
+        format!("Claude Code 在等你确认 · {label}")
+    };
+    json!({ "count": live.len(), "text": text, "since": first.get("since").cloned().unwrap_or(Value::Null) })
+}

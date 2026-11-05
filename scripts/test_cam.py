@@ -1208,11 +1208,21 @@ class CamTest(unittest.TestCase):
                 mid = px(6 * S, 10 * S)  # 中间那盏（橙）的圆心
                 self.assertTrue(orange(mid) if lit else mid[0] >= 200 and mid[2] <= 110 and 60 <= mid[3] <= 120, (kind, phase, dark, mid))
                 top = px(6 * S, round(4.2 * S))  # 上面那盏（红）没亮：和线框一个颜色的淡点（不是红的），不是全透明也不是实心
-                self.assertEqual((top[0], top[1], top[2]), tuple(cam_menu.GLYPH[dark][:3]), (kind, phase, dark, top))
-                self.assertTrue(40 <= top[3] <= 110, (kind, phase, dark, top))
+                if kind != "blink":  # 等你确认时三盏一起闪，下面单独查
+                    self.assertEqual((top[0], top[1], top[2]), tuple(cam_menu.GLYPH[dark][:3]), (kind, phase, dark, top))
+                    self.assertTrue(40 <= top[3] <= 110, (kind, phase, dark, top))
                 self.assertEqual(px(0, 0)[3], 0, (kind, phase, dark))  # 圆角外面是透明的
                 self.assertGreaterEqual(px(round(0.6 * S), 10 * S)[3], 180, (kind, phase, dark))  # 左边的线框
                 self.assertEqual(px(round(2.2 * S), 10 * S)[3], 0, (kind, phase, dark))  # 线框和灯之间是空的
+        # 等你确认（blink）：三盏灯一起闪——亮的那拍红、橙、绿都是实心，灭的那拍三盏都只剩淡淡的镜片色
+        for dark in (0, 1):
+            w, h, px = pixels(cam_menu.status_icon(dark, "busy", "blink", 0, "lamp"))
+            r, g = px(6 * S, round(4.2 * S)), px(6 * S, round(15.8 * S))
+            self.assertTrue(r[0] >= 200 and r[1] <= 120 and r[3] >= 240, r)
+            self.assertTrue(g[1] >= 180 and g[0] <= 120 and g[3] >= 240, g)
+            w, h, px = pixels(cam_menu.status_icon(dark, "busy", "blink", 0.125, "lamp"))
+            r, g = px(6 * S, round(4.2 * S)), px(6 * S, round(15.8 * S))
+            self.assertTrue(r[0] >= 200 and 60 <= r[3] <= 120 and g[1] >= 180 and 60 <= g[3] <= 120, (r, g))
         w, h, px = pixels(cam_menu.status_icon(0, "ok", "", 0, "lamp"))
         g = px(6 * S, round(15.8 * S))
         self.assertTrue(g[1] >= 180 and g[0] <= 110, g)  # 空闲：下面那盏绿灯亮
@@ -1278,6 +1288,93 @@ class CamTest(unittest.TestCase):
             self.assertEqual(cam.session_count(max_age=0), 0)
             self.assertFalse(cam.session_busy())
         reset()
+
+    def test_hooks_and_attention(self):
+        """Claude Code 弹权限确认时红绿灯三盏灯一起闪：cam hooks install 往 settings.json 加钩子（别的钩子不动，重复装不重复）；
+        钩子事件由 cam hook 从 stdin 读，PermissionRequest 记下会话、答过了 / 会话结束清掉；记录文件在提示之后又写了也算答过了。"""
+        cam = self.cam
+        path = cam.claude_settings_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"theme": "dark", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}}, f)
+        self.assertFalse(cam.hooks_status()["installed"])
+        st = cam.hooks_install()
+        self.assertTrue(st["installed"])
+        with open(path, encoding="utf-8") as f:
+            s = json.load(f)
+        self.assertEqual(s["theme"], "dark")
+        self.assertEqual(len(s["hooks"]["Stop"]), 2)  # 用户自己的那条还在
+        self.assertEqual(s["hooks"]["Stop"][0]["hooks"][0]["command"], "say done")
+        ours = s["hooks"]["PermissionRequest"][0]["hooks"][0]
+        self.assertTrue(cam.HOOK_MARK.search(ours["command"]) and ours["async"] and ours["type"] == "command", ours)
+        self.assertEqual(sorted(s["hooks"]), sorted(set(cam.HOOK_EVENTS) | {"Stop"}))
+        cam.hooks_install()  # 再装一次不重复
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(len(json.load(f)["hooks"]["Stop"]), 2)
+        self.assertEqual(self.run_cam("hooks"), 0)
+        # 钩子事件：PermissionRequest 记下来（只记工具和说明，不记命令本身）
+        tr = os.path.join(self.tmp, ".claude", "projects", "p", "s1.jsonl")
+        os.makedirs(os.path.dirname(tr), exist_ok=True)
+        with open(tr, "w") as f:
+            f.write("{}\n")
+        old = time.time() - 30
+        os.utime(tr, (old, old))
+        ev = lambda name, **kw: json.dumps({"hook_event_name": name, "session_id": "s1", "transcript_path": tr, "cwd": "/x", **kw})  # noqa: E731
+        with mock.patch.object(sys, "stdin", io.StringIO(ev("PermissionRequest", tool_name="Bash",
+                                                            tool_input={"command": "rm -rf node_modules", "description": "删掉 node_modules"}))):
+            self.assertEqual(cam.main(["hook"]), 0)
+        with open(cam.attention_path(), encoding="utf-8") as f:
+            rec = json.load(f)["sessions"]["s1"]
+        self.assertEqual((rec["tool"], rec["what"], rec["transcript"]), ("Bash", "删掉 node_modules", tr))
+        self.assertNotIn("rm -rf", json.dumps(rec))
+        cam._SESSION_CACHE[:] = [0.0, 0]
+        with mock.patch.object(cam, "running_claude_processes", return_value=[(1, "claude")]), \
+                mock.patch.object(cam, "claude_activity", return_value=False):
+            att = cam.attention_view()
+            self.assertEqual((att["count"], att["text"]), (1, "Claude Code 在等你确认 · Bash：删掉 node_modules"))
+            later = time.time() + 5  # 记录文件在提示之后又写了：答过了
+            os.utime(tr, (later, later))
+            self.assertIsNone(cam.attention_view())
+            os.utime(tr, (old, old))
+            self.assertIsNotNone(cam.attention_view())
+            with mock.patch.object(sys, "stdin", io.StringIO(ev("Stop"))):  # 会话结束：清掉
+                self.assertEqual(cam.main(["hook"]), 0)
+            self.assertIsNone(cam.attention_view())
+            with mock.patch.object(sys, "stdin", io.StringIO(ev("PermissionRequest", tool_name="Edit"))):
+                cam.main(["hook"])
+            self.assertEqual(cam.attention_view()["text"], "Claude Code 在等你确认 · Edit")
+            data = cam._load_attention()
+            data["sessions"]["s1"]["since_ts"] -= 3 * 3600  # 过期的不算
+            cam._save_attention(data)
+            self.assertIsNone(cam.attention_view())
+            with mock.patch.object(sys, "stdin", io.StringIO("not json")):  # 坏的输入不报错、不输出
+                self.assertEqual(cam.main(["hook"]), 0)
+            with mock.patch.object(sys, "stdin", io.StringIO(ev("PermissionRequest", tool_name="Bash"))):
+                cam.main(["hook"])
+            # 菜单栏：等你确认 → 三盏灯一起闪（标题两帧）、第一行写着在等你确认；卡片 / 面板从 /api/state 的 attention 拿同一句
+            cam_menu = self._menu_plugin()
+            MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                    "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+            self._two_accounts()
+            self.assertEqual(self.run_cam("usage"), 0)
+            store = cam.Store()
+            lines = []
+            cam_menu.render(store, {}, out=lines.append, rich=True)
+            self.assertEqual(lines[2], "---", lines[:3])
+            self.assertTrue(lines[3].startswith("● Claude Code 在等你确认 · Bash | size=12 color=" + cam_menu.YELLOW), lines[3])
+            self.assertEqual(cam.public_state(store, store.load())["attention"]["text"], "Claude Code 在等你确认 · Bash")
+        with mock.patch.object(cam, "running_claude_processes", return_value=[]):
+            cam._SESSION_CACHE[:] = [0.0, 0]
+            self.assertIsNone(cam.attention_view())  # 没有 claude 进程在跑
+        # 设置页的开关
+        store = cam.Store()
+        self.assertTrue(cam.menubar_settings(store)["hooks"])
+        self.assertFalse(cam.save_menubar_settings(store, {"hooks": False})["hooks"])
+        with open(path, encoding="utf-8") as f:
+            s = json.load(f)
+        self.assertEqual((list(s["hooks"]), len(s["hooks"]["Stop"]), s["theme"]), (["Stop"], 1, "dark"))  # 只剩用户自己的
+        self.assertEqual(self.run_cam("hooks", "remove"), 0)
+        self.assertTrue(cam.save_menubar_settings(store, {"hooks": True})["hooks"])
 
     # ---- 锁
 

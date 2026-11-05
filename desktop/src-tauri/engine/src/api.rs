@@ -400,6 +400,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "risks": risks,
         "risk_score": risk_score,
         "sessions": json!({ "count": procs.len(), "busy": !procs.is_empty() && claude_busy() }),  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算
+        "attention": attention_view(!procs.is_empty()),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
         "generated_at": now_iso()
     })
 }

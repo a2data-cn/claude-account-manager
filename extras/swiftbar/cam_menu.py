@@ -235,7 +235,8 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
 
     颜色是状态：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。kind="pulse"（工作中）时随 phase（0–1）
     信号格一格格渐亮涨上去再从头来 / 红绿灯照真红绿灯的黄闪：亮着的那盏灯一亮一灭（灭的时候还看得见镜片的颜色），红绿不动；
-    "blink"（等你确认）时信号格全亮全灭、红绿灯闪得快一倍。经典模式只有两帧（phase 0 和 0.375：两种动画都是一帧亮一帧灭），
+    "blink"（等你确认：Claude Code 弹着权限提示、或者切换要你确认）时信号格全亮全灭、红绿灯三盏灯一起闪，比黄闪快一倍。
+    经典模式只有两帧（phase 0 和 0.375：两种动画都是一帧亮一帧灭），
     流式模式每 0.25 秒一帧。画好的图按参数缓存。
     """
     if kind == "pulse":
@@ -277,10 +278,10 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         bulbs = []
         for lv, cy in lamps:
             color = FILL[{"busy": "warn"}.get(lv, lv)][dark]
-            if lv != level:
-                bulbs.append((lamp(cy, lr), (*ink[:3], ink[3] * 0.3)))  # 没亮的灯：淡淡的一个点，看得出三盏都在
-            else:
+            if lv == level or kind == "blink":  # 等你确认（blink）时三盏灯一起闪
                 bulbs.append((lamp(cy, lr), (*color, 1.0 if lit else 0.35)))
+            else:
+                bulbs.append((lamp(cy, lr), (*ink[:3], ink[3] * 0.3)))  # 没亮的灯：淡淡的一个点，看得出三盏都在
         return _png(W, H, _raster(W, H, [(frame, ink)] + bulbs))
     S = ICON_H * SCALE
     if kind == "pulse":
@@ -582,10 +583,13 @@ def status_light(store, data, accs, active, st):
         items.append(("bad", f"当前号：{first}", False))
     if p5 is not None and p5 >= 100:
         items.append(("bad", "5 小时额度用完了", False))
+    n = cam.session_count(max_age=SESSION_MAX_AGE)
+    att = cam.attention_view()  # Claude Code 弹着权限确认（yes / no）等你：钩子记下来的（cam hooks install）
+    if att:
+        items.append(("busy", att["text"], "blink"))
     pend = cam.pending_switch_view(data)
     if pend:
         items.append(("busy", pend["message"], "blink"))
-    n = cam.session_count(max_age=SESSION_MAX_AGE)
     if n and cam.session_busy():  # 开着但在等你输入的不算工作中
         items.append(("busy", f"工作中 · {n} 个 claude 会话在跑", "pulse"))
     if p5 is not None and p5 >= 90:

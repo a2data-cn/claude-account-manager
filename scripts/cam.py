@@ -37,6 +37,7 @@ import http.client
 import http.server
 import io
 import json
+import shlex
 import math
 import os
 import platform
@@ -2946,7 +2947,8 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "sessions": {"count": session_count(), "busy": session_busy()}, "generated_at": now_iso()}
+            "risk_score": risk_score(risks), "sessions": {"count": session_count(), "busy": session_busy()},
+            "attention": attention_view(), "generated_at": now_iso()}
 
 
 _SESSION_CACHE = [0.0, 0]  # [上次数的时间, 个数]
@@ -3099,6 +3101,212 @@ def claude_activity(pids, max_age=5):
         busy = (written is not None and written < ACTIVE_WINDOW) or (rate is not None and rate > CPU_BUSY)
         _ACTIVITY.update(t=now, cpu=cpu, busy=busy)
         return busy
+
+
+# ---- Claude Code 在等你确认（权限提示 yes / no）：靠 Claude Code 的钩子（hooks）告诉 cam，红绿灯三盏灯一起闪。
+# cam hooks install 往 ~/.claude/settings.json 加几条钩子，每条都是跑 cam.py hook，事件 JSON 从 stdin 进来：
+# PermissionRequest（要问你权限了）记下这个会话在等你；工具跑完、拒绝了、你又发了消息、会话结束就清掉
+ATTENTION_FILE = "attention.json"  # CAM_HOME 下：哪些会话在等你确认
+ATTENTION_MAX_AGE = 2 * 3600  # 秒：等了这么久还没动静就不算了（会话早关了、清的钩子没来得及跑）
+HOOK_SET_EVENTS = ("PermissionRequest",)
+HOOK_CLEAR_EVENTS = ("PostToolUse", "PostToolUseFailure", "PermissionDenied", "UserPromptSubmit", "Stop", "SessionEnd")
+HOOK_EVENTS = HOOK_SET_EVENTS + HOOK_CLEAR_EVENTS
+HOOK_MARK = re.compile(r"cam\.py[\"']? hook$")  # settings.json 里哪条钩子是 cam 装的
+
+
+def claude_settings_file():
+    return os.path.join(claude_config_dir(), "settings.json")
+
+
+def hook_command():
+    """钩子里写的命令：用现在这个 python 跑 cam.py hook。"""
+    cam_py = os.path.abspath(__file__)
+    if IS_WIN:
+        return f'"{sys.executable}" "{cam_py}" hook'
+    return f"{shlex.quote(sys.executable)} {shlex.quote(cam_py)} hook"
+
+
+def _is_cam_hook(group):
+    if not isinstance(group, dict):
+        return False
+    return any(isinstance(h, dict) and HOOK_MARK.search(str(h.get("command", ""))) for h in (group.get("hooks") or []))
+
+
+def _read_settings(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise CamError(f"读不了 {path}：{e}")
+    if not isinstance(data, dict):
+        raise CamError(f"{path} 不是 JSON 对象")
+    return data
+
+
+def _write_settings(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".cam-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def hooks_status():
+    """cam 的钩子装没装：每个事件都有一条指向现在这份 cam.py 和 python 的才算装了；有但指向别处（代码搬过家、换了 python）算过期。"""
+    path = claude_settings_file()
+    try:
+        hooks = _read_settings(path).get("hooks") or {}
+    except CamError:
+        hooks = {}
+    cmd = hook_command()
+    have = stale = 0
+    for ev in HOOK_EVENTS:
+        groups = [g for g in (hooks.get(ev) or []) if _is_cam_hook(g)] if isinstance(hooks, dict) else []
+        if groups:
+            have += 1
+            if not any(h.get("command") == cmd for g in groups for h in g.get("hooks") or []):
+                stale += 1
+    return {"installed": have == len(HOOK_EVENTS) and not stale, "partial": 0 < have < len(HOOK_EVENTS), "stale": stale > 0,
+            "settings": path, "command": cmd}
+
+
+def hooks_install():
+    """往 Claude Code 的 settings.json 加 cam 的钩子（别的钩子不动；cam 自己旧的先去掉，所以重复装不会重复）。正在跑的 claude 要重开才加载。"""
+    path = claude_settings_file()
+    data = _read_settings(path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    cmd = hook_command()
+    for ev in HOOK_EVENTS:
+        groups = [g for g in (hooks.get(ev) or []) if not _is_cam_hook(g)]
+        groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10, "async": True}]})  # async：不让 claude 等它
+        hooks[ev] = groups
+    data["hooks"] = hooks
+    _write_settings(path, data)
+    return hooks_status()
+
+
+def hooks_remove():
+    """从 settings.json 去掉 cam 的钩子，别的钩子不动。"""
+    path = claude_settings_file()
+    data = _read_settings(path)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        for ev in list(hooks):
+            groups = [g for g in (hooks.get(ev) or []) if not _is_cam_hook(g)]
+            if groups:
+                hooks[ev] = groups
+            else:
+                del hooks[ev]
+        if not hooks:
+            del data["hooks"]
+        _write_settings(path, data)
+    return hooks_status()
+
+
+def attention_path():
+    return os.path.join(cam_home(), ATTENTION_FILE)
+
+
+def _load_attention():
+    try:
+        with open(attention_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and isinstance(data.get("sessions"), dict) else {"sessions": {}}
+    except (OSError, ValueError):
+        return {"sessions": {}}
+
+
+def _save_attention(data):
+    os.makedirs(cam_home(), exist_ok=True)
+    tmp = attention_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, attention_path())
+
+
+def hook_event(event):
+    """Claude Code 的钩子来了一个事件（stdin 的 JSON 已解析）：要问权限 → 记下这个会话在等你确认；答过了、会话结束 → 清掉。"""
+    if not isinstance(event, dict):
+        return
+    name, sid = event.get("hook_event_name"), str(event.get("session_id") or "")
+    if not sid or name not in HOOK_EVENTS:
+        return
+    data = _load_attention()
+    sessions, now = data["sessions"], time.time()
+    for k in list(sessions):  # 顺手把过期的扫掉
+        if not isinstance(sessions[k], dict) or now - float(sessions[k].get("since_ts") or 0) > ATTENTION_MAX_AGE:
+            del sessions[k]
+    if name in HOOK_SET_EVENTS:
+        ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+        what = ti.get("description") if isinstance(ti.get("description"), str) else ""  # 只记说明，不记命令本身（可能带密钥）
+        sessions[sid] = {"since": now_iso(), "since_ts": now, "transcript": str(event.get("transcript_path") or ""),
+                         "cwd": str(event.get("cwd") or ""), "tool": str(event.get("tool_name") or ""), "what": what[:80]}
+    else:
+        sessions.pop(sid, None)
+    _save_attention(data)
+
+
+def attention_view():
+    """有没有 Claude Code 会话在等你确认（权限提示）：钩子记下来的，去掉答过的（会话记录在那之后又写了）和过期的；
+    没有 claude 进程在跑也不算。给红绿灯和面板用：{"count", "text", "since"}，没有就 None。"""
+    sessions = _load_attention()["sessions"]
+    if not sessions or not session_count():
+        return None
+    now, live = time.time(), []
+    for s in sessions.values():
+        if not isinstance(s, dict):
+            continue
+        since = float(s.get("since_ts") or 0)
+        if now - since > ATTENTION_MAX_AGE:
+            continue
+        try:  # 提示出现之后会话记录又写了：答过了（工具跑了，或者拒绝的消息进去了）。钩子可能比写文件早一点，放 2 秒
+            if os.path.getmtime(s.get("transcript") or "") > since + 2:
+                continue
+        except OSError:
+            pass
+        live.append(s)
+    if not live:
+        return None
+    live.sort(key=lambda s: s.get("since_ts") or 0)
+    first = live[0]
+    what = (first.get("tool") or "") + (f"：{first['what']}" if first.get("what") else "")
+    if len(live) > 1:
+        text = f"{len(live)} 个 Claude Code 会话在等你确认"
+    else:
+        text = f"Claude Code 在等你确认 · {what}" if what else "Claude Code 在等你确认"
+    return {"count": len(live), "text": text, "since": first.get("since")}
+
+
+def cmd_hook():
+    """Claude Code 的钩子调用：事件 JSON 从 stdin 进来。什么都不输出、永远返回 0，不能影响 Claude Code。"""
+    try:
+        raw = sys.stdin.read()
+        hook_event(json.loads(raw) if raw.strip() else {})
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+def cmd_hooks(args):
+    act = args.action or "status"
+    if act == "install":
+        st = hooks_install()
+        print(f"已写入 {st['settings']}：{'、'.join(HOOK_EVENTS)} 各一条钩子，命令是 {st['command']}")
+        print("正在跑的 claude 要重开一次才会加载钩子。以后 Claude Code 弹权限确认（yes / no）时，菜单栏红绿灯三盏灯一起闪，卡片和面板的红绿灯写着在等你确认。")
+    elif act == "remove":
+        st = hooks_remove()
+        print(f"已从 {st['settings']} 去掉 cam 的钩子（别的钩子没动）。")
+    else:
+        st = hooks_status()
+        state = ("已装" if st["installed"] else "过期：指向别的 cam.py 或 python，重新 cam hooks install" if st["stale"]
+                 else "只装了一部分，重新 cam hooks install" if st["partial"] else "没装（cam hooks install）")
+        print(f"Claude Code 钩子：{state}\n  配置文件：{st['settings']}\n  命令：{st['command']}")
+    return 0
 
 
 KIND_NAMES = {"claude_code": "Claude Code", "claude_web": "claude.ai 网页版", "claude_desktop": "Claude 桌面版", "api": "API Key"}
@@ -6692,7 +6900,8 @@ def menubar_settings(store):
     prefs = store.load().get("prefs") or {}
     return {"available": IS_MAC or bool(os.environ.get("CAM_SWIFTBAR_DIR")), "installed": installed, "mode": mode,
             "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars",
-            "confirm_switch": bool(prefs.get("confirm_switch")), "plugin": path}  # confirm_switch：卡片里点其它号先问一句再切
+            "confirm_switch": bool(prefs.get("confirm_switch")), "plugin": path,  # confirm_switch：卡片里点其它号先问一句再切
+            "hooks": hooks_status()["installed"]}  # hooks：Claude Code 的钩子装没装（等你确认时三盏灯一起闪）
 
 
 def save_menubar_settings(store, body):
@@ -6700,6 +6909,10 @@ def save_menubar_settings(store, body):
     if not isinstance(body, dict):
         raise CamError("请求体应为 JSON 对象")
     restarting = False
+    if "hooks" in body:
+        if not isinstance(body["hooks"], bool):
+            raise CamError("hooks 只能是 true 或 false")
+        hooks_install() if body["hooks"] else hooks_remove()
     if "confirm_switch" in body:
         if not isinstance(body["confirm_switch"], bool):
             raise CamError("confirm_switch 只能是 true 或 false")
@@ -7224,6 +7437,9 @@ def main(argv=None):
     s.add_argument("--check", action="store_true", help="只检查有没有新版本，列出新改动，不更新")
     s.add_argument("--json", action="store_true", help="输出 JSON（给菜单栏、脚本用）")
     sub.add_parser("verify", help="按 SHA256SUMS 校验代码文件是否完整（安装和更新时会自动做）")
+    s = sub.add_parser("hooks", help="Claude Code 钩子：装了之后弹权限确认（yes / no）时红绿灯三盏灯一起闪（status / install / remove）")
+    s.add_argument("action", nargs="?", choices=["status", "install", "remove"], default="status")
+    sub.add_parser("hook", help="（Claude Code 的钩子调用的，不用手动运行）从 stdin 读事件")
     s = sub.add_parser("env", help="Claude Code 环境：检查 / 安装 / 清理")
     esub = s.add_subparsers(dest="env_cmd")
     e = esub.add_parser("doctor", aliases=["check"], help="同 cam doctor：全面体检")
@@ -7277,9 +7493,11 @@ def main(argv=None):
             print(color("错误：", "r") + str(e), file=sys.stderr)
             return 1
     args = p.parse_args(argv)
-    if args.cmd == "verify":  # 只读代码目录，不建数据目录
+    if args.cmd == "hook":  # Claude Code 的钩子：每个事件都跑一次，不碰账号库，不能出错
+        return cmd_hook()
+    if args.cmd in ("verify", "hooks"):  # 只读代码目录 / 只改 Claude Code 的 settings.json，不建数据目录
         try:
-            return cmd_verify()
+            return cmd_verify() if args.cmd == "verify" else cmd_hooks(args)
         except CamError as e:
             print(color("错误：", "r") + str(e), file=sys.stderr)
             return 1

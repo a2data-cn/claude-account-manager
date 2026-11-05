@@ -38,7 +38,8 @@ button { font: inherit; color: inherit; }
 .light.busy .dot { background: var(--y); box-shadow: 0 0 0 3px rgba(255, 159, 10, .24); }
 .light.bad .dot { background: var(--r); box-shadow: 0 0 0 3px rgba(255, 59, 48, .22); }
 .light.pulse .dot { animation: breathe 2s ease-in-out infinite; }  /* 有会话在跑：黄点一呼一吸，和菜单栏图标一个节奏 */
-.light.ask .dot { animation: blink 1s step-end infinite; }  /* 等你确认：一亮一暗 */
+.light.ask .dot { animation: blink 1s step-end infinite; }  /* 等你确认切换：一亮一暗 */
+.light.blink .dot { animation: blink .5s step-end infinite; }  /* Claude Code 在等你点 yes / no：快闪，和菜单栏三盏灯一个节奏 */
 @keyframes breathe { 50% { box-shadow: 0 0 0 6px rgba(255, 159, 10, .32); transform: scale(1.12); } }
 @keyframes blink { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .light .dot { animation: none; } }
@@ -213,7 +214,9 @@ button { font: inherit; color: inherit; }
     const s = settings;
     // 第一行是卡片自己的开关（Windows 托盘也有）；后面几行是菜单栏小工具的，没装就只给一句提示。忙的时候的 disabled 由 applyBusy 统一加
     const confirmRow = `<div class="row"><div class="lab"><b>切换前确认</b><span>${s.confirm_switch ? "点其它号的卡片先问一句，点“切换”才切" : "点其它号的卡片直接切；有 claude 会话在跑时本来就会先问"}</span></div>
-        <label class="sw"><input type="checkbox" data-set="confirm" ${s.confirm_switch ? "checked" : ""}><i></i></label></div>`;
+        <label class="sw"><input type="checkbox" data-set="confirm" ${s.confirm_switch ? "checked" : ""}><i></i></label></div>
+      <div class="row"><div class="lab"><b>等你确认时闪灯</b><span>${s.hooks ? "Claude Code 弹权限确认（yes / no）时红绿灯三盏灯一起闪，答了就恢复" : "关着看不出 Claude Code 在等你点 yes。打开会往 ~/.claude/settings.json 加几条钩子，正在跑的 claude 重开后生效"}</span></div>
+        <label class="sw"><input type="checkbox" data-set="hooks" ${s.hooks ? "checked" : ""}><i></i></label></div>`;
     if (!s.available) return `<div class="tile glass set">${confirmRow}<div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
     if (!s.installed) return `<div class="tile glass set">${confirmRow}<div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh。<a href="#" data-act="set-close">收起</a></div></div>`;
     return `<div class="tile glass set">${confirmRow}
@@ -344,6 +347,7 @@ button { font: inherit; color: inherit; }
       btns: [["ask-wait", "等它们退出再切"], ["ask-now", "现在就切", "go"], ["ask-no", "取消"]] });
     if (ask && ask.open) items.push({ lv: "busy", ask: true, text: `打开 ${ask.label} 会退出并重启电脑上的 Claude 桌面版，里面在跑的先处理好。继续？`,
       btns: [["open-now", "打开", "go"], ["ask-no", "取消"]] });
+    if (state.attention) items.push({ lv: "busy", blink: true, text: state.attention.text });  // Claude Code 弹着权限确认等你（钩子记的）
     if (pend) items.push({ lv: "busy", ask: true, text: pend.message, btns: [["pend-now", "现在就切", "go"], ["pend-cancel", "取消"]] });
     if (n > 0 && ss.busy) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });  // 开着但在等你输入的不算
     if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${p5.toFixed(0)}%，快满了` });
@@ -355,7 +359,7 @@ button { font: inherit; color: inherit; }
     if (!items.length) items.push({ lv: "ok", text: n > 0 ? `空闲 · ${n} 个 Claude Code 会话开着` : "空闲 · 一切正常" });
     const top = items.find((i) => i.ask) || items[0];  // 等你确认的（切换、打开桌面版）要排在红色状态前面，不然按钮永远看不到
     const tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
-    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}${top.pulse ? " pulse" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}">${label}</button>`).join("")}</span>` : ""}</div>`;
+    return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}${top.pulse ? " pulse" : ""}${top.blink ? " blink" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}">${label}</button>`).join("")}</span>` : ""}</div>`;
   }
   // 鼠标放到账号上弹出的说明（放 350 毫秒才出，扫过去不闪）：邮箱、套餐、到期、每个额度窗口和重置时间、用量是几分钟前取的、最近切换、有问题时问题和怎么办
   let tipTimer = null, tipFor = null;
@@ -596,6 +600,12 @@ button { font: inherit; color: inherit; }
     if (cf && settings) {
       const on = cf.checked;
       run(async () => { settings = await api("PUT", "/api/menubar", { confirm_switch: on }); say(on ? "已打开：点卡片先问一句再切" : "已关闭：点卡片直接切"); });
+      return;
+    }
+    const hk = ev.target.closest('[data-set="hooks"]');
+    if (hk && settings) {
+      const on = hk.checked;
+      run(async () => { settings = await api("PUT", "/api/menubar", { hooks: on }); say(on ? "已装钩子：Claude Code 等你确认时三盏灯一起闪（正在跑的 claude 重开后生效）" : "已去掉钩子"); });
       return;
     }
     const sw = ev.target.closest('[data-set="mode"]');

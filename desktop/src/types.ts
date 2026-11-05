@@ -96,6 +96,7 @@ export interface State {
   risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
   sessions?: { count: number; busy?: boolean } | null; // 本机开着的 claude 会话数，以及有没有真的在执行任务（标题旁的红绿灯用）
+  attention?: { count: number; text: string; since?: string | null } | null; // Claude Code 弹着权限确认在等你（cam 的钩子记的）
 }
 
 /** 环境风险评分：满分 100，≥90 低 / 70–89 中 / <70 高。只是把提醒汇总成一个数 */

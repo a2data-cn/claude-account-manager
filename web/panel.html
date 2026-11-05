@@ -678,7 +678,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-signal"/></svg></span>菜单栏图标<span class="hint">macOS</span></h3>
         <ul class="lgd">
           <li><span class="sm"><span class="mb"><i class="g"></i>个人 12%</span></span><span class="t"><b>绿</b>空闲，一切正常</span></li>
-          <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话正在执行任务（开着但在等你输入的不算；信号格一格格涨 / 三盏灯的黄灯像黄闪一样一亮一灭）、额度快满、等你确认切换（信号格一闪一闪 / 三盏灯闪得快一倍）</span></li>
+          <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话正在执行任务（开着但在等你输入的不算；信号格一格格涨 / 三盏灯的黄灯像黄闪一样一亮一灭）、额度快满、等你确认（切换、或 Claude Code 弹着权限提示；信号格一闪一闪 / 三盏灯一起闪）</span></li>
           <li><span class="sm"><span class="mb"><i class="r"></i>个人 93%</span></span><span class="t"><b>红</b>要处理：登录失效、额度用完、后台出错</span></li>
         </ul>
         <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
@@ -1263,6 +1263,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (state.warning) items.push({ lv: "bad", text: state.warning });
     if (h.level === "error") items.push({ lv: "bad", text: `当前号${issue.text ? "：" + issue.text : "有问题"}`, tip: issue.advice });
     if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: "5 小时额度用完了" });
+    if (state.attention) items.push({ lv: "busy", blink: true, text: state.attention.text });  // Claude Code 弹着权限确认等你（钩子记的）
     if (pend) items.push({ lv: "busy", blink: true, text: pend.message });
     if (n > 0 && ss.busy) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });  // 开着但在等你输入的不算
     if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${Math.round(p5)}%，快满了` });

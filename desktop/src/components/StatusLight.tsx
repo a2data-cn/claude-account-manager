@@ -17,6 +17,7 @@ export function lightItems(state: State): Item[] {
   if (state.warning) items.push({ lv: "bad", text: state.warning });
   if (h?.level === "error") items.push({ lv: "bad", text: `当前号${issue?.text ? "：" + issue.text : "有问题"}`, tip: issue?.advice });
   if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: "5 小时额度用完了" });
+  if (state.attention) items.push({ lv: "busy", blink: true, text: state.attention.text }); // Claude Code 弹着权限确认等你（钩子记的）
   if (state.pending_switch) items.push({ lv: "busy", blink: true, text: state.pending_switch.message });
   if (n !== null && n > 0 && working) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });
   if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${Math.round(p5)}%，快满了` });
