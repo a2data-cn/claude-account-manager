@@ -262,6 +262,7 @@ button { font: inherit; color: inherit; }
     return isNaN(ms) ? "" : ms <= 0 ? "已重置" : `${dur(ms)}后重置`;
   }
   const passed = (w) => !!(w && w.resets_at && new Date(w.resets_at) <= Date.now());  // 窗口早该重置了：存着的数字是旧的，刷新一次才知道现在多少
+  const noReset = (p) => (p === 0 ? "还没开始用，不计时" : "重置时间未知");  // 接口没给重置时间：0% 是这个窗口还没开始（第一条消息才开始计时），不是不知道
   function ago(iso) {
     if (!iso) return "还没有";
     const s = (Date.now() - new Date(iso)) / 1000;
@@ -305,7 +306,8 @@ button { font: inherit; color: inherit; }
   function meter(label, w, tail) {
     const p = pct(w);
     if (p === null) return "";
-    return `<div class="meter"><div class="lab"><span>${esc(label)}${tail ? ` · ${esc(tail)}` : ""}</span><b>${p.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p)}" style="width:${p}%"></i></div></div>`;
+    const t = tail || (p === 0 ? noReset(0) : "");  // 没有重置时间又是 0%：这个窗口还没开始
+    return `<div class="meter"><div class="lab"><span>${esc(label)}${t ? ` · ${esc(t)}` : ""}</span><b>${p.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p)}" style="width:${p}%"></i></div></div>`;
   }
   // 本机今天的消耗（Claude Code 的本地记录，按 API 价折算）：tokens、缓存命中率、折算金额
   function todayStats(cur) {
@@ -363,7 +365,7 @@ button { font: inherit; color: inherit; }
     const win = (label, w) => {
       const p = pct(w);
       if (p === null) return null;
-      return [label, passed(w) ? `上次 ${p.toFixed(0)}%，已重置，刷新看最新` : `${p.toFixed(0)}% · ${resetShort(w.resets_at) || "重置时间未知"}`, !passed(w) && p >= 90 ? "hot" : ""];
+      return [label, passed(w) ? `上次 ${p.toFixed(0)}%，已重置，刷新看最新` : `${p.toFixed(0)}% · ${resetShort(w.resets_at) || noReset(p)}`, !passed(w) && p >= 90 ? "hot" : ""];
     };
     const rows = [
       ["邮箱", a.email || "–"],
@@ -475,7 +477,7 @@ button { font: inherit; color: inherit; }
       if (p === null) return "";
       const old = passed(w);
       return `<span class="m"><span class="lab"><span>${label}</span>${old ? `<b class="off">已重置</b>` : `<b>${p.toFixed(0)}%</b>`}</span>
-        <span class="bar"><i class="${old ? "" : lv(p)}" style="width:${old ? 0 : p}%"></i></span><span class="when">${old ? "点下面的刷新看最新" : esc(resetShort(w.resets_at) || "重置时间未知")}</span></span>`;
+        <span class="bar"><i class="${old ? "" : lv(p)}" style="width:${old ? 0 : p}%"></i></span><span class="when">${old ? "点下面的刷新看最新" : esc(resetShort(w.resets_at) || noReset(p))}</span></span>`;
     };
     const card = (a) => {
       const uu = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), f = uu.five_hour, q5 = passed(f) ? null : pct(f);

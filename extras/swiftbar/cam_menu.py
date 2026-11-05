@@ -209,9 +209,13 @@ def quota_ring(p, dark, size=16, thick=2.5):
 
 
 ICON_W = ICON_H = 16  # 菜单栏图标（点）：四格信号
-LAMP_W, LAMP_H = 10, 18  # 红绿灯样式：竖的灯体，比信号格高一点，三盏灯才画得够大
+LAMP_W, LAMP_H = 12, 20  # 红绿灯样式：竖的灯体，比信号格宽一点、高一点（SwiftBar 自己的图标是 21 点），三盏灯各 5.6 点才看得清
 DIM = ((0, 0, 0, 0.22), (255, 255, 255, 0.3))  # 没亮的信号格
-BODY = ((58, 58, 64, 0.88), (205, 205, 212, 0.6))  # 红绿灯样式的灯体，浅色 / 深色模式
+# 红绿灯样式的灯体、灯体的边、没亮的灯座，浅色 / 深色菜单栏各一组。灯体不透明：菜单栏本身是半透明的，半透明的灯体会和壁纸混成
+# 一团灰，边缘看着就糊；边是 0.5 点（Retina 上正好 1 像素）的一圈反差色，在什么壁纸上轮廓都清楚；没亮的灯是灰底透一点灯的颜色
+BODY = ((48, 48, 54, 1.0), (238, 238, 243, 1.0))
+EDGE = ((112, 112, 122, 1.0), (150, 150, 160, 1.0))
+SOCKET = ((92, 92, 100, 1.0), (168, 168, 178, 1.0))
 ICON_STYLES = (("bars", "信号格（像手机信号）"), ("lamp", "红绿灯（竖的三盏灯）"))
 
 
@@ -243,13 +247,17 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         glow = 1.0
     if style == "lamp":
         W, H = LAMP_W * SCALE, LAMP_H * SCALE
-        br, lr, cx = 3.5 * SCALE, 2.3 * SCALE, W / 2  # 灯体圆角、灯的半径
-        lamps = (("bad", 3.5 * SCALE), ("busy", 9.0 * SCALE), ("ok", 14.5 * SCALE))  # 红、橙、绿三盏灯的圆心 y
-        base = BODY[dark]
+        br, lr, cx = 4.5 * SCALE, 2.8 * SCALE, W / 2  # 灯体圆角、灯的半径
+        lamps = (("bad", 3.6 * SCALE), ("busy", 10.0 * SCALE), ("ok", 16.4 * SCALE))  # 红、橙、绿三盏灯的圆心 y
+        base, socket = BODY[dark], SOCKET[dark]
 
-        def body(px, py):
-            qx, qy = min(max(px, br), W - br), min(max(py, br), H - br)
-            return (px - qx) ** 2 + (py - qy) ** 2 <= br * br
+        def rrect(inset, r):  # 圆角矩形，四边往里缩 inset
+            def inside(px, py):
+                if not (inset <= px <= W - inset and inset <= py <= H - inset):
+                    return False
+                qx, qy = min(max(px, inset + r), W - inset - r), min(max(py, inset + r), H - inset - r)
+                return (px - qx) ** 2 + (py - qy) ** 2 <= r * r
+            return inside
 
         def lamp(cy, r):
             return lambda px, py: (px - cx) ** 2 + (py - cy) ** 2 <= r * r
@@ -258,16 +266,17 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         for lv, cy in lamps:
             color = (*FILL[{"busy": "warn"}.get(lv, lv)][dark], 1.0)
             if lv != level:
-                bulbs.append((lamp(cy, lr), _mix(base, color, 0.3)))  # 没亮的灯只透一点颜色
+                bulbs.append((lamp(cy, lr), _mix(socket, color, 0.35)))  # 没亮的灯：灰底透一点颜色
                 continue
             if kind == "blink":
                 on = 1.0 if glow else 0.6  # 暗的那拍也看得见是哪盏
             else:
                 on = 0.75 + 0.25 * glow  # 呼吸：灯一直亮着，只在 75% 和 100% 之间
             if kind and glow > 0.05:  # 光晕随呼吸变大变亮，不出灯体
-                halo.append((lamp(cy, lr + 1.3 * SCALE * glow), _mix(base, color, 0.4 * glow)))
+                halo.append((lamp(cy, lr + 1.0 * SCALE * glow), _mix(base, color, 0.4 * glow)))
             bulbs.append((lamp(cy, lr * (1 + 0.12 * glow)), _mix(base, color, on)))
-        return _png(W, H, _raster(W, H, [(body, base)] + halo + bulbs))
+        rim = 0.5 * SCALE
+        return _png(W, H, _raster(W, H, [(rrect(0, br), EDGE[dark]), (rrect(rim, br - rim), base)] + halo + bulbs))
     S = ICON_H * SCALE
     if kind == "pulse":
         fill = 1 + phase * 3  # 亮的格数 1 → 4 再从头来，每一格渐亮

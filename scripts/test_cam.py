@@ -1188,19 +1188,20 @@ class CamTest(unittest.TestCase):
 
         S = cam_menu.SCALE
         self.assertEqual(S, 2)
-        self.assertEqual((cam_menu.icon_size("lamp"), cam_menu.icon_size("bars")), ((10, 18), (16, 16)))
+        self.assertEqual((cam_menu.icon_size("lamp"), cam_menu.icon_size("bars")), ((12, 20), (16, 16)))
         orange = lambda px: px[0] >= 200 and 100 <= px[1] <= 200 and px[2] <= 110 and px[3] >= 220  # noqa: E731  深色模式的灯体是浅灰，橙灯掺一点灰
         for kind, phase in (("", 0), ("pulse", 0), ("pulse", 0.3), ("pulse", 0.5), ("blink", 0), ("blink", 0.5)):
             for dark in (0, 1):
                 w, h, px = pixels(cam_menu.status_icon(dark, "busy", kind, phase, "lamp"))
-                self.assertEqual((w, h), (10 * S, 18 * S))
-                mid = px(5 * S, 9 * S)  # 中间那盏（橙）的圆心：每一帧都是橙的，闪到暗的那拍也只是暗一点
+                self.assertEqual((w, h), (12 * S, 20 * S))
+                mid = px(6 * S, 10 * S)  # 中间那盏（橙）的圆心：每一帧都是橙的，闪到暗的那拍也只是暗一点
                 dim = kind == "blink" and phase >= 0.5
                 self.assertTrue(orange(mid) if not dim else mid[0] >= 160 and mid[0] - mid[2] >= 100 and mid[3] >= 200, (kind, phase, dark, mid))
-                top = px(5 * S, round(3.5 * S))  # 上面那盏（红）没亮：不是鲜红
+                top = px(6 * S, round(3.6 * S))  # 上面那盏（红）没亮：不是鲜红，但和灯体分得开
                 self.assertLess(top[0] - top[1], 120, (kind, phase, dark, top))
+                self.assertGreater(abs(top[0] - cam_menu.BODY[dark][0]), 30, (kind, phase, dark, top))
         w, h, px = pixels(cam_menu.status_icon(0, "ok", "", 0, "lamp"))
-        g = px(5 * S, round(14.5 * S))
+        g = px(6 * S, round(16.4 * S))
         self.assertTrue(g[1] >= 180 and g[0] <= 110, g)  # 空闲：下面那盏绿灯亮
         # 信号格呼吸到一半：前两格全亮、第三格半亮、第四格没亮
         w, h, px = pixels(cam_menu.status_icon(0, "busy", "pulse", 0.5, "bars"))
@@ -1218,9 +1219,9 @@ class CamTest(unittest.TestCase):
         self.assertEqual(cam_menu.set_icon_from_menu(store, "lamp"), 0)
         lines = []
         cam_menu.render(store, {}, out=lines.append, rich=True)
-        self.assertIn(" width=10 height=18", lines[0])
+        self.assertIn(" width=12 height=20", lines[0])
         png = base64.b64decode(re.search(r"image=(\S+)", lines[0]).group(1).split(",")[0])
-        self.assertEqual(struct.unpack(">II", png[16:24]), (10 * S, 18 * S))
+        self.assertEqual(struct.unpack(">II", png[16:24]), (12 * S, 20 * S))
 
     # ---- 锁
 

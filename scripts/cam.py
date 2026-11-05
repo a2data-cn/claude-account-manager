@@ -3688,6 +3688,8 @@ def save_serve_state(store, st, refresh_min):
 def serve(store, host, port, auto_refresh_min):
     token = server_token(store)
     srv = ThreadingServer((host, port), make_handler(store, token))
+    if not _SESSION_CACHE[0]:  # 先在后台把 claude 会话数数好：卡片第一次打开时 /api/state 不用等 ps
+        threading.Thread(target=session_count, daemon=True).start()
     print(f"Web 面板已启动（Ctrl+C 退出）")
     print(f"  本机：  http://127.0.0.1:{port}/?t={token}")
     if host == "0.0.0.0":
