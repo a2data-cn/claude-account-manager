@@ -586,7 +586,7 @@ def status_light(store, data, accs, active, st):
     if pend:
         items.append(("busy", pend["message"], "blink"))
     n = cam.session_count(max_age=SESSION_MAX_AGE)
-    if n:
+    if n and cam.session_busy():  # 开着但在等你输入的不算工作中
         items.append(("busy", f"工作中 · {n} 个 claude 会话在跑", "pulse"))
     if p5 is not None and p5 >= 90:
         items.append(("busy", f"5 小时额度 {p5:.0f}%，快满了", False))
@@ -601,7 +601,7 @@ def status_light(store, data, accs, active, st):
         if ha["level"] == "error":
             items.append(("busy", f"{a.get('label') or a.get('email') or '未命名'}：{ha['issues'][0]['text'] if ha['issues'] else ha['label']}", False))
     if not items:
-        return "ok", "空闲 · 一切正常" if n == 0 else "一切正常", "", 0
+        return "ok", f"空闲 · {n} 个 claude 会话开着" if n else "空闲 · 一切正常", "", 0
     level, text, blink = items[0]
     return level, text, blink, len(items) - 1
 

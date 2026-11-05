@@ -95,7 +95,7 @@ export interface State {
   region?: RegionInfo | null; // 后台上次检测到的出口地区，只用于提示
   risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
-  sessions?: { count: number } | null; // 本机正在跑的 claude 会话数（标题旁的红绿灯用）
+  sessions?: { count: number; busy?: boolean } | null; // 本机开着的 claude 会话数，以及有没有真的在执行任务（标题旁的红绿灯用）
 }
 
 /** 环境风险评分：满分 100，≥90 低 / 70–89 中 / <70 高。只是把提醒汇总成一个数 */

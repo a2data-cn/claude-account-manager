@@ -13,11 +13,12 @@ export function lightItems(state: State): Item[] {
   const p5 = cur?.usage?.five_hour?.utilization ?? null;
   const p7 = cur?.usage?.seven_day?.utilization ?? null;
   const n = state.sessions?.count ?? null;
+  const working = !!state.sessions?.busy; // 开着但在等你输入的不算工作中
   if (state.warning) items.push({ lv: "bad", text: state.warning });
   if (h?.level === "error") items.push({ lv: "bad", text: `当前号${issue?.text ? "：" + issue.text : "有问题"}`, tip: issue?.advice });
   if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: "5 小时额度用完了" });
   if (state.pending_switch) items.push({ lv: "busy", blink: true, text: state.pending_switch.message });
-  if (n !== null && n > 0) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });
+  if (n !== null && n > 0 && working) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });
   if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${Math.round(p5)}%，快满了` });
   else if (p7 !== null && p7 >= 90) items.push({ lv: "busy", text: `7 天额度 ${Math.round(p7)}%，快满了` });
   if (h?.level === "warn") items.push({ lv: "busy", text: `当前号：${issue?.text || h.label || "要注意"}`, tip: issue?.advice });
@@ -26,7 +27,7 @@ export function lightItems(state: State): Item[] {
       items.push({ lv: "busy", text: `${a.label || a.email || "未命名"}：${a.health.issues?.[0]?.text || "登录有问题"}` });
     }
   }
-  if (!items.length) items.push({ lv: "ok", text: n === 0 ? "空闲 · 一切正常" : "一切正常" });
+  if (!items.length) items.push({ lv: "ok", text: n !== null && n > 0 ? `空闲 · ${n} 个 Claude Code 会话开着` : "空闲 · 一切正常" });
   return items;
 }
 

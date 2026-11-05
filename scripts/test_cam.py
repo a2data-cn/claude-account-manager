@@ -1006,8 +1006,16 @@ class CamTest(unittest.TestCase):
         # 红绿灯：没会话在跑、没问题时标题只有一行（右下角绿点），菜单第一行写“空闲 · 一切正常”
         self.assertEqual(lines[1], "---")
         self.assertTrue(lines[2].startswith("● 空闲 · 一切正常 | size=12 color=" + cam_menu.GREEN), lines[2])
-        # 有 claude 会话在跑：橙点，标题两行实心 / 空心交替（SwiftBar 每 5 秒换一张），第二行不进下拉菜单、不带快捷键
-        with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude"), (2, "claude")]):
+        # 开着 claude 但没在执行（等你输入）：还是绿的，标题一行，第一行写着几个会话开着
+        with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude"), (2, "claude")]), \
+                mock.patch.object(self.cam, "claude_activity", return_value=False):
+            idle = []
+            cam_menu.render(store, {}, out=idle.append, rich=True)
+        self.assertEqual(idle[1], "---", idle[:3])
+        self.assertTrue(idle[2].startswith("● 空闲 · 2 个 claude 会话开着 | size=12 color=" + cam_menu.GREEN), idle[2])
+        # 有 claude 会话真在执行任务：橙点，标题两行实心 / 空心交替（SwiftBar 每 5 秒换一张），第二行不进下拉菜单、不带快捷键
+        with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude"), (2, "claude")]), \
+                mock.patch.object(self.cam, "claude_activity", return_value=True):
             busy = []
             cam_menu.render(store, {}, out=busy.append, rich=True)
         self.assertEqual(busy[2], "---", busy[:3])
@@ -1021,7 +1029,8 @@ class CamTest(unittest.TestCase):
         # 流式模式：一帧就是整份菜单，标题只有一行；工作中时相邻两帧的图标不一样（橙灯呼吸），空闲时每帧都一样
         cam_menu.STREAMING = True
         try:
-            with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude")]):
+            with mock.patch.object(self.cam, "running_claude_processes", return_value=[(1, "claude")]), \
+                    mock.patch.object(self.cam, "claude_activity", return_value=True):
                 f0, f1 = cam_menu.stream_frame(store, {}, 0.0), cam_menu.stream_frame(store, {}, 0.25)
             self.assertEqual(cam_menu.LAST_LIGHT[2], "pulse")
             self.assertNotEqual(f0, f1)
@@ -1226,6 +1235,49 @@ class CamTest(unittest.TestCase):
         self.assertIn(" width=12 height=20", lines[0])
         png = base64.b64decode(re.search(r"image=(\S+)", lines[0]).group(1).split(",")[0])
         self.assertEqual(struct.unpack(">II", png[16:24]), (12 * S, 20 * S))
+
+    def test_claude_activity(self):
+        """红绿灯只在 claude 真的在执行任务时闪黄：最近 20 秒内写过会话记录，或者进程（含子进程）在吃 CPU；开着等输入不算。"""
+        cam = self.cam
+        self.assertEqual(cam._cpu_seconds("0:01.23"), 1.23)
+        self.assertEqual(cam._cpu_seconds("01:02:03"), 3723.0)
+        self.assertEqual(cam._cpu_seconds("1-00:00:01"), 86401.0)
+        self.assertEqual(cam._cpu_seconds("x"), 0.0)
+        root = os.path.join(cam.claude_config_dir(), "projects", "p", "sub")
+        os.makedirs(root, exist_ok=True)
+        path = os.path.join(root, "s.jsonl")
+        with open(path, "w") as f:
+            f.write("{}\n")
+        reset = lambda: cam._ACTIVITY.update(t=0.0, cpu=None, busy=False)  # noqa: E731
+        with mock.patch.object(cam, "claude_cpu_seconds", return_value={1: 0.0}):
+            reset()
+            self.assertTrue(cam.claude_activity([1], max_age=0))  # 刚写过记录
+            old = time.time() - 60
+            os.utime(path, (old, old))
+            reset()
+            self.assertFalse(cam.claude_activity([1], max_age=0))  # 记录是一分钟前的，CPU 第一次采样比不了
+            self.assertFalse(cam.claude_activity([], max_age=0))  # 没有进程
+        # CPU：两次采样之间进程（含子进程）用了 1 秒 CPU，10 秒里就是 10%，算在执行；新出现的进程（上次没有）不比
+        cam._ACTIVITY.update(t=time.monotonic() - 10, cpu={1: 5.0}, busy=False)
+        with mock.patch.object(cam, "claude_cpu_seconds", return_value={1: 6.0, 2: 100.0}):
+            self.assertTrue(cam.claude_activity([1, 2], max_age=0))
+        cam._ACTIVITY.update(t=time.monotonic() - 10, cpu={1: 5.0}, busy=False)
+        with mock.patch.object(cam, "claude_cpu_seconds", return_value={1: 5.1, 2: 100.0}):
+            self.assertFalse(cam.claude_activity([1, 2], max_age=0))  # 1%：闲着
+            self.assertFalse(cam.claude_activity([1, 2], max_age=5))  # 缓存里的结论
+        real = cam.claude_cpu_seconds([os.getpid()])  # 真的采一次：本进程的 CPU 时间，格式都认得
+        if real is not None:
+            self.assertGreaterEqual(real[os.getpid()], 0.0)
+        # session_count 数进程时一起判断，session_busy 给面板和红绿灯用
+        cam._SESSION_CACHE[:] = [0.0, 0]
+        with mock.patch.object(cam, "running_claude_processes", return_value=[(1, "claude")]), \
+                mock.patch.object(cam, "claude_activity", return_value=True):
+            self.assertEqual(cam.session_count(max_age=0), 1)
+            self.assertTrue(cam.session_busy())
+        with mock.patch.object(cam, "running_claude_processes", return_value=[]):
+            self.assertEqual(cam.session_count(max_age=0), 0)
+            self.assertFalse(cam.session_busy())
+        reset()
 
     # ---- 锁
 
@@ -4007,7 +4059,7 @@ class UpdateTest(unittest.TestCase):
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + token})
             with opener.open(req) as r:
                 st = json.load(r)
-            self.assertEqual(st["sessions"], {"count": 0})
+            self.assertEqual(st["sessions"], {"count": 0, "busy": False})
             self.assertEqual(st["code_stamp"], self.cam.CODE_STAMP)  # 插件据此判断后台 cam serve 是不是旧代码
             self.assertFalse(self.cam.serve_outdated(port, token))
             self.assertFalse(self.cam.serve_outdated(1, token))  # 连不上不算旧

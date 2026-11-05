@@ -2946,7 +2946,7 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "sessions": {"count": session_count()}, "generated_at": now_iso()}
+            "risk_score": risk_score(risks), "sessions": {"count": session_count(), "busy": session_busy()}, "generated_at": now_iso()}
 
 
 _SESSION_CACHE = [0.0, 0]  # [上次数的时间, 个数]
@@ -2955,7 +2955,9 @@ _SESSION_COUNTING = threading.Lock()  # 后台线程正在数：同一时间只�
 
 def _count_sessions(now):
     try:
-        _SESSION_CACHE[:] = [now, len(running_claude_processes())]
+        procs = running_claude_processes()
+        _SESSION_BUSY[0] = claude_activity([p for p, _ in procs], max_age=0)
+        _SESSION_CACHE[:] = [now, len(procs)]
     except Exception:  # noqa: BLE001  数不出来就沿用上次的
         _SESSION_CACHE[0] = now
 
@@ -2985,6 +2987,118 @@ def session_count(max_age=20):
         _SESSION_CACHE[0] = now  # 先把时间记上：数的这几百毫秒里再来的请求直接拿旧数，不再起线程
         threading.Thread(target=_count_sessions_bg, args=(now,), daemon=True).start()
     return last
+
+
+def session_busy():
+    """session_count 数到的会话里有没有真的在执行任务的（和 session_count 一起更新，先调它）。"""
+    return _SESSION_BUSY[0]
+
+
+# ---- 本机 Claude Code 是不是真的在执行任务（不只是开着窗口等你输入）：红绿灯只在真执行时闪黄
+ACTIVE_WINDOW = 20  # 秒：会话记录文件这么久内写过就算在执行（跑着的时候每条消息、每个工具结果都往里追加；等你输入时不写）
+CPU_BUSY = 0.02  # claude 进程和它的子进程这段时间平均占 CPU 超过 2% 就算在执行（算 token、画界面、跑工具）；闲着等输入时接近 0
+_SESSION_BUSY = [False]
+_ACTIVITY = {"t": 0.0, "cpu": None, "busy": False}  # 上次采样：时间、每个 claude 进程（含子进程）的累计 CPU 秒、结论
+_ACTIVITY_LOCK = threading.Lock()
+
+
+def _cpu_seconds(text):
+    """ps 的 cputime 换成秒：macOS 是 m:ss.cc，Linux 是 [d-]hh:mm:ss。"""
+    days = 0
+    if "-" in text:
+        d, text = text.split("-", 1)
+        days = int(d) if d.isdigit() else 0
+    total = 0.0
+    try:
+        for part in text.split(":"):
+            total = total * 60 + float(part)
+    except ValueError:
+        return 0.0
+    return days * 86400 + total
+
+
+def claude_cpu_seconds(pids):
+    """每个进程连同它的子孙进程累计用掉的 CPU 秒数 {pid: 秒}。Linux 读 /proc（精确到 10 毫秒），macOS 用 ps；
+    Windows 不支持，返回 None。"""
+    if IS_WIN:
+        return None
+    children, cpu = {}, {}
+    try:
+        if os.path.isdir("/proc/self"):
+            tick = os.sysconf("SC_CLK_TCK")
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{pid}/stat") as f:
+                        stat = f.read()
+                except OSError:
+                    continue
+                fields = stat[stat.rfind(")") + 2:].split()  # 进程名后面依次是 state ppid … utime stime（第 14、15 个字段）
+                if len(fields) < 13:
+                    continue
+                children.setdefault(int(fields[1]), []).append(int(pid))
+                cpu[int(pid)] = (int(fields[11]) + int(fields[12])) / tick
+        else:
+            r = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,cputime="], capture_output=True, text=True, timeout=10)
+            for line in r.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+                    children.setdefault(int(parts[1]), []).append(int(parts[0]))
+                    cpu[int(parts[0])] = _cpu_seconds(parts[2])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    out = {}
+    for root in pids:
+        total, stack, seen = 0.0, [root], set()
+        while stack:
+            p = stack.pop()
+            if p in seen:
+                continue
+            seen.add(p)
+            total += cpu.get(p, 0.0)
+            stack.extend(children.get(p, []))
+        out[root] = total
+    return out
+
+
+def transcript_written_ago():
+    """本机 Claude Code 会话记录（~/.claude/projects 下的 .jsonl，含子目录）最近一次写入是几秒前；没有记录时 None。"""
+    newest, stack = 0.0, [os.path.join(claude_config_dir(), "projects")]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.name.endswith(".jsonl"):
+                            newest = max(newest, e.stat().st_mtime)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return (time.time() - newest) if newest else None
+
+
+def claude_activity(pids, max_age=5):
+    """这些 claude 进程是不是真的在执行任务（不只是开着等你输入）：最近 ACTIVE_WINDOW 秒内往会话记录里写过，或者进程和
+    子进程这段时间在吃 CPU。结果缓存 max_age 秒；CPU 占用要两次采样才算得出（只比两次都在的进程），第一次只看记录文件。"""
+    now = time.monotonic()
+    with _ACTIVITY_LOCK:
+        if _ACTIVITY["t"] and now - _ACTIVITY["t"] < max_age:
+            return _ACTIVITY["busy"]
+        if not pids:
+            _ACTIVITY.update(t=now, cpu=None, busy=False)
+            return False
+        written = transcript_written_ago()
+        cpu, last, dt = claude_cpu_seconds(pids), _ACTIVITY["cpu"], now - _ACTIVITY["t"]
+        rate = None
+        if cpu is not None and last is not None and dt >= 1:
+            rate = sum(max(0.0, cpu[p] - last[p]) for p in cpu if p in last) / dt
+        busy = (written is not None and written < ACTIVE_WINDOW) or (rate is not None and rate > CPU_BUSY)
+        _ACTIVITY.update(t=now, cpu=cpu, busy=busy)
+        return busy
 
 
 KIND_NAMES = {"claude_code": "Claude Code", "claude_web": "claude.ai 网页版", "claude_desktop": "Claude 桌面版", "api": "API Key"}

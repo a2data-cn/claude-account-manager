@@ -901,7 +901,7 @@ pub fn roll_renewals_at(data: &mut Value, today: chrono::NaiveDate) {
 
 // ---------------------------------------------------------------- 本地 JSONL 统计
 
-fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+pub(crate) fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     if depth > 8 {
         return;
     }

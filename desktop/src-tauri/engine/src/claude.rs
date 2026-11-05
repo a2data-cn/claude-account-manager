@@ -1114,3 +1114,20 @@ pub fn apply_pending_switch_at(
     let r = switch_account(store, &target)?;
     Ok(if r.changed { Some((r, reason)) } else { None })
 }
+
+/// 本机 Claude Code 是不是真的在执行任务（不只是开着等你输入）：会话记录（projects 下的 .jsonl）最近 20 秒内写过。
+/// 跑着的时候每条消息、每个工具结果都往里追加，等你输入时不写。和 cam.py 的 claude_activity 对应，只是不采 CPU
+/// （桌面版的状态一次一算，没有上一次的样本可比）。
+pub fn claude_busy() -> bool {
+    let mut files = Vec::new();
+    super::usage::walk_jsonl(&claude_config_dir().join("projects"), &mut files, 0);
+    let now = std::time::SystemTime::now();
+    files.iter().any(|p| {
+        fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .map(|d| d.as_secs() < 20)
+            .unwrap_or(false)
+    })
+}

@@ -389,6 +389,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "linux" => "Linux",
         o => o,
     };
+    let procs = running_claude_processes();
     json!({
         "version": VERSION, "backend": "desktop", "host": host, "platform": platform,
         "active": data.get("active").cloned().unwrap_or(json!({})), "accounts": accs,
@@ -398,7 +399,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "region": super::health::region_view(data),
         "risks": risks,
         "risk_score": risk_score,
-        "sessions": json!({ "count": running_claude_processes().len() }),  // 标题旁的红绿灯：有会话在跑就一呼一吸
+        "sessions": json!({ "count": procs.len(), "busy": !procs.is_empty() && claude_busy() }),  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算
         "generated_at": now_iso()
     })
 }
