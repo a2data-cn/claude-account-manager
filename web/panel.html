@@ -76,10 +76,22 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .wrap { max-width: 880px; margin: 0 auto; padding: 16px 16px 40px; }
 
 header.top { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-header.top h1 { display: flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+header.top h1 { display: flex; flex: none; align-items: center; gap: 9px; font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -.01em; white-space: nowrap; }
 .logo { width: 24px; height: 24px; flex: none; border-radius: 6px; box-shadow: 0 1px 2px rgba(60, 45, 25, .18); }
 .theme-btn { min-width: 2.4em; font-size: 13px; }
 header.top .host { color: var(--muted); font-size: 12px; }
+/* 标题旁的红绿灯：规则和卡片小面板、菜单栏图标一致——绿空闲、黄工作中 / 要注意 / 等你确认、红要处理；悬停看全部 */
+header.top .light { display: inline-flex; align-items: center; gap: 7px; max-width: 34%; padding: 3px 10px 3px 8px; border-radius: 999px; font-size: 12px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
+.light .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.light .more { flex: none; color: var(--muted); font-size: 11px; }
+.light .led { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
+.light.busy .led { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.light.bad .led { background: var(--hot); box-shadow: 0 0 0 3px var(--hot-soft); }
+.light.pulse .led { animation: led-breathe 2s ease-in-out infinite; }  /* 有会话在跑：一呼一吸，和菜单栏图标一个节奏 */
+.light.blink .led { animation: led-blink 1s step-end infinite; }  /* 等会话结束再切：一亮一暗 */
+@keyframes led-breathe { 50% { box-shadow: 0 0 0 6px var(--warn-soft); transform: scale(1.12); } }
+@keyframes led-blink { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .light .led { animation: none; } }
 .spacer { flex: 1; }
 
 .btn {
@@ -218,6 +230,7 @@ header.top .host { color: var(--muted); font-size: 12px; }
   :root { --control-h: 36px; }
   header.top h1 { font-size: 18px; }
   header.top .host { display: none; }
+  header.top .light { order: 9; max-width: 100%; }
   header.top { flex-wrap: wrap; }
 }
 
@@ -556,6 +569,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 <div class="wrap">
   <header class="top">
     <h1><svg class="logo" aria-hidden="true" viewBox="0 0 32 32"><rect width="32" height="32" rx="7.7" fill="#D97757"/><circle cx="16" cy="16" r="6.72" fill="none" stroke="#FFF6EE" stroke-width="4" stroke-linecap="round" stroke-dasharray="31.67 42.22" transform="rotate(45 16 16)"/></svg>Claude 账号</h1>
+    <span class="light" id="light" role="status" hidden></span>
     <span class="host" id="host"></span>
     <span class="spacer"></span>
     <button class="btn quiet theme-btn" id="btn-theme" type="button" title="主题：跟随系统">◐</button>
@@ -664,7 +678,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-signal"/></svg></span>菜单栏图标<span class="hint">macOS</span></h3>
         <ul class="lgd">
           <li><span class="sm"><span class="mb"><i class="g"></i>个人 12%</span></span><span class="t"><b>绿</b>空闲，一切正常</span></li>
-          <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话在跑（信号格一格格涨）、额度快满、等你确认切换（一闪一闪）</span></li>
+          <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话在跑（信号格一格格涨 / 三盏灯的光晕一呼一吸）、额度快满、等你确认切换（信号格一闪一闪 / 三盏灯一亮一暗）</span></li>
           <li><span class="sm"><span class="mb"><i class="r"></i>个人 93%</span></span><span class="t"><b>红</b>要处理：登录失效、额度用完、后台出错</span></li>
         </ul>
         <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
@@ -1237,8 +1251,36 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="checkup"]):not([data-act="env-fold"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
       .forEach((button) => { button.disabled = accountBusy; });
   }
+  // 标题旁的红绿灯：规则和卡片小面板、菜单栏图标一致。只显示最要紧的一条，其余在悬停提示里
+  function renderLight() {
+    const el = $("#light");
+    const cur = state.accounts.find((a) => a.is_active && a.kind === "claude_code");
+    const h = (cur && cur.health) || {}, u = (cur && cur.usage) || {}, issue = (h.issues || [])[0] || {};
+    const win = (w) => (w && typeof w.utilization === "number" ? w.utilization : null);
+    const p5 = win(u.five_hour), p7 = win(u.seven_day);
+    const n = state.sessions ? state.sessions.count : null, pend = state.pending_switch;
+    const items = [];
+    if (state.warning) items.push({ lv: "bad", text: state.warning });
+    if (h.level === "error") items.push({ lv: "bad", text: `当前号${issue.text ? "：" + issue.text : "有问题"}`, tip: issue.advice });
+    if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: "5 小时额度用完了" });
+    if (pend) items.push({ lv: "busy", blink: true, text: pend.message });
+    if (n > 0) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });
+    if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${Math.round(p5)}%，快满了` });
+    else if (p7 !== null && p7 >= 90) items.push({ lv: "busy", text: `7 天额度 ${Math.round(p7)}%，快满了` });
+    if (h.level === "warn") items.push({ lv: "busy", text: `当前号：${issue.text || h.label || "要注意"}`, tip: issue.advice });
+    for (const a of state.accounts) {
+      if ((!cur || a.id !== cur.id) && (a.health || {}).level === "error") items.push({ lv: "busy", text: `${a.label || a.email || "未命名"}：${((a.health.issues || [])[0] || {}).text || "登录有问题"}` });
+    }
+    if (!items.length) items.push({ lv: "ok", text: n === 0 ? "空闲 · 一切正常" : "一切正常" });
+    const top = items[0];
+    el.className = `light ${top.lv}${top.pulse ? " pulse" : ""}${top.blink ? " blink" : ""}`;
+    el.title = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
+    el.innerHTML = `<i class="led"></i><span class="txt">${esc(top.text)}</span>${items.length > 1 ? `<span class="more">+${items.length - 1}</span>` : ""}`;
+    el.hidden = false;
+  }
   function render() {
     const list = $("#list");
+    renderLight();
     const reg = state.region || {};
     const regTxt = reg.status === "supported" ? `<span class="reg-ok"> · 出口 ${esc(reg.loc)} ✓</span>`
       : reg.status === "unsupported" ? `<span class="reg-bad"> · 出口 ${esc(reg.loc)} ⚠ 不在支持名单</span>`

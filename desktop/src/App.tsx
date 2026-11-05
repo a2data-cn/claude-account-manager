@@ -20,6 +20,7 @@ import { Privacy } from "./components/Privacy";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
+import { StatusLight } from "./components/StatusLight";
 import type { Account, RegionInfo, ServiceCheckItem, State, SwitchResult } from "./types";
 
 type Tab = "accounts" | "vault" | "settings";
@@ -532,6 +533,7 @@ export default function App() {
     <div className="wrap">
       <header className="top">
         <h1>Claude 账号</h1>
+        {state && <StatusLight state={state} />}
         {state && (
           <span className="host">
             {state.host}（{state.platform}）

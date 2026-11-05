@@ -1169,6 +1169,59 @@ class CamTest(unittest.TestCase):
         cam_menu.render(store, {}, out=lines.append, rich=True)
         self.assertNotIn("shortcut=", "\n".join(lines))
 
+    def test_menubar_lamp_icon(self):
+        """红绿灯（三盏灯）样式：图标 10×18 点、按 2 倍像素画（SwiftBar 在 Retina 上按 2 倍重画，一个图像素对一个屏幕像素）；
+        呼吸和闪的每一帧亮着的灯都看得清（不会暗到和灯体一个颜色），没亮的灯只是淡淡的；信号格呼吸时每格渐亮。"""
+        import zlib
+        cam_menu = self._menu_plugin()
+
+        def pixels(png):  # 解开自己写的 PNG：每行开头一个过滤字节 0，后面是 RGBA
+            w, h = struct.unpack(">II", png[16:24])
+            pos, idat = 8, b""
+            while pos < len(png):
+                n, tag = struct.unpack(">I4s", png[pos:pos + 8])
+                if tag == b"IDAT":
+                    idat += png[pos + 8:pos + 8 + n]
+                pos += 12 + n
+            raw, stride = zlib.decompress(idat), 1 + w * 4
+            return w, h, lambda x, y: tuple(raw[y * stride + 1 + x * 4:y * stride + 5 + x * 4])
+
+        S = cam_menu.SCALE
+        self.assertEqual(S, 2)
+        self.assertEqual((cam_menu.icon_size("lamp"), cam_menu.icon_size("bars")), ((10, 18), (16, 16)))
+        orange = lambda px: px[0] >= 200 and 100 <= px[1] <= 200 and px[2] <= 110 and px[3] >= 220  # noqa: E731  深色模式的灯体是浅灰，橙灯掺一点灰
+        for kind, phase in (("", 0), ("pulse", 0), ("pulse", 0.3), ("pulse", 0.5), ("blink", 0), ("blink", 0.5)):
+            for dark in (0, 1):
+                w, h, px = pixels(cam_menu.status_icon(dark, "busy", kind, phase, "lamp"))
+                self.assertEqual((w, h), (10 * S, 18 * S))
+                mid = px(5 * S, 9 * S)  # 中间那盏（橙）的圆心：每一帧都是橙的，闪到暗的那拍也只是暗一点
+                dim = kind == "blink" and phase >= 0.5
+                self.assertTrue(orange(mid) if not dim else mid[0] >= 160 and mid[0] - mid[2] >= 100 and mid[3] >= 200, (kind, phase, dark, mid))
+                top = px(5 * S, round(3.5 * S))  # 上面那盏（红）没亮：不是鲜红
+                self.assertLess(top[0] - top[1], 120, (kind, phase, dark, top))
+        w, h, px = pixels(cam_menu.status_icon(0, "ok", "", 0, "lamp"))
+        g = px(5 * S, round(14.5 * S))
+        self.assertTrue(g[1] >= 180 and g[0] <= 110, g)  # 空闲：下面那盏绿灯亮
+        # 信号格呼吸到一半：前两格全亮、第三格半亮、第四格没亮
+        w, h, px = pixels(cam_menu.status_icon(0, "busy", "pulse", 0.5, "bars"))
+        y = 16 * S - 3 * S
+        bars = [px(round(i * 4 * S + 1.5 * S), y) for i in range(4)]
+        self.assertTrue(orange(bars[0]) and orange(bars[1]), bars)
+        self.assertLess(bars[3][3], 100, bars)
+        self.assertTrue(bars[3][3] < bars[2][3] < bars[0][3], bars)
+        # 选了三盏灯样式：标题里的图按 10×18 点显示
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+        self._two_accounts()
+        self.assertEqual(self.run_cam("usage"), 0)
+        store = self.cam.Store()
+        self.assertEqual(cam_menu.set_icon_from_menu(store, "lamp"), 0)
+        lines = []
+        cam_menu.render(store, {}, out=lines.append, rich=True)
+        self.assertIn(" width=10 height=18", lines[0])
+        png = base64.b64decode(re.search(r"image=(\S+)", lines[0]).group(1).split(",")[0])
+        self.assertEqual(struct.unpack(">II", png[16:24]), (10 * S, 18 * S))
+
     # ---- 锁
 
     def test_lock_excludes_threads_and_is_released_when_process_dies(self):

@@ -63,10 +63,22 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .wrap { max-width: 880px; margin: 0 auto; padding: 16px 16px 40px; }
 
 header.top { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-header.top h1 { display: flex; align-items: center; gap: 9px; font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+header.top h1 { display: flex; flex: none; align-items: center; gap: 9px; font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -.01em; white-space: nowrap; }
 .logo { width: 24px; height: 24px; flex: none; border-radius: 6px; box-shadow: 0 1px 2px rgba(60, 45, 25, .18); }
 .theme-btn { min-width: 2.4em; font-size: 13px; }
 header.top .host { color: var(--muted); font-size: 12px; }
+/* 标题旁的红绿灯：规则和卡片小面板、菜单栏图标一致——绿空闲、黄工作中 / 要注意 / 等你确认、红要处理；悬停看全部 */
+header.top .light { display: inline-flex; align-items: center; gap: 7px; max-width: 34%; padding: 3px 10px 3px 8px; border-radius: 999px; font-size: 12px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
+.light .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.light .more { flex: none; color: var(--muted); font-size: 11px; }
+.light .led { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
+.light.busy .led { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.light.bad .led { background: var(--hot); box-shadow: 0 0 0 3px var(--hot-soft); }
+.light.pulse .led { animation: led-breathe 2s ease-in-out infinite; }  /* 有会话在跑：一呼一吸，和菜单栏图标一个节奏 */
+.light.blink .led { animation: led-blink 1s step-end infinite; }  /* 等会话结束再切：一亮一暗 */
+@keyframes led-breathe { 50% { box-shadow: 0 0 0 6px var(--warn-soft); transform: scale(1.12); } }
+@keyframes led-blink { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .light .led { animation: none; } }
 .spacer { flex: 1; }
 
 .btn {
@@ -205,6 +217,7 @@ header.top .host { color: var(--muted); font-size: 12px; }
   :root { --control-h: 36px; }
   header.top h1 { font-size: 18px; }
   header.top .host { display: none; }
+  header.top .light { order: 9; max-width: 100%; }
   header.top { flex-wrap: wrap; }
 }
 

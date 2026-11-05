@@ -398,6 +398,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "region": super::health::region_view(data),
         "risks": risks,
         "risk_score": risk_score,
+        "sessions": json!({ "count": running_claude_processes().len() }),  // 标题旁的红绿灯：有会话在跑就一呼一吸
         "generated_at": now_iso()
     })
 }
