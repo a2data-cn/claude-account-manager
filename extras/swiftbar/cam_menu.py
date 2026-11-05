@@ -234,14 +234,14 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
     菜单栏这么小，画出来的数字不如文字清楚。
 
     颜色是状态：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。kind="pulse"（工作中）时随 phase（0–1）
-    信号格一格格渐亮涨上去再从头来 / 红绿灯亮着的那盏灯外面的光晕一呼一吸（灯本身一直亮着，哪一帧都看得出是哪盏）；
-    "blink"（等你确认）时信号格全亮全灭、红绿灯的灯一亮一暗（暗的那拍也看得见）。经典模式只有两帧（phase 0 和 0.5），
-    流式模式每 0.2 秒一帧。画好的图按参数缓存。
+    信号格一格格渐亮涨上去再从头来 / 红绿灯照真红绿灯的黄闪：亮着的那盏灯一亮一灭（灭的时候还看得见镜片的颜色），红绿不动；
+    "blink"（等你确认）时信号格全亮全灭、红绿灯闪得快一倍。经典模式只有两帧（phase 0 和 0.375：两种动画都是一帧亮一帧灭），
+    流式模式每 0.25 秒一帧。画好的图按参数缓存。
     """
     if kind == "pulse":
         glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)  # 0 → 1 → 0
     elif kind == "blink":
-        glow = 1.0 if phase < 0.5 else 0.0
+        glow = 1.0 if (phase % 0.5) < 0.25 else 0.0  # 每秒亮灭一次
     else:
         glow = 1.0
     if style == "lamp":
@@ -266,20 +266,22 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         def lamp(cy, r):
             return lambda px, py: (px - cx) ** 2 + (py - cy) ** 2 <= r * r
 
-        halo, bulbs = [], []  # 光晕垫在所有灯下面，不压到旁边的灯
+        # 动画照真红绿灯的黄闪：只有亮着的那盏灯一亮一灭，灭的时候还看得见镜片的颜色（35%），红绿不动，没有光晕。
+        # 工作中每秒闪一次（亮半秒灭半秒），等你确认快一倍
+        if kind == "pulse":
+            lit = (phase % 0.5) < 0.25
+        elif kind == "blink":
+            lit = (phase % 0.25) < 0.125
+        else:
+            lit = True
+        bulbs = []
         for lv, cy in lamps:
             color = FILL[{"busy": "warn"}.get(lv, lv)][dark]
             if lv != level:
                 bulbs.append((lamp(cy, lr), (*ink[:3], ink[3] * 0.3)))  # 没亮的灯：淡淡的一个点，看得出三盏都在
-                continue
-            if kind == "blink":
-                on = 1.0 if glow else 0.55  # 暗的那拍也看得见是哪盏
             else:
-                on = 0.75 + 0.25 * glow  # 呼吸：灯一直亮着，只在 75% 和 100% 之间
-            if kind and glow > 0.05:  # 光晕随呼吸变大变亮，不出灯体
-                halo.append((lamp(cy, lr + 1.0 * SCALE * glow), (*color, 0.35 * glow)))
-            bulbs.append((lamp(cy, lr), (*color, on)))
-        return _png(W, H, _raster(W, H, [(frame, ink)] + halo + bulbs))
+                bulbs.append((lamp(cy, lr), (*color, 1.0 if lit else 0.35)))
+        return _png(W, H, _raster(W, H, [(frame, ink)] + bulbs))
     S = ICON_H * SCALE
     if kind == "pulse":
         fill = 1 + phase * 3  # 亮的格数 1 → 4 再从头来，每一格渐亮
@@ -487,7 +489,7 @@ def _background_work(store):
 
 
 STREAMING = False  # 流式模式（见 stream）
-FRAMES, FRAME = 10, 0.2  # 流式动画：一圈几帧、每帧几秒（呼吸和信号格涨落 2 秒一个来回）
+FRAMES, FRAME = 8, 0.25  # 流式动画：一圈几帧、每帧几秒（一圈 2 秒：黄闪亮半秒灭半秒，等你确认快一倍，信号格涨落 2 秒一个来回）
 SESSION_MAX_AGE = 0  # 数 claude 进程的缓存秒数：经典模式每分钟是个新进程不用缓存，流式模式 5 秒
 LAST_LIGHT = None  # render 最近算出的红绿灯，stream 用它决定要不要继续推动画帧
 _MINI_CACHE = [0.0, None]  # [探测时间, (端口, 令牌)]
@@ -629,7 +631,7 @@ def render(store, st, out=print, rich=None, phase=None):
     light = status_light(store, data, accs, active, st) if accs else None
     LAST_LIGHT = light
     kind = light[2] if light else ""
-    phases = [phase] if phase is not None else ([0.0, 0.5] if kind else [0.0])
+    phases = [phase] if phase is not None else ([0.0, 0.375] if kind else [0.0])  # 经典模式两帧：0.375 这一帧两种动画都是灭的
 
     style = (data.get("prefs") or {}).get("menu_icon") or "bars"  # 菜单里选的图标样式
 
@@ -910,7 +912,7 @@ def stream_frame(store, st, phase):
 def stream(store):
     """流式模式（SwiftBar 的 streamable 插件，安装时 --stream）：进程常驻，每份菜单以一行 ~~~ 开头推给 SwiftBar，有变化才推。
 
-    后台任务照旧每分钟一轮；信号灯要动画时（工作中、等你确认）每 0.2 秒推一帧，10 帧一个周期（图按参数缓存，不重画；
+    后台任务照旧每分钟一轮；信号灯要动画时（工作中、等你确认）每 0.25 秒推一帧，8 帧一个周期（图按参数缓存，不重画；
     一帧和上一帧一样就不推，闪的时候只在亮暗切换时推）；不动时 5 秒看一眼。SwiftBar 对标题行数不变的更新做增量刷新，菜单开着也不会被关掉。
     """
     global STREAMING, SESSION_MAX_AGE
