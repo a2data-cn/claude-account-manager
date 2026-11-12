@@ -383,7 +383,7 @@ def state_path(store):
 
 def load_state(store):
     try:
-        with open(state_path(store)) as f:
+        with open(state_path(store), encoding="utf-8") as f:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
@@ -552,7 +552,7 @@ def bg_error(store, st):
     if st.get("bg_owner") != "other":
         return st.get("last_error")
     try:
-        with open(os.path.join(store.root, cam.SERVE_STATE)) as f:
+        with open(os.path.join(store.root, cam.SERVE_STATE), encoding="utf-8") as f:
             return json.load(f).get("last_error")
     except (OSError, ValueError):
         return None
