@@ -25,6 +25,141 @@
 """
 from __future__ import annotations
 
+import json
+import os
+import sys
+import time
+
+# --------------------------------------------------------------------------- Claude Code 钩子（快路径）
+# Claude Code 弹权限确认（yes / no）时告诉 cam，红绿灯三盏灯一起闪。cam hooks install 往 ~/.claude/settings.json 加
+# 几条钩子（见后面的 hooks_install），事件 JSON 从 stdin 进来：PermissionRequest（要问你权限了）记下这个会话在等你；
+# 工具跑完、拒绝了、你又发了消息、会话结束就清掉。
+# 钩子每次工具调用都跑一遍，所以这一段只用上面四个模块、写在其余 import 之前：作为钩子运行时到这一段结尾就退出，
+# 不加载后面的东西（ssl、http、argparse 这些要多花近一百毫秒）。
+ATTENTION_FILE = "attention.json"  # CAM_HOME 下：哪些会话在等你确认
+ATTENTION_MAX_AGE = 2 * 3600  # 秒：等了这么久还没动静就不算了（会话早关了、清的钩子没来得及跑）
+HOOK_SET_EVENTS = ("PermissionRequest",)
+HOOK_CLEAR_EVENTS = ("PostToolUse", "PostToolUseFailure", "PermissionDenied", "UserPromptSubmit", "Stop", "SessionEnd")
+HOOK_EVENTS = HOOK_SET_EVENTS + HOOK_CLEAR_EVENTS
+
+
+def home() -> str:
+    return os.path.expanduser("~")
+
+
+def cam_home() -> str:
+    return os.environ.get("CAM_HOME") or os.path.join(home(), ".claude-accounts")
+
+
+def attention_path():
+    return os.path.join(cam_home(), ATTENTION_FILE)
+
+
+def _load_attention():
+    try:
+        with open(attention_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and isinstance(data.get("sessions"), dict) else {"sessions": {}}
+    except (OSError, ValueError):
+        return {"sessions": {}}
+
+
+def _save_attention(data):
+    os.makedirs(cam_home(), exist_ok=True)
+    tmp = attention_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, attention_path())
+
+
+def _lock_attention():
+    """拿 CAM_HOME/attention.lock 上的独占锁（等到拿到为止），返回要交给 _unlock_attention 的 fd；锁用不了时照常往下做。
+
+    几个工具并行跑完、几个会话同时有动静时，钩子是好几个进程一起来的；读—改—写不加锁，后写的会把先写的盖掉。
+    """
+    try:
+        os.makedirs(cam_home(), exist_ok=True)
+        fd = os.open(os.path.join(cam_home(), "attention.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    deadline = time.time() + 5  # 拿着锁的那一下只有几毫秒；钩子自己 10 秒超时
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # LK_LOCK 没拿到要睡一整秒再试，自己短间隔地试
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            return fd
+        except OSError:
+            if os.name != "nt" or time.time() > deadline:
+                return fd
+            time.sleep(0.02)
+
+
+def _unlock_attention(fd):
+    if fd is None:
+        return
+    if os.name == "nt":
+        try:
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    os.close(fd)  # Unix 上关闭文件即释放 flock
+
+
+def hook_event(event):
+    """Claude Code 的钩子来了一个事件（stdin 的 JSON 已解析）：要问权限 → 记下这个会话在等你确认；答过了、会话结束 → 清掉。"""
+    if not isinstance(event, dict):
+        return
+    name, sid = event.get("hook_event_name"), str(event.get("session_id") or "")
+    if not sid or name not in HOOK_EVENTS:
+        return
+    if name not in HOOK_SET_EVENTS and not os.path.exists(attention_path()):
+        return  # 没有会话在等：绝大多数事件（每次工具调用跑完都来一个）到这里就结束，不拿锁、不写文件
+    lock = _lock_attention()
+    try:
+        data = _load_attention()
+        sessions, now = data["sessions"], time.time()
+        before = json.dumps(sessions, sort_keys=True)
+        for k in list(sessions):  # 顺手把过期的扫掉
+            if not isinstance(sessions[k], dict) or now - float(sessions[k].get("since_ts") or 0) > ATTENTION_MAX_AGE:
+                del sessions[k]
+        if name in HOOK_SET_EVENTS:
+            ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+            what = ti.get("description") if isinstance(ti.get("description"), str) else ""  # 只记说明，不记命令本身（可能带密钥）
+            sessions[sid] = {"since": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now)), "since_ts": now,
+                             "transcript": str(event.get("transcript_path") or ""), "cwd": str(event.get("cwd") or ""),
+                             "tool": str(event.get("tool_name") or ""), "what": what[:80]}
+        else:
+            sessions.pop(sid, None)
+        if not sessions:  # 没有会话在等了：文件删掉，下一个事件一看没有文件就走了
+            try:
+                os.remove(attention_path())
+            except OSError:
+                pass
+        elif json.dumps(sessions, sort_keys=True) != before:
+            _save_attention(data)
+    finally:
+        _unlock_attention(lock)
+
+
+def cmd_hook():
+    """Claude Code 的钩子调用：事件 JSON 从 stdin 进来。什么都不输出、永远返回 0，不能影响 Claude Code。"""
+    try:
+        raw = sys.stdin.read()
+        hook_event(json.loads(raw) if raw.strip() else {})
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["hook"]:
+    sys.exit(cmd_hook())
+
 import argparse
 import base64
 import calendar
@@ -33,32 +168,32 @@ import datetime as dt
 import getpass
 import glob
 import hashlib
-import http.client
-import http.server
 import io
-import json
 import shlex
 import math
-import os
 import platform
 import re
 import secrets as pysecrets
 import shutil
 import signal
 import socket
-import socketserver
-import ssl
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
-import time
 import unicodedata
 import urllib.error
 import urllib.parse
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+
+# http.client、http.server、socketserver、ssl、urllib.request、concurrent.futures 不在这里加载：它们连带的 email、logging 等
+# 要多花五十毫秒左右，而 cam ls / switch / json 这些命令不联网、也不开线程池。用到它们的函数在开头自己 import。
+
+
+def ThreadPoolExecutor(*args, **kw):
+    """concurrent.futures.ThreadPoolExecutor，第一次用到时才加载。"""
+    from concurrent.futures import ThreadPoolExecutor as Pool  # noqa: PLC0415
+    return Pool(*args, **kw)
+
 
 if os.name == "nt":
     import msvcrt
@@ -83,14 +218,6 @@ TOKEN_URLS = [u for u in os.environ.get(
 CLAUDE_WEB_BASE = os.environ.get("CAM_CLAUDE_WEB_BASE", "https://claude.ai")
 USER_AGENT = f"claude-account-manager/{VERSION}"
 BACKUP_KEEP = 30
-
-
-def home() -> str:
-    return os.path.expanduser("~")
-
-
-def cam_home() -> str:
-    return os.environ.get("CAM_HOME") or os.path.join(home(), ".claude-accounts")
 
 
 def claude_config_dir() -> str:
@@ -120,11 +247,21 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _iso_for_python(s):
+    """把 ISO 时间整理成各版本 Python 的 fromisoformat 都认的写法：Z 写成 +00:00，小数秒凑成 6 位。
+
+    Python 3.10 及以前只认 3 位或 6 位小数秒；桌面版（Rust）写的时间是 9 位，不整理的话在那些版本上只剩日期，
+    几点钟就丢了，“多久以前”能差出一天。
+    """
+    s = s.strip().replace("Z", "+00:00").replace("z", "+00:00")
+    return re.sub(r"(?<=:\d\d)[.,](\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s, count=1)
+
+
 def parse_iso(s):
     if not s or not isinstance(s, str):
         return None
     try:
-        s = s.replace("Z", "+00:00")
+        s = _iso_for_python(s)
         d = dt.datetime.fromisoformat(s)
         if d.tzinfo is None:
             d = d.replace(tzinfo=dt.timezone.utc)
@@ -675,40 +812,146 @@ def resolve_pending(store, data, live_fp=None):
     ob = p.get("claudeAiOauth") or {}
     fp = token_fp(ob.get("refreshToken") or "")
     if live_fp is not None and fp == live_fp:
+        if p.pop("released_at", None):  # 又成了当前登录（旧会话写回来的）
+            store.save_secret(PENDING_ID, p)
         return  # 就是当前生效的这份登录，走 snapshot_live 的正常流程
     if _pending_is_stale(p) or any(a.get("token_fp") == fp for a in data["accounts"] if a["kind"] == "claude_code"):
         store.delete_secret(PENDING_ID)
         return
+    if live_fp is not None:
+        release_pending(store, p)
     if not access_token_fresh(ob):
         return  # 核对要 access token 还有效；切换到候选账号时会用 refresh token 换一个再核对
     st, owner = probe_token_owner(ob.get("accessToken") or "")
     if owner:
         _file_pending(store, data, p, ob, owner)
         store.delete_secret(PENDING_ID)
+    elif st == 401 and ob.get("refreshToken"):
+        # 服务端不认这个 access token 了（比本地算的过期得早，或者已经被换掉）。refresh token 也许还能用：
+        # 记成已过期留着，切换到它、手动刷新时用 refresh token 换一个再核对（见 adopt_pending_for）
+        ob = dict(ob, expiresAt=0)
+        p["claudeAiOauth"] = ob
+        if isinstance(p.get("raw"), dict):
+            p["raw"] = dict(p["raw"], claudeAiOauth=ob)
+        store.save_secret(PENDING_ID, p)
     elif st == 401:
-        store.delete_secret(PENDING_ID)  # 服务端明确不认这个 token 了，留着也没用；限流、5xx 只是这次核对不了，留着下次再问
+        store.delete_secret(PENDING_ID)  # 没有 refresh token，access token 又不认了，留着也没用；限流、5xx 只是这次核对不了，留着下次再问
 
 
-def adopt_pending_for(store, data, target):
-    """切换到 target 之前：暂存的登录可能是它的、又比它保存的新，现在核对一下。
+def release_pending(store, p=None):
+    """记下暂存的登录从现在起不是当前登录了：这之后才启动的 claude 会话读到的是别的登录（见 pending_holders）。"""
+    p = p or store.load_secret(PENDING_ID)
+    if p and not p.get("released_at"):
+        p["released_at"] = now_iso()
+        store.save_secret(PENDING_ID, p)
 
-    access token 过期就用 refresh token 换一个再问（这时没有 claude 会话在用它，不会互相抢）。
-    核对出来是谁的就归到谁名下：真是 target 的，切换就用上最新的 token；其实是别人的，也不会写进 target。
+
+def _etime_secs(text):
+    """ps 的 etime（[[天-]时:]分:秒）换成秒；看不懂返回 None。"""
+    days, _, rest = text.rpartition("-")
+    try:
+        total = int(days) * 24 if days else 0
+        parts = [int(x) for x in rest.split(":")]
+    except ValueError:
+        return None
+    if not 2 <= len(parts) <= 3:
+        return None
+    if len(parts) == 3:
+        total += parts.pop(0)
+    return total * 3600 + parts[0] * 60 + parts[1]
+
+
+def pending_holders(p):
+    """可能还拿着暂存的这份登录的 claude 进程有几个；进程没查出来时返回 None（当作有）。
+
+    替它换 token 之前问这个：还有会话拿着它的话，两边各换一次 refresh token 会互相顶掉。
+    它不再是当前登录之后（released_at）才启动的会话读到的是别的登录，不算；Linux 上还看得出会话用的不是本机登录
+    （自带 token、API Key、别的配置目录），也不算。启动时间看不出来的（Windows）都算。
+    """
+    procs = running_claude_processes()
+    if isinstance(procs, ProcsUnknown):
+        return None
+    released = parse_iso(p.get("released_at"))
+    if not procs or released is None:
+        return len(procs)
+    since = (dt.datetime.now(dt.timezone.utc) - released).total_seconds() - 5  # 运行了不到这么久的，是它让位之后才启动的
+    sessions = claude_sessions()
+    if sessions is not None:
+        known = {x["pid"]: x for x in sessions}
+        age = {pid: x["secs"] for pid, x in known.items()}
+    else:
+        known = {}
+        age = {pid: _etime_secs(t) for pid, t in _ps_etimes([pid for pid, _ in procs]).items()}
+    n = 0
+    for pid, _ in procs:
+        if (known.get(pid) or {}).get("login") in ("own_token", "api_key", "config_dir"):
+            continue
+        if age.get(pid) is not None and age[pid] < since:
+            continue
+        n += 1
+    return n
+
+
+PENDING_HELD = "登录还暂存着没核对"  # 报错里带这句的归成 pending_login（见 _health_kind_of_error），不是登录失效
+
+
+def _pending_why(reason, switching=False):
+    """暂存的登录这次为什么没核对成（adopt_pending_for 的返回值），换成给人看的话。"""
+    if reason == "sessions":
+        return ("有 claude 会话可能还在用它。等这些会话退出后再切换，或者切换时选“现在就切”" if switching
+                else "有 claude 会话可能还在用它，等它们退出后再刷新，或者直接切换到这个账号")
+    if reason == "live":
+        return ("它就是 Claude Code 现在用的登录。在 claude 里发一句话让它续上，再切换" if switching
+                else "它就是 Claude Code 现在用的登录，在 claude 里发一句话它就会续上")
+    return f"这次没核对成（{reason}），稍后再试"
+
+
+def pending_held_error(reason, sure=True):
+    """替账号续登录时暂存的登录没核对成，给的说法。网络问题照网络问题报；别的归成 pending_login，不说登录失效。
+
+    sure=False：暂存的那份不一定是这个账号的（它保存的登录被服务端拒绝了，才想到可能是被暂存的那份顶掉的）。
+    """
+    if reason.startswith("续登录失败"):
+        return reason
+    head = (f"这个账号更新的一份{PENDING_HELD}" if sure
+            else f"保存的那份登录被服务端拒绝了，不过还有一份{PENDING_HELD}，可能就是这个账号更新的那份")
+    return f"{head}：{_pending_why(reason)}。先不用重新登录"
+
+
+def adopt_pending_for(store, data, target, force=False, only_candidate=True):
+    """替 target 续登录、切换到 target 之前：暂存的登录可能是它的、又比它保存的新，现在核对一下。
+
+    access token 过期就用 refresh token 换一个再问。换之前要确认没有 claude 会话还拿着它（pending_holders）；
+    force=True 是用户明说“现在就切”（已经告诉过他正在运行的会话要重开），不再等。
+    核对出来是谁的就归到谁名下：真是 target 的，接下来就用上最新的 token；其实是别人的，也不会写进 target。
+    only_candidate=False：暂存时猜的不是 target 也核对（target 保存的登录刚被服务端拒绝，可能就是被这份顶掉的：
+    旧会话写回登录时 ~/.claude.json 里留的是别人的名字，猜的人就不对）。
+
+    返回空串表示处理完了（或者没有和 target 有关的暂存）；否则是这次没核对成的原因：sessions、live、
+    “续登录失败…”（网络）或“问不出这份登录是谁的”，暂存还留着。这时 target 自己保存的 refresh token 多半已经被
+    暂存的那份顶掉了，调用方不要再拿它去续：服务端会拒绝，看起来就像登录失效了。
     """
     p = store.load_secret(PENDING_ID)
-    if not p or p.get("candidate") != target["id"]:
-        return
+    if not p or (only_candidate and p.get("candidate") != target["id"]):
+        return ""
     if _newer(store.load_secret(target["id"]).get("saved_at"), p.get("at")):
-        return  # target 后来又拿到过更新的 token，暂存的这份对它没用了
+        return ""  # target 后来又拿到过更新的 token，暂存的这份对它没用了
     ob = dict(p.get("claudeAiOauth") or {})
     owner = token_owner(ob["accessToken"]) if access_token_fresh(ob) and ob.get("accessToken") else None
-    if not owner and ob.get("refreshToken") and not running_claude_processes():
+    if not owner and not ob.get("refreshToken"):
+        return ""  # 没有 refresh token 的登录顶不掉 target 保存的那份，也没法换新再核对：留着等 resolve_pending
+    if not owner:
+        if token_fp(ob["refreshToken"]) == token_fp(oauth_block(read_live_credentials()[0]).get("refreshToken") or ""):
+            return "live"  # 当前登录从不替它续
+        if not force and pending_holders(p) != 0:
+            return "sessions"
         try:
             tok = refresh_oauth(ob["refreshToken"])
         except CamError as e:
             if "登录已失效" in str(e):  # refresh token 本身已作废，这份登录没用了
                 store.delete_secret(PENDING_ID)
-            return
+                return ""
+            return str(e)
         ob["accessToken"] = tok["access_token"]
         if tok.get("refresh_token"):
             ob["refreshToken"] = tok["refresh_token"]
@@ -719,9 +962,10 @@ def adopt_pending_for(store, data, target):
         store.save_secret(PENDING_ID, p)  # 旧的 refresh token 已作废：新的先存回暂存，下面核对失败也不能丢这份登录
         owner = token_owner(ob["accessToken"])
     if not owner:
-        return  # 还是核对不了：暂存留着，这次用 target 已保存的登录
+        return "问不出这份登录是谁的"  # 还是核对不了：暂存留着
     _file_pending(store, data, p, ob, owner)
     store.delete_secret(PENDING_ID)
+    return ""
 
 
 def snapshot_live(store, data, label=None, create_if_unknown=True):
@@ -858,8 +1102,22 @@ def _is_claude_cmd(argv0, cmdline):
     return False
 
 
+class ProcsUnknown(list):
+    """进程没查出来（ps / PowerShell 出错或超时）时 running_claude_processes 返回的空列表。
+
+    显示上当 0 个；要据此做决定的地方（自动切换、替暂存的登录换 token）用 claude_may_be_running，把“没查出来”当成“可能有”。
+    """
+
+
+def claude_may_be_running(procs=None):
+    """有 claude 进程在跑，或者这次没查出来。自动替用户做事之前用这个问，不用 bool(running_claude_processes())。"""
+    if procs is None:
+        procs = running_claude_processes()
+    return bool(procs) or isinstance(procs, ProcsUnknown)
+
+
 def running_claude_processes():
-    """正在运行的 Claude Code 进程 [(pid, 命令行)]，不含本进程。查不到时返回空列表。
+    """正在运行的 Claude Code 进程 [(pid, 命令行)]，不含本进程。查不到时返回空的 ProcsUnknown。
 
     切换账号后，这些进程内存里还是旧账号的 token，刷新后还可能把旧账号写回凭据文件。
     """
@@ -873,6 +1131,8 @@ def running_claude_processes():
                   "ForEach-Object { \"$($_.ProcessId)`t$(if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name })"
                   "`t$($_.CommandLine)\" }")
             r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=15)
+            if r.returncode != 0:  # PowerShell 自己出错了：不是“没有进程”
+                return ProcsUnknown()
             r.stdout = decode_output(r.stdout)
             for line in r.stdout.splitlines():
                 parts = line.split("\t", 2)
@@ -901,11 +1161,13 @@ def running_claude_processes():
                         out[int(pid)] = rest.strip()
                 return out
             comm, args = ps("comm"), ps("args")
+            if not comm:  # ps 至少会列出它自己；一行都没有就是没查成
+                return ProcsUnknown()
             for pid, exe in comm.items():
                 if pid != me and _is_claude_cmd(exe, args.get(pid, exe)):
                     found.append((pid, args.get(pid, exe)))
     except (OSError, subprocess.SubprocessError):
-        return []
+        return ProcsUnknown()
     return found
 
 
@@ -938,6 +1200,18 @@ def repair_oauth_account(store, data, acc):
 SWITCH_RENEW_SECS = 300  # Claude Code 在 access token 过期前 5 分钟就自己续；切换前按同一个标准先替目标账号续好
 
 
+def switch_pending_error(label, reason, sure=True):
+    """目标账号更新的一份登录还暂存着、这次没核对成：保存的那份多半已经被它顶掉，切过去用不久，所以不切。
+
+    sure=False：暂存的那份不一定是它的（见 pending_held_error）。
+    """
+    if reason.startswith("续登录失败"):
+        return f"没有切换：“{label}”更新的一份登录还暂存着，切换前要先核对一下，但{reason}。当前登录没有动"
+    head = (f"“{label}”更新的一份{PENDING_HELD}" if sure
+            else f"“{label}”保存的那份登录被服务端拒绝了，不过还有一份{PENDING_HELD}，可能就是它更新的那份")
+    return f"没有切换：{head}。{_pending_why(reason, switching=True)}。当前登录没有动，先不用重新登录"
+
+
 def switch_renew_error(label, err):
     """切换前替目标账号续登录没成功时给用户看的话：说清楚没切、当前登录没动、怎么办。"""
     if "登录已失效" in str(err):
@@ -946,7 +1220,60 @@ def switch_renew_error(label, err):
     return f"没有切换：“{label}”保存的登录过期了，切换前要先续一下，但{err}。当前登录没有动"
 
 
-def switch_code_account(store, key):
+def _saved_login_rejected(store, target, ob):
+    """target 保存的登录本地看还没过期，但有一份更新的登录暂存着没核对（暂存时猜的是别的账号）：问一下服务端还认不认它。
+
+    旧会话把 target 换过的登录写回来、~/.claude.json 里留的却是别人的名字时就是这样：target 名下那份已经被顶掉，
+    照着切过去，Claude Code 一续就被拒绝。只有服务端明确不认（401）才算；离线、限流都当它还好，不耽误切换。
+    """
+    p = store.load_secret(PENDING_ID)
+    if not (p.get("claudeAiOauth") or {}).get("refreshToken") or p.get("candidate") == target["id"]:
+        return False
+    if _newer(store.load_secret(target["id"]).get("saved_at"), p.get("at")):
+        return False
+    return probe_token_owner(ob.get("accessToken") or "")[0] == 401
+
+
+def _login_for_switch(store, data, target, force):
+    """切换前拿到 target 能用的登录（oauth 块）；拿不到就抛 CamError，当前登录一个字都没动。调用方持有数据锁。
+
+    暂存着的更新登录先核对、归档（adopt_pending_for）；保存的登录快过期了就用它自己的 refresh token 续上再切
+    （它不是当前登录，没人跟它抢）。续不上就不切：refresh token 作废了的话，切过去 Claude Code 也用不了，
+    还把能用的当前登录换掉了。
+    """
+    held = adopt_pending_for(store, data, target, force)
+    if held:  # 保存的那份多半已经被暂存的顶掉：access token 就算还没过期，切过去也用不久
+        raise CamError(switch_pending_error(target["label"], held))
+    err = None
+    for retry in (True, False):
+        ob = store.load_secret(target["id"]).get("claudeAiOauth")
+        if not ob or not ob.get("refreshToken"):
+            raise CamError("该账号没有保存可用的凭据，请先用这个账号登录 Claude Code 后执行 cam import")
+        if (ob.get("expiresAt") or 0) > (time.time() + SWITCH_RENEW_SECS) * 1000 and not (
+                retry and _saved_login_rejected(store, target, ob)):
+            return ob
+        try:
+            return renew_saved_login(store, target)
+        except CamError as e:
+            err = e
+        if not (retry and "登录已失效" in str(err)):
+            break
+        # 被拒绝的也许只是旧的那份：还有登录暂存着没核对的话（当时猜的是别的账号），看看是不是 target 更新的登录
+        held = adopt_pending_for(store, data, target, force, only_candidate=False)
+        if held:
+            raise CamError(switch_pending_error(target["label"], held, sure=False))
+        if (store.load_secret(target["id"]).get("claudeAiOauth") or {}).get("refreshToken") == ob["refreshToken"]:
+            break  # 没有暂存，或者暂存的是别人的：这个号的登录确实失效了
+    if "登录已失效" in str(err) and (data.get("pending_switch") or {}).get("account") == target["id"]:
+        data.pop("pending_switch", None)  # 等下去也切不过去，登记作废
+    raise CamError(switch_renew_error(target["label"], err))
+
+
+def switch_code_account(store, key, force=False):
+    """切换 Claude Code 登录到 key 指的账号，返回 (账号, 备份目录, 是否真的切了)。
+
+    force=True：用户已经确认“现在就切”（或者没有 claude 会话在跑），目标账号暂存的登录不用等会话退出就核对。
+    """
     with store.lock():
         data = store.load()
         target = find_account(data, key)
@@ -958,22 +1285,12 @@ def switch_code_account(store, key):
             data.pop("pending_switch", None)
             store.save(data)
             return target, None, False
-        adopt_pending_for(store, data, target)  # 暂存的登录要是 target 的，先核对并存进去，下面就能用上
+        try:
+            ob = _login_for_switch(store, data, target, force)  # 第 3 步
+        except CamError:
+            store.save(data)  # 快照可能刚导入了新账号、回写了当前账号的 token，先存下；等待中的切换也留着
+            raise
         secret = store.load_secret(target["id"])
-        ob = secret.get("claudeAiOauth")
-        if not ob or not ob.get("refreshToken"):
-            store.save(data)  # 快照可能刚导入了新账号，先存下
-            raise CamError("该账号没有保存可用的凭据，请先用这个账号登录 Claude Code 后执行 cam import")
-        if (ob.get("expiresAt") or 0) <= (time.time() + SWITCH_RENEW_SECS) * 1000:
-            # 第 3 步：目标账号保存的登录过期了，先用它自己的 refresh token 续上再切（它不是当前登录，没人跟它抢）。
-            # 续不上就不切，什么都不写：refresh token 作废了的话，切过去 Claude Code 也用不了，还把能用的当前登录换掉了
-            try:
-                ob = renew_saved_login(store, target)
-            except CamError as e:
-                if "登录已失效" in str(e) and (data.get("pending_switch") or {}).get("account") == target["id"]:
-                    data.pop("pending_switch", None)  # 等下去也切不过去，登记作废
-                store.save(data)  # 快照可能刚导入了新账号、回写了当前账号的 token，先存下
-                raise CamError(switch_renew_error(target["label"], e))
         backup = backup_live(store, f"before-{target['id']}")  # 第 4 步
         live, where = read_live_credentials()
         # 只换 claudeAiOauth：凭据里的其它内容（例如 mcpOAuth，MCP 服务器的登录）保持现在的样子，
@@ -992,6 +1309,7 @@ def switch_code_account(store, key):
             except Exception:  # noqa: BLE001  回滚失败时保留原来的错误
                 pass
             raise
+        release_pending(store)  # 还暂存着的登录（别的账号的）从这时起不是当前登录了
         data.pop("live_mismatch", None)  # 凭据和 oauthAccount 现在是同一个账号的
         data.pop("live_unverified", None)  # 现在生效的登录是我们刚写的，当然认识
         data.pop("pending_switch", None)  # 这次切换优先于之前登记的等待切换
@@ -1018,6 +1336,7 @@ def make_ssl_context():
     要手动运行一次 Install Certificates.command。这里在默认证书一张都没加载到时，依次改用 SSL_CERT_FILE、
     certifi（装了的话）和系统自带的证书文件，开箱即用。证书照常校验，不会关掉校验。
     """
+    import ssl  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
     ctx = ssl.create_default_context()
     if ctx.cert_store_stats().get("x509_ca"):
         return ctx, None
@@ -1043,7 +1362,19 @@ def make_ssl_context():
     return ctx, None
 
 
-SSL_CTX, SSL_CA_FALLBACK = make_ssl_context()
+_SSL = None
+_SSL_LOCK = threading.Lock()
+
+
+def ssl_state():
+    """(SSLContext, 改用的证书文件或 None)。第一次联网时才建：读进几百张根证书要十毫秒左右，不联网的命令用不着。
+    几个线程同时第一次联网（各项检查是并行的）时只建一份。"""
+    global _SSL
+    if _SSL is None:
+        with _SSL_LOCK:
+            if _SSL is None:
+                _SSL = make_ssl_context()
+    return _SSL
 
 
 def is_cert_error(msg):
@@ -1056,6 +1387,8 @@ CERT_ADVICE = ("本机 Python 不认识 HTTPS 证书（python.org 版 Python 常
 
 
 def http_json(method, url, headers=None, body=None, timeout=20):
+    import http.client  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+    import urllib.request  # noqa: PLC0415
     h = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     h.update(headers or {})
     data = None
@@ -1064,15 +1397,19 @@ def http_json(method, url, headers=None, body=None, timeout=20):
         h["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_state()[0]) as r:
             txt = r.read().decode("utf-8", "replace")
             return r.status, (json.loads(txt) if txt.strip() else {})
     except urllib.error.HTTPError as e:
         txt = e.read().decode("utf-8", "replace")
         try:
-            return e.code, json.loads(txt)
+            body = json.loads(txt)
         except json.JSONDecodeError:
-            return e.code, {"error": {"message": txt[:200]}}
+            body = None
+        if isinstance(body, dict):
+            return e.code, body
+        # 不是接口自己答的 JSON（代理、网关、验证页）：_not_json 让调用方分得清（见 _token_answer_dead）
+        return e.code, {"error": {"message": txt[:200]}, "_not_json": True}
     except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException, ValueError) as e:
         return 0, {"error": {"message": f"网络错误：{getattr(e, 'reason', e)}"}}
 
@@ -1092,16 +1429,33 @@ def oauth_headers(token):
             "anthropic-version": "2023-06-01"}
 
 
+OAUTH_REQUEST_ERRORS = ("invalid_client", "unauthorized_client", "unsupported_grant_type", "invalid_scope")
+
+
+def _token_answer_dead(st, body):
+    """token 接口这次的回答是不是在说“这个 refresh token 不能用了”。规则和 Rust 版 usage::token_answer_dead 一致。
+
+    只认它自己答的 400 / 401（JSON）。代理、网关、验证页回的 400 / 401 不是它答的；报的是请求本身不对
+    （client_id、grant_type、scope）也和这个账号的登录无关。这两种都不能说“登录已失效”，否则好好的账号被标成异常。
+    """
+    if st not in (400, 401) or not isinstance(body, dict) or body.get("_not_json"):
+        return False
+    e = body.get("error")
+    if isinstance(e, dict):
+        e = f"{e.get('type') or ''} {e.get('message') or ''}"
+    return not any(c in str(e or "") for c in OAUTH_REQUEST_ERRORS)
+
+
 def refresh_oauth(refresh_token):
     last = None
     for url in TOKEN_URLS:
         # 在数据锁里调用，超时设短一些，别让其它操作等太久
         st, body = http_json("POST", url, timeout=8, body={
             "grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": OAUTH_CLIENT_ID})
-        if st == 200 and body.get("access_token"):
+        if st == 200 and isinstance(body, dict) and body.get("access_token"):
             return body
         last = err_msg(st, body)
-        if st in (400, 401):  # refresh token 本身无效，换地址也没用
+        if _token_answer_dead(st, body):  # refresh token 本身无效，换地址也没用
             raise CamError(f"登录已失效（{last}），需要用这个账号重新登录 Claude Code 后 cam import")
     raise CamError(f"续登录失败（{last}），稍后再试")
 
@@ -1126,19 +1480,33 @@ def _usable_token(store, data, acc):
     return None
 
 
-def ensure_fresh_token(store, acc_id, allow_refresh=True):
+def ensure_fresh_token(store, acc_id, allow_refresh=True, rejected=None):
     """返回 (access token, oauth 块)。
 
     当前生效账号只读不刷新，由 Claude Code 自己刷新。其它账号的 token 过期时，在数据锁里重新确认
     “它仍然不是当前账号”后再换新，和切换操作互斥：不会出现刚切过去、Claude Code 和这里拿着同一个
     refresh token 各刷一次、把账号弄成需要重新登录的情况。
     allow_refresh=False 时（后台定时任务）不换 token，只用还没过期的。
+    rejected：服务端刚对这个 access token 答了 401（本地看还没过期）。不是当前登录的话当它过期了，续一次。
+
+    换之前先看暂存的登录（adopt_pending_for）：这个号更新的一份登录可能还暂存着（Claude Code 换过 token，
+    当时核对不了）。它保存的那份 refresh token 这时已经被顶掉，拿去续会被拒绝，账号就被错标成“登录已失效”，
+    而切换到它（那时会核对暂存）又是好的。所以核对成了就用暂存的那份；核对不成就不续，报 pending_login。
     """
+    def usable(data, acc):
+        got = _usable_token(store, data, acc)
+        if got and rejected and got[0] == rejected and data["active"].get("claude_code") != acc["id"]:
+            return None
+        return got
+
+    def saved_rt(acc):
+        return (store.load_secret(acc["id"]).get("claudeAiOauth") or {}).get("refreshToken")
+
     data = store.load()
     acc = next((a for a in data["accounts"] if a["id"] == acc_id), None)
     if acc is None:
         raise CamError("账号已被删除")
-    got = _usable_token(store, data, acc)
+    got = usable(data, acc)
     if got:
         return got
     if not allow_refresh:
@@ -1149,10 +1517,31 @@ def ensure_fresh_token(store, acc_id, allow_refresh=True):
         acc = next((a for a in data["accounts"] if a["id"] == acc_id), None)
         if acc is None:
             raise CamError("账号已被删除")
-        got = _usable_token(store, data, acc)  # 等锁期间可能已切成当前账号，或已被别的进程刷新
+        got = usable(data, acc)  # 等锁期间可能已切成当前账号，或已被别的进程刷新
         if got:
             return got
-        ob = renew_saved_login(store, acc)
+        held = adopt_pending_for(store, data, acc)
+        store.save(data)
+        if held:
+            raise CamError(pending_held_error(held))
+        for retry in (True, False):
+            got = usable(data, acc)
+            if got:
+                return got
+            before = saved_rt(acc)
+            try:
+                ob = renew_saved_login(store, acc)
+                break
+            except CamError as e:
+                if not (retry and "登录已失效" in str(e)):
+                    raise
+                # 被拒绝的也许只是旧的那份：还有登录暂存着没核对的话（当时猜的是别的账号），看看是不是这个号更新的登录
+                held = adopt_pending_for(store, data, acc, only_candidate=False)
+                store.save(data)
+                if held:
+                    raise CamError(pending_held_error(held, sure=False)) from None
+                if saved_rt(acc) == before:
+                    raise  # 没有暂存，或者暂存的是别人的：这个号的登录确实失效了
         store.save(data)
         return ob["accessToken"], ob
 
@@ -1272,16 +1661,31 @@ def message_cost(model, u):
             + w5 * inp * 1.25 + w1 * inp * 2) / 1e6
 
 
+USAGE_TIMEOUT = 12  # 秒：读账号资料、读用量各最多等多久（只读的小请求；续登录那一步不用这个数，照旧等足 20 秒）
+USAGE_GIVE_UP = 5   # 秒：读资料等了这么久还没连上，就不接着读用量了
+
+
 def fetch_code_usage(store, acc, allow_refresh=True):
     token, ob = ensure_fresh_token(store, acc["id"], allow_refresh)
     # 先拿账号资料：既用来补邮箱、套餐，也用来核对这份凭据是不是这个账号的
-    st2, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(token))
+    t0 = time.monotonic()
+    st2, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(token), timeout=USAGE_TIMEOUT)
+    if st2 == 0 and time.monotonic() - t0 >= USAGE_GIVE_UP:
+        # 等了好几秒都没连上（断网、代理节点挂了）：接着读用量也是白等同样久。一下就失败的（连接被重置）才接着试
+        raise CamError(err_msg(st2, prof))
+    if st2 == 401 and allow_refresh and not (isinstance(prof, dict) and prof.get("_not_json")):
+        # 本地看还没过期，服务端却不认：这份登录在别处被续过（旧的 access token 跟着作废），或者本机的钟慢了。
+        # 不是当前登录的话续一次再试；当前登录原样返回，留给 Claude Code 自己续
+        again, ob = ensure_fresh_token(store, acc["id"], True, rejected=token)
+        if again != token:
+            token = again
+            st2, prof = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(token), timeout=USAGE_TIMEOUT)
     if st2 == 200 and isinstance(prof, dict):
         a = prof.get("account") or {}
         if not identity_agrees(acc, a.get("uuid"), a.get("email")):
             raise CamError(f"这个账号保存的登录实际属于 {a.get('email') or a.get('uuid')}，"
                            "可能被旧的 claude 会话覆盖了。请用这个账号重新登录 Claude Code 后 cam import")
-    st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", headers=oauth_headers(token))
+    st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", headers=oauth_headers(token), timeout=USAGE_TIMEOUT)
     if st != 200:
         raise CamError(err_msg(st, body))
     usage = parse_usage_body(body, "oauth")
@@ -1322,6 +1726,8 @@ WEB_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 def web_get(path, sk, timeout=20):
     """向 claude.ai 发起只读请求。返回 (状态码, 解析后的 JSON 或 None, 原始文本)。"""
+    import http.client  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+    import urllib.request  # noqa: PLC0415
     url = f"{CLAUDE_WEB_BASE}{path}"
     h = {
         "User-Agent": WEB_UA,
@@ -1333,7 +1739,7 @@ def web_get(path, sk, timeout=20):
     }
     req = urllib.request.Request(url, headers=h, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_state()[0]) as r:
             raw = r.read().decode("utf-8", "replace")
             code = r.status
     except urllib.error.HTTPError as e:
@@ -1710,8 +2116,10 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
         except Exception as e:  # 不让单个账号拖垮整体
             u = dict(acc.get("usage") or {})
             u["error"] = f"{type(e).__name__}: {e}"
-        if acc["kind"] != "claude_desktop":
-            u["fetched_at"] = now_iso()
+        if acc["kind"] != "claude_desktop":  # 桌面版的两个时间由 fetch_desktop_usage 自己记，意思一样
+            u["checked_at"] = now_iso()  # 什么时候查的
+            if not u["error"]:
+                u["fetched_at"] = u["checked_at"]  # 这些数字是什么时候的：没取到就还是上次那份的时间，不把旧数字说成刚更新的
         meta = {k: acc.get(k) for k in ("email", "plan", "org_name", "rate_limit_tier", "auto", "account_uuid", "desktop_account_uuid")
                 if acc.get(k)}
         results[acc["id"]] = (u, meta)
@@ -1738,12 +2146,33 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
                 a["usage"] = None
             if a["id"] in results:
                 u, meta = results[a["id"]]
+                keep_login_invalid(a, u)
                 note_incident(fresh, a, u)
                 a["usage"] = u
                 a.update(meta)
         roll_renewals(fresh)
         store.save(fresh)
         return fresh
+
+
+def keep_login_invalid(acc, new_usage):
+    """“登录已失效”查出来以后不让后台那轮盖掉。规则和 Rust 版 usage::keep_login_invalid 一致。
+
+    后台不替不常用的号续登录，登录过期的号只会得到“登录过期了”（stale，算正常）。上次手动刷新已经查出它的
+    refresh token 被服务端拒绝、之后保存的登录也没换过（error_fp 记着当时的 token 指纹）的话，结论还是失效：
+    不然状态一会儿异常、一会儿正常，下次手动刷新又报一遍。重新登录、导入后指纹变了，就按新的结果来。
+    """
+    if acc.get("kind") != "claude_code":
+        return
+    prev = acc.get("usage") or {}
+    err, was = new_usage.get("error"), prev.get("error")
+    kind = _health_kind_of_error("claude_code", err) if err else None
+    fp = prev.get("error_fp")
+    new_usage.pop("error_fp", None)
+    if kind == "stale" and was and fp and fp == acc.get("token_fp") and _health_kind_of_error("claude_code", was) == "login_invalid":
+        new_usage["error"], kind = was, "login_invalid"
+    if kind == "login_invalid" and acc.get("token_fp"):
+        new_usage["error_fp"] = acc["token_fp"]
 
 
 INCIDENT_KINDS = ("wrong_owner", "login_invalid", "session_invalid", "key_invalid")  # 这几种算“账号出事了”，要记现场
@@ -1965,7 +2394,7 @@ def apply_pending_switch(store, when=None):
     p = data.get("pending_switch")
     if not p:
         return None
-    if not pending_switch_expired(p) and running_claude_processes():
+    if not pending_switch_expired(p) and claude_may_be_running():  # 进程没查出来也当作有：宁可晚点切
         return None
     with store.lock():
         data = store.load()
@@ -2002,7 +2431,7 @@ def apply_time_rules(store, when=None):
         store.save(data)
     if not r or data["active"].get("claude_code") == r["account"]:
         return None
-    if running_claude_processes():
+    if claude_may_be_running():
         with store.lock():
             data = store.load()
             defer_switch(data, r["account"], "rule", r["id"])
@@ -2083,6 +2512,8 @@ def with_quick_region(data, q):
         for k in META_FIELDS + STACK_FIELDS:
             reg.pop(k, None)
     reg.update({k: q.get(k) for k in ("loc", "ip", "colo", "ms", "warp", "skew")}, checked_at=now)
+    for k in ("failed_at", "fail_count"):
+        reg.pop(k, None)
     data["region"] = reg
     return data
 
@@ -2130,7 +2561,7 @@ def privacy_sources(cfg):
             src("speed.cloudflare.com", "再查不到时：运营商、城市"),
             src("rdap.org", "出口 IP 的注册国"),
             src("1.1.1.1 / Cloudflare IPv6", "分别测 IPv4、IPv6 出口"),
-            src("www.cloudflare.com", "claude.ai 连不上时，代替它看出口国家")]
+            src("www.cloudflare.com", "claude.ai 连不上或两秒没回音时，代替它看出口国家")]
     return out
 
 
@@ -2209,8 +2640,8 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
     prefs = risk_prefs(data)
     if not prefs["risk_prompt"]:
         return True
-    if not cached_region_loc(data):
-        # 一小时内没检测过：完整检测放到后台进程里做，这里只花最多 3 秒问一次 claude.ai 的出口，不拖慢启动
+    if not region_trusted(data):
+        # 一小时内没检测过、上次没连上、或者本机换了网络：完整检测放到后台进程里做，这里只花最多 3 秒问一次 claude.ai 的出口，不拖慢启动
         spawn_background_check()
         q = quick_trace(3)
         if q:
@@ -2852,6 +3283,7 @@ HEALTH_TEXT = {  # kind → (level, 一句话, 怎么办)。规则和 Rust 版 a
     "login_invalid": ("error", "登录已失效，无法续期", "用这个账号在 Claude Code 里重新登录一次（/login），会自动保存。在那之前切换到它也用不了。"),
     "session_invalid": ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),
     "key_invalid": ("error", "API Key 无效或没有填写", "在“编辑”里换一个有效的 Key。"),
+    "pending_login": ("info", "有一份更新的登录暂存着，还没核对", "切换到这个账号时会核对并用上；正在运行的 claude 会话退出后点“刷新”也会处理。不用重新登录。"),
     "stale": ("info", "用量没更新：登录过期了，后台不替不常用的账号续登录", "点“刷新”会续一次；切换到这个账号时也会自动续。"),
     "live_expired": ("info", "用量没更新：当前登录的 access token 过期了，等 Claude Code 自己续", "在 claude 里发一句话它就会续上；cam 不碰当前正在用的登录。"),
     "network": ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
@@ -2862,6 +3294,8 @@ HEALTH_TEXT = {  # kind → (level, 一句话, 怎么办)。规则和 Rust 版 a
 
 def _health_kind_of_error(kind, err):
     """把用量报错归类成健康问题的种类；None 表示这不是问题（例如网页号本来就没填 sessionKey）。"""
+    if PENDING_HELD in err:  # 排在最前：这句话里可能带着“被服务端拒绝”，但结论还没下
+        return "pending_login"
     if "实际属于" in err:
         return "wrong_owner"
     if "没有保存凭据" in err:
@@ -2958,6 +3392,9 @@ _SESSION_COUNTING = threading.Lock()  # 后台线程正在数：同一时间只�
 def _count_sessions(now):
     try:
         procs = running_claude_processes()
+        if isinstance(procs, ProcsUnknown):  # 这次没查出来：沿用上次的数
+            _SESSION_CACHE[0] = now
+            return
         _SESSION_BUSY[0] = claude_activity([p for p, _ in procs], max_age=0)
         _SESSION_CACHE[:] = [now, len(procs)]
     except Exception:  # noqa: BLE001  数不出来就沿用上次的
@@ -3103,27 +3540,26 @@ def claude_activity(pids, max_age=5):
         return busy
 
 
-# ---- Claude Code 在等你确认（权限提示 yes / no）：靠 Claude Code 的钩子（hooks）告诉 cam，红绿灯三盏灯一起闪。
-# cam hooks install 往 ~/.claude/settings.json 加几条钩子，每条都是跑 cam.py hook，事件 JSON 从 stdin 进来：
-# PermissionRequest（要问你权限了）记下这个会话在等你；工具跑完、拒绝了、你又发了消息、会话结束就清掉
-ATTENTION_FILE = "attention.json"  # CAM_HOME 下：哪些会话在等你确认
-ATTENTION_MAX_AGE = 2 * 3600  # 秒：等了这么久还没动静就不算了（会话早关了、清的钩子没来得及跑）
-HOOK_SET_EVENTS = ("PermissionRequest",)
-HOOK_CLEAR_EVENTS = ("PostToolUse", "PostToolUseFailure", "PermissionDenied", "UserPromptSubmit", "Stop", "SessionEnd")
-HOOK_EVENTS = HOOK_SET_EVENTS + HOOK_CLEAR_EVENTS
-HOOK_MARK = re.compile(r"cam\.py[\"']? hook$")  # settings.json 里哪条钩子是 cam 装的
+# ---- Claude Code 在等你确认（权限提示 yes / no）：钩子怎么装、等着的会话怎么看。记事件的那一半（hook_event、cmd_hook、
+# ATTENTION_* / HOOK_* 常量）在文件最前面的快路径里
+HOOK_MARK = re.compile(r"(cam\.py[\"']? hook|cam_hook\.py[\"']?)$")  # settings.json 里哪条钩子是 cam 装的
 
 
 def claude_settings_file():
     return os.path.join(claude_config_dir(), "settings.json")
 
 
-def hook_command():
-    """钩子里写的命令：用现在这个 python 跑 cam.py hook。"""
+def hook_command(fast=True):
+    """钩子里写的命令：用现在这个 python 跑旁边的 cam_hook.py（快入口：用得上编译好的字节码，见那个文件）。
+
+    旁边没有它（单独拷走了 cam.py）或 fast=False 时是 cam.py hook：做的事一样，每次多花一百毫秒左右重新编译。
+    """
     cam_py = os.path.abspath(__file__)
+    shim = os.path.join(os.path.dirname(cam_py), "cam_hook.py")
+    script, tail = (shim, "") if fast and os.path.isfile(shim) else (cam_py, " hook")
     if IS_WIN:
-        return f'"{sys.executable}" "{cam_py}" hook'
-    return f"{shlex.quote(sys.executable)} {shlex.quote(cam_py)} hook"
+        return f'"{sys.executable}" "{script}"{tail}'
+    return f"{shlex.quote(sys.executable)} {shlex.quote(script)}{tail}"
 
 
 def _is_cam_hook(group):
@@ -3155,22 +3591,30 @@ def _write_settings(path, data):
 
 
 def hooks_status():
-    """cam 的钩子装没装：每个事件都有一条指向现在这份 cam.py 和 python 的才算装了；有但指向别处（代码搬过家、换了 python）算过期。"""
+    """cam 的钩子装没装：每个事件都有一条指向现在这份代码和 python 的才算装了；有但指向别处（代码搬过家、换了 python）算过期。
+
+    旧版本装的是 cam.py hook，照样能用，只是每次慢一百毫秒左右：算装了，slow 标出来，重新装一次就换成快入口。
+    """
     path = claude_settings_file()
     try:
         hooks = _read_settings(path).get("hooks") or {}
     except CamError:
         hooks = {}
-    cmd = hook_command()
-    have = stale = 0
+    cmd, legacy = hook_command(), hook_command(fast=False)
+    have = stale = slow = 0
     for ev in HOOK_EVENTS:
         groups = [g for g in (hooks.get(ev) or []) if _is_cam_hook(g)] if isinstance(hooks, dict) else []
         if groups:
             have += 1
-            if not any(h.get("command") == cmd for g in groups for h in g.get("hooks") or []):
+            cmds = [h.get("command") for g in groups for h in g.get("hooks") or [] if isinstance(h, dict)]
+            if cmd in cmds:
+                continue
+            if legacy in cmds:
+                slow += 1
+            else:
                 stale += 1
     return {"installed": have == len(HOOK_EVENTS) and not stale, "partial": 0 < have < len(HOOK_EVENTS), "stale": stale > 0,
-            "settings": path, "command": cmd}
+            "slow": slow > 0, "settings": path, "command": cmd}
 
 
 def hooks_install():
@@ -3208,47 +3652,38 @@ def hooks_remove():
     return hooks_status()
 
 
-def attention_path():
-    return os.path.join(cam_home(), ATTENTION_FILE)
+def hook_items():
+    """体检里“钩子”那一行，装了 cam 的钩子才有。只读 settings.json。
 
-
-def _load_attention():
+    代码搬过家、换过 python 以后钩子还指着原来的地方：Claude Code 每次工具调用都白起一个跑不起来的命令，
+    红绿灯也不闪，别处看不出来。
+    """
+    st = hooks_status()
+    if not (st["installed"] or st["partial"] or st["stale"]):
+        return []
     try:
-        with open(attention_path(), encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) and isinstance(data.get("sessions"), dict) else {"sessions": {}}
-    except (OSError, ValueError):
-        return {"sessions": {}}
-
-
-def _save_attention(data):
-    os.makedirs(cam_home(), exist_ok=True)
-    tmp = attention_path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, attention_path())
-
-
-def hook_event(event):
-    """Claude Code 的钩子来了一个事件（stdin 的 JSON 已解析）：要问权限 → 记下这个会话在等你确认；答过了、会话结束 → 清掉。"""
-    if not isinstance(event, dict):
-        return
-    name, sid = event.get("hook_event_name"), str(event.get("session_id") or "")
-    if not sid or name not in HOOK_EVENTS:
-        return
-    data = _load_attention()
-    sessions, now = data["sessions"], time.time()
-    for k in list(sessions):  # 顺手把过期的扫掉
-        if not isinstance(sessions[k], dict) or now - float(sessions[k].get("since_ts") or 0) > ATTENTION_MAX_AGE:
-            del sessions[k]
-    if name in HOOK_SET_EVENTS:
-        ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
-        what = ti.get("description") if isinstance(ti.get("description"), str) else ""  # 只记说明，不记命令本身（可能带密钥）
-        sessions[sid] = {"since": now_iso(), "since_ts": now, "transcript": str(event.get("transcript_path") or ""),
-                         "cwd": str(event.get("cwd") or ""), "tool": str(event.get("tool_name") or ""), "what": what[:80]}
-    else:
-        sessions.pop(sid, None)
-    _save_attention(data)
+        hooks = _read_settings(st["settings"]).get("hooks") or {}
+    except CamError:
+        return []
+    cmds = sorted({str(h.get("command")) for ev in HOOK_EVENTS for g in (hooks.get(ev) or []) if _is_cam_hook(g)
+                   for h in g.get("hooks") or [] if isinstance(h, dict) and HOOK_MARK.search(str(h.get("command", "")))})
+    redo = "cam hooks install（重新装一次；正在跑的 claude 要重开才加载）"
+    for cmd in cmds:
+        try:
+            argv = [a.strip('"') for a in shlex.split(cmd, posix=not IS_WIN)]
+        except ValueError:
+            argv = []
+        gone = [a for a in argv[:2] if not (os.path.exists(a) or shutil.which(a))]
+        if len(argv) < 2 or gone:
+            return [ck("warn", f"Claude Code 的钩子指向的 {gone[0] if gone else cmd} 已经不在了（代码搬过家或换过 python），"
+                               "弹权限确认时红绿灯不会闪", redo)]
+    if st["partial"]:
+        return [ck("warn", "Claude Code 的钩子只装了一部分，等你确认的提示可能记不上或清不掉", redo)]
+    if st["stale"]:
+        return [ck("info", "Claude Code 的钩子用的是另一份 cam 或另一个 python，能跑：" + "；".join(cmds), "想让它用现在这份：" + redo)]
+    if st["slow"]:
+        return [ck("info", "Claude Code 的钩子是旧版本装的写法，能用，每次工具调用多花一百毫秒左右", "cam hooks install（重新装一次，换成快入口）")]
+    return [ck("ok", "Claude Code 的钩子已装：弹权限确认时红绿灯三盏灯一起闪")]
 
 
 def attention_view():
@@ -3282,16 +3717,6 @@ def attention_view():
     return {"count": len(live), "text": text, "since": first.get("since")}
 
 
-def cmd_hook():
-    """Claude Code 的钩子调用：事件 JSON 从 stdin 进来。什么都不输出、永远返回 0，不能影响 Claude Code。"""
-    try:
-        raw = sys.stdin.read()
-        hook_event(json.loads(raw) if raw.strip() else {})
-    except Exception:  # noqa: BLE001
-        pass
-    return 0
-
-
 def cmd_hooks(args):
     act = args.action or "status"
     if act == "install":
@@ -3303,7 +3728,8 @@ def cmd_hooks(args):
         print(f"已从 {st['settings']} 去掉 cam 的钩子（别的钩子没动）。")
     else:
         st = hooks_status()
-        state = ("已装" if st["installed"] else "过期：指向别的 cam.py 或 python，重新 cam hooks install" if st["stale"]
+        state = ("已装（旧写法，能用；重新 cam hooks install 换成快一些的入口）" if st["installed"] and st["slow"]
+                 else "已装" if st["installed"] else "过期：指向别的 cam.py 或 python，重新 cam hooks install" if st["stale"]
                  else "只装了一部分，重新 cam hooks install" if st["partial"] else "没装（cam hooks install）")
         print(f"Claude Code 钩子：{state}\n  配置文件：{st['settings']}\n  命令：{st['command']}")
     return 0
@@ -3376,7 +3802,9 @@ def diagnostic_text(rep):
         if w.get("utilization") is not None:
             L.append(f"- {name}额度已用 {w['utilization']:.0f}%，{_when(w.get('resets_at'))} 重置")
     if u.get("fetched_at"):
-        L.append(f"- 用量更新于 {_when(u['fetched_at'])}" + (f"，报错：{u['error']}" if u.get("error") else ""))
+        L.append(f"- 用量更新于 {_when(u['fetched_at'])}" + (f"，之后没取到：{u['error']}" if u.get("error") else ""))
+    elif u.get("error"):
+        L.append(f"- 用量没取到：{u['error']}")
     L += ["", "## 现在的问题"]
     issues = (a.get("health") or {}).get("issues") or []
     L += [f"- [{ {'error': '异常', 'warn': '注意', 'info': '提示'}.get(i['level'], i['level'])}] {i['text']}"
@@ -3396,7 +3824,8 @@ def diagnostic_text(rep):
           for r in rep["regions"]] or ["- 还没有记录"]
     L += ["", "## 当前环境"]
     if reg.get("checked_at"):
-        L.append(f"- 出口 {exit_line(reg)} · WARP {'是' if reg.get('warp') else '否'} · 查询方式 {reg.get('lookup_mode') or '自动'} · 检测于 {_when(reg['checked_at'])}")
+        L.append(f"- 出口 {exit_line(reg)} · WARP {'是' if reg.get('warp') else '否'} · 查询方式 {reg.get('lookup_mode') or '自动'} · 检测于 {_when(reg['checked_at'])}"
+                 + (f" · 最近一次没连上（{_when(reg['failed_at'])}）" if reg.get("failed_at") else ""))
         L.append(f"- {reg.get('message') or ''}" + (f"（{reg['advice']}）" if reg.get("advice") else ""))
     else:
         L.append("- 还没有检测过出口地区")
@@ -3694,6 +4123,8 @@ def open_verification_url(store, entry_id, url):
 
 
 def make_handler(store, token):
+    import http.server  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+
     class H(http.server.BaseHTTPRequestHandler):
         server_version = f"cam/{VERSION}"
         timeout = 30  # 一条连接最多等 30 秒：不让谁开着连接不说话把线程占住
@@ -3874,9 +4305,22 @@ def lan_ips():
     return sorted(i for i in ips if not i.startswith("127."))
 
 
-class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+def ThreadingServer(address, handler):
+    """面板用的 HTTP 服务，每个请求一个线程。"""
+    import http.server  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+    import socketserver  # noqa: PLC0415
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+        def handle_error(self, request, client_address):
+            # 对面没等回答就断开了（关掉面板、卡片收起、刷新页面）：不是出错，不往日志里打一屏调用栈
+            if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+                return
+            super().handle_error(request, client_address)
+
+    return Server(address, handler)
 
 
 def api_switch(store, aid, mode=None):
@@ -3897,7 +4341,7 @@ def api_switch(store, aid, mode=None):
         return {"ok": True, "changed": False, "deferred": True, "running_claude": len(procs), "account": target["id"],
                 "risks": risks,
                 "message": f"有 {len(procs)} 个 claude 会话在运行，等它们退出后会自动切换到 {target['label']}"}
-    acc, backup, changed = switch_code_account(store, aid)
+    acc, backup, changed = switch_code_account(store, aid, force=True)  # 到这里：没有会话在跑，或用户选了“现在就切”
     procs = running_claude_processes() if changed else []
     msg = (f"已切换到 {acc['label']}。" + (running_warning(procs) or "正在运行的 claude 会话需要重启")
            if changed else "已经是当前账号")
@@ -3936,8 +4380,15 @@ def background_round(store, st, refresh_min, tell, import_live=True):
 
     菜单栏插件每次运行跑一轮，cam serve 每隔几秒跑一轮，两边弹的通知一样（tell(标题, 正文)）。
     st 记两轮之间的状态（last_refresh、warned、last_error），调用方负责保存。任何一步出错都只记进
-    last_error，不影响后面的步骤。import_live=False 跳过自动导入（cam serve 在登录状态没变时用它省掉读钥匙串）。
+    last_error，不影响后面的步骤；last_error 留到下一次整轮（连刷新在内）都没出错才清掉。
+    import_live=False 跳过自动导入（cam serve 在登录状态没变时用它省掉读钥匙串）。
     """
+    failed = []
+
+    def fail(step, e):
+        failed.append(step)
+        st["last_error"] = f"{step}：{errtext(e)}"
+
     if import_live:
         try:
             acc = auto_import(store)
@@ -3945,37 +4396,56 @@ def background_round(store, st, refresh_min, tell, import_live=True):
                 tell("发现新账号", f"已自动保存：{acc['label']}")
                 st["last_refresh"] = 0
         except Exception as e:  # noqa: BLE001
-            st["last_error"] = f"自动导入：{errtext(e)}"
+            fail("自动导入", e)
     try:
         res = apply_time_rules(store)
         if res and res[2]:
             warn = running_warning(running_claude_processes()) or "正在运行的会话需要重启。"
             tell("已按规则切换账号", f"Claude Code 已切换到 {res[0]['label']}。{warn}")
     except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"时间规则：{errtext(e)}"
+        fail("时间规则", e)
     try:
         res = apply_pending_switch(store)
         if res:
             tell("已切换账号", f"claude 会话已退出，Claude Code 已切换到 {res[0]['label']}"
                  + ("（时间规则）" if res[2] == "rule" else ""))
     except Exception as e:  # noqa: BLE001
-        st["last_error"] = f"等待切换：{errtext(e)}"
+        fail("等待切换", e)
         try:
             if not store.load().get("pending_switch"):  # 登记已作废（目标账号的登录失效了），不会再试，告诉用户一声
                 tell("等待中的切换没有完成", str(e))
         except Exception:  # noqa: BLE001
             pass
     now = time.time()
-    if refresh_min > 0 and now - float(st.get("last_refresh") or 0) >= refresh_min * 60:
+    due = refresh_min > 0 and now - float(st.get("last_refresh") or 0) >= refresh_min * 60
+    if refresh_min > 0 and not due:
+        try:  # 两次定时刷新之间：本机换了网络、或者上次环境检测没连上到了重试的时候，补测一次
+            if region_recheck_due(store.load(), st, refresh_min, now):
+                check_region(store, max_age=0)
+        except Exception as e:  # noqa: BLE001
+            fail("环境检测", e)
+    if due:
         st["last_refresh"] = now
+        st["net"] = net_fingerprint() or st.get("net")  # 这一轮本来就要测，记下现在连的是哪张网
         try:
+            env_err = []
+
+            def env_check():
+                try:
+                    check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
+                except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
+                    env_err.append(e)
+
+            # 环境检测和刷新用量同时进行，互不等待（各自只在最后合并写回时加锁）
+            t = threading.Thread(target=env_check, daemon=True)
+            t.start()
             # 定时刷新不替不常用的账号续登录，见 refresh_usage
-            try:
-                check_region(store)  # 界面常显的出口地区，随用量刷新一起更新
-            except Exception as e:  # noqa: BLE001  检测出错不影响刷新用量
-                st["last_error"] = f"环境检测：{errtext(e)}"
             data = refresh_usage(store, allow_token_refresh=False)
-            st.pop("last_error", None)
+            t.join(REGION_CHECK_BUDGET + 2)
+            if env_err:
+                fail("环境检测", env_err[0])
+            if not failed:  # 这一轮前面有哪步出过错就留着，体检里的“后台上一轮出错”才看得到
+                st.pop("last_error", None)
             limit = rules_view(data)["alert_threshold"]
             act = data["active"].get("claude_code")
             warned = set(st.get("warned") or [])
@@ -3992,7 +4462,7 @@ def background_round(store, st, refresh_min, tell, import_live=True):
                     tell(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", fmt_reset(w.get("resets_at")))
             st["warned"] = sorted(warned)[-50:]
         except Exception as e:  # noqa: BLE001
-            st["last_error"] = f"刷新用量：{errtext(e)}"
+            fail("刷新用量", e)
     return st
 
 
@@ -4067,34 +4537,40 @@ def serve(store, host, port, auto_refresh_min):
         pass
 
 
+def _panel_get(port, path, token=None, timeout=2):
+    """向本机 port 上的面板发一个 GET，不走代理。返回 (状态码, 正文)；没连上是 (0, "")。"""
+    import http.client  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+    import urllib.request  # noqa: PLC0415
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers={"Authorization": f"Bearer {token}"} if token else {})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, e.read().decode("utf-8", "replace")
+        except OSError:
+            return e.code, ""
+    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return 0, ""
+
+
 def cam_panel_at(port):
     """本机 port 上听着的是不是 cam 的面板（cam serve 或桌面版）：不带令牌问一下，只有它会这样回 401。
 
     令牌只发给认出来的面板：端口被别的程序先占了，不能把令牌送上门。不走代理。
     """
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state")
+    code, txt = _panel_get(port, "/api/state")
+    if code != 401:
+        return False  # 不要令牌就给看（或者没连上）：不是我们的
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2):
-            return False  # 不要令牌就给看：不是我们的
-    except urllib.error.HTTPError as e:
-        try:
-            return e.code == 401 and json.loads(e.read().decode()).get("error") == "需要访问令牌"
-        except (ValueError, OSError, AttributeError):
-            return False
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        return json.loads(txt).get("error") == "需要访问令牌"
+    except (ValueError, AttributeError):
         return False
 
 
 def panel_running(port, token):
     """本机 port 上是不是已经有一个用同一令牌的面板（cam serve 或桌面版开的）。不走代理。"""
-    if not cam_panel_at(port):
-        return False
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
-            return r.status == 200
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
-        return False
+    return cam_panel_at(port) and _panel_get(port, "/api/state", token)[0] == 200
 
 
 def port_free(port):
@@ -4137,24 +4613,18 @@ def ensure_panel(store, port=8787, need_mini=False):
 
 def mini_available(port, token):
     """本机 port 上的面板有没有卡片小面板页（只有脚本版的 cam serve 有；桌面版的服务没有）。"""
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/mini", headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
-            return r.status == 200
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
-        return False
+    return _panel_get(port, "/mini", token)[0] == 200
 
 
 def serve_outdated(port, token):
     """本机 port 上跑的脚本版 cam serve 用的是不是旧代码（git pull / cam update 之后没重启）。
     桌面版的服务、连不上、回答里没有 code_stamp 的老版本：桌面版和连不上算“不是”，老版本算“是”。"""
+    code, txt = _panel_get(port, "/api/state", token, timeout=3)
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=3) as r:
-            st = json.loads(r.read().decode())
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
-        return False
-    return st.get("backend") == "python" and st.get("code_stamp") != CODE_STAMP
+        st = json.loads(txt) if code == 200 else None
+    except ValueError:
+        st = None
+    return isinstance(st, dict) and st.get("backend") == "python" and st.get("code_stamp") != CODE_STAMP
 
 
 def restart_stale_serve(store, port, token):
@@ -4164,12 +4634,11 @@ def restart_stale_serve(store, port, token):
     心跳文件里的 pid 不能用来找它：只有拿到后台锁的 serve 才写心跳，流式模式的菜单栏插件拿着锁时它一次都没写过。
     返回有没有结束掉，调用方再用 ensure_panel 起新的。
     """
+    code, txt = _panel_get(port, "/api/state", token)
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as r:
-            if json.loads(r.read().decode()).get("backend") != "python":
-                return False
-    except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError):
+        if code != 200 or json.loads(txt).get("backend") != "python":
+            return False
+    except (ValueError, AttributeError):
         return False
     pid = serve_pid_on(port)
     if not pid:
@@ -4348,7 +4817,8 @@ def print_accounts(store, data):
     if sc and (st.get("region") or {}).get("status"):  # 后台检测过才有意义
         c = {"low": "g", "medium": "y", "high": "r"}[sc["grade"]]
         print(("" if risks else "\n") + color(f"环境评分 {sc['score']}/100：{sc['label']}", c)
-              + color("（据后台缓存；cam doctor 实测并查看完整的服务检查）", "d"))
+              + color(f"（{fmt_ago(st['region'].get('checked_at')) or '后台'}检测"
+                      + ("，最近一次没连上" if st["region"].get("failed_at") else "") + "；cam doctor 实测并查看完整的服务检查）", "d"))
 
 
 # --------------------------------------------------------------------------- 命令
@@ -4580,7 +5050,7 @@ def cmd_switch(store, args):
     if procs and wait:
         wait_and_switch(store, target, procs)
         return
-    acc, backup, changed = switch_code_account(store, args.account)
+    acc, backup, changed = switch_code_account(store, args.account, force=True)  # 到这里：没有会话在跑，或用户选了现在就切
     if not changed:
         print(f"已经是当前账号：{acc['label']}")
         return
@@ -4637,7 +5107,11 @@ def cmd_risk(store, args):
     print(f"  {p['risk_strong_below']}–{p['risk_confirm_below'] - 1} 分：问“是否继续 [y/N]”")
     print(f"  {p['risk_strong_below']} 分以下，或出口不在支持名单内：要输入“继续”才启动")
     if reg["status"]:
-        print(f"当前（据后台缓存）：{sc['score']}/100，{sc['label']}；档位 {launch_tier(sc['score'], reg['status'], p)}")
+        print(f"当前（{fmt_ago(reg['checked_at'])}检测）：{sc['score']}/100，{sc['label']}；档位 {launch_tier(sc['score'], reg['status'], p)}")
+        if reg["failed_at"]:
+            print(f"  最近一次检测没连上（{fmt_ago(reg['failed_at'])}），上面是上一次查到的结果")
+        if not cached_region_loc(data):
+            print("  " + ENV_STALE_ADVICE)
     else:
         print("当前：还没有检测过，运行 cam doctor 或 cam claude 时会检测")
     pv = privacy_view(store)
@@ -4951,9 +5425,11 @@ def cmd_env_clean(store, args):
 
 def http_text(url, timeout=8):
     """GET 纯文本。返回 (状态, 文本)；状态 0 表示没连上。"""
+    import http.client  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+    import urllib.request  # noqa: PLC0415
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_state()[0]) as r:
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
@@ -4982,7 +5458,7 @@ REGION_NAMES = {"CN": "中国大陆", "HK": "香港", "MO": "澳门", "RU": "俄
                 "ID": "印尼", "PH": "菲律宾", "IN": "印度", "AE": "阿联酋", "TR": "土耳其"}
 REGION_ADVICE = {
     "supported": "出口 IP 这一项没问题。Anthropic 结合 IP 和其他信号综合判断所在地，下面的代理 / VPN、时区、出口变化等就是这些信号里本机能看到的部分。",
-    "unsupported": "按 Anthropic 政策这个地区不提供服务，继续使用可能导致账号被限制或封禁。建议换到支持地区的网络出口后再使用。",
+    "unsupported": "按 Anthropic 政策这个地区不提供服务，继续使用可能导致账号被限制或封禁。Anthropic 按使用者实际所在地判断，不按出口 IP：人在支持地区的话，多半是代理 / VPN 把出口带到了这里，查一下它的设置。",
     "unknown": "连不上 Cloudflare，判断不了出口地区。检查网络或代理后重新检测。",
 }
 
@@ -5014,6 +5490,8 @@ STACK_FIELDS = ("v4_ip", "v4_loc", "v6_ip", "v6_loc")
 RDAP_URL = os.environ.get("CAM_RDAP_URL", "https://rdap.org/ip/")  # IP 的注册国（原生 / 广播 IP）；空字符串表示不查
 CF_TRACE4_URL = os.environ.get("CAM_CF_TRACE4_URL", "https://1.1.1.1/cdn-cgi/trace")  # 只走 IPv4 的出口
 CF_TRACE6_URL = os.environ.get("CAM_CF_TRACE6_URL", "https://[2606:4700:4700::1111]/cdn-cgi/trace")  # 只走 IPv6 的出口
+# claude.ai 的 trace 没回音时改问 Cloudflare 自己的（同一个出口，看到的一样）；空字符串表示不问
+CF_TRACE_URL = os.environ.get("CAM_CF_TRACE_URL", "https://www.cloudflare.com/cdn-cgi/trace")
 IP_TYPE_NAMES = {"residential": "家庭 / 公司宽带", "hosting": "机房 / 云服务器", "proxy": "代理 / VPN 出口", "tor": "Tor 出口节点",
                  "mobile": "手机网络"}
 # 公共 DNS → (名称, 国家)。Google / Cloudflare / Quad9 这类任播的全球都有节点，国家记 None，不拿来判断位置
@@ -5041,6 +5519,14 @@ ACCOUNT_REGION_DAYS = 7       # 同一账号几天内从多个地区使用过就
 ACCOUNT_REGION_KEEP = 8       # 每个账号最多记几个地区
 CLOCK_SKEW_WARN = 120         # 本机时钟与服务器相差超过这么多秒就提醒
 REGION_FRESH_SECS = 3600      # 切换账号时，多久以内的出口地区检测结果算有效
+TRACE_HEDGE_SECS = 2          # claude.ai 的 trace 这么久没回音，就同时问 Cloudflare 自己的，谁先答用谁的
+META_BUDGET_SECS = 8          # 运营商 / 注册国 / IPv4 / IPv6 这几项第三方查询加起来最多等多久，到点没答的当作查不到
+META_SOURCE_TIMEOUT = 4       # 其中每个运营商数据源最多等多久
+REGION_CHECK_BUDGET = 6 + META_BUDGET_SECS + 2  # 一次完整的环境检测最多等多久（出口 6 秒 + 第三方 + 一点余量）
+REGION_RETRY_SECS = 60        # 环境检测没连上时，最快多久以后重试；连续失败每次翻一倍
+NET_RECHECK_SECS = 30         # 发现本机换了网络就补测一次，最多这么久一次
+SERVICE_DNS_SECS = 5          # 服务检测里解析一个域名最多等多久
+SERVICE_PROBE_SECS = 10       # 服务检测里连 api.anthropic.com、claude.ai 各最多等多久
 # 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
 TUNNEL_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec", "tailscale", "zt", "nebula", "proton", "nordlynx",
                    "mullvad", "clash", "mihomo", "sing", "hysteria", "surge")
@@ -5111,19 +5597,85 @@ def _age_secs(iso):
     return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() if t else None
 
 
+def run_parallel(jobs, budget, limits=None):
+    """同时做几件互不相干的事（{名字: 无参函数}），总共最多等 budget 秒；limits 可以给其中某件定更短的时限。
+    返回 {名字: 结果}，没等到的那件是 None；哪件抛了错，等其它的收齐后原样抛出。
+    用 daemon 线程而不是线程池：卡在连不上的网络里的那件（域名解析没有超时可设）不拖着调用方，也不拦着进程退出。"""
+    import queue  # noqa: PLC0415
+    q = queue.Queue()
+
+    def run(name, fn):
+        try:
+            q.put((name, fn(), None))
+        except Exception as e:  # noqa: BLE001
+            q.put((name, None, e))
+
+    for name, fn in jobs.items():
+        threading.Thread(target=run, args=(name, fn), daemon=True).start()
+    out, err, left = dict.fromkeys(jobs), None, set(jobs)
+    t0 = time.monotonic()
+    while left:
+        end = t0 + max(min(budget, (limits or {}).get(n, budget)) for n in left)
+        try:
+            name, val, e = q.get(timeout=max(0.0, end - time.monotonic()))
+        except queue.Empty:
+            break
+        left.discard(name)
+        out[name], err = val, err or e
+    if err:
+        raise err
+    return out
+
+
+def exit_trace(timeout=6, fallback=True):
+    """出口信息（parse_trace 的结果）或 None。先问 claude.ai；它答不上来、或者 TRACE_HEDGE_SECS 秒还没回音，
+    就同时问 Cloudflare 自己的 trace（fallback=False 时不问），谁先给出结果用谁的。总共最多等 timeout 秒。"""
+    import queue  # noqa: PLC0415
+    q = queue.Queue()
+
+    def ask(url, secs):
+        def run():
+            t0 = time.time()
+            try:
+                st, txt = http_text(url, secs)
+                q.put(parse_trace(txt, t0) if st == 200 and "loc=" in txt else None)
+            except Exception:  # noqa: BLE001
+                q.put(None)
+        threading.Thread(target=run, daemon=True).start()
+
+    start = time.monotonic()
+    ask(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace", timeout)
+    pending, spare = 1, bool(fallback and CF_TRACE_URL)
+    while True:
+        end = start + (min(TRACE_HEDGE_SECS, timeout) if spare else timeout)
+        try:
+            got = q.get(timeout=max(0.0, end - time.monotonic()))
+            pending -= 1
+            if got:
+                return got
+        except queue.Empty:
+            if not spare:
+                return None
+        if spare:
+            spare = False
+            left = start + timeout - time.monotonic()
+            if left > 0.2:
+                ask(CF_TRACE_URL, left)
+                pending += 1
+        if not pending:
+            return None
+
+
 def detect_region(timeout=6, cfg=None, prev=None):
     """从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的），再并行查运营商 / 类型 / 注册国 /
     IPv4 / IPv6 出口。出口 IP 和数据源都没变、且 META_TTL 内查过时，运营商那几项直接沿用 prev，不再问第三方。
-    设置为 off 时只查 claude.ai。返回 dict 或 None（claude.ai 都连不上）。"""
+    设置为 off 时只查 claude.ai。返回 dict 或 None（claude.ai 和 Cloudflare 都没回音）。
+    最多等 timeout + META_BUDGET_SECS 秒：第三方那几项到时限还没答的当作查不到，不拖着出口地区。"""
     cfg = cfg or ip_lookup_config()
     off = cfg["mode"] == "off"
-    t0 = time.time()
-    st, txt = http_text(f"{CLAUDE_WEB_BASE}/cdn-cgi/trace", timeout)
-    if (st != 200 or "loc=" not in txt) and not off:
-        st, txt = http_text("https://www.cloudflare.com/cdn-cgi/trace", timeout)
-    if st != 200 or "loc=" not in txt:
+    out = exit_trace(timeout, fallback=not off)
+    if not out:
         return None
-    out = parse_trace(txt, t0)
     out.update({k: None for k in META_FIELDS + STACK_FIELDS})
     out["lookup_mode"] = cfg["mode"]
     if off:
@@ -5132,21 +5684,24 @@ def detect_region(timeout=6, cfg=None, prev=None):
     age = _age_secs(prev.get("meta_at"))
     reuse = (bool(out["ip"]) and prev.get("ip") == out["ip"] and prev.get("lookup_mode") == cfg["mode"]
              and age is not None and age < META_TTL)
+    t0 = time.monotonic()
     jobs = {"v4": lambda: trace_only(CF_TRACE4_URL), "v6": lambda: trace_only(CF_TRACE6_URL)}
     if not reuse:
         jobs["meta"] = lambda: fetch_exit_meta(cfg)
         if not cfg["ipapi_key"]:  # 带 key 的 ipapi.is 自己会给注册国
             jobs["rdap"] = lambda: fetch_ip_registration(out["ip"])
-    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
-        futs = {k: ex.submit(f) for k, f in jobs.items()}
-        res = {k: f.result() for k, f in futs.items()}
+    res = run_parallel(jobs, META_BUDGET_SECS)
     if reuse:
         out.update({k: prev.get(k) for k in META_FIELDS})
     else:
-        if res.get("meta"):
+        if res["meta"]:
             out.update(res["meta"])
         if not out["reg_loc"]:
-            out["reg_loc"] = res.get("rdap") if "rdap" in res else fetch_ip_registration(out["ip"])
+            if "rdap" in res:
+                out["reg_loc"] = res["rdap"]
+            else:  # 带了 key 但 ipapi.is 这次没给注册国：时限里还有剩才补问 RDAP
+                left = META_BUDGET_SECS - (time.monotonic() - t0)
+                out["reg_loc"] = fetch_ip_registration(out["ip"], min(5, left)) if left >= 1 else None
         if out["org"] or out["meta_loc"]:  # 查到了才缓存；全失败的话下次重查
             out["meta_at"] = now_iso()
     if res["v4"]:
@@ -5189,12 +5744,19 @@ def meta_sources(cfg):
                   ("Cloudflare", CF_META_URL)]
 
 
-def fetch_exit_meta(cfg=None, timeout=5):
-    """出口 IP 的 ASN、运营商、城市、国家和类型，按 meta_sources 的顺序问，第一个查到的为准。查不到返回 None。"""
+def fetch_exit_meta(cfg=None, timeout=None, budget=None):
+    """出口 IP 的 ASN、运营商、城市、国家和类型，按 meta_sources 的顺序问，第一个查到的为准。查不到返回 None。
+    每个数据源最多等 timeout 秒（默认 META_SOURCE_TIMEOUT），加起来不超过 budget 秒（默认 META_BUDGET_SECS）：
+    前面的卡住了，后面的就少等或不问。"""
+    timeout = META_SOURCE_TIMEOUT if timeout is None else timeout
+    end = time.monotonic() + (META_BUDGET_SECS if budget is None else budget)
     for name, url in meta_sources(cfg or ip_lookup_config()):
         if not url:
             continue
-        st, txt = http_text(url, timeout)
+        left = end - time.monotonic()
+        if left < min(0.5, timeout):
+            break
+        st, txt = http_text(url, min(timeout, left))
         if st != 200:
             continue
         try:
@@ -5255,7 +5817,7 @@ def parse_exit_meta(j):
     return {"asn": asn, "org": org, "city": city or None, "meta_loc": loc, "ip_type": ip_type, "reg_loc": reg_loc}
 
 
-def fetch_ip_registration(ip, timeout=6):
+def fetch_ip_registration(ip, timeout=5):
     """IP 在 RIR 登记的国家（RDAP）。查不到返回 None（ARIN 的分配记录常常没写国家）。"""
     if not RDAP_URL or not ip:
         return None
@@ -5585,6 +6147,12 @@ def note_account_region(data, acc_id, loc, reg=None):
             a["regions"] = regs[:ACCOUNT_REGION_KEEP]
 
 
+ENV_STALE_ADVICE = ("重新检测：运行 cam doctor，或在面板的“环境”里点“重新检测”。"
+                    "开着面板（cam serve）、桌面版或菜单栏小工具时会定时自动检测。")
+ENV_FAILED_ADVICE = ("多半是网络刚好断了一下，或者代理在换节点。开着面板（cam serve）、桌面版或菜单栏小工具时过一会儿会自动重试，"
+                     "连上就恢复；想马上重测：运行 cam doctor，或在面板的“环境”里点“重新检测”。")
+
+
 def cached_region_loc(data, max_age=REGION_FRESH_SECS):
     """后台最近一次检测到的出口地区；超过 max_age 秒或没检测过时为 None。"""
     reg = data.get("region") or {}
@@ -5595,58 +6163,171 @@ def cached_region_loc(data, max_age=REGION_FRESH_SECS):
 
 
 def region_view(data):
-    """界面常显用的出口地区状态（不联网，用后台上次检测的结果）。没检测过时 status 为 None。"""
+    """界面常显用的出口地区状态（不联网，用后台上次检测的结果）。没检测过时 status 为 None。
+    failed_at / fail_count：最近一次检测没连上（这时其它字段还是上一次查到的，checked_at 是那一次的时间）。"""
     c = data.get("region") or {}
     if not c.get("checked_at"):
         return {"loc": None, "loc_name": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
                 "warp": False, "prev_loc": None, "changed_at": None, "org": None, "asn": None, "city": None, "ip_type": None,
-                "reg_loc": None, "reg_loc_name": None, "meta_source": None, "lookup_mode": None}
+                "reg_loc": None, "reg_loc_name": None, "meta_source": None, "lookup_mode": None, "failed_at": None, "fail_count": 0}
     status = region_status(c.get("loc"))
     return {"loc": c.get("loc"), "loc_name": region_name(c.get("loc")), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
             "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
             "warp": bool(c.get("warp")), "prev_loc": c.get("prev_loc"), "changed_at": c.get("changed_at"),
             "org": c.get("org"), "asn": c.get("asn"), "city": c.get("city"), "ip_type": c.get("ip_type"),
             "reg_loc": c.get("reg_loc"), "reg_loc_name": region_name(c.get("reg_loc")),
-            "meta_source": c.get("meta_source"), "lookup_mode": c.get("lookup_mode")}
+            "meta_source": c.get("meta_source"), "lookup_mode": c.get("lookup_mode"),
+            "failed_at": c.get("failed_at"), "fail_count": int(c.get("fail_count") or 0)}
+
+
+def net_fingerprint():
+    """本机现在连的是哪张网（短哈希，只在本机比较用）：默认路由用的本机地址，IPv6 只取前 64 位（后半截隔一阵自己会换）。
+    换 Wi-Fi、插拔网线、开关接管整机流量的 VPN 时会变；代理换节点在本机看不出来，那种靠定时检测。
+    不发任何数据包（UDP 的 connect 只让系统选路）。没有网络时返回 ""。"""
+    fake = os.environ.get("CAM_TEST_NET")
+    if fake is not None:
+        return fake
+    addrs = []
+    for fam, host in ((socket.AF_INET, "1.1.1.1"), (socket.AF_INET6, "2606:4700:4700::1111")):
+        try:
+            with socket.socket(fam, socket.SOCK_DGRAM) as s:
+                s.connect((host, 53))
+                addrs.append(s.getsockname()[0])
+        except (OSError, ValueError):
+            continue
+    return net_fingerprint_of(addrs)
+
+
+def net_fingerprint_of(addrs):
+    """net_fingerprint 的计算部分：addrs 是默认路由用的本机地址（文字形式，IPv4 在前、IPv6 在后）。
+    IPv6 只取前 64 位；链路本地地址（fe80::/10）哪张网都是它，不算。一个能用的都没有返回 ""。
+    两个版本读写同一个 region.net，算出来的必须是同一个值：规则和 Rust 版 health::net_fingerprint_of 一致
+    （tests/shared/region_check.json）。"""
+    parts = []
+    for ip in addrs:
+        if ":" not in ip:
+            parts.append(ip)
+            continue
+        try:
+            raw = socket.inet_pton(socket.AF_INET6, ip.split("%")[0])
+        except (OSError, ValueError):
+            continue
+        if not (raw[0] == 0xfe and raw[1] & 0xc0 == 0x80):
+            parts.append(raw[:8].hex())
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12] if parts else ""
+
+
+def region_trusted(data):
+    """上次环境检测的结果现在还能直接用：一小时内查到的，之后没有失败过，本机也没换网络。"""
+    reg = data.get("region") or {}
+    if not cached_region_loc(data) or reg.get("failed_at"):
+        return False
+    fp = net_fingerprint()
+    return not (fp and reg.get("net") and fp != reg["net"])
+
+
+def region_check_fresh(age, fage, max_age, moved):
+    """check_region 这一次可以跳过：max_age 秒内查到过，本机没换网络；上次没连上的话只看离那次失败有没有到
+    REGION_RETRY_SECS 秒（max_age 更短就按它）。age / fage：离上次查到 / 上次没连上过了几秒，没有过是 None。
+    规则和 Rust 版 health::region_check_fresh 一致（tests/shared/region_check.json）。"""
+    if fage is not None:
+        return fage < min(max_age, REGION_RETRY_SECS)
+    return age is not None and age < max_age and not moved
+
+
+def region_retry_wait(fail_count, refresh_min):
+    """环境检测没连上之后隔几秒重试：从 REGION_RETRY_SECS 起每连着失败一次翻一倍（最多翻四次），
+    最长不超过定时检测的间隔。规则和 Rust 版 health::region_retry_wait 一致（tests/shared/region_check.json）。"""
+    n = max(1, int(fail_count or 1))
+    return min(REGION_RETRY_SECS * 2 ** min(n - 1, 4), max(REGION_RETRY_SECS, refresh_min * 60))
+
+
+def region_recheck_due(data, st, refresh_min, now=None):
+    """两次定时检测之间要不要补测一次环境（background_round 每轮问一次，st 是它的状态）：
+    本机换了网络（net_fingerprint 和上次不一样；NET_RECHECK_SECS 秒内最多补测一次），
+    或者上次没连上、到了重试的时候（从 REGION_RETRY_SECS 起每失败一次翻一倍，最长不超过定时检测的间隔）。"""
+    now = time.time() if now is None else now
+    reg = data.get("region") or {}
+    fp, seen = net_fingerprint(), st.get("net") or reg.get("net")
+    if fp and fp != seen and (not seen or now - float(st.get("net_at") or 0) >= NET_RECHECK_SECS):
+        st["net"], st["net_at"] = fp, now
+        if seen:
+            return True
+    if reg.get("failed_at"):
+        age = _age_secs(reg["failed_at"])
+        return age is None or age >= region_retry_wait(reg.get("fail_count"), refresh_min)
+    return False
 
 
 def check_region(store, max_age=300):
     """后台定时调用：检测出口地区（连带 WARP、时钟偏差）和 Anthropic 官方状态页，记到 data["region"] / data["status_page"]，
-    并给当前账号记一笔地区。max_age 秒内查过就跳过。只记录，不干预任何操作。"""
+    并给当前账号记一笔地区。max_age 秒内查到过就跳过（本机换了网络的不跳）；上次没连上的话 REGION_RETRY_SECS 秒内不重试
+    （max_age 更短就按它）。
+
+    这次没连上、以前查到过：出口那一份留着不动（checked_at 还是查到那次的时间），只记 failed_at / fail_count，
+    界面据此说“最近一次没连上，先用上一次的结果”；连上了就清掉。从没查到过的还是记成查不到。
+    本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。只记录，不干预任何操作。"""
     data = store.load()
-    at = parse_iso((data.get("region") or {}).get("checked_at"))
-    if at and (dt.datetime.now(dt.timezone.utc) - at).total_seconds() < max_age:
+    old = data.get("region") or {}
+    fp = net_fingerprint()
+    moved = bool(fp and old.get("net") and fp != old["net"])  # 本机换了网络：上次查到的是另一张网的，没到 max_age 也重测
+    if region_check_fresh(_age_secs(old.get("checked_at")), _age_secs(old.get("failed_at")), max_age, moved):
         return region_view(data)
     cfg = ip_lookup_config(store)
-    with ThreadPoolExecutor(max_workers=3) as ex:  # 出口、状态页、本机设置三件事并行，互不等待
-        f_r = ex.submit(detect_region, 6, cfg, data.get("region") or {})
-        f_sp = ex.submit(fetch_status_page)
-        f_env = ex.submit(local_env)
-        r, sp, env = f_r.result() or {}, f_sp.result(), f_env.result()
+    # 出口、状态页、本机设置几件事并行，互不等待
+    res = run_parallel({"r": lambda: detect_region(6, cfg, old), "sp": fetch_status_page, "env": local_env, "net": net_fingerprint},
+                       REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2})
+    r, sp, env = res["r"] or {}, res["sp"], res["env"]
     with store.lock():
         data = store.load()
         old = data.get("region") or {}
-        reg = {k: r.get(k) for k in ("loc", "ip", "colo", "ms", "skew") + META_FIELDS + STACK_FIELDS}
-        reg.update(warp=bool(r.get("warp")), lookup_mode=cfg["mode"], env=env, checked_at=now_iso())
-        last = old.get("loc") or old.get("last_loc")  # 中间失败过一次也和最后一次知道的出口比
-        reg["last_loc"] = reg["loc"] or last
-        if last and reg["loc"] and last != reg["loc"]:
-            reg["prev_loc"], reg["changed_at"] = last, reg["checked_at"]
-        elif old.get("prev_loc"):
-            reg["prev_loc"], reg["changed_at"] = old["prev_loc"], old.get("changed_at")
+        now = now_iso()
+        if r.get("loc") or not old.get("loc"):
+            reg = {k: r.get(k) for k in ("loc", "ip", "colo", "ms", "skew") + META_FIELDS + STACK_FIELDS}
+            reg.update(warp=bool(r.get("warp")), lookup_mode=cfg["mode"], env=old.get("env"), env_at=old.get("env_at"),
+                       checked_at=now, net=res["net"] or "")
+            last = old.get("loc") or old.get("last_loc")  # 中间失败过一次也和最后一次知道的出口比
+            reg["last_loc"] = reg["loc"] or last
+            if last and reg["loc"] and last != reg["loc"]:
+                reg["prev_loc"], reg["changed_at"] = last, now
+            elif old.get("prev_loc"):
+                reg["prev_loc"], reg["changed_at"] = old["prev_loc"], old.get("changed_at")
+        else:  # 这次没连上，手里有以前查到的：留着那一份
+            reg = dict(old)
+        if not r.get("loc"):
+            reg.update(failed_at=now, fail_count=int(old.get("fail_count") or 0) + 1)
+        if env is not None:
+            reg.update(env=env, env_at=now)
         data["region"] = reg
-        if sp:
-            data["status_page"] = dict(sp, checked_at=reg["checked_at"])
-        else:
-            data.pop("status_page", None)
-        note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"], reg)
-        ss = data.get("service_status")
-        if reg["loc"] and isinstance(ss, dict):  # 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
-            ss["items"] = [i for i in ss.get("items") or [] if not resolved_by_trace(i)]
-            if not ss["items"]:
-                data.pop("service_status", None)
+        if sp:  # 状态页这次没连上就留着上次的（它自己带时间，过一小时不再算数）
+            data["status_page"] = dict(sp, checked_at=now)
+        if r.get("loc"):
+            note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"], reg)
+            ss = data.get("service_status")
+            if isinstance(ss, dict):  # 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
+                ss["items"] = [i for i in ss.get("items") or [] if not resolved_by_trace(i)]
+                if not ss["items"]:
+                    data.pop("service_status", None)
         store.save(data)
     return region_view(data)
+
+
+def region_fail_item(reg):
+    """最近一次环境检测没连上、手里还有以前查到的出口时的那一条提示；顶部环境卡（risk_items）和服务检测共用，两边扣分才一致。
+    那份结果还新（一小时内）：只说一声，不扣分；已经旧了：出口现在是哪里说不准，按“查不到”提醒。
+    上一次查到的出口不在支持名单时也只说一声：“不在名单”那条已经提醒并扣过分了，不再叠一条。没失败过返回 None。"""
+    if not (reg.get("failed_at") and reg.get("loc") and reg.get("checked_at")):
+        return None
+    age = _age_secs(reg["checked_at"])
+    if (age is not None and age <= REGION_FRESH_SECS) or region_status(reg["loc"]) == "unsupported":
+        return {"kind": "env_failed", "level": "info",
+                "text": f"最近一次环境检测没连上（{fmt_ago(reg['failed_at'])}），先用上一次查到的结果（{fmt_ago(reg['checked_at'])}）",
+                "advice": ENV_FAILED_ADVICE}
+    n = int(reg.get("fail_count") or 1)
+    return {"kind": "region_unknown", "level": "warn",
+            "text": f"出口地区现在查不到：{f'连续 {n} 次检测都' if n > 1 else '最近一次检测'}没连上 claude.ai 和 Cloudflare，"
+                    f"上一次查到是 {region_label(reg['loc'])}（{fmt_ago(reg['checked_at'])}）",
+            "advice": REGION_ADVICE["unknown"]}
 
 
 def resolved_by_trace(item):
@@ -5656,39 +6337,51 @@ def resolved_by_trace(item):
     return k in ("dns", "tls") or (k == "web" and "连不上" in (item.get("text") or ""))
 
 
-def risk_items(data, include_region=True):
+def risk_items(data, include_region=True, note_age=True):
     """根据后台缓存和本机设置算出的风险提示（不联网）：[{"kind", "level", "text", "advice"}]。
 
     只提示，不拦任何操作；界面把 warn / bad 的常显在顶部，info 只在服务检查里列出。
+    上次环境检测超过一小时（后台没在跑时会这样）：从那次结果里算出来的每一条后面标上是多久以前测的，
+    再加一条 env_stale 说明怎么重新检测；官方状态页的故障过了一小时不再算数。note_age=False 不标（调用方自己说了是多久前的）。
+    最近一次检测没连上（failed_at）：出口还按上一次查到的算，另加一条 region_fail_item 说明。
     """
     out = []
-
-    def add(kind, level, text, advice=""):
-        out.append({"kind": kind, "level": level, "text": text, "advice": advice})
-
     now = dt.datetime.now(dt.timezone.utc)
     reg = data.get("region") or {}
+    age = _age_secs(reg.get("checked_at"))
+    old = f"（{fmt_ago(reg['checked_at'])}检测的）" if note_age and age is not None and age > REGION_FRESH_SECS else ""
+    env_at = reg.get("env_at") or reg.get("checked_at")  # 本机设置每次都更新，出口没连上那次也是
+    env_age = _age_secs(env_at)
+    env_old = f"（{fmt_ago(env_at)}检测的）" if note_age and env_age is not None and env_age > REGION_FRESH_SECS else ""
+
+    def add(kind, level, text, advice="", cached=True):
+        # cached：这一条是从上次环境检测的结果里算出来的，结果旧了要标出来；自己带时间或不靠那次检测的传 False
+        out.append({"kind": kind, "level": level, "text": text + (old if cached else ""), "advice": advice})
+
     loc = reg.get("loc") if reg.get("checked_at") else None
     if include_region and loc and region_status(loc) == "unsupported":
         add("region", "warn", region_message(loc, "unsupported"), REGION_ADVICE["unsupported"])
     if include_region and reg.get("checked_at") and not loc:
         add("region_unknown", "warn", "出口地区查不到：上次检测连不上 claude.ai 和 Cloudflare", REGION_ADVICE["unknown"])
+    fail = region_fail_item(reg)
+    if fail and include_region:
+        out.append(fail)
     if include_region and reg.get("checked_at"):  # 代理 / VPN：和服务检测用同一份缓存，扣分一致
         e = reg.get("env") if isinstance(reg.get("env"), dict) else {}
         if "proxy" in e:
-            out.extend(dict(i) for i in proxy_vpn_items(e) if i["level"] != "ok")
+            out.extend(dict(i, text=i["text"] + env_old) for i in proxy_vpn_items(e) if i["level"] != "ok")
     if include_region:  # 最近一次服务检测发现的连接问题（后台检测到网络恢复后会清掉）
         ss = data.get("service_status") or {}
         at = parse_iso(ss.get("checked_at"))
         if at and (now - at).total_seconds() < 3600:
             for it in ss.get("items") or []:
-                add(it["kind"], it["level"], it["text"], it.get("advice", ""))
+                add(it["kind"], it["level"], it["text"], it.get("advice", ""), cached=False)
     changed = parse_iso(reg.get("changed_at"))
     if reg.get("prev_loc") and loc and changed and (now - changed).total_seconds() < REGION_CHANGE_HOURS * 3600:
         add("region_change", "warn",
             f"出口地区变化：{region_label(reg['prev_loc'])} → {region_label(loc)}（{fmt_ago(reg['changed_at'])}）",
             "网络环境变了（出差、换网络、开关 VPN 或代理都会这样）。Anthropic 按使用者实际所在地判断是否支持，"
-            "同一账号短时间内从多个地区使用也容易触发风控。确认现在人所在的地区在支持名单内再继续。")
+            "同一账号短时间内从多个地区使用也容易触发风控。确认现在人所在的地区在支持名单内再继续。", cached=False)
     if loc and reg.get("meta_loc") and reg["meta_loc"] != loc:
         add("region_mismatch", "warn",
             f"出口地区判定不一致：trace 接口看到 {region_label(loc)}，meta 接口看到 {region_label(reg['meta_loc'])}",
@@ -5732,10 +6425,11 @@ def risk_items(data, include_region=True):
             "时钟偏差大会让登录续期和 HTTPS 校验失败，也是常见的风控信号。打开系统的自动校时。")
     sp = data.get("status_page") or {}
     ind = sp.get("indicator")
-    if ind and ind != "none":
+    sp_age = _age_secs(sp.get("checked_at") or reg.get("checked_at"))  # 旧版没单独记时间，和出口是同一次查的
+    if ind and ind != "none" and sp_age is not None and sp_age <= REGION_FRESH_SECS:  # 一小时前的故障现在多半已经恢复，不再提
         add("status", "bad" if ind in ("major", "critical") else "warn",
             f"Anthropic 官方状态页：{sp.get('description') or ind}（{ind}）",
-            "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。")
+            "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。", cached=False)
     tz = (env["tz"], env.get("tz_cc") or []) if loc and env and env.get("tz") else None
     if tz and loc and tz[1] and loc not in tz[1]:
         zone, home = tz[0], tz[1][0]
@@ -5762,11 +6456,14 @@ def risk_items(data, include_region=True):
         if len(locs) > 1:
             add("account_regions", "warn",
                 f"当前账号“{acc['label']}”{ACCOUNT_REGION_DAYS} 天内从 {len(locs)} 个地区使用过：{'、'.join(region_label(l) for l in locs)}",
-                "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。")
+                "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。", cached=False)
     n = sum(1 for a in data.get("accounts") or [] if a.get("kind") == "claude_code")
     if n >= 2:
         add("accounts", "info", f"本机保存了 {n} 个 Claude Code 账号",
-            "按 Anthropic 消费者条款，账号和登录信息不能给别人用或分享；一个人自己用多个号条款没有明确禁止。")
+            "按 Anthropic 消费者条款，账号和登录信息不能给别人用或分享；一个人自己用多个号条款没有明确禁止。", cached=False)
+    if old and not fail:  # 没连上那一条已经说了结果是多久前的、怎么重新检测
+        add("env_stale", "info", f"环境检测结果是 {fmt_ago(reg['checked_at'])}的，出口、代理、时区这些可能已经变了",
+            ENV_STALE_ADVICE, cached=False)
     return out
 
 
@@ -5821,26 +6518,67 @@ def service_check(store=None):
                if os.environ.get(k)}
     api_host = urllib.parse.urlparse(API_BASE).hostname or API_BASE
     web_host = urllib.parse.urlparse(CLAUDE_WEB_BASE).hostname or CLAUDE_WEB_BASE
-    for host in dict.fromkeys((api_host, web_host)):
+    hosts = list(dict.fromkeys((api_host, web_host)))
+    # 有登录就用当前登录实测 api.anthropic.com；读登录可能要问钥匙串，留在主线程做
+    creds = read_live_credentials()[0] if store is not None else None
+    at = oauth_block(creds).get("accessToken") if creds else None
+
+    def resolve(host):
         try:
-            ips = sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
-            add("dns", "ok", f"DNS：{host} → {', '.join(ips[:3])}")
+            return sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)}), None
         except OSError as e:
-            add("dns", "bad", f"DNS：{host} 解析失败（{e}）",
-                "检查本机 DNS 或代理设置" + ("；设了代理的话通常由代理解析，可忽略" if proxies else ""))
+            return None, e
+
+    def region():
+        if store is None:
+            return detect_region(cfg=ip_lookup_config()) or {}
+        check_region(store, max_age=0)  # 顺便更新界面常显的缓存和账号的地区记录
+        return {}
+
+    def probe_api():
+        t0 = time.time()
+        if at:
+            st, body = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(at), timeout=SERVICE_PROBE_SECS)
+        else:
+            st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", timeout=SERVICE_PROBE_SECS)
+        return st, body, int((time.time() - t0) * 1000)
+
+    def probe_web():
+        t0 = time.time()
+        code, body, raw = web_get("/api/organizations", "", timeout=SERVICE_PROBE_SECS)
+        return code, body, raw, int((time.time() - t0) * 1000)
+
+    # 解析域名、出口地区、api.anthropic.com、claude.ai 这几件事同时做，各有各的时限：哪件卡住了都不拖着别的
+    jobs = {f"dns:{h}": (lambda h=h: resolve(h)) for h in hosts}
+    jobs.update(region=region, api=probe_api, web=probe_web)
+    limits = dict.fromkeys((f"dns:{h}" for h in hosts), SERVICE_DNS_SECS)
+    limits.update(api=SERVICE_PROBE_SECS + 1, web=SERVICE_PROBE_SECS + 1)
+    res = run_parallel(jobs, REGION_CHECK_BUDGET + 2, limits)
+    dns_advice = "检查本机 DNS 或代理设置" + ("；设了代理的话通常由代理解析，可忽略" if proxies else "")
+    for host in hosts:
+        ips, e = res[f"dns:{host}"] or (None, None)
+        if ips:
+            add("dns", "ok", f"DNS：{host} → {', '.join(ips[:3])}")
+        elif e is not None:
+            add("dns", "bad", f"DNS：{host} 解析失败（{e}）", dns_advice)
+        else:
+            add("dns", "bad", f"DNS：{host} 解析超过 {SERVICE_DNS_SECS} 秒没有回应", dns_advice)
     # 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息
     data = {}
     if store is not None:
-        check_region(store, max_age=0)  # 顺便更新界面常显的缓存和账号的地区记录
         data = store.load()
         r = data.get("region") or {}
     else:
-        r = detect_region(cfg=ip_lookup_config()) or {}
+        r = res["region"] or {}
     if r.get("loc"):
         status = region_status(r["loc"])
+        kept = f"；这次没连上，这是{fmt_ago(r['checked_at'])}查到的" if r.get("failed_at") and r.get("checked_at") else ""
         add("region", "ok" if status == "supported" else "warn",
             f"{region_message(r['loc'], status)}（IP {r.get('ip')}" + (f"，{r['city']}" if r.get("city") else "")
-            + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms）", REGION_ADVICE[status])
+            + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms{kept}）", REGION_ADVICE[status])
+        fail = region_fail_item(r)
+        if fail:  # 和顶部环境卡同一条，两边分数才一致
+            out.append(fail)
     else:
         add("region_unknown", "warn", "出口地区：查不到（连不上 claude.ai 和 Cloudflare 的 trace 接口）", REGION_ADVICE["unknown"])
     ip_type = r.get("ip_type")
@@ -5874,17 +6612,11 @@ def service_check(store=None):
         add("dns_servers", "info", "DNS 解析器：" + "；".join(parts),
             "局域网 DNS 最终走路由器配置的上游；Google / Cloudflare 这类任播 DNS 全球有节点，不代表位置；某国公共 DNS 说明本机网络大概率在那个国家。"
             "人在支持地区的话，用当地网络自动获取的 DNS 或任播 DNS 即可；出差前手动填过国内 DNS 的，到了支持地区记得在系统网络设置里改回自动获取。只读本机配置，没有做泄漏探测")
-    # api.anthropic.com：有登录就用当前登录实测
-    creds = read_live_credentials()[0] if store is not None else None
-    at = oauth_block(creds).get("accessToken") if creds else None
-    t0 = time.time()
-    if at:
-        st, body = http_json("GET", f"{API_BASE}/api/oauth/profile", headers=oauth_headers(at), timeout=10)
-    else:
-        st, body = http_json("GET", f"{API_BASE}/api/oauth/usage", timeout=10)
-    ms = int((time.time() - t0) * 1000)
+    # api.anthropic.com
+    no_answer = f"超过 {SERVICE_PROBE_SECS} 秒没有回应"
+    st, body, ms = res["api"] or (0, {"error": {"message": no_answer}}, None)
     msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
-    region_hint = "通常是出口地区不在 Anthropic 支持范围，换一个出口后重试"
+    region_hint = "通常是出口地区不在 Anthropic 支持范围。Anthropic 按使用者实际所在地判断；人在支持地区的话，查一下代理 / VPN 把出口带到了哪里"
     if st == 0:
         add("api", "bad", f"{api_host}：连不上（{msg}）", "检查网络或代理；公司网络可能屏蔽了这个域名")
     elif st == 403 or region_denied(msg):
@@ -5902,9 +6634,7 @@ def service_check(store=None):
     if st:
         out[-1]["ms"] = ms  # 延迟，cam doctor 单列一行
     # claude.ai：不带登录，看可达性和有没有被网络管控拦截
-    t0 = time.time()
-    code, body, raw = web_get("/api/organizations", "", timeout=10)
-    ms = int((time.time() - t0) * 1000)
+    code, body, raw, ms = res["web"] or (0, None, no_answer, None)
     msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
     if code == 0:
         add("web", "bad", f"{web_host}：连不上（{raw}）", "检查网络或代理")
@@ -5927,8 +6657,8 @@ def service_check(store=None):
     out.extend(risk_items(data, include_region=False))
     if any(is_cert_error(i["text"]) for i in out):
         add("tls", "bad", "HTTPS 证书校验失败（CERTIFICATE_VERIFY_FAILED），上面连不上的几项都是这个原因", CERT_ADVICE)
-    elif SSL_CA_FALLBACK:
-        add("tls", "info", f"证书：本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}", "证书照常校验；想用 Python 自己的证书可以运行一次 Install Certificates.command")
+    elif ssl_state()[1]:
+        add("tls", "info", f"证书：本机 Python 没带根证书，已自动改用 {ssl_state()[1]}", "证书照常校验；想用 Python 自己的证书可以运行一次 Install Certificates.command")
     add("device", "info", f"设备：{platform.system()} {platform.release()}，{platform.machine()}，Python {platform.python_version()}",
         "设备类型、系统、时区、语言这些设备环境信息 Anthropic 会收集；这里只是列出来，本工具不会改动或伪装任何设备标识。")
     add("scope", "info", "检测范围：本机能看到的信号（出口 IP、IP 类型、IPv4 / IPv6、注册国、运营商、代理 / VPN、WARP、DNS 配置、时钟、时区、系统语言、账号使用地区）",
@@ -5946,8 +6676,12 @@ def service_check(store=None):
         level = "warn"
     else:
         level = "ok"
+    if any(i["kind"] == "env_failed" for i in out):  # 出口这次没测到，别说成“在支持名单内”
+        fine = "；Claude 服务连得上，这次没测到出口地区，先按上一次查到的算，其它没有发现风险点"
+    else:
+        fine = "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"
     out.insert(0, {"kind": "summary", "level": level, "score": sc["score"], "grade": sc["grade"],
-                   "text": head + (f" —— {worst['text']}" if worst else "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"),
+                   "text": head + (f" —— {worst['text']}" if worst else fine),
                    "advice": worst["advice"] if worst else RISK_SCORE_ADVICE})
     if store is not None:  # 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
         bad = [i for i in out if i["kind"] in ("api", "web", "dns", "tls") and i["level"] in ("warn", "bad")]
@@ -6296,8 +7030,14 @@ def _account_group(p):
 
 
 def _usage_brief(u):
-    return "，".join(f"{n}已用 {u[k]['utilization']:.0f}%" for k, n in (("five_hour", "5 小时"), ("seven_day", "7 天"))
-                    if isinstance(u.get(k), dict) and u[k].get("utilization") is not None)
+    """体检里一句话的用量。窗口早该重置而数字还是上次取的（很久没刷新）：标出来，不拿旧数字当现在的。"""
+    parts, now = [], dt.datetime.now(dt.timezone.utc)
+    for k, n in (("five_hour", "5 小时"), ("seven_day", "7 天")):
+        w = u.get(k)
+        if isinstance(w, dict) and w.get("utilization") is not None:
+            resets = parse_iso(w.get("resets_at"))
+            parts.append(f"{n}已用 {w['utilization']:.0f}%" + ("（这个窗口已经重置，是旧数字）" if resets and resets <= now else ""))
+    return "，".join(parts)
 
 
 def checkup_account(store, p, live_ob, before_exp, offline):
@@ -6307,7 +7047,8 @@ def checkup_account(store, p, live_ob, before_exp, offline):
     err = u.get("error")
     covered = {"expired"}  # 下面单独写过的问题，健康状态里不再重复
     relogin = f"cam login {label}（在浏览器里重新登录这个账号，登录完自动保存）"
-    when = f"（{fmt_ago(u['fetched_at'])}）" if offline and u.get("fetched_at") else ""
+    seen = u.get("checked_at") or u.get("fetched_at")  # 这个结论是什么时候查出来的
+    when = f"（{fmt_ago(seen)}）" if offline and seen else ""
     left = 0
     if kind == "claude_code":
         ob = live_ob or store.load_secret(p["id"]).get("claudeAiOauth") or {}
@@ -6318,6 +7059,9 @@ def checkup_account(store, p, live_ob, before_exp, offline):
         elif p.get("is_active"):  # 当前登录从不替它续，交给 Claude Code
             out.append(ck("ok", f"当前登录：access token {fmt_span(left)}后过期，Claude Code 会自己续") if left > 0 else
                        ck("info", "当前登录：access token 已过期，Claude Code 下次运行时会自己续（cam 从不替当前登录续）"))
+        elif err and PENDING_HELD in err:
+            covered.add("pending_login")
+            out.append(ck("info", err.rstrip("。"), "切换到这个账号时会核对并用上；不用重新登录"))
         elif err and ("登录已失效" in err or "没有 refresh token" in err):
             covered.add("login_invalid")
             out.append(ck("bad", "登录已失效：保存的 refresh token 被服务端拒绝，切换到它也用不了", relogin))
@@ -6426,13 +7170,14 @@ def checkup_service(store, offline, svc=None, summary=None):
         data = store.load()
         reg = region_view(data)
         out = [ck("info", "离线模式：没有实测 Claude 服务，下面是后台上次检测的结果"
-                  + (f"（{fmt_ago(reg['checked_at'])}）" if reg.get("checked_at") else "（还没检测过）"))]
+                  + (f"（{fmt_ago(reg['checked_at'])}" + ("；之后还测过一次，没连上" if reg.get("failed_at") else "") + "）"
+                     if reg.get("checked_at") else "（还没检测过）"))]
         if reg.get("status"):
             ok = reg["status"] == "supported"
             out.append(ck("ok" if ok else "warn", reg["message"], "" if ok else reg["advice"], kind="region"))
-        out += [ck(r["level"], r["text"], r["advice"], kind=r["kind"]) for r in risk_items(data)]
-        if SSL_CA_FALLBACK:
-            out.append(ck("info", f"证书：本机 Python 没带根证书，已自动改用 {SSL_CA_FALLBACK}（证书照常校验）"))
+        out += [ck(r["level"], r["text"], r["advice"], kind=r["kind"]) for r in risk_items(data, note_age=False)]
+        if ssl_state()[1]:
+            out.append(ck("info", f"证书：本机 Python 没带根证书，已自动改用 {ssl_state()[1]}（证书照常校验）"))
         return out
     items = [dict(i) for i in svc or []]
     if summary is not None:  # 下面有状态页的完整摘要，服务检查里那一行就不重复了
@@ -6541,9 +7286,11 @@ def background_status(store, data):
     后台锁（background.lock）被拿着就是有人在做；不拿锁试一下就看不出来，试完马上放掉。
     """
     lease = store.background_lock()
-    held = not lease.try_acquire()
-    if not held:
-        lease.release()
+    held = False
+    if os.path.exists(lease.path):  # 锁文件都没有：还没有谁做过后台任务。不为了看一眼去建它（体检离线模式什么都不改）
+        held = not lease.try_acquire()
+        if not held:
+            lease.release()
     procs = process_table()
     serve = [pid for pid, cmd in procs if _is_cam_serve(cmd)]
     desk = [pid for pid, cmd in procs if _is_cam_desktop(cmd)]
@@ -6597,7 +7344,8 @@ def usage_freshness(data, running, refresh_min):
         u = a.get("usage") or {}
         if a["kind"] == "claude_web" and (not u or "未填写 sessionKey" in (u.get("error") or "")):
             continue  # 没填 sessionKey 的网页号本来就不读用量
-        t = parse_iso(u.get("checked_at") if a["kind"] == "claude_desktop" else u.get("fetched_at"))
+        # 看的是“后台有没有在查”：用查的时间（没取到也算查过）；旧版本没记 checked_at，那时 fetched_at 就是查的时间
+        t = parse_iso(u.get("checked_at") if a["kind"] == "claude_desktop" else u.get("checked_at") or u.get("fetched_at"))
         name = a.get("label") or a["id"]
         if t is None:
             out.append(ck("info", f"{name}：还没刷新过用量"))
@@ -6612,7 +7360,7 @@ def usage_freshness(data, running, refresh_min):
 def checkup_cam(store, data):
     out = [ck("info", f"数据目录：{store.root}，已保存 {len(data['accounts'])} 个账号")]
     running, refresh_min, items = background_status(store, data)
-    out += items + usage_freshness(data, running, refresh_min) + panel_items(store)
+    out += items + usage_freshness(data, running, refresh_min) + panel_items(store) + hook_items()
     pend = pending_switch_view(data)
     if pend:
         out.append(ck("info", pend["message"], "cam switch --cancel-wait 可取消"))

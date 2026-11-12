@@ -476,6 +476,7 @@ fn background(app: AppHandle) {
         let mut last_fp = String::new();
         let mut last_kc = Instant::now();
         let mut warned: HashSet<String> = HashSet::new();
+        let mut recheck = health::RegionRecheck::default();
         let mut first = true;
         loop {
             let store = Store::new();
@@ -563,11 +564,21 @@ fn background(app: AppHandle) {
                     .unwrap_or(true)
             {
                 last_refresh = Some(Instant::now());
+                // 这一轮本来就要测，记下现在连的是哪张网
+                recheck.note_net();
                 // 定时刷新不替不常用的账号续登录，见 usage::refresh_usage
                 let _ = health::check_region(&store, 300); // 界面常显的出口地区，随用量刷新一起更新
                 if usage::refresh_usage(&store, None, false).is_ok() {
                     check_alert(&app, &mut warned);
                 }
+            } else if every > 0
+                && store
+                    .load()
+                    .map(|d| health::region_recheck_due(&d, &mut recheck, every))
+                    .unwrap_or(false)
+            {
+                // 两次定时刷新之间：本机换了网络、或者上次环境检测没连上到了重试的时候，补测一次
+                let _ = health::check_region(&store, 0);
             }
 
             // 4. 脚本版、手机端或本线程改了数据，同步到窗口和托盘

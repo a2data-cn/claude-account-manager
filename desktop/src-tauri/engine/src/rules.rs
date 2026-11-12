@@ -1,7 +1,7 @@
 //! 切号规则：按时间段自动切换、额度提醒阈值。与 cam.py 的同名函数逻辑一致。
 //! 目录规则只在脚本版 `cam claude` 里生效，这里只负责保存。
 
-use super::claude::{defer_switch, running_claude_processes, switch_account, SwitchResult};
+use super::claude::{claude_may_be_running, defer_switch, switch_account, SwitchResult};
 use super::store::*;
 use chrono::{Datelike, Timelike};
 use serde_json::{json, Value};
@@ -235,14 +235,15 @@ pub fn apply_time_rules_at(store: &Store, now: chrono::NaiveDateTime) -> R<Optio
     if active.as_deref() == Some(target.as_str()) {
         return Ok(None);
     }
-    if !running_claude_processes().is_empty() {
+    if claude_may_be_running() {
+        // 进程没查出来也当作有：宁可晚点切
         let _g = store.lock()?;
         let mut data = store.load()?;
         defer_switch(&mut data, &target, "rule", s(&rule, "id"));
         store.save(&mut data)?;
         return Ok(None);
     }
-    switch_account(store, &target).map(Some)
+    switch_account(store, &target, false).map(Some)
 }
 
 #[cfg(test)]

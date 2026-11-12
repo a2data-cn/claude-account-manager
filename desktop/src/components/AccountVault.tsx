@@ -98,7 +98,7 @@ export function AccountVault({ accounts, onAccountsChanged, toast }: { accounts:
   useEffect(() => {
     if (!autoRead || waiting || !state?.unlocked || !active?.connected || active.provider === "credential") return;
     void checkMail(true);
-    const timer = window.setInterval(() => void checkMail(true), 30000);
+    const timer = window.setInterval(() => { if (!document.hidden) void checkMail(true); }, 30000); // 窗口在后台时不读邮箱
     return () => window.clearInterval(timer);
   }, [autoRead, waiting, state?.unlocked, active?.id, active?.connected]);
   useEffect(() => {

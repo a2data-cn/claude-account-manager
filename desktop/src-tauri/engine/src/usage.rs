@@ -6,9 +6,10 @@ use chrono::{Datelike, Utc};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 
 pub const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
@@ -29,9 +30,23 @@ fn token_urls() -> Vec<String> {
         .collect()
 }
 
-fn agent(timeout_secs: u64) -> ureq::Agent {
+/// 读账号资料、读用量各最多等多久（秒；只读的小请求；续登录那一步不用这个数，照旧等足 20 秒）
+pub const USAGE_TIMEOUT: u64 = 12;
+/// 读资料等了这么久（秒）还没连上，就不接着读用量了
+pub const USAGE_GIVE_UP: u64 = 5;
+
+/// 一个等待时间：平时就是 secs 秒；测试里用环境变量（毫秒）改短，不用每个用例真等好几秒
+pub(crate) fn wait_of(test_env: &str, secs: u64) -> Duration {
+    std::env::var(test_env)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(secs))
+}
+
+fn agent(timeout: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(timeout_secs))
+        .timeout(timeout)
         .user_agent(concat!(
             "claude-account-manager/",
             env!("CARGO_PKG_VERSION")
@@ -57,7 +72,24 @@ pub fn http_json_timeout(
     body: Option<&Value>,
     timeout_secs: u64,
 ) -> (u16, Value) {
-    let mut req = agent(timeout_secs)
+    http_json_in(
+        method,
+        url,
+        headers,
+        body,
+        Duration::from_secs(timeout_secs),
+    )
+}
+
+/// 同 http_json_timeout，时限可以不是整秒（剩多少时间就等多少）。
+pub fn http_json_in(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+    timeout: Duration,
+) -> (u16, Value) {
+    let mut req = agent(timeout)
         .request(method, url)
         .set("Accept", "application/json");
     for (k, v) in headers {
@@ -81,14 +113,33 @@ pub fn http_json_timeout(
     };
     match res {
         Ok(r) => parse(r),
-        Err(ureq::Error::Status(_, r)) => parse(r),
+        Err(ureq::Error::Status(code, r)) => {
+            (code, error_body(&r.into_string().unwrap_or_default()))
+        }
         Err(e) => (0, json!({"error": {"message": format!("网络错误：{}", e)}})),
+    }
+}
+
+/// 出错（4xx / 5xx）时的响应体：接口自己答的是 JSON 对象，原样返回；不是的（代理、网关、验证页回的网页，
+/// 或者不是对象的 JSON）带上 _not_json，让调用方分得清（见 token_answer_dead）。与 cam.py 的 http_json 一致。
+pub fn error_body(text: &str) -> Value {
+    match serde_json::from_str::<Value>(text) {
+        Ok(v) if v.is_object() => v,
+        _ => json!({
+            "error": {"message": text.chars().take(200).collect::<String>()},
+            "_not_json": true
+        }),
     }
 }
 
 /// GET 纯文本。返回 (状态, 文本)；状态 0 表示没连上。
 pub fn http_text(url: &str, timeout_secs: u64) -> (u16, String) {
-    match agent(timeout_secs).get(url).call() {
+    http_text_in(url, Duration::from_secs(timeout_secs))
+}
+
+/// 同 http_text，时限可以不是整秒（剩多少时间就等多少）。
+pub fn http_text_in(url: &str, timeout: Duration) -> (u16, String) {
+    match agent(timeout).get(url).call() {
         Ok(r) => {
             let code = r.status();
             (code, r.into_string().unwrap_or_default())
@@ -100,7 +151,7 @@ pub fn http_text(url: &str, timeout_secs: u64) -> (u16, String) {
 
 pub fn err_msg(code: u16, body: &Value) -> String {
     if let Some(e) = body.get("error") {
-        if let Some(m) = e.get("message").and_then(|m| m.as_str()) {
+        if let Some(m) = s(e, "message").filter(|m| !m.is_empty()) {
             return format!("HTTP {}：{}", code, m);
         }
         if let Some(m) = e.as_str() {
@@ -118,9 +169,10 @@ fn oauth_headers(token: &str) -> Vec<(String, String)> {
     ]
 }
 
-pub(crate) fn get_with(url: &str, h: &[(String, String)]) -> (u16, Value) {
+/// GET 一个 JSON 接口，带上给的请求头，最多等 timeout
+pub(crate) fn get_with_in(url: &str, h: &[(String, String)], timeout: Duration) -> (u16, Value) {
     let refs: Vec<(&str, &str)> = h.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    http_json("GET", url, &refs, None)
+    http_json_in("GET", url, &refs, None, timeout)
 }
 
 /// 带 OAuth access token 请求 api.anthropic.com 的只读接口。
@@ -136,6 +188,44 @@ pub fn get_oauth(token: &str, path: &str, timeout_secs: u64) -> (u16, Value) {
     )
 }
 
+/// token 接口报的这几种错说的是请求本身不对（client_id、grant_type、scope），和这个账号的登录无关
+const OAUTH_REQUEST_ERRORS: [&str; 4] = [
+    "invalid_client",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+];
+
+/// token 接口这次的回答是不是在说“这个 refresh token 不能用了”。规则和 cam.py 的 _token_answer_dead 一致。
+/// 只认它自己答的 400 / 401（JSON）。代理、网关、验证页回的 400 / 401 不是它答的；报的是请求本身不对
+/// 也和这个账号的登录无关。这两种都不能说“登录已失效”，否则好好的账号被标成异常。
+pub fn token_answer_dead(code: u16, body: &Value) -> bool {
+    if !(code == 400 || code == 401) || !body.is_object() || truthy(body.get("_not_json")) {
+        return false;
+    }
+    let e = match body.get("error") {
+        Some(Value::Object(o)) => {
+            let part = |k: &str| o.get(k).and_then(|v| v.as_str()).unwrap_or("");
+            format!("{} {}", part("type"), part("message"))
+        }
+        Some(Value::String(x)) => x.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    };
+    !OAUTH_REQUEST_ERRORS.iter().any(|c| e.contains(c))
+}
+
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(x)) => !x.is_empty(),
+        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+    }
+}
+
 pub(crate) fn refresh_oauth(refresh_token: &str) -> R<Value> {
     let mut last = String::new();
     for url in token_urls() {
@@ -149,11 +239,11 @@ pub(crate) fn refresh_oauth(refresh_token: &str) -> R<Value> {
             ),
             8,
         );
-        if code == 200 && s(&body, "access_token").is_some() {
+        if code == 200 && s(&body, "access_token").is_some_and(|t| !t.is_empty()) {
             return Ok(body);
         }
         last = err_msg(code, &body);
-        if code == 400 || code == 401 {
+        if token_answer_dead(code, &body) {
             // refresh token 本身无效，换地址也没用
             return Err(format!(
                 "登录已失效（{}），需要用这个账号重新登录 Claude Code 后再导入",
@@ -223,10 +313,35 @@ fn usable_token(store: &Store, data: &Value, id: &str) -> R<Option<(String, Valu
 /// “它仍然不是当前账号”后再换新，和切换操作互斥：不会出现刚切过去、Claude Code 和这里拿着同一个
 /// refresh token 各刷一次、把账号弄成需要重新登录的情况。
 /// allow_refresh=false 时（后台定时任务）不换 token，只用还没过期的。
-pub fn ensure_fresh_token(store: &Store, id: &str, allow_refresh: bool) -> R<(String, Value)> {
+/// rejected：服务端刚对这个 access token 答了 401（本地看还没过期）。不是当前登录的话当它过期了，续一次。
+///
+/// 换之前先看暂存的登录（adopt_pending_for）：这个号更新的一份登录可能还暂存着（Claude Code 换过 token，
+/// 当时核对不了）。它保存的那份 refresh token 这时已经被顶掉，拿去续会被拒绝，账号就被错标成“登录已失效”，
+/// 而切换到它（那时会核对暂存）又是好的。所以核对成了就用暂存的那份；核对不成就不续，报 pending_login。
+/// 与 cam.py 的 ensure_fresh_token 一致。
+pub fn ensure_fresh_token(
+    store: &Store,
+    id: &str,
+    allow_refresh: bool,
+    rejected: Option<&str>,
+) -> R<(String, Value)> {
+    let usable = |data: &Value| -> R<Option<(String, Value)>> {
+        let got = usable_token(store, data, id)?;
+        Ok(got.filter(|(t, _)| {
+            !(rejected.is_some_and(|r| !r.is_empty() && r == t)
+                && active_code_id(data).as_deref() != Some(id))
+        }))
+    };
+    let saved_rt = || -> Option<String> {
+        store
+            .load_secret(id)
+            .get("claudeAiOauth")
+            .and_then(|o| s(o, "refreshToken"))
+            .map(String::from)
+    };
     let data = store.load()?;
     find_acc(&data, id)?;
-    if let Some(t) = usable_token(store, &data, id)? {
+    if let Some(t) = usable(&data)? {
         return Ok(t);
     }
     if !allow_refresh {
@@ -239,10 +354,39 @@ pub fn ensure_fresh_token(store: &Store, id: &str, allow_refresh: bool) -> R<(St
     let mut data = store.load()?;
     find_acc(&data, id)?;
     // 等锁期间可能已切成当前账号，或已被别的进程刷新
-    if let Some(t) = usable_token(store, &data, id)? {
+    if let Some(t) = usable(&data)? {
         return Ok(t);
     }
-    let ob = renew_saved_login(store, &mut data, id)?;
+    let held = adopt_pending_for(store, &mut data, id, false, true)?;
+    store.save(&mut data)?;
+    if !held.is_empty() {
+        return Err(pending_held_error(&held, true));
+    }
+    let mut retry = true;
+    let ob = loop {
+        if let Some(t) = usable(&data)? {
+            return Ok(t);
+        }
+        let before = saved_rt();
+        match renew_saved_login(store, &mut data, id) {
+            Ok(ob) => break ob,
+            Err(e) => {
+                if !(retry && e.contains("登录已失效")) {
+                    return Err(e);
+                }
+                retry = false;
+                // 被拒绝的也许只是旧的那份：还有登录暂存着没核对的话（当时猜的是别的账号），看看是不是这个号更新的登录
+                let held = adopt_pending_for(store, &mut data, id, false, false)?;
+                store.save(&mut data)?;
+                if !held.is_empty() {
+                    return Err(pending_held_error(&held, false));
+                }
+                if saved_rt() == before {
+                    return Err(e); // 没有暂存，或者暂存的是别人的：这个号的登录确实失效了
+                }
+            }
+        }
+    };
     store.save(&mut data)?;
     Ok((s(&ob, "accessToken").unwrap_or_default().to_string(), ob))
 }
@@ -406,44 +550,95 @@ fn count(u: &Value, k: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// 一条消息记账用得上的几个数。本机记录里的消息要留在内存里（见 local_events），几十万条，整个 usage 留着太占地方。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Tokens {
+    input: i64,
+    output: i64,
+    cache_write: i64,
+    cache_read: i64,
+    /// 写缓存的部分里 5 分钟的和 1 小时的（价钱不一样）；usage 没分开给时都算 5 分钟的
+    write_5m: i64,
+    write_1h: i64,
+}
+
+impl Tokens {
+    pub(crate) fn of(u: &Value) -> Tokens {
+        let cache_write = count(u, "cache_creation_input_tokens");
+        let (write_5m, write_1h) = match u
+            .get("cache_creation")
+            .filter(|c| c.as_object().is_some_and(|o| !o.is_empty()))
+        {
+            Some(cc) => (
+                count(cc, "ephemeral_5m_input_tokens"),
+                count(cc, "ephemeral_1h_input_tokens"),
+            ),
+            None => (cache_write, 0),
+        };
+        Tokens {
+            input: count(u, "input_tokens"),
+            output: count(u, "output_tokens"),
+            cache_write,
+            cache_read: count(u, "cache_read_input_tokens"),
+            write_5m,
+            write_1h,
+        }
+    }
+}
+
 /// 一条消息按 API 价折算多少美元；不认识的模型返回 None。与 cam.py 的 message_cost 一致。
 pub fn message_cost(model: &str, u: &Value) -> Option<f64> {
+    token_cost(model, &Tokens::of(u))
+}
+
+fn token_cost(model: &str, t: &Tokens) -> Option<f64> {
     let m = model.to_lowercase();
     let m = m.find("claude-").map(|i| &m[i + 7..]).unwrap_or(&m);
     let &(key, mut inp, mut out, mut cr) = PRICES.iter().find(|r| m.starts_with(r.0))?;
-    let (w5, w1) = match u
-        .get("cache_creation")
-        .filter(|c| c.as_object().is_some_and(|o| !o.is_empty()))
-    {
-        Some(cc) => (
-            count(cc, "ephemeral_5m_input_tokens"),
-            count(cc, "ephemeral_1h_input_tokens"),
-        ),
-        None => (count(u, "cache_creation_input_tokens"), 0),
-    };
     // Haiku 5.5 的提示超过 10 万 token 时整条按 5 倍价
-    if key == "haiku-5-5"
-        && count(u, "input_tokens") + count(u, "cache_read_input_tokens") + w5 + w1 > 100_000
-    {
+    if key == "haiku-5-5" && t.input + t.cache_read + t.write_5m + t.write_1h > 100_000 {
         (inp, out, cr) = (inp * 5.0, out * 5.0, cr * 5.0);
     }
-    let n = |k: &str| count(u, k) as f64;
     Some(
-        (n("input_tokens") * inp
-            + n("output_tokens") * out
-            + n("cache_read_input_tokens") * cr
-            + w5 as f64 * inp * 1.25
-            + w1 as f64 * inp * 2.0)
+        (t.input as f64 * inp
+            + t.output as f64 * out
+            + t.cache_read as f64 * cr
+            + t.write_5m as f64 * inp * 1.25
+            + t.write_1h as f64 * inp * 2.0)
             / 1e6,
     )
 }
 
 /// 返回 (usage, 要合并进账号的元数据)
 fn fetch_code(store: &Store, acc: &Value, allow_refresh: bool) -> R<(Value, Map<String, Value>)> {
-    let (token, ob) = ensure_fresh_token(store, s(acc, "id").unwrap_or_default(), allow_refresh)?;
-    let h = oauth_headers(&token);
+    let id = s(acc, "id").unwrap_or_default();
+    let (mut token, mut ob) = ensure_fresh_token(store, id, allow_refresh, None)?;
+    let timeout = wait_of("CAM_TEST_USAGE_TIMEOUT_MS", USAGE_TIMEOUT);
+    let profile = |token: &str| {
+        get_with_in(
+            &format!("{}/api/oauth/profile", api_base()),
+            &oauth_headers(token),
+            timeout,
+        )
+    };
     // 先拿账号资料：既用来补邮箱、套餐，也用来核对这份凭据是不是这个账号的
-    let (c2, prof) = get_with(&format!("{}/api/oauth/profile", api_base()), &h);
+    let t0 = Instant::now();
+    let (mut c2, mut prof) = profile(&token);
+    if c2 == 0 && t0.elapsed() >= wait_of("CAM_TEST_USAGE_GIVE_UP_MS", USAGE_GIVE_UP) {
+        // 等了好几秒都没连上（断网、代理节点挂了）：接着读用量也是白等同样久。一下就失败的（连接被重置）才接着试
+        return Err(err_msg(c2, &prof));
+    }
+    if c2 == 401 && allow_refresh && !truthy(prof.get("_not_json")) {
+        // 本地看还没过期，服务端却不认：这份登录在别处被续过（旧的 access token 跟着作废），或者本机的钟慢了。
+        // 不是当前登录的话续一次再试；当前登录原样返回，留给 Claude Code 自己续
+        let (again, renewed) = ensure_fresh_token(store, id, true, Some(&token))?;
+        ob = renewed;
+        if again != token {
+            token = again;
+            (c2, prof) = profile(&token);
+        }
+    }
+    let h = oauth_headers(&token);
     if c2 == 200 {
         let a = prof.get("account").cloned().unwrap_or_default();
         if !identity_agrees(acc, s(&a, "uuid"), s(&a, "email")) {
@@ -453,7 +648,7 @@ fn fetch_code(store: &Store, acc: &Value, allow_refresh: bool) -> R<(Value, Map<
             ));
         }
     }
-    let (code, body) = get_with(&format!("{}/api/oauth/usage", api_base()), &h);
+    let (code, body) = get_with_in(&format!("{}/api/oauth/usage", api_base()), &h, timeout);
     if code != 200 {
         return Err(err_msg(code, &body));
     }
@@ -516,7 +711,7 @@ const WEB_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKi
 /// 向 claude.ai 发起只读请求。返回 (状态码, 解析后的 JSON 或 Null, 原始文本)；状态 0 表示没连上，原始文本是错误说明
 fn web_get(path: &str, sk: &str) -> (u16, Value, String) {
     let base = web_base();
-    let req = agent(20)
+    let req = agent(Duration::from_secs(20))
         .get(&format!("{}{}", base, path))
         .set("User-Agent", WEB_UA)
         .set("Accept", "application/json, text/plain, */*")
@@ -753,9 +948,14 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
                             (u, Map::new())
                         }
                     };
-                    // Desktop 的 fetched_at 是 Claude 缓存/采样时间，读取动作不能把旧数据伪装成实时。
+                    // 桌面版的两个时间由 fetch_desktop_usage 自己记，意思一样
                     if s(acc, "kind") != Some("claude_desktop") {
-                        u["fetched_at"] = json!(now_iso());
+                        let now = now_iso();
+                        // 这些数字是什么时候的：没取到就还是上次那份的时间，不把旧数字说成刚更新的
+                        if u["error"].is_null() {
+                            u["fetched_at"] = json!(now);
+                        }
+                        u["checked_at"] = json!(now); // 什么时候查的
                     }
                     (s(acc, "id").unwrap_or_default().to_string(), u, meta)
                 })
@@ -780,10 +980,22 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
             u["local"] = local.get(id).cloned().unwrap_or(Value::Null);
         }
     }
+    // 有账号这次新出了问题时要记下几个 claude 会话在跑：数进程慢（还可能卡住），放在拿锁之前；都没报错就不用数
+    let sessions = if results.iter().any(|(_, u, _)| s(u, "error").is_some()) {
+        sessions_view().0
+    } else {
+        0
+    };
     let _g = store.lock()?;
     let mut fresh = store.load()?;
-    let by_id: HashMap<String, (Value, Map<String, Value>)> =
+    let mut by_id: HashMap<String, (Value, Map<String, Value>)> =
         results.into_iter().map(|(id, u, m)| (id, (u, m))).collect();
+    // 先于记现场：查出过“登录已失效”的号，后台这轮的“登录过期了”盖不掉它，也就不会再记一次
+    for a in accounts(&fresh) {
+        if let Some((u, _)) = s(a, "id").and_then(|id| by_id.get_mut(id)) {
+            keep_login_invalid(a, u);
+        }
+    }
     // 账号刚出问题的那一刻把现场记下来（和 cam.py 的 note_incident 一致）：先看哪些号这次新出了问题，现场只算一次
     let incidents: Vec<(String, &'static str, String)> = accounts(&fresh)
         .iter()
@@ -798,7 +1010,7 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
             ))
         })
         .collect();
-    let scene = (!incidents.is_empty()).then(|| super::api::incident_scene(&fresh));
+    let scene = (!incidents.is_empty()).then(|| super::api::incident_scene(&fresh, sessions));
     for a in accounts_mut(&mut fresh).iter_mut() {
         let id = s(a, "id").unwrap_or_default().to_string();
         if let Some((u, meta)) = by_id.get(&id) {
@@ -816,6 +1028,37 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
     roll_renewals(&mut fresh);
     store.save(&mut fresh)?;
     Ok(fresh)
+}
+
+/// “登录已失效”查出来以后不让后台那轮盖掉。规则和 cam.py 的 keep_login_invalid 一致。
+///
+/// 后台不替不常用的号续登录，登录过期的号只会得到“登录过期了”（stale，算正常）。上次手动刷新已经查出它的
+/// refresh token 被服务端拒绝、之后保存的登录也没换过（error_fp 记着当时的 token 指纹）的话，结论还是失效：
+/// 不然状态一会儿异常、一会儿正常，下次手动刷新又报一遍。重新登录、导入后指纹变了，就按新的结果来。
+pub fn keep_login_invalid(acc: &Value, new_usage: &mut Value) {
+    if s(acc, "kind") != Some("claude_code") || !new_usage.is_object() {
+        return;
+    }
+    let filled = |v: &Value, key: &str| s(v, key).filter(|x| !x.is_empty()).map(String::from);
+    let prev = acc.get("usage").cloned().unwrap_or(Value::Null);
+    let (was, fp) = (filled(&prev, "error"), filled(&prev, "error_fp"));
+    let acc_fp = filled(acc, "token_fp");
+    let kind_of = |e: &Option<String>| e.as_deref().and_then(super::api::health_kind_of_error);
+    let mut kind = kind_of(&filled(new_usage, "error"));
+    if let Some(o) = new_usage.as_object_mut() {
+        o.remove("error_fp");
+    }
+    if kind == Some("stale")
+        && fp.is_some()
+        && fp == acc_fp
+        && kind_of(&was) == Some("login_invalid")
+    {
+        new_usage["error"] = json!(was);
+        kind = Some("login_invalid");
+    }
+    if let (Some("login_invalid"), Some(f)) = (kind, acc_fp) {
+        new_usage["error_fp"] = json!(f);
+    }
 }
 
 /// “3小时20分后重置（17:39）”，与 cam.py 的 fmt_reset 一致。
@@ -901,68 +1144,192 @@ pub fn roll_renewals_at(data: &mut Value, today: chrono::NaiveDate) {
 
 // ---------------------------------------------------------------- 本地 JSONL 统计
 
-pub(crate) fn walk_jsonl(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
-    if depth > 8 {
-        return;
-    }
-    let Ok(rd) = fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        match e.file_type() {
-            Ok(t) if t.is_dir() => walk_jsonl(&p, out, depth + 1),
-            Ok(t) if t.is_file() && p.extension().map(|x| x == "jsonl").unwrap_or(false) => {
-                out.push(p)
+/// root 下所有 .jsonl（含子目录）。跟着符号链接走（有人把项目目录链接到别的盘），隐藏目录也算，和 cam.py 的两处遍历
+/// （local_events、transcript_written_ago）同一个规则。最深 8 层。经过链接才走到的目录按真实位置认：在 root 里面的不进去
+/// （那些文件直接走得到），在外面的每个只进一次，链接绕圈时不会把同一批文件数很多遍。
+pub(crate) fn walk_jsonl(root: &Path) -> Vec<PathBuf> {
+    let mut walk = JsonlWalk {
+        real_root: fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
+        linked: HashSet::new(),
+        out: Vec::new(),
+    };
+    walk.dir(root, 0, false);
+    walk.out
+}
+
+struct JsonlWalk {
+    real_root: PathBuf,
+    /// 经过符号链接进去过的目录（真实路径）
+    linked: HashSet<PathBuf>,
+    out: Vec<PathBuf>,
+}
+
+impl JsonlWalk {
+    /// via_link：dir 是不是经过符号链接才走到的
+    fn dir(&mut self, dir: &Path, depth: u32, via_link: bool) {
+        if depth > 8 {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(t) = e.file_type() else { continue };
+            // 普通文件和目录用 read_dir 给的类型，不多查一次；符号链接看它指的是什么（断掉的链接跳过）
+            let (is_dir, is_file) = if t.is_symlink() {
+                match fs::metadata(&p) {
+                    Ok(m) => (m.is_dir(), m.is_file()),
+                    Err(_) => continue,
+                }
+            } else {
+                (t.is_dir(), t.is_file())
+            };
+            if is_dir {
+                let via_link = via_link || t.is_symlink();
+                if via_link {
+                    let Ok(real) = fs::canonicalize(&p) else {
+                        continue;
+                    };
+                    if real.starts_with(&self.real_root) || !self.linked.insert(real) {
+                        continue;
+                    }
+                }
+                self.dir(&p, depth + 1, via_link);
+            } else if is_file && p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                self.out.push(p);
             }
-            _ => {}
         }
     }
 }
 
-/// 本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)。同一条消息只算一次。与 cam.py 的 local_events 一致。
-fn local_events(since: chrono::DateTime<Utc>) -> Vec<(chrono::DateTime<Utc>, String, Value)> {
-    let mut files = Vec::new();
-    walk_jsonl(&claude_config_dir().join("projects"), &mut files, 0);
-    let mut seen: HashSet<(Option<String>, Option<String>)> = HashSet::new();
-    let mut out = Vec::new();
+/// 记录文件里一条带用量的消息
+struct LocalEvent {
+    ts: chrono::DateTime<Utc>,
+    model: Arc<str>,
+    tokens: Tokens,
+    /// (消息 id, requestId)：同一条消息在几个文件里都有时只算一次
+    key: (Option<Box<str>>, Option<Box<str>>),
+}
+
+/// 一个记录文件读到了哪、里面带用量的消息
+#[derive(Default)]
+struct FileEvents {
+    /// 读到的字节位置（最后一个完整行的结尾）
+    pos: u64,
+    size: u64,
+    mtime: Option<SystemTime>,
+    events: Vec<LocalEvent>,
+}
+
+type LocalCache = HashMap<PathBuf, FileEvents>;
+
+/// 按文件缓存在进程里：没变的文件不重读，只追加了的只读新加的部分。桌面版常驻，每次刷新用量、每次打开本机用量都要
+/// 这些消息，一天的记录能有几百 MB，每次从头读要零点几秒到几秒。与 cam.py 的 _LOCAL_CACHE 一致。
+fn local_cache() -> &'static Mutex<LocalCache> {
+    static CACHE: OnceLock<Mutex<LocalCache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// 一行记录里带用量的消息；不是这种行返回 None。行里有不是 UTF-8 的字节也照样读（换成 U+FFFD）。
+fn parse_usage_line(raw: &[u8], last_model: Option<&Arc<str>>) -> Option<LocalEvent> {
+    let line = String::from_utf8_lossy(raw);
+    if !line.contains("\"usage\"") {
+        return None;
+    }
+    let ev = serde_json::from_str::<Value>(&line).ok()?;
+    let ts = s(&ev, "timestamp").and_then(parse_time)?;
+    let msg = ev
+        .get("message")
+        .filter(|m| m.get("usage").is_some_and(Value::is_object))?;
+    let model = s(msg, "model").unwrap_or_default();
+    Some(LocalEvent {
+        ts,
+        // 一个会话里前后两条消息多半是同一个模型：名字共用一份
+        model: match last_model {
+            Some(m) if **m == *model => m.clone(),
+            _ => Arc::from(model),
+        },
+        tokens: Tokens::of(&msg["usage"]),
+        key: (
+            s(msg, "id").map(Box::from),
+            s(&ev, "requestId").map(Box::from),
+        ),
+    })
+}
+
+/// 从 entry 记的位置接着读 path 到最后一个完整的行，带用量的消息追加进 entry；文件变小了（被重写）就从头读。
+/// Claude Code 的记录是只追加的，正在写的最后一行可能还没写完：没换行符就留到下次（文件一分钟没动过的除外）。
+/// 按字节一行一行读：某一行不是合法的 UTF-8 不影响后面的行。与 cam.py 的 _scan_jsonl 一致。
+fn scan_jsonl(path: &Path, meta: &fs::Metadata, entry: &mut FileEvents) -> std::io::Result<()> {
+    let (size, mtime) = (meta.len(), meta.modified().ok());
+    if size < entry.pos {
+        *entry = FileEvents::default();
+    }
+    if size == entry.size && mtime.is_some() && mtime == entry.mtime {
+        return Ok(());
+    }
+    let stale = mtime
+        .and_then(|m| SystemTime::now().duration_since(m).ok())
+        .is_some_and(|d| d.as_secs() > 60);
+    let mut fh = BufReader::new(fs::File::open(path)?);
+    fh.seek(SeekFrom::Start(entry.pos))?;
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        let n = fh.read_until(b'\n', &mut raw)?;
+        if n == 0 || (raw.last() != Some(&b'\n') && !stale) {
+            break;
+        }
+        entry.pos += n as u64;
+        let last_model = entry.events.last().map(|e| &e.model);
+        if let Some(ev) = parse_usage_line(&raw, last_model) {
+            entry.events.push(ev);
+        }
+    }
+    (entry.size, entry.mtime) = (size, mtime);
+    Ok(())
+}
+
+/// 本机 Claude Code 记录里每条带用量的消息：(时间, 模型, 用量)。同一条消息只算一次。与 cam.py 的 local_events 一致。
+fn local_events(since: chrono::DateTime<Utc>) -> Vec<(chrono::DateTime<Utc>, Arc<str>, Tokens)> {
+    let mut cache = local_cache().lock().unwrap_or_else(|e| e.into_inner());
+    local_events_in(&claude_config_dir().join("projects"), &mut cache, since)
+}
+
+fn local_events_in(
+    root: &Path,
+    cache: &mut LocalCache,
+    since: chrono::DateTime<Utc>,
+) -> Vec<(chrono::DateTime<Utc>, Arc<str>, Tokens)> {
+    let files = walk_jsonl(root);
+    {
+        let live: HashSet<&PathBuf> = files.iter().collect();
+        cache.retain(|p, _| live.contains(p)); // 文件没了的不留
+    }
+    let mut recent = Vec::new();
     for f in files {
-        let recent = fs::metadata(&f)
-            .and_then(|m| m.modified())
-            .map(|t| chrono::DateTime::<Utc>::from(t) >= since)
-            .unwrap_or(true);
-        if !recent {
+        let Ok(meta) = fs::metadata(&f) else { continue };
+        let old = meta
+            .modified()
+            .map(|t| chrono::DateTime::<Utc>::from(t) < since)
+            .unwrap_or(false);
+        if old {
             continue;
         }
-        let Ok(fh) = fs::File::open(&f) else { continue };
-        for line in BufReader::new(fh).lines().map_while(Result::ok) {
-            if !line.contains("\"usage\"") {
-                continue;
-            }
-            let Ok(mut ev) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let Some(ts) = s(&ev, "timestamp").and_then(parse_time) else {
-                continue;
-            };
-            let Some(msg) = ev
-                .get_mut("message")
-                .filter(|m| m.get("usage").is_some_and(Value::is_object))
-            else {
-                continue;
-            };
-            if ts < since {
-                continue;
-            }
-            let key = (
-                s(msg, "id").map(String::from),
-                s(&ev, "requestId").map(String::from),
-            );
-            let msg = &mut ev["message"];
-            if key != (None, None) && !seen.insert(key) {
-                continue;
-            }
-            let model = s(msg, "model").unwrap_or_default().to_string();
-            out.push((ts, model, msg["usage"].take()));
+        if scan_jsonl(&f, &meta, cache.entry(f.clone()).or_default()).is_ok() {
+            recent.push(f);
         }
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for ev in recent
+        .iter()
+        .filter_map(|f| cache.get(f))
+        .flat_map(|e| &e.events)
+    {
+        if ev.ts < since || (ev.key != (None, None) && !seen.insert(&ev.key)) {
+            continue;
+        }
+        out.push((ev.ts, ev.model.clone(), ev.tokens));
     }
     out
 }
@@ -1005,11 +1372,11 @@ pub fn local_usage(data: &Value, days: i64) -> Value {
     type Rec = ([i64; 5], f64);
     let mut daily: std::collections::BTreeMap<(String, String), Rec> = Default::default();
     let mut by_model: std::collections::BTreeMap<(String, String), Rec> = Default::default();
-    let add = |rec: &mut Rec, u: &Value, cost: f64| {
-        rec.0[0] += count(u, "input_tokens");
-        rec.0[1] += count(u, "output_tokens");
-        rec.0[2] += count(u, "cache_creation_input_tokens");
-        rec.0[3] += count(u, "cache_read_input_tokens");
+    let add = |rec: &mut Rec, u: &Tokens, cost: f64| {
+        rec.0[0] += u.input;
+        rec.0[1] += u.output;
+        rec.0[2] += u.cache_write;
+        rec.0[3] += u.cache_read;
         rec.0[4] += 1;
         rec.1 += cost;
     };
@@ -1019,11 +1386,11 @@ pub fn local_usage(data: &Value, days: i64) -> Value {
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d")
             .to_string();
-        let cost = message_cost(&model, &u).unwrap_or(0.0);
+        let cost = token_cost(&model, &u).unwrap_or(0.0);
         let name = if model.is_empty() {
             "unknown".to_string()
         } else {
-            model
+            model.to_string()
         };
         add(
             daily.entry((day.clone(), owner)).or_insert(([0; 5], 0.0)),
@@ -1113,10 +1480,8 @@ pub fn local_window_usage(
         if ts > now {
             continue;
         }
-        let cost = message_cost(&model, &u).unwrap_or(0.0);
-        let tokens = count(&u, "input_tokens")
-            + count(&u, "output_tokens")
-            + count(&u, "cache_creation_input_tokens");
+        let cost = token_cost(&model, &u).unwrap_or(0.0);
+        let tokens = u.input + u.output + u.cache_write;
         let lower = model.to_lowercase();
         for (name, family, start) in list {
             if ts < *start || family.as_ref().is_some_and(|f| !lower.contains(f.as_str())) {
@@ -1142,4 +1507,271 @@ pub fn local_window_usage(
             json!({"tokens": tokens, "cost_usd": round4(cost), "messages": messages});
     }
     out
+}
+
+#[cfg(test)]
+mod local_events_tests {
+    use super::*;
+
+    /// 每个测试自己的临时目录，用完删掉
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new() -> Tmp {
+            let dir = std::env::temp_dir().join(format!(
+                "cam-engine-events-{}-{}",
+                std::process::id(),
+                new_id()
+            ));
+            fs::create_dir_all(dir.join("projects")).unwrap();
+            Tmp(dir)
+        }
+        fn root(&self) -> PathBuf {
+            self.0.join("projects")
+        }
+        /// projects 下的一个文件（上级目录没有就建）
+        fn file(&self, rel: &str) -> PathBuf {
+            let p = self.root().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            p
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 一行带用量的消息，output_tokens 用来认是哪一条
+    fn line(id: &str, out: i64) -> String {
+        json!({
+            "timestamp": "2026-10-20T12:00:00Z", "requestId": format!("req-{id}"), "cwd": "/home/me/proj",
+            "message": {"id": id, "model": "claude-fable-5", "usage": {"input_tokens": 1, "output_tokens": out}},
+        })
+        .to_string()
+            + "\n"
+    }
+    fn since() -> chrono::DateTime<Utc> {
+        parse_time("2020-01-01T00:00:00Z").unwrap()
+    }
+    /// 读到的每条消息的 output_tokens，排好序
+    fn outputs(root: &Path, cache: &mut LocalCache) -> Vec<i64> {
+        let mut v: Vec<i64> = local_events_in(root, cache, since())
+            .iter()
+            .map(|(_, _, t)| t.output)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+    fn append(path: &Path, text: &str) {
+        use std::io::Write;
+        let mut f = fs::File::options().append(true).open(path).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+    }
+    fn set_mtime(path: &Path, t: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+    fn mtime(path: &Path) -> SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[test]
+    fn unchanged_file_is_not_read_again() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        fs::write(&f, line("m1", 11) + &line("m2", 12)).unwrap();
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12]);
+        // 内容换了但大小和修改时间都没变：当没变，用的是上次读到的
+        let before = mtime(&f);
+        fs::write(&f, line("m1", 21) + &line("m2", 22)).unwrap();
+        set_mtime(&f, before);
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12]);
+        // 修改时间变了就接着读（没有新的行），不会把已有的再数一遍
+        set_mtime(&f, before + Duration::from_secs(1));
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12]);
+    }
+
+    #[test]
+    fn appended_lines_are_read_from_where_it_stopped() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        let head = line("m1", 11) + &line("m2", 12);
+        fs::write(&f, &head).unwrap();
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12]);
+        assert_eq!(cache[&f].pos, head.len() as u64);
+        // 前面那段换成等长的乱码再追加一行：要是从头读，前两条就没了
+        let third = line("m3", 13);
+        fs::write(&f, "x".repeat(head.len()) + &third).unwrap();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12, 13]);
+        assert_eq!(cache[&f].pos, (head.len() + third.len()) as u64);
+    }
+
+    #[test]
+    fn unfinished_last_line_waits_for_its_newline() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        let (first, second) = (line("m1", 11), line("m2", 12));
+        let (half, rest) = second.split_at(second.len() / 2);
+        fs::write(&f, first.clone() + half).unwrap();
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11]);
+        assert_eq!(cache[&f].pos, first.len() as u64);
+        append(&f, rest);
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12]);
+    }
+
+    #[test]
+    fn last_line_without_newline_is_read_once_the_file_has_gone_quiet() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        let text = line("m1", 11) + line("m2", 12).trim_end();
+        fs::write(&f, &text).unwrap();
+        set_mtime(&f, SystemTime::now() - Duration::from_secs(120));
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12]);
+        assert_eq!(cache[&f].pos, text.len() as u64);
+    }
+
+    #[test]
+    fn shrunk_file_is_read_from_the_start() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        fs::write(&f, line("m1", 11) + &line("m2", 12) + &line("m3", 13)).unwrap();
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12, 13]);
+        // 被重写成更短的：之前读到的都不算了
+        fs::write(&f, line("m9", 99)).unwrap();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [99]);
+        assert_eq!(cache[&f].events.len(), 1);
+    }
+
+    #[test]
+    fn line_with_bad_utf8_does_not_drop_the_lines_after_it() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        // 第二行的路径里有一个不是 UTF-8 的字节（文件名是别的编码）
+        let mut bytes = line("m1", 11).into_bytes();
+        let bad = line("m2", 12).replace("/home/me/proj", "/home/me/pr\u{1}j");
+        bytes.extend(bad.bytes().map(|b| if b == 1 { 0xff } else { b }));
+        bytes.extend(line("m3", 13).into_bytes());
+        assert!(String::from_utf8(bytes.clone()).is_err());
+        fs::write(&f, bytes).unwrap();
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12, 13]);
+    }
+
+    #[test]
+    fn same_message_in_two_files_counts_once_and_removed_files_leave_the_cache() {
+        let tmp = Tmp::new();
+        let (a, b) = (tmp.file("proj/a.jsonl"), tmp.file("proj/sub/b.jsonl"));
+        fs::write(&a, line("m1", 11) + &line("m2", 12)).unwrap();
+        fs::write(&b, line("m2", 12) + &line("m3", 13)).unwrap(); // 续接的会话把 m2 又抄了一遍
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11, 12, 13]);
+        assert_eq!(cache.len(), 2);
+        fs::remove_file(&a).unwrap();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [12, 13]);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn old_files_and_old_messages_are_left_out() {
+        let tmp = Tmp::new();
+        let (old, new) = (tmp.file("proj/old.jsonl"), tmp.file("proj/new.jsonl"));
+        fs::write(&old, line("m1", 11)).unwrap();
+        set_mtime(
+            &old,
+            SystemTime::from(parse_time("2019-06-01T00:00:00Z").unwrap()),
+        );
+        let early = line("m2", 12).replace("2026-10-20T12:00:00Z", "2019-12-31T23:59:59Z");
+        fs::write(&new, early + &line("m3", 13)).unwrap();
+        let mut cache = LocalCache::new();
+        // 文件在 since 之前就没再动过的不读；读了的文件里早于 since 的消息不给
+        assert_eq!(outputs(&tmp.root(), &mut cache), [13]);
+        assert!(!cache.contains_key(&old));
+        assert_eq!(cache[&new].events.len(), 2);
+    }
+
+    #[test]
+    fn rows_that_are_not_usage_messages_are_skipped() {
+        let tmp = Tmp::new();
+        let f = tmp.file("proj/a.jsonl");
+        let no_time = line("m4", 14).replace("\"timestamp\"", "\"when\"");
+        let text = [
+            "{\"type\":\"summary\",\"summary\":\"no usage here\"}\n".to_string(),
+            "{\"usage\": broken json\n".to_string(),
+            "\n".to_string(),
+            no_time,
+            line("m1", 11),
+        ]
+        .concat();
+        fs::write(&f, &text).unwrap();
+        let mut cache = LocalCache::new();
+        assert_eq!(outputs(&tmp.root(), &mut cache), [11]);
+        assert_eq!(cache[&f].pos, text.len() as u64);
+    }
+
+    fn names(root: &Path) -> Vec<String> {
+        let mut v: Vec<String> = walk_jsonl(root)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn walk_includes_hidden_directories_and_stops_at_the_depth_cap() {
+        let tmp = Tmp::new();
+        fs::write(tmp.file("proj/a.jsonl"), "").unwrap();
+        fs::write(tmp.file(".hidden/b.jsonl"), "").unwrap();
+        fs::write(tmp.file("proj/notes.txt"), "").unwrap();
+        fs::write(tmp.file("1/2/3/4/5/6/7/8/deep.jsonl"), "").unwrap(); // root 下第 8 层目录：还在范围内
+        fs::write(tmp.file("1/2/3/4/5/6/7/8/9/deeper.jsonl"), "").unwrap();
+        assert_eq!(names(&tmp.root()), ["a.jsonl", "b.jsonl", "deep.jsonl"]);
+        assert!(walk_jsonl(&tmp.0.join("missing")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_follows_symlinks_without_going_round_in_circles() {
+        use std::os::unix::fs::symlink;
+        let tmp = Tmp::new();
+        let outside = tmp.0.join("other-disk");
+        fs::create_dir_all(outside.join("sub")).unwrap();
+        fs::write(tmp.file("proj/a.jsonl"), "").unwrap();
+        fs::write(outside.join("c.jsonl"), "").unwrap();
+        fs::write(outside.join("sub/d.jsonl"), "").unwrap();
+        fs::write(tmp.0.join("e.jsonl"), "").unwrap();
+        symlink(&outside, tmp.root().join("linked")).unwrap(); // 目录链接到 root 外面
+        symlink(tmp.0.join("e.jsonl"), tmp.root().join("proj/e.jsonl")).unwrap(); // 文件链接
+        symlink(tmp.root(), tmp.root().join("proj/back")).unwrap(); // 指回 root 自己
+        symlink(&outside, outside.join("sub/again")).unwrap(); // 外面的目录里绕回自己
+        symlink(outside.join("sub"), tmp.root().join("linked-sub")).unwrap(); // 已经进过的目录再链接一次
+        symlink(&tmp.0, outside.join("up")).unwrap(); // 外面绕到 root 的上级：root 里的文件不再数一遍
+        symlink(tmp.0.join("nowhere"), tmp.root().join("broken")).unwrap(); // 断掉的链接
+        symlink(tmp.0.join("nowhere.jsonl"), tmp.root().join("gone.jsonl")).unwrap();
+        // tmp.0 下的 e.jsonl 经过 up 这个链接也走得到，和文件链接各算一次（同一条消息按 id 只算一次）
+        assert_eq!(
+            names(&tmp.root()),
+            ["a.jsonl", "c.jsonl", "d.jsonl", "e.jsonl", "e.jsonl"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_reads_a_root_that_is_itself_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = Tmp::new();
+        fs::write(tmp.file("proj/a.jsonl"), "").unwrap();
+        let link = tmp.0.join("projects-link");
+        symlink(tmp.root(), &link).unwrap();
+        assert_eq!(names(&link), ["a.jsonl"]);
+    }
 }

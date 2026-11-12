@@ -290,11 +290,16 @@ class VaultTest(unittest.TestCase):
         client = mock.Mock()
         client.select.return_value = ("OK", [b"1"])
         client.uid.side_effect = [("OK", [b"1"]), ("OK", [meta]), ("OK", [(b"body", raw), b")"])]
-        with mock.patch.object(mailbox.imaplib, "IMAP4_SSL", return_value=client) as factory:
-            result = mailbox.messages(self.store, entry_id, {})
+        if sys.version_info >= (3, 9):
+            with mock.patch.object(mailbox.imaplib, "IMAP4_SSL", return_value=client) as factory:
+                result = mailbox.messages(self.store, entry_id, {})
+            self.assertTrue(factory.call_args.kwargs["ssl_context"].check_hostname)
+            self.assertEqual(factory.call_args.kwargs["timeout"], 20)
+        else:  # Python 3.8: no constructor timeout, the module builds the connection in a subclass
+            with mock.patch.object(mailbox, "_imap_connection", return_value=client) as factory:
+                result = mailbox.messages(self.store, entry_id, {})
+            self.assertTrue(factory.call_args.args[2].check_hostname)
         self.assertEqual(result["status"], "found")
-        self.assertTrue(factory.call_args.kwargs["ssl_context"].check_hostname)
-        self.assertEqual(factory.call_args.kwargs["timeout"], 20)
         client.select.assert_called_once_with("INBOX", readonly=True)
         self.assertIn("BODY.PEEK", client.uid.call_args_list[-1].args[-1])
         self.assertFalse(any(call.args[0].lower() in ("store", "copy", "delete", "expunge") for call in client.uid.call_args_list))

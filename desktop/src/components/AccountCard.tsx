@@ -1,6 +1,6 @@
 import type { Account, LocalWindow, Window5, WindowKey } from "../types";
 import { Ico } from "./Icon";
-import { BREAKDOWN, KIND, PLAN, WINDOW_KEYS, WINDOW_MS, WINDOW_NAME, ago, dur, planTier, resetText, usd, wan } from "../format";
+import { BREAKDOWN, KIND, PLAN, WINDOW_KEYS, WINDOW_MS, WINDOW_NAME, ago, dur, noReset, planTier, resetText, usd, wan } from "../format";
 import { maskMail, usePrefs } from "../prefs";
 
 const PLAN_CLASS: Record<string, string> = {
@@ -83,7 +83,7 @@ function Gauge({ g: { name, w, span, local }, snapshot = false }: { g: GaugeWind
           {shown.toFixed(0)}
           <small>%{remain ? " 剩余" : ""}</small>
         </span>
-        <span className="g-reset">{snapshot && !w.resets_at ? "未提供重置时间" : resetText(w.resets_at)}</span>
+        <span className="g-reset">{w.resets_at ? resetText(w.resets_at) : snapshot ? "未提供重置时间" : noReset(pct)}</span>
       </div>
       <div className="g-bar" title={snapshot ? "Claude 本地额度快照" : remain ? "竖线表示窗口还剩的时间" : "竖线表示窗口时间已过去的比例"}>
         <div className={`g-fill ${cls}`} style={{ width: `${shown}%` }} />

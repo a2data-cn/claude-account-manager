@@ -44,6 +44,9 @@ export function resetText(iso: string | null | undefined): string {
   return `${day}${t.toTimeString().slice(0, 5)} 重置 · ${dur(ms)}后`;
 }
 
+/** 接口没给重置时间时写什么：0% 是这个窗口还没开始（第一条消息才开始计时），不是不知道。和手机面板、卡片小面板同一个说法 */
+export const noReset = (pct: number) => (pct === 0 ? "还没开始用，不计时" : "重置时间未知");
+
 export function ago(iso: string | null | undefined): string {
   if (!iso) return "从未";
   const s = (Date.now() - new Date(iso).getTime()) / 1000;

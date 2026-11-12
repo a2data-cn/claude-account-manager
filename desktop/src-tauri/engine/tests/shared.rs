@@ -2,6 +2,9 @@
 
 use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
+use cam_engine::health::{
+    net_fingerprint_of, region_check_fresh, region_fail_item, region_retry_wait,
+};
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::store::{accounts, find_index, parse_day, s};
 use cam_engine::usage::{message_cost, parse_usage_body, roll_renewals_at};
@@ -150,5 +153,89 @@ fn usage_cases() {
                 want
             ),
         }
+    }
+}
+
+/// 环境检测没连上之后的规则：这一次能不能跳过、隔多久重试、界面上提示哪一条。
+#[test]
+fn region_check_cases() {
+    let fx = fixture("region_check.json");
+    for c in cases(&fx, "net_fingerprint") {
+        let addrs: Vec<std::net::IpAddr> = c["addrs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(
+            json!(net_fingerprint_of(&addrs)),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "fresh") {
+        let got = region_check_fresh(
+            c["age"].as_f64(),
+            c["fage"].as_f64(),
+            c["max_age"].as_i64().unwrap(),
+            c["moved"].as_bool().unwrap(),
+        );
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "retry_wait") {
+        // 没记次数（null）按一次算，和 cam.py 的 int(fail_count or 1) 一样
+        let got = region_retry_wait(
+            c["fail_count"].as_i64().unwrap_or(1),
+            c["refresh_min"].as_i64().unwrap(),
+        );
+        assert_eq!(json!(got), c["expect"], "{}", c);
+    }
+    let ago = |secs: i64| {
+        (chrono::Utc::now() - chrono::Duration::seconds(secs))
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string()
+    };
+    for c in cases(&fx, "fail_item") {
+        let r = &c["region"];
+        let mut reg = json!({"loc": r["loc"], "fail_count": r["fail_count"]});
+        for (key, field) in [
+            ("checked_secs_ago", "checked_at"),
+            ("failed_secs_ago", "failed_at"),
+        ] {
+            if let Some(secs) = r[key].as_i64() {
+                reg[field] = json!(ago(secs));
+            }
+        }
+        let got = region_fail_item(&reg);
+        let Some(want) = c["expect"].as_object() else {
+            assert_eq!(got, None, "{}", c["name"]);
+            continue;
+        };
+        let got = got.unwrap_or_else(|| panic!("{}：应该有这一条", c["name"]));
+        assert_eq!(
+            (&got["kind"], &got["level"]),
+            (&want["kind"], &want["level"]),
+            "{}",
+            c["name"]
+        );
+        let text = got["text"].as_str().unwrap();
+        for part in want["contains"].as_array().unwrap() {
+            assert!(
+                text.contains(part.as_str().unwrap()),
+                "{}：{} 里没有 {}",
+                c["name"],
+                text,
+                part
+            );
+        }
+        let mut keys: Vec<&str> = got
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["advice", "kind", "level", "text"], "{}", c["name"]);
     }
 }

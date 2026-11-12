@@ -6,4 +6,10 @@ while [ -L "$self" ]; do
   self="$(readlink "$self")"
   case "$self" in /*) ;; *) self="$dir/$self" ;; esac
 done
-exec python3 "$(dirname "$self")/cam.py" "$@"
+dir="$(dirname "$self")"
+# 走快入口 cam_run.py：用得上编译好的字节码，每条命令快一百毫秒左右。两种情况直接运行 cam.py：
+# 旁边没有 cam_run.py；命令是 serve（别的地方靠命令行里的 "cam.py serve" 认出后台在跑的面板服务）
+run="$dir/cam_run.py"
+[ -f "$run" ] || run="$dir/cam.py"
+case "${1:-}" in serve) run="$dir/cam.py" ;; esac
+exec python3 "$run" "$@"

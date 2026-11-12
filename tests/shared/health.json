@@ -393,6 +393,42 @@
           "live_expired"
         ]
       }
+    },
+    {
+      "name": "更新的一份登录暂存着没核对：不算登录失效",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "这个账号更新的一份登录还暂存着没核对：有 claude 会话可能还在用它，等它们退出后再刷新，或者直接切换到这个账号。先不用重新登录"
+        }
+      },
+      "expect": {
+        "level": "info",
+        "label": "正常",
+        "kinds": [
+          "pending_login"
+        ]
+      }
+    },
+    {
+      "name": "保存的登录被拒绝，但还有一份暂存着没核对：结论还没下",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "usage": {
+          "error": "保存的那份登录被服务端拒绝了，不过还有一份登录还暂存着没核对，可能就是这个账号更新的那份：它就是 Claude Code 现在用的登录，在 claude 里发一句话它就会续上。先不用重新登录"
+        }
+      },
+      "expect": {
+        "level": "info",
+        "label": "正常",
+        "kinds": [
+          "pending_login"
+        ]
+      }
     }
   ]
 }

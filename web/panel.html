@@ -813,13 +813,20 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     else token = localStorage.getItem("cam-token") || "";
   } catch (_) { /* 无痕模式等情况下 localStorage 不可用 */ }
 
-  async function api(method, path, body) {
-    const res = await fetch(path, {
-      method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    let data = null;
-    try { data = await res.json(); } catch (_) { data = null; }
+  // ms：这么久没回应就放弃（后端卡住、电脑睡醒后连接半断时，定时刷新不会一直挂着）。只给定时读取的接口用；刷新、登录、体检本来就可能很慢，不限时
+  async function api(method, path, body, ms) {
+    const ctl = ms ? new AbortController() : null;
+    const timer = ctl && setTimeout(() => ctl.abort(), ms);
+    let res, data = null;
+    try {
+      res = await fetch(path, {
+        method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body), signal: ctl ? ctl.signal : undefined,
+      });
+      try { data = await res.json(); } catch (_) { data = null; }
+    } catch (e) {
+      throw e && e.name === "AbortError" ? new Error("后端没有响应") : e;
+    } finally { clearTimeout(timer); }
     if (!res.ok) {
       const err = new Error((data && data.error) || ("HTTP " + res.status));
       err.status = res.status; throw err;
@@ -864,6 +871,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const day = t.toDateString() === new Date().toDateString() ? "" : `${t.getMonth() + 1}月${t.getDate()}日 `;
     return `${day}${t.toTimeString().slice(0, 5)} 重置 · ${dur(ms)}后`;
   }
+  const noReset = (p) => (p === 0 ? "还没开始用，不计时" : "重置时间未知");  // 接口没给重置时间：0% 是这个窗口还没开始（第一条消息才开始计时），不是不知道
   const usd = (n) => "$" + (n >= 100 ? Math.round(n).toLocaleString("en-US") : n.toFixed(2));
   const wan = (n) => n >= 1e8 ? (n / 1e8).toFixed(1) + " 亿" : n >= 1e5 ? Math.round(n / 1e4) + " 万" : n >= 1e4 ? (n / 1e4).toFixed(1) + " 万" : String(Math.round(n));
 
@@ -934,7 +942,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     return `<div class="g">
       <div class="g-head"><span class="g-name">${esc(name)}</span>
         <span class="g-pct">${shown.toFixed(0)}<small>%${pref.remain ? " 剩余" : ""}</small></span>
-        <span class="g-reset">${esc(snapshot && !w.resets_at ? "未提供重置时间" : resetText(w.resets_at))}</span></div>
+        <span class="g-reset">${esc(w.resets_at ? resetText(w.resets_at) : snapshot ? "未提供重置时间" : noReset(pct))}</span></div>
       <div class="g-bar" title="${snapshot ? "Claude 本地额度快照" : pref.remain ? "竖线表示窗口还剩的时间" : "竖线表示窗口时间已过去的比例"}"><div class="g-fill ${cls}" style="width:${shown}%"></div>
         ${tick !== null ? `<div class="g-tick" style="left:calc(${tick}% - 1px)"></div>` : ""}</div>
       ${pace}${est}</div>`;
@@ -1042,8 +1050,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       a.kind === "claude_code" || a.kind === "claude_desktop" ? [a.kind === "claude_desktop" ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"] : null,
       a.kind === "claude_desktop" ? ["额度来源", u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"] : ["用量更新", ago(u.fetched_at)],
       a.kind === "claude_desktop" ? ["记录时间", ago(u.fetched_at)] : null,
-      a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${flag(a.last_incident.loc)}${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${a.last_incident.sessions} 个会话在跑`] : null,
-      a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${flag(e.loc)}${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${e.times} 次`).join(" · ")] : null,
+      a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${flag(a.last_incident.loc)}${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${Number(a.last_incident.sessions) || 0} 个会话在跑`] : null,
+      a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${flag(e.loc)}${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${Number(e.times) || 1} 次`).join(" · ")] : null,
       a.kind === "claude_desktop" ? ["最近读取", ago(u.checked_at)] : null,
       m.note ? ["备注", esc(m.note)] : null,
     ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd><span class="v">${v}</span></dd>`).join("");
@@ -1174,12 +1182,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     ["change", "出口变化", ["region_change"]],
     ["account", "账号", ["account_regions", "accounts"]],
     ["service", "Claude 服务", ["api", "web", "tls", "status"]],
+    ["stale", "检测时间", ["env_stale", "env_failed"]],  // 结果是一小时前的、或者最近一次没连上才有这一行
   ];
   const LEVEL_RANK = { bad: 3, warn: 2, info: 1, ok: 0 };
   function envRows(st) {
     const reg = st.region || {}, risks = st.risks || [];
     const okText = {
-      region: `${regName(reg.loc, reg.loc_name)} · 在 Anthropic 支持名单内`,
+      region: `${regName(reg.loc, reg.loc_name)} · 在 Anthropic 支持名单内${reg.failed_at ? `（${ago(reg.checked_at)}查到的）` : ""}`,
       iptype: reg.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
       proxy: "没发现代理，默认路由没走隧道",
       local: "没发现和出口地区不一致的设置",
@@ -1196,7 +1205,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     });
     const other = risks.filter((r) => !used.has(r));
     if (other.length) rows.push({ title: "其它", hits: other, ok: "" });
-    return rows.map(({ title, hits, ok }) => {
+    return rows.filter((r) => r.hits.length || r.ok).map(({ title, hits, ok }) => {
       const level = hits.reduce((m, r) => LEVEL_RANK[r.level] > LEVEL_RANK[m] ? r.level : m, "ok");
       const body = hits.length ? hits.map((r) => `<div>${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</div>`).join("") : ok;
       return `<dt>${title}</dt><dd><i class="dot ${esc(level)}"></i><span class="v">${body}</span></dd>`;
@@ -1206,8 +1215,15 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const h3 = (extra) => `<h3><span class="eico"><svg><use href="#i-globe"/></svg></span>出口 IP${extra || ""}</h3>`;
     if (!reg.status) return `<div class="panel ecard">${h3()}<p class="hint" style="margin:0">还没有检测过。后台每隔几分钟自动检测一次出口地区和环境风险，也可以点“立即检测”现在就测。</p></div>`;
     const off = reg.lookup_mode === "off";
-    const status = reg.status === "supported" ? `<span class="chip c-ok">支持名单内</span>`
-      : reg.status === "unsupported" ? `<span class="chip st-error">不在支持名单</span>` : `<span class="chip st-warn">查不到</span>`;
+    // 最近一次检测没连上：上面留着的是以前查到的出口（从没查到过就是“查不到”），在这里说清楚是哪一次的
+    const failed = !!reg.failed_at, kept = failed && !!reg.loc;
+    const status = (reg.status === "supported" ? `<span class="chip c-ok">支持名单内</span>`
+      : reg.status === "unsupported" ? `<span class="chip st-error">不在支持名单</span>` : `<span class="chip st-warn">查不到</span>`)
+      + (kept ? `<span class="chip st-warn">最近一次没连上</span>` : "");
+    const source = reg.meta_source ? " · 数据来自 " + esc(reg.meta_source) : "";
+    const when = failed
+      ? `<span class="bad">${ago(reg.failed_at)}没连上</span>${reg.fail_count > 1 ? `，连续 ${esc(reg.fail_count)} 次` : ""}${kept ? ` · 上面是上一次查到的（${ago(reg.checked_at)}）` : ""}<span class="sub">后台过一会儿自动重试，换了网络也会自动重测；也可以点“重新检测”</span>`
+      : `${ago(reg.checked_at)} · 后台每隔几分钟自动检测，换了网络也会自动重测${source}`;
     const where = [reg.loc ? regName(reg.loc, reg.loc_name) : "", esc(reg.city || ""), esc(reg.org || "")].filter(Boolean).join(" · ");
     const native = reg.reg_loc && reg.loc ? (reg.reg_loc === reg.loc ? `<span class="chip c-ok">原生 IP</span>` : `<span class="chip st-warn">广播 IP</span>`) : "";
     const rows = [
@@ -1217,7 +1233,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       off || !reg.org ? null : ["运营商", `${reg.asn ? "AS" + esc(reg.asn) + " · " : ""}${esc(reg.org)}`],
       off || !reg.reg_loc ? null : ["注册地", `${flag(reg.reg_loc)}${regName(reg.reg_loc, reg.reg_loc_name)}${reg.loc ? (reg.reg_loc === reg.loc ? " · 和定位一致" : ` · 定位在 ${regName(reg.loc, reg.loc_name)}`) : ""}`],
       reg.warp ? ["WARP", "出口经过 Cloudflare WARP / Zero Trust，上面是 WARP 的出口，不是本机网络的真实出口"] : null,
-      ["检测", `${ago(reg.checked_at)} · 后台每隔几分钟自动检测${reg.meta_source ? " · 数据来自 " + esc(reg.meta_source) : ""}`],
+      ["检测", when],
     ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd><span class="v">${v}</span></dd>`).join("");
     return `<div class="panel ecard">${h3(status)}<dl class="kv">${rows}</dl></div>`;
   }
@@ -1352,8 +1368,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   let localRange = "7", localRep = null;
   try { localRange = RANGES.some(([v]) => v === localStorage.getItem("cam-local-range")) ? localStorage.getItem("cam-local-range") : "7"; } catch (_) {}
   async function loadLocal() {
-    try { localRep = await api("GET", `/api/local-usage?days=${localRange}`); }
-    catch (_) { localRep = null; }
+    const want = localRange;
+    let rep = null;
+    try { rep = await api("GET", `/api/local-usage?days=${want}`, undefined, 30000); } catch (_) {}
+    if (want !== localRange) return;  // 等的时候又点了别的范围：这份是旧范围的，不画到新标签下面
+    localRep = rep;
     renderLocal();
   }
   // 模型 id 变成好认的名字：claude-opus-4-1-20250805 → Opus 4.1，claude-3-5-sonnet-20241022 → Sonnet 3.5
@@ -1540,15 +1559,41 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     } finally { btn.disabled = false; renderUpdate(); }
   };
 
+  let loadFailed = "";  // 上一次没取到（"auth" 令牌不对 / "net" 连不上）：页面上是输令牌的框或“连不上后端”，定时重绘不能拿旧数据把它盖掉
   async function load() {
     try {
-      state = await api("GET", "/api/state");
+      state = await api("GET", "/api/state", undefined, 15000);
+      loadFailed = "";
       render(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate();
       if (!checkupProbed) probeCheckup();
     } catch (e) {
+      loadFailed = e.status === 401 ? "auth" : "net";
+      $("#light").hidden = true;  // 灯是旧数据画的，后端都连不上了不能还亮着绿灯
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
       else $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`;
     }
+  }
+  // 红绿灯跟着 Claude Code 的状态走（在不在执行、是不是弹着确认等你）：页面开着时每 15 秒只取这几项，变了才重画灯；
+  // 等着的切换办完了、当前号换了，才整页重新加载
+  const LIGHT_KEYS = ["sessions", "attention"];
+  let lightPolling = false;
+  async function pollLight() {
+    if (document.hidden || lightPolling || accountBusy || loadFailed === "auth") return;  // 在输令牌：不打扰
+    if (!state) { if (loadFailed) load(); return; }  // 一开始就没连上：隔一会儿再试，后端起来了页面自己恢复
+    lightPolling = true;
+    try {
+      const s = await api("GET", "/api/state", undefined, 15000);
+      if (accountBusy || !state) return;
+      if (loadFailed || JSON.stringify([s.pending_switch, s.active, s.warning]) !== JSON.stringify([state.pending_switch, state.active, state.warning])) {
+        if (!document.querySelector("dialog[open]")) await load();  // 开着对话框（正在填东西）时先不动，关掉后下一轮再加载
+        return;
+      }
+      if (JSON.stringify(LIGHT_KEYS.map((k) => s[k])) === JSON.stringify(LIGHT_KEYS.map((k) => state[k]))) return;
+      LIGHT_KEYS.forEach((k) => { state[k] = s[k]; });
+      renderLight();
+    } catch (e) {
+      if (!loadFailed && !document.querySelector("dialog[open]")) await load();  // 后端没了：让 load 把“连不上后端”画出来
+    } finally { lightPolling = false; }
   }
 
   async function busy(btn, fn) {
@@ -2180,7 +2225,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     });
   });
   setInterval(() => {
-    if ($("#vault-block").hidden || !vaultState?.unlocked || vaultBusy) return;
+    if (document.hidden || $("#vault-block").hidden || !vaultState?.unlocked || vaultBusy) return;  // 页面在后台时不读邮箱
     const entry = vaultActive();
     if (!entry?.connected || entry.provider === "credential") return;
     if (vaultWatch) {
@@ -2213,7 +2258,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   };
 
   // 倒计时每分钟重绘；页面回到前台时重新拉取
-  setInterval(() => state && render(), 60000);
+  setInterval(() => state && !loadFailed && render(), 60000);
+  setInterval(pollLight, 15000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
   load();
 })();

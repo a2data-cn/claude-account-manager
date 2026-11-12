@@ -50,9 +50,23 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     status_summary = "operational"  # 状态页摘要 /summary.json：operational / incident；/summary-down.json 总是 503
     usage_code = None  # 设了就让 /api/oauth/usage 返回这个状态码（比如 429 限流）
     release_latest = "2.1.0"  # /releases/latest：Claude Code 原生安装器的最新版本号
+    down = ()  # 这些路径（按前缀）一律回 503：接口连得上但答不上来
+    slow = {}  # 路径前缀 -> 秒：收到请求先等这么久再回（卡住的接口）；hold.set() 让等着的马上放行
+    hold = threading.Event()
+    active = 0  # 正在处理的请求数
+    active_lock = threading.Lock()
 
     def log_message(self, *a):
         pass
+
+    def handle(self):
+        with MockAnthropic.active_lock:
+            MockAnthropic.active += 1
+        try:
+            super().handle()
+        finally:
+            with MockAnthropic.active_lock:
+                MockAnthropic.active -= 1
 
     def _send(self, code, obj):
         b = json.dumps(obj).encode()
@@ -110,9 +124,15 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
             if self._web():
                 return
         auth = (self.headers.get("Authorization") or "")[7:]
-        if self.path == "/cdn-cgi/trace":
+        secs = next((s for p, s in MockAnthropic.slow.items() if self.path.startswith(p)), 0)
+        if secs:
+            MockAnthropic.hold.wait(secs)
+        if self.path.startswith(tuple(MockAnthropic.down)):
+            return self._send(503, {"error": {"message": "down"}})
+        if self.path in ("/cdn-cgi/trace", "/cf/cdn-cgi/trace"):  # /cf/…：Cloudflare 自己的 trace（claude.ai 没回音时的备用），节点写成 LAX 好区分
+            colo = "LAX" if self.path.startswith("/cf/") else "SJC"
             return self._send_html(200, f"fl=1\nip={self.trace_ip}\nts={time.time() + self.trace_ts_offset:.3f}\n"
-                                        f"loc={self.trace_loc}\ncolo=SJC\nwarp={'on' if self.trace_warp else 'off'}\n")
+                                        f"loc={self.trace_loc}\ncolo={colo}\nwarp={'on' if self.trace_warp else 'off'}\n")
         if self.path.startswith("/ipapiis"):  # ipapi.is：带 key 返回完整信息和标记，不带 key 只有简版
             t = self.ipapi_type
             if t is None:
@@ -220,10 +240,17 @@ def oauth_account(uuid, email):
             "organizationName": email + " org", "displayName": email.split("@")[0]}
 
 
+class QuietServer(http.server.ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return  # 测超时的用例里客户端等不及先走了，不用打一屏报错
+        super().handle_error(request, client_address)
+
+
 class CamTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockAnthropic)
+        cls.srv = QuietServer(("127.0.0.1", 0), MockAnthropic)
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
         os.environ["CAM_API_BASE"] = base
@@ -243,6 +270,8 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_RDAP_URL"] = base + "/rdap/"
         os.environ["CAM_CF_TRACE4_URL"] = base + "/trace4"
         os.environ["CAM_CF_TRACE6_URL"] = base + "/trace6"
+        os.environ["CAM_CF_TRACE_URL"] = base + "/cf/cdn-cgi/trace"
+        os.environ["CAM_TEST_NET"] = "net-a"  # 本机连的是哪张网：固定住，要测换网络的用例自己改
         os.environ["CAM_TEST_LOCALE"] = "en_US"
         os.environ["CAM_TEST_DNS"] = "192.168.1.1"
         os.environ["CAM_TEST_PROXY"] = ""  # 不读本机的系统代理设置（macOS 上开着系统代理时结果会变）
@@ -291,6 +320,9 @@ class CamTest(unittest.TestCase):
         MockAnthropic.rdap_country = "US"
         MockAnthropic.trace6_loc = None
         MockAnthropic.trace_ip = "1.2.3.4"
+        MockAnthropic.down = ()
+        MockAnthropic.slow = {}
+        os.environ["CAM_TEST_NET"] = "net-a"
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有；cam doctor 读的 /proc 换成一个空的假目录
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
@@ -298,6 +330,7 @@ class CamTest(unittest.TestCase):
         os.makedirs(os.environ["CAM_TEST_PROC_ROOT"])
 
     def tearDown(self):
+        self.drain()
         self.cam.running_claude_processes = self._real_procs
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -327,6 +360,15 @@ class CamTest(unittest.TestCase):
 
     def data(self):
         return self.cam.Store().load()
+
+    def drain(self):
+        """让 mock 里还卡着的请求马上放行、等它们走完，免得拖进下一个用例。"""
+        MockAnthropic.slow = {}
+        MockAnthropic.hold.set()
+        end = time.time() + 5
+        while MockAnthropic.active and time.time() < end:
+            time.sleep(0.01)
+        MockAnthropic.hold = threading.Event()
 
     # ---- tests
     def test_import_switch_keeps_everything(self):
@@ -1376,6 +1418,171 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.run_cam("hooks", "remove"), 0)
         self.assertTrue(cam.save_menubar_settings(store, {"hooks": True})["hooks"])
 
+    def test_hook_fast_entry_lock_and_legacy_command(self):
+        """钩子每次工具调用都跑一遍：走 cam_hook.py 这个快入口；没有会话在等时什么都不写；几个钩子同时来不互相盖掉；
+        旧版本装的 cam.py hook 照样算装了，重新装一次换成快入口。"""
+        cam = self.cam
+        shim = os.path.join(HERE, "cam_hook.py")
+        fast, legacy = cam.hook_command(), cam.hook_command(fast=False)
+        self.assertTrue(fast.rstrip("\"'").endswith("cam_hook.py"), fast)
+        self.assertTrue(legacy.endswith(" hook") and "cam.py" in legacy, legacy)
+        self.assertTrue(cam.HOOK_MARK.search(fast) and cam.HOOK_MARK.search(legacy))
+        with mock.patch.object(cam.os.path, "isfile", lambda p: False):  # 单独拷走了 cam.py，旁边没有 cam_hook.py
+            self.assertEqual(cam.hook_command(), legacy)
+        # 旧版本装的命令：算装了，标出 slow；重新装一次就换掉，不留两条
+        path = cam.claude_settings_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        group = lambda cmd: [{"hooks": [{"type": "command", "command": cmd, "timeout": 10, "async": True}]}]  # noqa: E731
+
+        def flags():
+            st = cam.hooks_status()
+            return st["installed"], st["slow"], st["stale"]
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"hooks": {ev: group(legacy) for ev in cam.HOOK_EVENTS}}, f)
+        self.assertEqual(flags(), (True, True, False))
+        self.assertEqual([(i["level"], i["advice"]) for i in cam.hook_items()], [("info", "cam hooks install（重新装一次，换成快入口）")])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cam("hooks"), 0)
+        self.assertIn("旧写法", out.getvalue())
+        cam.hooks_install()
+        self.assertEqual(flags(), (True, False, False))
+        self.assertEqual([(i["level"], i["text"]) for i in cam.hook_items()], [("ok", "Claude Code 的钩子已装：弹权限确认时红绿灯三盏灯一起闪")])
+        self.assertIn(cam.hook_items()[0], cam.checkup_cam(cam.Store(), cam.Store().load()))  # 体检里有这一行
+        with open(path, encoding="utf-8") as f:
+            hooks = json.load(f)["hooks"]
+        self.assertTrue(all(len(hooks[ev]) == 1 and hooks[ev][0]["hooks"][0]["command"] == fast for ev in cam.HOOK_EVENTS), hooks)
+        with open(path, "w", encoding="utf-8") as f:  # 指向别处的（代码搬过家、换了 python）才算过期
+            json.dump({"hooks": {ev: group("/old/python3 /old/place/cam.py hook") for ev in cam.HOOK_EVENTS}}, f)
+        self.assertEqual(flags(), (False, False, True))
+        item = cam.hook_items()[0]  # 体检：指向的文件不在了，钩子其实不起作用
+        self.assertEqual(item["level"], "warn")
+        self.assertIn("/old/python3 已经不在了", item["text"])
+        other = os.path.join(self.tmp, "elsewhere", "cam.py")  # 另一份 cam，文件都在：能跑，只是告诉一声
+        write(other, "")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"hooks": {ev: group(f'"{sys.executable}" "{other}" hook') for ev in cam.HOOK_EVENTS}}, f)
+        self.assertEqual((flags(), cam.hook_items()[0]["level"]), ((False, False, True), "info"))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"hooks": {"Stop": group(fast)}}, f)
+        self.assertEqual((cam.hook_items()[0]["level"], "只装了一部分" in cam.hook_items()[0]["text"]), ("warn", True))
+        os.remove(path)
+        self.assertEqual(cam.hook_items(), [])  # 没装钩子：体检里不提
+        shutil.rmtree(cam.cam_home())  # 上面跑体检时建的
+        # 没有会话在等：清除事件（每次工具跑完都来一个）不建目录、不写文件
+        ev = lambda name, sid="s1", **kw: {"hook_event_name": name, "session_id": sid, **kw}  # noqa: E731
+        cam.hook_event(ev("PostToolUse"))
+        self.assertFalse(os.path.exists(cam.cam_home()))
+        cam.hook_event(ev("PermissionRequest", tool_name="Bash"))
+        cam.hook_event(ev("PermissionRequest", "s2", tool_name="Edit"))
+        self.assertEqual(sorted(cam._load_attention()["sessions"]), ["s1", "s2"])
+        with mock.patch.object(cam, "_save_attention", side_effect=AssertionError("没变化不该重写文件")):
+            cam.hook_event(ev("PostToolUse", "s3"))  # 别的会话的事件
+        cam.hook_event(ev("Stop"))
+        self.assertEqual(sorted(cam._load_attention()["sessions"]), ["s2"])
+        cam.hook_event(ev("SessionEnd", "s2"))
+        self.assertFalse(os.path.exists(cam.attention_path()))  # 没有会话在等了：文件删掉，下一个事件一看没有就走
+        # 真的当钩子跑：两个入口都不输出、返回 0；同时来的 8 个事件一个都不丢
+        env = dict(os.environ, CAM_HOME=os.path.join(self.tmp, "hookhome"))
+        att = os.path.join(env["CAM_HOME"], cam.ATTENTION_FILE)
+
+        def start(argv):
+            return subprocess.Popen([sys.executable] + argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+
+        def finish(proc, payload):
+            out, err = proc.communicate(payload if isinstance(payload, bytes) else json.dumps(payload).encode(), timeout=60)
+            self.assertEqual((proc.returncode, out, err), (0, b"", b""))
+
+        finish(start([shim]), b"not json")
+        self.assertFalse(os.path.exists(env["CAM_HOME"]))
+        procs = [start([shim]) for _ in range(8)]
+        for i, proc in enumerate(procs):  # 先都喂进去，再一起等：读—改—写撞在一起
+            proc.stdin.write(json.dumps(ev("PermissionRequest", f"c{i}", tool_name="Bash",
+                                           tool_input={"command": "secret-cmd", "description": "跑测试"})).encode())
+            proc.stdin.close()
+        for proc in procs:
+            self.assertEqual(proc.wait(timeout=60), 0)
+            self.assertEqual(proc.stdout.read() + proc.stderr.read(), b"")
+            proc.stdout.close()
+            proc.stderr.close()
+        with open(att, encoding="utf-8") as f:
+            raw = f.read()
+        self.assertEqual(sorted(json.loads(raw)["sessions"]), [f"c{i}" for i in range(8)])
+        self.assertEqual(json.loads(raw)["sessions"]["c3"]["what"], "跑测试")
+        self.assertNotIn("secret-cmd", raw)
+        self.assertIsNotNone(cam.parse_iso(json.loads(raw)["sessions"]["c3"]["since"]))
+        finish(start([os.path.join(HERE, "cam.py"), "hook"]), ev("Stop", "c0"))  # 旧写法的入口：同一段代码
+        with open(att, encoding="utf-8") as f:
+            self.assertEqual(sorted(json.load(f)["sessions"]), [f"c{i}" for i in range(1, 8)])
+
+    def test_usage_time_is_when_the_numbers_are_from(self):
+        """用量没取到时（断网、限流、登录过期而后台不替它续）旧数字留着，“用量更新”的时间也还是旧数字的时间，不写成刚刚；
+        另记 checked_at（什么时候查的），体检用它看后台有没有在查。"""
+        cam = self.cam
+        a_id, b_id = self._two_accounts()
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+        self.assertEqual(self.run_cam("usage"), 0)
+        store = cam.Store()
+        u = next(a for a in store.load()["accounts"] if a["id"] == a_id)["usage"]
+        self.assertEqual((u["error"], u["fetched_at"]), (None, u["checked_at"]))
+        old = "2026-01-01T00:00:00+00:00"
+        with store.lock():
+            d = store.load()
+            for a in d["accounts"]:
+                a["usage"]["fetched_at"] = a["usage"]["checked_at"] = old
+            store.save(d)
+        MockAnthropic.usage_code = 429
+        cam.refresh_usage(store)
+        d = store.load()
+        u = next(a for a in d["accounts"] if a["id"] == a_id)["usage"]
+        self.assertIn("429", u["error"])
+        self.assertEqual((u["five_hour"]["utilization"], u["fetched_at"]), (10.0, old))  # 数字和它的时间都是上次那份
+        self.assertGreater(cam.parse_iso(u["checked_at"]), cam.parse_iso(old))
+        fresh = [(i["level"], i["text"]) for i in cam.usage_freshness(d, True, 10)]
+        self.assertEqual(fresh, [("ok", "A：用量上次刷新 刚刚"), ("ok", "B：用量上次刷新 刚刚")])  # 查是查了的，没取到另有一条说
+        MockAnthropic.usage_code = None
+        cam.refresh_usage(store)
+        u = next(a for a in store.load()["accounts"] if a["id"] == a_id)["usage"]
+        self.assertEqual((u["error"], u["fetched_at"]), (None, u["checked_at"]))
+        self.assertGreater(cam.parse_iso(u["fetched_at"]), cam.parse_iso(old))
+        # 体检里的一句话：窗口早就重置了的数字要标出来
+        self.assertEqual(cam._usage_brief({"five_hour": {"utilization": 8, "resets_at": "2020-01-01T00:00:00Z"},
+                                           "seven_day": {"utilization": 11, "resets_at": "2999-01-01T00:00:00Z"}}),
+                         "5 小时已用 8%（这个窗口已经重置，是旧数字），7 天已用 11%")
+        self.assertEqual(cam._usage_brief({"five_hour": {"utilization": 3, "resets_at": None}}), "5 小时已用 3%")
+
+    def test_parse_iso_fractional_seconds(self):
+        """桌面版（Rust）写的时间带 9 位小数秒；Python 3.10 及以前的 fromisoformat 只认 3 位或 6 位，先凑成 6 位再解析。"""
+        cam = self.cam
+        self.assertEqual(cam._iso_for_python("2026-11-10T12:24:19.123456789+00:00"), "2026-11-10T12:24:19.123456+00:00")
+        self.assertEqual(cam._iso_for_python("2026-11-10T12:24:19.5Z"), "2026-11-10T12:24:19.500000+00:00")
+        self.assertEqual(cam._iso_for_python("2026-11-10T12:24:19+08:00"), "2026-11-10T12:24:19+08:00")
+        for raw, micro in (("2026-11-10T12:24:19.123456789+00:00", 123456), ("2026-11-10T12:24:19.5Z", 500000),
+                           ("2026-11-10T12:24:19.12+00:00", 120000), ("2026-11-10T12:24:19Z", 0), ("2026-11-10 12:24:19.1234", 123400)):
+            d = cam.parse_iso(raw)
+            self.assertEqual((d.hour, d.minute, d.second, d.microsecond, d.utcoffset()), (12, 24, 19, micro, dt.timedelta(0)), raw)
+        self.assertEqual(cam.parse_iso("2026-11-10T20:24:19.25+08:00"), cam.parse_iso("2026-11-10T12:24:19.250Z"))
+        self.assertEqual(cam.parse_iso("2026-11-10").isoformat(), "2026-11-10T00:00:00+00:00")
+        self.assertIsNone(cam.parse_iso("不是时间"))
+        self.assertIsNone(cam.parse_iso(None))
+
+    def test_server_does_not_log_client_disconnects(self):
+        # 面板关掉、卡片收起时请求半路断开：不算出错，日志里不打调用栈；别的异常照常打
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+        try:
+            for exc, noisy in ((ConnectionResetError(104, "reset"), False), (BrokenPipeError(32, "pipe"), False), (ValueError("x"), True)):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    try:
+                        raise exc
+                    except Exception:  # noqa: BLE001
+                        srv.handle_error(None, ("127.0.0.1", 1))
+                self.assertEqual(bool(err.getvalue()), noisy, exc)
+        finally:
+            srv.server_close()
+
     # ---- 锁
 
     def test_lock_excludes_threads_and_is_released_when_process_dies(self):
@@ -1719,6 +1926,7 @@ class CamTest(unittest.TestCase):
         a_id, b_id = self._switched_to_b()
         # B 换过 token，但 cam 运行时 access token 已过期：先暂存；随后切走，B 换过的 token 只剩暂存这一份
         self.write_creds("at-B2", "rt-B2", expires_ms=self._expired_ms())
+        MockAnthropic.tokens = {"at-A1": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}}  # A 保存的登录是好的
         self.run_cam("switch", "A")
         store = self.cam.Store()
         self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
@@ -1737,6 +1945,8 @@ class CamTest(unittest.TestCase):
         a_id, b_id = self._switched_to_b()
         # 暂存的其实是旧会话写回的 A 的 token，但 ~/.claude.json 说是 B
         self.write_creds("at-A2", "rt-A2", expires_ms=self._expired_ms())
+        # A 保存的那份 access token 服务端还认（认不认由服务端定；不认的情况见 test_parked_login_guessed_for_another_account）
+        MockAnthropic.tokens = {"at-A1": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}}
         self.run_cam("switch", "A")
         MockAnthropic.refresh_map = {"rt-A2": ("at-A3", "rt-A3")}
         MockAnthropic.tokens = {"at-A3": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}}
@@ -1746,6 +1956,319 @@ class CamTest(unittest.TestCase):
         self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
         self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A3")  # 换新后归到 A
         self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+
+    # ---- 暂存着更新的登录时，不在用的号不能被报成“登录已失效”；切换前先核对
+
+    A_OK = {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"}
+    B_OK = {"u5": 7.0, "u7": 8.0, "email": "b@x.com", "plan": "max"}
+
+    def _acc(self, acc_id):
+        return next(a for a in self.data()["accounts"] if a["id"] == acc_id)
+
+    def _token_calls(self):
+        return [c[2] for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"]
+
+    def _parked_b_then_on_a(self, released_secs_ago=None):
+        """B 换过 token（rt-B2），cam 运行时核对不了，暂存着；随后切到 A。B 名下保存的还是被顶掉的 rt-B1。
+        服务端只认 rt-B2（换出 at-B3 / rt-B3）和 A 的 at-A1。"""
+        a_id, b_id = self._switched_to_b()
+        self.write_creds("at-B2", "rt-B2", expires_ms=self._expired_ms())
+        MockAnthropic.tokens = {"at-A1": self.A_OK}
+        self.run_cam("switch", "A")
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A1")
+        store = self.cam.Store()
+        pend = store.load_secret(self.cam.PENDING_ID)
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B1")
+        self.assertEqual((pend["candidate"], pend["claudeAiOauth"]["refreshToken"]), (b_id, "rt-B2"))
+        self.assertTrue(pend.get("released_at"))  # 切走时记下：它从这时起不是当前登录
+        if released_secs_ago:
+            ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=released_secs_ago)
+            pend["released_at"] = ago.isoformat(timespec="seconds")
+            store.save_secret(self.cam.PENDING_ID, pend)
+        MockAnthropic.refresh_map = {"rt-B2": ("at-B3", "rt-B3")}
+        MockAnthropic.tokens = {"at-A1": self.A_OK, "at-B3": self.B_OK}
+        MockAnthropic.calls = []
+        return a_id, b_id
+
+    def _one_session(self, etime):
+        """当作有一个 claude 会话在跑（pid 4321，已经运行了 etime）；看不出它用的哪个登录（macOS / Windows 就是这样）。"""
+        self.cam.running_claude_processes = lambda: [(4321, "claude")]
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(self.cam, "claude_sessions", return_value=None))
+        stack.enter_context(mock.patch.object(self.cam, "_ps_etimes", return_value={4321: etime}))
+        return stack
+
+    def test_refresh_uses_parked_login_not_the_superseded_one(self):
+        # 保存的 access token 本地看还没过期（服务端已经不认）
+        a_id, b_id = self._parked_b_then_on_a()
+        self.cam.refresh_usage(self.cam.Store())
+        store, b = self.cam.Store(), self._acc(b_id)
+        self.assertIsNone(b["usage"]["error"])
+        self.assertEqual(b["usage"]["five_hour"]["utilization"], 7.0)
+        self.assertEqual(self.cam.account_health(b, True, None)["level"], "ok")
+        self.assertFalse(b.get("incidents"))
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B3")
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+        self.assertEqual(self._token_calls(), ["rt-B2"])  # 被顶掉的 rt-B1 一次都没拿去续
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A1")  # 当前登录没动
+        self.assertNotIn("live_unverified", self.data())
+
+    def test_refresh_uses_parked_login_when_saved_one_expired(self):
+        # 保存的 access token 也过期了（隔了几个小时再打开面板）：cam doctor 同样不报失效
+        a_id, b_id = self._parked_b_then_on_a()
+        store = self.cam.Store()
+        sec = store.load_secret(b_id)
+        sec["claudeAiOauth"]["expiresAt"] = self._expired_ms()
+        store.save_secret(b_id, sec)
+        b = self._group(self._section(self._checkup(), "accounts"), "B")
+        self.assertFalse([i for i in b if i["level"] in ("bad", "warn")], b)
+        self.assertEqual(b[-1]["text"], "账号状态：正常")
+        self.assertEqual(self.cam.Store().load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B3")
+        self.assertEqual(self._token_calls(), ["rt-B2"])
+
+    def test_parked_login_held_by_session_is_not_login_invalid(self):
+        a_id, b_id = self._parked_b_then_on_a(released_secs_ago=3600)
+        # 这个会话在 B 让位之前就开着（跑了两小时），可能还拿着 rt-B2：两个 refresh token 都不去换，也不说登录失效
+        with self._one_session("02:00:00"):
+            self.cam.refresh_usage(self.cam.Store())
+            b = self._acc(b_id)
+            err = b["usage"]["error"]
+            self.assertIn(self.cam.PENDING_HELD, err)
+            self.assertIn("先不用重新登录", err)
+            self.assertNotIn("登录已失效", err)
+            h = self.cam.account_health(b, True, None)
+            self.assertEqual((h["level"], h["label"], [i["kind"] for i in h["issues"]]), ("info", "正常", ["pending_login"]))
+            self.assertFalse(b.get("incidents"))
+            self.assertEqual(self._token_calls(), [])
+            self.assertEqual(self.cam.Store().load_secret(self.cam.PENDING_ID)["claudeAiOauth"]["refreshToken"], "rt-B2")
+            # cam doctor：一条说明，不是“要处理”
+            items = self._group(self._section(self._checkup(), "accounts"), "B")
+            self.assertFalse([i for i in items if i["level"] in ("bad", "warn")], items)
+            self.assertTrue([i for i in items if self.cam.PENDING_HELD in i["text"] and "不用重新登录" in i["advice"]], items)
+            self.assertEqual(self._token_calls(), [])
+        # 进程没查出来（ps 出错、超时）：当作可能有，同样不换
+        self.cam.running_claude_processes = lambda: self.cam.ProcsUnknown()
+        self.cam.refresh_usage(self.cam.Store())
+        self.assertIn(self.cam.PENDING_HELD, self._acc(b_id)["usage"]["error"])
+        self.assertEqual(self._token_calls(), [])
+        # 会话是 B 让位之后才开的（只跑了十分钟，读到的是 A 的登录）：不算，照常核对并用上
+        with self._one_session("10:00"):
+            self.cam.refresh_usage(self.cam.Store())
+        self.assertIsNone(self._acc(b_id)["usage"]["error"])
+        self.assertEqual(self.cam.Store().load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B3")
+        self.assertEqual(self._token_calls(), ["rt-B2"])
+
+    def test_pending_holders_skips_sessions_with_their_own_login(self):
+        cam = self.cam
+        self.assertEqual([cam._etime_secs(t) for t in ("00:05", "10:00", "02:00:00", "1-00:00:01", "x", "1:2:3:4")],
+                         [5, 600, 7200, 86401, None, None])
+        ago = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat(timespec="seconds")
+        self.assertEqual(cam.pending_holders({"released_at": ago}), 0)
+        cam.running_claude_processes = lambda: [(1, "claude"), (2, "claude"), (3, "claude"), (4, "claude")]
+        sessions = [{"pid": 1, "secs": 7200, "login": "machine"}, {"pid": 2, "secs": 7200, "login": "own_token"},
+                    {"pid": 3, "secs": 60, "login": "machine"}, {"pid": 4, "secs": 7200, "login": "unknown"}]
+        with mock.patch.object(cam, "claude_sessions", return_value=sessions):
+            self.assertEqual(cam.pending_holders({"released_at": ago}), 2)  # 自带 token 的、让位之后才开的不算
+            self.assertEqual(cam.pending_holders({}), 4)  # 还是当前登录（没让位过）：都算
+        cam.running_claude_processes = lambda: cam.ProcsUnknown()
+        self.assertIsNone(cam.pending_holders({"released_at": ago}))
+
+    def test_switch_checks_parked_login_first(self):
+        a_id, b_id = self._parked_b_then_on_a()
+        store = self.cam.Store()
+        with self._one_session("02:00:00"):
+            # 自动的切换（规则、等待中的切换）不替它换 token：不切，当前登录不动，也不让人去重新登录
+            with self.assertRaises(self.cam.CamError) as cm:
+                self.cam.switch_code_account(store, b_id)
+            msg = str(cm.exception)
+            self.assertTrue(msg.startswith("没有切换：“B”更新的一份登录还暂存着没核对"), msg)
+            self.assertIn("现在就切", msg)
+            self.assertIn("先不用重新登录", msg)
+            self.assertEqual(self.live()[0]["refreshToken"], "rt-A1")
+            self.assertEqual(self.data()["active"]["claude_code"], a_id)
+            self.assertEqual(self._token_calls(), [])
+            # 用户说现在就切（面板的“现在就切”、cam switch -y）：核对暂存的那份并用上
+            r = self.cam.api_switch(store, b_id, "now")
+            self.assertTrue(r["ok"] and r["changed"], r)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B3")
+        self.assertEqual(self.cam.Store().load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B3")
+        self.assertEqual(self.cam.Store().load_secret(self.cam.PENDING_ID), {})
+        self.assertEqual(self._token_calls(), ["rt-B2"])
+
+    def test_switch_network_error_while_checking_parked_login(self):
+        a_id, b_id = self._parked_b_then_on_a()
+        with mock.patch.object(self.cam, "TOKEN_URLS", ["http://127.0.0.1:1/v1/oauth/token"]):
+            with self.assertRaises(self.cam.CamError) as cm:
+                self.cam.switch_code_account(self.cam.Store(), b_id, force=True)
+        msg = str(cm.exception)
+        self.assertIn("续登录失败", msg)  # 网络问题照网络问题说
+        self.assertIn("当前登录没有动", msg)
+        self.assertNotIn("重新登录", msg)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A1")
+        self.assertEqual(self.cam.Store().load_secret(self.cam.PENDING_ID)["claudeAiOauth"]["refreshToken"], "rt-B2")
+        self.assertEqual(self.cam._health_kind_of_error("claude_code", self.cam.pending_held_error("续登录失败（网络错误：x），稍后再试")), "network")
+
+    def test_parked_login_guessed_for_another_account(self):
+        a_id, b_id = self._switched_to_b()
+        self.run_cam("switch", "A")
+        # 切到 A 之前就开着的会话续了 B 的登录、写回凭据文件；~/.claude.json 里还是 A，cam 运行时又核对不了：暂存，猜的是 A
+        self.write_creds("at-B2", "rt-B2", expires_ms=self._expired_ms())
+        self.run_cam("ls")
+        store = self.cam.Store()
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID)["candidate"], a_id)
+        MockAnthropic.refresh_map = {"rt-B2": ("at-B3", "rt-B3")}
+        MockAnthropic.tokens = {"at-A1": self.A_OK, "at-B3": self.B_OK}
+        MockAnthropic.calls = []
+        # 刷新：B 保存的那份被拒绝了，但暂存的那份就是 Claude Code 现在用的登录，不能替它换：不下“失效”的结论
+        self.cam.refresh_usage(store)
+        err = self._acc(b_id)["usage"]["error"]
+        self.assertIn("保存的那份登录被服务端拒绝了", err)
+        self.assertIn(self.cam.PENDING_HELD, err)
+        self.assertEqual(self.cam.account_health(self._acc(b_id), True, None)["level"], "info")
+        self.assertNotIn("rt-B2", self._token_calls())
+        # 切到 B：保存的 access token 本地看没过期，但服务端不认；照着切过去 Claude Code 一续就要重新登录，所以不切
+        MockAnthropic.calls = []
+        with self.assertRaises(self.cam.CamError) as cm:
+            self.cam.switch_code_account(store, b_id, force=True)
+        self.assertIn("没有切换：“B”保存的那份登录被服务端拒绝了", str(cm.exception))
+        self.assertIn("在 claude 里发一句话", str(cm.exception))
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B2")
+        # Claude Code 换成了别的登录（重新登录了 A）：暂存的那份不再是当前登录，再切 B 时核对出是 B 的，用上
+        self.login("at-A9", "rt-A9", "uuid-A", "a@x.com")
+        MockAnthropic.tokens["at-A9"] = self.A_OK
+        MockAnthropic.calls = []
+        acc, _, changed = self.cam.switch_code_account(self.cam.Store(), b_id, force=True)
+        self.assertTrue(changed)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-B3")
+        store = self.cam.Store()
+        self.assertEqual(store.load_secret(b_id)["claudeAiOauth"]["refreshToken"], "rt-B3")
+        self.assertEqual(store.load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A9")
+        self.assertEqual(store.load_secret(self.cam.PENDING_ID), {})
+
+    def test_rejected_access_token_is_renewed_once(self):
+        a_id, b_id = self._two_accounts()  # B 是当前登录；A 保存的 access token 本地看没过期
+        MockAnthropic.tokens = {"at-B1": self.B_OK, "at-A2": self.A_OK}  # 服务端不认 at-A1 了
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        self.cam.refresh_usage(self.cam.Store())
+        a = self._acc(a_id)
+        self.assertIsNone(a["usage"]["error"])
+        self.assertEqual(self.cam.Store().load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")
+        self.assertEqual(self._token_calls(), ["rt-A1"])
+        # 当前登录被拒绝：从不替它续，原样报
+        MockAnthropic.tokens = {"at-A2": self.A_OK}
+        MockAnthropic.refresh_map = {"rt-B1": ("at-B2", "rt-B2")}
+        MockAnthropic.calls = []
+        self.cam.refresh_usage(self.cam.Store())
+        self.assertIn("401", self._acc(b_id)["usage"]["error"])
+        self.assertEqual(self._token_calls(), [])
+        # 后台那轮（不许换 token）也不续
+        MockAnthropic.tokens = {"at-B1": self.B_OK}
+        MockAnthropic.refresh_map = {"rt-A2": ("at-A3", "rt-A3")}
+        MockAnthropic.calls = []
+        self.cam.refresh_usage(self.cam.Store(), allow_token_refresh=False)
+        self.assertEqual(self._token_calls(), [])
+
+    def test_token_endpoint_answers_that_do_not_mean_dead(self):
+        cam = self.cam
+        dead = cam._token_answer_dead
+        self.assertTrue(dead(400, {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}))
+        self.assertTrue(dead(400, {"error": {"type": "invalid_request_error", "message": "invalid_grant"}}))
+        self.assertTrue(dead(401, {"error": {"message": "revoked"}}))
+        self.assertFalse(dead(400, {"error": {"message": "<html>Bad Request</html>"}, "_not_json": True}))  # 代理、网关回的
+        self.assertFalse(dead(400, {"error": "invalid_client"}))  # 请求本身不对，和这个账号的登录无关
+        self.assertFalse(dead(400, {"error": {"type": "invalid_request_error", "message": "unsupported_grant_type"}}))
+        self.assertFalse(dead(403, {"error": {"message": "forbidden"}}))
+        self.assertFalse(dead(400, ["x"]))
+        self.assertFalse(dead(500, {"error": "invalid_grant"}))
+        for st, body in ((400, {"error": {"message": "<html>blocked</html>"}, "_not_json": True}), (400, {"error": "invalid_client"})):
+            with mock.patch.object(cam, "http_json", return_value=(st, body)):
+                with self.assertRaises(cam.CamError) as cm:
+                    cam.refresh_oauth("rt")
+            self.assertIn("续登录失败", str(cm.exception))
+            self.assertEqual(cam._health_kind_of_error("claude_code", str(cm.exception)), "network")
+        with mock.patch.object(cam, "http_json", return_value=(400, {"error": "invalid_grant"})):
+            with self.assertRaises(cam.CamError) as cm:
+                cam.refresh_oauth("rt")
+        self.assertEqual(cam._health_kind_of_error("claude_code", str(cm.exception)), "login_invalid")
+
+    def test_http_json_marks_non_json_error_bodies(self):
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                body = b"<html>Bad Request</html>" if self.path == "/html" else b'["x"]'
+                self.send_response(400)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            for path in ("/html", "/list"):
+                st, body = self.cam.http_json("POST", base + path, body={"a": 1})
+                self.assertEqual(st, 400)
+                self.assertTrue(isinstance(body, dict) and body.get("_not_json"), body)
+                self.assertFalse(self.cam._token_answer_dead(st, body))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_login_invalid_survives_background_round(self):
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())  # 假接口不认 rt-A1：A 的登录确实作废了
+        MockAnthropic.tokens = {"at-B1": self.B_OK}
+        store = self.cam.Store()
+        self.cam.refresh_usage(store)
+        a = self._acc(a_id)
+        self.assertEqual(self.cam.account_health(a, True, None)["level"], "error")
+        self.assertEqual(a["usage"]["error_fp"], a["token_fp"])
+        self.assertEqual(len(a["incidents"]), 1)
+        # 后台那轮不替它续，只会得到“登录过期了”：结论还是失效，现场也不重复记
+        self.cam.refresh_usage(store, allow_token_refresh=False)
+        a = self._acc(a_id)
+        self.assertIn("登录已失效", a["usage"]["error"])
+        self.assertEqual(self.cam.account_health(a, True, None)["level"], "error")
+        self.assertEqual(len(a["incidents"]), 1)
+        # 重新登录 A 并保存后（token 换了）按新的结果来
+        self.login("at-A5", "rt-A5", "uuid-A", "a@x.com")
+        MockAnthropic.tokens["at-A5"] = self.A_OK
+        self.cam.refresh_usage(store, allow_token_refresh=False)
+        a = self._acc(a_id)
+        self.assertIsNone(a["usage"]["error"])
+        self.assertNotIn("error_fp", a["usage"])
+        # 没查出过失效的号，后台那轮的“登录过期了”还是提示，不是异常
+        keep = self.cam.keep_login_invalid
+        u = {"error": "登录已过期。后台不会替它续登录（避免和 Claude Code 抢 refresh token），手动刷新一次或切换到这个账号即可"}
+        acc = {"kind": "claude_code", "token_fp": "f1", "usage": {"error": "登录已失效（x）", "error_fp": "f0"}}
+        keep(acc, u)
+        self.assertNotIn("登录已失效", u["error"])  # 之后保存的登录换过：不沿用
+        self.assertNotIn("error_fp", u)
+
+    def test_unknown_process_list_defers_automatic_switch(self):
+        cam = self.cam
+        a_id, b_id = self._two_accounts()
+        store = cam.Store()
+        self.assertFalse(cam.claude_may_be_running([]))
+        self.assertTrue(cam.claude_may_be_running([(1, "claude")]))
+        self.assertTrue(cam.claude_may_be_running(cam.ProcsUnknown()))
+        with store.lock():
+            data = store.load()
+            cam.defer_switch(data, a_id, "manual")
+            store.save(data)
+        cam.running_claude_processes = lambda: cam.ProcsUnknown()
+        self.assertIsNone(cam.apply_pending_switch(store))  # 没查出来：当作有会话，先不切
+        self.assertEqual(self.data()["active"]["claude_code"], b_id)
+        self.assertTrue(self.data().get("pending_switch"))
+        cam.running_claude_processes = lambda: []
+        self.assertEqual(cam.apply_pending_switch(store)[0]["id"], a_id)
+        # 面板上的会话数：这次没查出来就沿用上次的，不归零
+        cam.running_claude_processes = lambda: [(1, "claude"), (2, "claude")]
+        self.assertEqual(cam.session_count(max_age=0), 2)
+        cam.running_claude_processes = lambda: cam.ProcsUnknown()
+        self.assertEqual(cam.session_count(max_age=0), 2)
 
     # ---- cam login：先存好当前账号，再换号登录
 
@@ -2300,6 +2823,107 @@ class CamTest(unittest.TestCase):
         finally:
             self.cam.META_TTL = old_ttl
 
+    def test_stale_environment_results_are_labelled(self):
+        """后台没在跑时环境检测结果会很旧：从那次结果算出来的提示标上是多久以前测的，旧的官方故障不再提，并说怎么重新检测。"""
+        self._two_accounts()
+        store = self.cam.Store()
+
+        def put(checked_at, sp_at="same"):
+            with store.lock():
+                d = store.load()
+                d["region"] = {"loc": "US", "ip": "1.2.3.4", "org": "Amazon.com, Inc.", "asn": 16509, "ip_type": "hosting", "skew": 300,
+                               "warp": False, "checked_at": checked_at,
+                               "env": {"tz": "America/New_York", "tz_cc": ["US"], "locale": None, "locale_cc": None, "dns": [],
+                                       "proxy": ["HTTPS_PROXY=http://127.0.0.1:7890"], "tunnel": None}}
+                d["status_page"] = {"indicator": "major", "description": "Partial System Outage"}
+                if sp_at:
+                    d["status_page"]["checked_at"] = checked_at if sp_at == "same" else sp_at
+                store.save(d)
+            return self.data()
+
+        def kinds(items):
+            return [r["kind"] for r in items]
+
+        ago = lambda **kw: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(**kw)).replace(microsecond=0).isoformat()
+        # 刚测的：原样，官方故障照常提
+        fresh = self.cam.risk_items(put(self.cam.now_iso()))
+        self.assertEqual(kinds(fresh), ["proxy", "isp", "clock", "status", "accounts"])
+        self.assertFalse([r for r in fresh if "检测的）" in r["text"]])
+        self.assertEqual(self.cam.risk_score(fresh)["score"], 100 - 5 - 20 - 10 - 30)
+        # 两天前测的：每条标出来，两天前的故障不算，多一条 env_stale；分数只少了故障那一项
+        old = self.cam.risk_items(put(ago(days=2)))
+        self.assertEqual(kinds(old), ["proxy", "isp", "clock", "accounts", "env_stale"])
+        by = {r["kind"]: r for r in old}
+        for k in ("proxy", "isp", "clock"):
+            self.assertTrue(by[k]["text"].endswith("（2 天前检测的）"), by[k]["text"])
+        self.assertNotIn("检测的）", by["accounts"]["text"])
+        self.assertEqual((by["env_stale"]["level"], by["env_stale"]["text"]),
+                         ("info", "环境检测结果是 2 天前的，出口、代理、时区这些可能已经变了"))
+        self.assertIn("cam doctor", by["env_stale"]["advice"])
+        self.assertEqual(self.cam.risk_score(old)["score"], 100 - 5 - 20 - 10)
+        # 调用方自己说了是多久前的（离线体检）：不标、不加 env_stale，旧故障同样不提
+        plain = self.cam.risk_items(self.data(), note_age=False)
+        self.assertEqual(kinds(plain), ["proxy", "isp", "clock", "accounts"])
+        self.assertFalse([r for r in plain if "检测的）" in r["text"]])
+        # 旧版的状态页没单独记时间：按出口那次检测的时间算
+        self.assertIn("status", kinds(self.cam.risk_items(put(self.cam.now_iso(), sp_at=None))))
+        self.assertNotIn("status", kinds(self.cam.risk_items(put(ago(hours=3), sp_at=None))))
+        # 出口刚测过、状态页是更早那次的（不该出现，出现了也不提旧故障）
+        self.assertNotIn("status", kinds(self.cam.risk_items(put(self.cam.now_iso(), sp_at=ago(hours=2)))))
+        # 一小时以内不算旧
+        self.assertNotIn("env_stale", kinds(self.cam.risk_items(put(ago(minutes=50)))))
+        # cam status / cam risk / 切换时的提醒都带上时间；离线体检开头说一次，下面每条不重复
+        put(ago(days=2))
+
+        def printed(*args):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.run_cam(*args)
+            return buf.getvalue()
+
+        out = printed("ls")
+        self.assertIn("（2 天前检测的）", out)
+        self.assertIn("（2 天前检测；cam doctor 实测并查看完整的服务检查）", out)
+        out = printed("risk")
+        self.assertIn("当前（2 天前检测）：", out)
+        self.assertIn("重新检测：运行 cam doctor", out)
+        res = self.cam.checkup_service(store, offline=True)
+        self.assertIn("（2 天前）", res[0]["text"])
+        self.assertFalse([i for i in res if "检测的）" in i["text"] or i.get("kind") == "env_stale"])
+        self.assertIn("isp", [i.get("kind") for i in res])
+        # 启动 claude 前的快速检测把出口换成刚测的：不再标旧
+        d2 = self.cam.with_quick_region(self.data(), {"loc": "US", "ip": "1.2.3.4", "colo": "SJC", "ms": 10, "warp": False, "skew": 0})
+        self.assertFalse([r for r in self.cam.risk_items(d2) if "检测的）" in r["text"] or r["kind"] == "env_stale"])
+
+    def test_background_error_is_not_wiped_by_the_same_round(self):
+        """后台一轮里环境检测（或更前面的步骤）出了错，后面刷新用量成功也不把这条错误清掉；下一次整轮都没出错才清。"""
+        self._two_accounts()
+        store = self.cam.Store()
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        st, told = {}, []
+        tell = lambda title, body: told.append(title)
+        with mock.patch.object(self.cam, "check_region", side_effect=OSError("boom")):
+            self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(st.get("last_error"), "环境检测：boom")
+        self.assertTrue((self.data()["accounts"][1].get("usage") or {}).get("five_hour"))  # 用量照样刷新了
+        # 没到刷新时间的轮次不动它
+        self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(st.get("last_error"), "环境检测：boom")
+        # 下一次刷新整轮没出错：清掉
+        st["last_refresh"] = 0
+        self.cam.background_round(store, st, 10, tell)
+        self.assertNotIn("last_error", st)
+        # 更前面的步骤（时间规则）出错，同一轮刷新成功：也留着
+        st["last_refresh"] = 0
+        with mock.patch.object(self.cam, "apply_time_rules", side_effect=self.cam.CamError("规则坏了")):
+            self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(st.get("last_error"), "时间规则：规则坏了")
+        # 刷新用量自己出错：记的是它
+        st["last_refresh"] = 0
+        with mock.patch.object(self.cam, "refresh_usage", side_effect=self.cam.CamError("读不了")):
+            self.cam.background_round(store, st, 10, tell)
+        self.assertEqual(st.get("last_error"), "刷新用量：读不了")
+
     def test_quick_region_for_launch(self):
         self._two_accounts()
         store = self.cam.Store()
@@ -2392,6 +3016,352 @@ class CamTest(unittest.TestCase):
         self.cam.check_region(store, max_age=0)
         self.assertEqual([i["kind"] for i in self.data()["service_status"]["items"]], ["api"])
 
+    def test_failed_check_keeps_last_good_result(self):
+        """环境检测这次没连上：上次查到的出口留着不动，只记一笔“最近一次没连上”；那份结果旧了才按查不到提醒。"""
+        import datetime as dt
+        self._two_accounts()
+        store = self.cam.Store()
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        both = ("/cdn-cgi/trace", "/cf/cdn-cgi/trace")
+        score = lambda: self.cam.risk_score(self.cam.risk_items(self.data()))["score"]
+        kinds = lambda items: [i["kind"] for i in items]
+        self.cam.check_region(store, max_age=0)
+        good = self.data()["region"]
+        self.assertEqual((good["loc"], good["ip"], good["net"], good.get("failed_at")), ("US", "1.2.3.4", "net-a", None))
+        self.assertEqual(score(), 100)
+        # claude.ai 和 Cloudflare 的 trace 都答不上来
+        MockAnthropic.down = both
+        MockAnthropic.calls = []
+        view = self.cam.check_region(store, max_age=0)
+        self.assertTrue(set(both) <= {c[1] for c in MockAnthropic.calls})  # 两边都问过
+        reg = self.data()["region"]
+        for k in ("loc", "ip", "colo", "org", "ip_type", "checked_at", "net", "meta_at"):
+            self.assertEqual(reg.get(k), good.get(k), k)
+        self.assertTrue(reg["failed_at"])
+        self.assertEqual(reg["fail_count"], 1)
+        self.assertTrue(reg["env_at"])  # 本机设置不用联网，照常更新
+        self.assertEqual((view["loc"], view["status"], view["fail_count"], view["failed_at"]),
+                         ("US", "supported", 1, reg["failed_at"]))
+        self.assertEqual(self.cam.public_state(store, self.data())["region"]["fail_count"], 1)
+        risks = self.cam.risk_items(self.data())
+        fail = [r for r in risks if r["kind"] == "env_failed"]
+        self.assertEqual(len(fail), 1)
+        self.assertEqual(fail[0]["level"], "info")
+        self.assertIn("最近一次环境检测没连上", fail[0]["text"])
+        self.assertNotIn("region_unknown", kinds(risks))
+        self.assertEqual(self.cam.risk_score(risks)["score"], 100)  # 上次的结果还新：只说一声，不扣分
+        # 刚失败过：定时的那种检测一分钟内不重试；手动的（max_age=0）马上重试
+        MockAnthropic.calls = []
+        self.cam.check_region(store)
+        self.assertEqual(MockAnthropic.calls, [])
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual(self.data()["region"]["fail_count"], 2)
+        # 服务检测：出口那行说明是上次查到的，同一条提示，分数和顶部一致；总体结论不说“出口在支持名单内”
+        items = self.cam.service_check(store)
+        row = next(i for i in items if i["kind"] == "region")
+        self.assertEqual(row["level"], "ok")
+        self.assertIn("这次没连上", row["text"])
+        self.assertEqual(kinds(items).count("env_failed"), 1)
+        self.assertEqual(items[0]["score"], score())
+        self.assertIn("这次没测到出口地区", items[0]["text"])
+        self.assertNotIn("出口地区在支持名单内", items[0]["text"])
+        self.assertEqual(self.data()["region"]["fail_count"], 3)
+
+        def backdate(hours):
+            with store.lock():
+                d = store.load()
+                d["region"]["checked_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)).replace(microsecond=0).isoformat()
+                store.save(d)
+
+        # 上次查到的已经是两小时前的：出口现在在哪说不准，按“查不到”提醒并扣分，不再另报一条“结果旧了”
+        backdate(2)
+        risks = self.cam.risk_items(self.data())
+        self.assertEqual(kinds(risks).count("region_unknown"), 1)
+        self.assertNotIn("env_failed", kinds(risks))
+        self.assertNotIn("env_stale", kinds(risks))
+        unknown = next(r for r in risks if r["kind"] == "region_unknown")
+        self.assertIn("连续 3 次检测都没连上", unknown["text"])
+        self.assertIn("上一次查到是", unknown["text"])
+        self.assertEqual(self.cam.risk_score(risks)["score"], 70)
+        items = self.cam.service_check(store)
+        self.assertEqual(kinds(items).count("region_unknown"), 1)
+        self.assertNotIn("env_stale", kinds(items))
+        self.assertEqual((items[0]["score"], score()), (70, 70))
+        # 上次查到的出口不在支持名单：“不在名单”那条已经扣过分，没连上只说一声，不叠一条“查不到”
+        with store.lock():
+            d = store.load()
+            d["region"]["loc"] = "CN"
+            store.save(d)
+        risks = self.cam.risk_items(self.data())
+        self.assertEqual((kinds(risks).count("region"), kinds(risks).count("env_failed")), (1, 1))
+        self.assertNotIn("region_unknown", kinds(risks))
+        self.assertEqual(next(r for r in risks if r["kind"] == "env_failed")["level"], "info")
+        # 连上了：失败记录清掉，换成新查到的
+        MockAnthropic.down = ()
+        self.cam.check_region(store, max_age=0)
+        reg = self.data()["region"]
+        self.assertEqual((reg["loc"], reg["prev_loc"]), ("US", "CN"))
+        self.assertNotIn("failed_at", reg)
+        self.assertNotIn("fail_count", reg)
+        self.assertEqual(self.cam.public_state(store, self.data())["region"]["fail_count"], 0)
+        self.assertNotIn("env_failed", kinds(self.cam.risk_items(self.data())))
+        # 从来没查到过的：还是记成查不到
+        with store.lock():
+            d = store.load()
+            d.pop("region")
+            store.save(d)
+        MockAnthropic.down = both
+        self.cam.check_region(store, max_age=0)
+        reg = self.data()["region"]
+        self.assertIsNone(reg["loc"])
+        self.assertEqual(reg["fail_count"], 1)
+        risks = self.cam.risk_items(self.data())
+        self.assertEqual(kinds(risks).count("region_unknown"), 1)
+        self.assertIn("出口地区查不到", next(r for r in risks if r["kind"] == "region_unknown")["text"])
+        self.assertEqual(self.cam.risk_score(risks)["score"], 70)
+
+    def test_exit_trace_asks_cloudflare_when_claude_ai_is_slow(self):
+        """claude.ai 的 trace 两秒没回音（这里调成 0.2 秒）或者答不上来：同时问 Cloudflare，谁先给出结果用谁的。"""
+        paths = lambda: [c[1] for c in MockAnthropic.calls]
+
+        def timed(fn):
+            t0 = time.monotonic()
+            return fn(), time.monotonic() - t0
+
+        with mock.patch.object(self.cam, "TRACE_HEDGE_SECS", 0.2):
+            # 正常：只问 claude.ai
+            got = self.cam.exit_trace(3)
+            self.assertEqual((got["loc"], got["colo"]), ("US", "SJC"))
+            self.assertEqual(paths(), ["/cdn-cgi/trace"])
+            # claude.ai 卡住：0.2 秒后同时问 Cloudflare，用它的结果，不等满 3 秒
+            MockAnthropic.calls = []
+            MockAnthropic.slow = {"/cdn-cgi/trace": 30}
+            got, took = timed(lambda: self.cam.exit_trace(3))
+            self.assertEqual((got["loc"], got["colo"]), ("US", "LAX"))
+            self.assertLess(took, 2)
+            self.assertEqual(paths(), ["/cdn-cgi/trace", "/cf/cdn-cgi/trace"])
+            self.drain()
+            # 设置里关了外部查询（fallback=False）：只问 claude.ai，到时限返回 None
+            MockAnthropic.calls = []
+            MockAnthropic.slow = {"/cdn-cgi/trace": 30}
+            got, took = timed(lambda: self.cam.exit_trace(0.6, fallback=False))
+            self.assertIsNone(got)
+            self.assertLess(took, 2)
+            self.assertEqual(paths(), ["/cdn-cgi/trace"])
+            self.drain()
+            # 两边都卡住：等到时限返回 None，不会更久
+            MockAnthropic.calls = []
+            MockAnthropic.slow = {"/cdn-cgi/trace": 30, "/cf/cdn-cgi/trace": 30}
+            got, took = timed(lambda: self.cam.exit_trace(0.8))
+            self.assertIsNone(got)
+            self.assertGreaterEqual(took, 0.7)
+            self.assertLess(took, 2.5)
+            self.assertEqual(sorted(paths()), ["/cdn-cgi/trace", "/cf/cdn-cgi/trace"])
+            self.drain()
+        with mock.patch.object(self.cam, "TRACE_HEDGE_SECS", 5):
+            # claude.ai 一下就答不上来（503）：不等那 5 秒，马上问 Cloudflare
+            MockAnthropic.calls = []
+            MockAnthropic.down = ("/cdn-cgi/trace",)
+            got, took = timed(lambda: self.cam.exit_trace(6))
+            self.assertEqual(got["colo"], "LAX")
+            self.assertLess(took, 2)
+            # 两边都答不上来：马上返回 None
+            MockAnthropic.down = ("/cdn-cgi/trace", "/cf/cdn-cgi/trace")
+            got, took = timed(lambda: self.cam.exit_trace(6))
+            self.assertIsNone(got)
+            self.assertLess(took, 2)
+            # 启动 claude 前的快速检测只问 claude.ai，不问别家
+            MockAnthropic.calls = []
+            self.assertIsNone(self.cam.quick_trace(3))
+            self.assertEqual(paths(), ["/cdn-cgi/trace"])
+
+    def test_stuck_third_parties_do_not_hold_up_the_exit_check(self):
+        """查运营商、注册国、IPv4 / IPv6 出口的第三方接口卡住：到时限当作查不到，出口地区照样记下来，不算检测失败。"""
+        self._two_accounts()
+        store = self.cam.Store()
+        MockAnthropic.slow = dict.fromkeys(("/ipapiis", "/ipinfo", "/ipapi", "/meta", "/rdap", "/trace4", "/trace6"), 30)
+        with mock.patch.object(self.cam, "META_BUDGET_SECS", 0.6), mock.patch.object(self.cam, "META_SOURCE_TIMEOUT", 0.25):
+            t0 = time.monotonic()
+            self.cam.check_region(store, max_age=0)
+            took = time.monotonic() - t0
+        self.assertLess(took, 3)
+        reg = self.data()["region"]
+        self.assertEqual((reg["loc"], reg["ip"], reg.get("org"), reg.get("v4_loc"), reg.get("failed_at")),
+                         ("US", "1.2.3.4", None, None, None))
+        self.assertIsNone(reg.get("meta_at"))  # 运营商没查到：不缓存，下次重查
+        paths = [c[1] for c in MockAnthropic.calls]
+        self.assertEqual(len([p for p in paths if p.startswith("/ipapiis")]), 1)
+        self.assertNotIn("/meta", paths)  # 前两个数据源把时限用完了，后面的不再问
+        self.assertEqual(self.cam.risk_score(self.cam.risk_items(self.data()))["score"], 100)
+        self.drain()
+        # 接口恢复后下一次就补上
+        self.cam.check_region(store, max_age=0)
+        reg = self.data()["region"]
+        self.assertEqual((reg["org"], reg["v4_loc"]), ("Comcast Cable Communications, LLC", "US"))
+
+    def test_run_parallel_budget_and_limits(self):
+        rp = self.cam.run_parallel
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        stuck = lambda: stop.wait(30)
+        self.assertEqual(rp({"a": lambda: 1, "b": lambda: "x"}, 2), {"a": 1, "b": "x"})
+        self.assertEqual(rp({}, 2), {})
+        # 到了总时限还没做完的那件是 None，不接着等
+        t0 = time.monotonic()
+        self.assertEqual(rp({"fast": lambda: 1, "stuck": stuck}, 0.3), {"fast": 1, "stuck": None})
+        self.assertLess(time.monotonic() - t0, 2)
+        # 某一件有自己更短的时限：别的都做完了就只等它到那个时限
+        t0 = time.monotonic()
+        self.assertEqual(rp({"fast": lambda: 1, "stuck": stuck}, 20, {"stuck": 0.2}), {"fast": 1, "stuck": None})
+        self.assertLess(time.monotonic() - t0, 2)
+        # 它的时限不影响别的：慢一点但在总时限内的照样等到
+        self.assertEqual(rp({"slowish": lambda: time.sleep(0.3) or "done", "stuck": stuck}, 5, {"stuck": 0.1}),
+                         {"slowish": "done", "stuck": None})
+        # 哪件抛了错原样抛出
+        with self.assertRaises(ZeroDivisionError):
+            rp({"ok": lambda: 1, "boom": lambda: 1 // 0}, 2)
+
+    def test_background_rechecks_on_network_change_and_retries_failures(self):
+        """两次定时检测之间：本机换了网络马上补测一次；上次没连上的过一分钟重试，再失败间隔翻倍。"""
+        import datetime as dt
+        self._two_accounts()
+        store = self.cam.Store()
+        MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        st, told = {}, []
+        tell = lambda title, body: told.append(title)
+
+        def traces_in_round(refresh_min=10):
+            MockAnthropic.calls = []
+            self.cam.background_round(store, st, refresh_min, tell)
+            return len([c for c in MockAnthropic.calls if c[1] == "/cdn-cgi/trace"])
+
+        self.assertEqual(traces_in_round(), 1)  # 第一轮：定时检测
+        self.assertEqual((st["net"], self.data()["region"]["net"]), ("net-a", "net-a"))
+        self.assertEqual(traces_in_round(), 0)  # 没到时间、网络也没变：不测
+        # 换了网络（换 Wi-Fi、开关接管整机的 VPN）：马上补测一次
+        os.environ["CAM_TEST_NET"] = "net-b"
+        MockAnthropic.trace_ip = "5.6.7.8"
+        self.assertEqual(traces_in_round(), 1)
+        reg = self.data()["region"]
+        self.assertEqual((reg["ip"], reg["net"], st["net"]), ("5.6.7.8", "net-b", "net-b"))
+        self.assertEqual(traces_in_round(), 0)
+        # 半分钟内又变了一次：先不测（切换网络时地址会连着变几回），过了半分钟才测
+        os.environ["CAM_TEST_NET"] = "net-c"
+        self.assertEqual(traces_in_round(), 0)
+        self.assertEqual(st["net"], "net-b")
+        st["net_at"] -= 31
+        self.assertEqual(traces_in_round(), 1)
+        self.assertEqual((st["net"], self.data()["region"]["net"]), ("net-c", "net-c"))
+        # 断网（没有可用的路由）不算换了网络
+        os.environ["CAM_TEST_NET"] = ""
+        st["net_at"] -= 31
+        self.assertEqual(traces_in_round(), 0)
+        self.assertEqual(st["net"], "net-c")
+        # 关掉了定时刷新（refresh_min=0）的也不补测
+        os.environ["CAM_TEST_NET"] = "net-d"
+        self.assertEqual(traces_in_round(0), 0)
+        # 轮到定时检测那一轮、刚好又换了网络：不因为“五分钟内测过”跳过；网络没变的才跳过
+        st["last_refresh"] = 0
+        self.assertEqual(traces_in_round(), 1)
+        self.assertEqual((st["net"], self.data()["region"]["net"]), ("net-d", "net-d"))
+        st["last_refresh"] = 0
+        self.assertEqual(traces_in_round(), 0)
+
+        def fail_age(secs):
+            with store.lock():
+                d = store.load()
+                d["region"]["failed_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs)).replace(microsecond=0).isoformat()
+                store.save(d)
+
+        # 检测没连上：一分钟内不重试
+        MockAnthropic.down = ("/cdn-cgi/trace", "/cf/cdn-cgi/trace")
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual(self.data()["region"]["fail_count"], 1)
+        self.assertEqual(traces_in_round(), 0)
+        fail_age(61)
+        self.assertEqual(traces_in_round(), 1)
+        self.assertEqual(self.data()["region"]["fail_count"], 2)
+        # 第二次失败后等两分钟，第三次后等四分钟……最长不超过定时检测的间隔
+        fail_age(61)
+        self.assertEqual(traces_in_round(), 0)
+        fail_age(121)
+        self.assertEqual(traces_in_round(), 1)
+        self.assertEqual(self.data()["region"]["fail_count"], 3)
+        fail_age(121)
+        self.assertEqual(traces_in_round(), 0)
+        self.assertEqual(traces_in_round(2), 1)  # 两分钟一轮的话最长等两分钟
+        self.assertEqual(self.data()["region"]["fail_count"], 4)
+        self.assertEqual(self.data()["region"]["loc"], "US")  # 一直留着上次查到的
+        # 连上了：恢复正常，不算后台出错，也不弹通知
+        MockAnthropic.down = ()
+        fail_age(1000)
+        self.assertEqual(traces_in_round(), 1)
+        self.assertNotIn("failed_at", self.data()["region"])
+        self.assertEqual(traces_in_round(), 0)
+        self.assertNotIn("last_error", st)
+        self.assertEqual(told, [])
+
+    def test_launch_prompt_rechecks_after_network_change_or_failure(self):
+        """启动 claude 前：刚测过、网络没变就不联网；换了网络或上次没连上，花一次快速检测看现在的出口。"""
+        self._two_accounts()
+        store = self.cam.Store()
+        self.cam.check_region(store, max_age=0)
+
+        def launch_calls():
+            MockAnthropic.calls = []
+            self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=lambda _: "y", interactive=True))
+            return [c[1] for c in MockAnthropic.calls]
+
+        self.assertEqual(launch_calls(), [])
+        os.environ["CAM_TEST_NET"] = "net-b"
+        self.assertEqual(launch_calls(), ["/cdn-cgi/trace"])
+        self.assertEqual(self.data()["region"]["net"], "net-a")  # 快速检测只用来算这次的提醒，不保存
+        # 后台那次完整检测（这里直接调它的入口）不因为“一分钟内测过”跳过
+        MockAnthropic.calls = []
+        self.cam.background_region_check(store)
+        self.assertEqual(self.data()["region"]["net"], "net-b")
+        self.assertEqual(launch_calls(), [])
+        # 上次没连上：留着的结果不直接信
+        MockAnthropic.down = ("/cdn-cgi/trace", "/cf/cdn-cgi/trace")
+        self.cam.check_region(store, max_age=0)
+        MockAnthropic.down = ()
+        self.assertEqual(launch_calls(), ["/cdn-cgi/trace"])
+        d2 = self.cam.with_quick_region(self.data(), self.cam.quick_trace(3))
+        self.assertNotIn("failed_at", d2["region"])
+        self.assertNotIn("env_failed", [r["kind"] for r in self.cam.risk_items(d2)])
+        self.assertTrue(self.data()["region"]["failed_at"])  # 只是副本
+
+    def test_usage_gives_up_when_the_network_hangs(self):
+        """读账号资料等了好几秒都没连上：不接着读用量（同样要白等那么久）；一下就失败的才接着试。"""
+        a_id, b_id = self._two_accounts()
+        store = self.cam.Store()
+        acc = next(a for a in self.data()["accounts"] if a["id"] == b_id)
+        seen = []
+
+        def hang(method, url, headers=None, body=None, timeout=20):
+            seen.append((url.rsplit("/", 1)[-1], timeout))
+            time.sleep(0.15)
+            return 0, {"error": {"message": "timed out"}}
+
+        with mock.patch.object(self.cam, "USAGE_GIVE_UP", 0.1), mock.patch.object(self.cam, "http_json", hang):
+            with self.assertRaises(self.cam.CamError):
+                self.cam.fetch_code_usage(store, dict(acc), allow_refresh=False)
+        self.assertEqual(seen, [("profile", self.cam.USAGE_TIMEOUT)])
+        self.assertLess(self.cam.USAGE_TIMEOUT, 20)
+        seen.clear()
+
+        def reset(method, url, headers=None, body=None, timeout=20):
+            seen.append((url.rsplit("/", 1)[-1], timeout))
+            if url.endswith("/profile"):
+                return 0, {"error": {"message": "connection reset"}}
+            return 200, {"five_hour": {"utilization": 12.0, "resets_at": "2099-01-01T00:00:00Z"},
+                         "seven_day": {"utilization": 3.0, "resets_at": "2099-01-05T00:00:00Z"}}
+
+        with mock.patch.object(self.cam, "http_json", reset):
+            usage = self.cam.fetch_code_usage(store, dict(acc), allow_refresh=False)
+        self.assertEqual(seen, [("profile", self.cam.USAGE_TIMEOUT), ("usage", self.cam.USAGE_TIMEOUT)])
+        self.assertEqual(usage["five_hour"]["utilization"], 12.0)
+
     def test_header_score_matches_service_check(self):
         self._two_accounts()
         store = self.cam.Store()
@@ -2439,8 +3409,9 @@ class CamTest(unittest.TestCase):
             real_trace = self.cam.http_text
             self.cam.http_text = lambda url, timeout=8: (0, "网络错误") if "cdn-cgi/trace" in url else real_trace(url, timeout)
             self.cam.check_region(store, max_age=0)
-            self.assertIsNone(self.data()["region"]["loc"])
-            self.assertEqual(self.data()["region"]["last_loc"], "US")
+            reg = self.data()["region"]
+            self.assertEqual((reg["loc"], reg["last_loc"], reg["fail_count"]), ("US", "US", 1))  # 留着上次查到的，记一笔没连上
+            self.assertTrue(reg["failed_at"])
         finally:
             self.cam.CLAUDE_WEB_BASE = real_base
             self.cam.http_text = real_trace
@@ -2483,7 +3454,7 @@ class CamTest(unittest.TestCase):
         self.cam.check_region(store, max_age=0)
         reg = self.cam.public_state(store, self.data())["region"]
         self.assertEqual(reg["status"], "unsupported")
-        self.assertIn("建议", reg["advice"])
+        self.assertIn("实际所在地", reg["advice"])
         self.assertTrue(self.cam.switch_code_account(store, "A")[2])
 
     def test_new_login_before_claude_json_updated(self):
@@ -2777,6 +3748,7 @@ class CamTest(unittest.TestCase):
     def test_checkup_expiry_rate_limit_web_and_api(self):
         a_id, b_id = self._two_accounts()
         MockAnthropic.tokens = {"at-B1": {"u5": 1.0, "u7": 2.0, "email": "b@x.com", "plan": "max"}}  # 不认 A 的 access token
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}  # 替它续一次（A 不是当前登录），换来的还是不认
         today = dt.date.today()
         self.run_cam("set", "A", "--expires", (today + dt.timedelta(days=3)).isoformat())
         self.run_cam("set", "B", "--expires", (today - dt.timedelta(days=2)).isoformat())
@@ -2788,6 +3760,7 @@ class CamTest(unittest.TestCase):
         pick = lambda label: [(i["level"], i["text"]) for i in self._group(acc, label)]
         a, b = pick("A"), pick("B")
         self.assertIn(("warn", "用量接口不认这个登录（HTTP 401）"), a)
+        self.assertEqual([c[2] for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"], ["rt-A1"])  # 只续一次，不反复试
         self.assertIn(("warn", f"3 天后到期（{(today + dt.timedelta(days=3)).isoformat()}）"), a)
         self.assertIn(("bad", f"订阅已过期 2 天（{(today - dt.timedelta(days=2)).isoformat()}）"), b)
         self.assertEqual(sum(1 for _, t in b if "订阅已过期" in t), 1)  # 健康状态里不重复
@@ -3038,6 +4011,7 @@ exit 2""")
         self.assertTrue(res["offline"])
         self.assertEqual(MockAnthropic.calls, [])
         self.assertFalse(os.path.exists(ran))
+        self.assertFalse(os.path.exists(os.path.join(self.cam.Store().root, "background.lock")))  # 看一眼后台锁，不为这个去建它
         a = self._group(self._section(res, "accounts"), "A")
         self.assertIn("离线没测能不能续", a[0]["text"])
         self.assertTrue(self._section(res, "service")[0]["text"].startswith("离线模式"))
@@ -3683,10 +4657,22 @@ exit 2""")
         self.assertEqual(store.load_secret("id1")["claudeAiOauth"]["refreshToken"], "rtB")
         self.assertTrue(data.get("live_unverified"))
         self.assertEqual(store.load_secret(cam.PENDING_ID)["claudeAiOauth"]["refreshToken"], "rtX")
-        # 暂存的 token 核对时限流：留着下次再问；401 才删
+        # 暂存的 token 核对时限流：留着下次再问
         with mock.patch.object(cam, "probe_token_owner", return_value=(429, None)):
             cam.resolve_pending(store, data, "nope")
-        self.assertTrue(store.load_secret(cam.PENDING_ID))
+        self.assertEqual(store.load_secret(cam.PENDING_ID)["claudeAiOauth"]["expiresAt"], far)
+        # 401：access token 不认了，refresh token 也许还能用。记成已过期留着（切换、手动刷新时换一个再核对），不再拿它白问
+        with mock.patch.object(cam, "probe_token_owner", return_value=(401, None)) as probe:
+            cam.resolve_pending(store, data, "nope")
+            cam.resolve_pending(store, data, "nope")
+        self.assertEqual(probe.call_count, 1)
+        pend = store.load_secret(cam.PENDING_ID)
+        self.assertEqual((pend["claudeAiOauth"]["refreshToken"], pend["claudeAiOauth"]["expiresAt"]), ("rtX", 0))
+        self.assertEqual(pend["raw"]["claudeAiOauth"]["expiresAt"], 0)
+        self.assertTrue(pend.get("released_at"))  # 核对时它已经不是当前登录了
+        # 没有 refresh token 的，401 就删：留着也换不出新的
+        pend["claudeAiOauth"] = {"accessToken": "atY", "expiresAt": far}
+        store.save_secret(cam.PENDING_ID, pend)
         with mock.patch.object(cam, "probe_token_owner", return_value=(401, None)):
             cam.resolve_pending(store, data, "nope")
         self.assertFalse(store.load_secret(cam.PENDING_ID))
@@ -3781,6 +4767,32 @@ class SharedFixtureTest(unittest.TestCase):
             got = {"level": h["level"], "label": h["label"], "kinds": [i["kind"] for i in h["issues"]]}
             self.assertEqual(got, c["expect"], c["name"])
             self.assertTrue(all(set(i) == {"kind", "level", "text", "advice", "detail"} for i in h["issues"]), c["name"])
+
+    def test_region_check_rules(self):
+        """环境检测没连上之后的规则：这一次能不能跳过、隔多久重试、界面上提示哪一条。"""
+        import datetime as dt
+        fx = shared("region_check.json")
+        for c in fx["fresh"]:
+            self.assertEqual(self.cam.region_check_fresh(c["age"], c["fage"], c["max_age"], c["moved"]), c["expect"], c["name"])
+        for c in fx["retry_wait"]:
+            self.assertEqual(self.cam.region_retry_wait(c["fail_count"], c["refresh_min"]), c["expect"], c)
+        ago = lambda secs: (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs)).replace(microsecond=0).isoformat()
+        for c in fx["fail_item"]:
+            r = c["region"]
+            reg = {"loc": r["loc"], "fail_count": r.get("fail_count")}
+            for key, field in (("checked_secs_ago", "checked_at"), ("failed_secs_ago", "failed_at")):
+                if r.get(key) is not None:
+                    reg[field] = ago(r[key])
+            got = self.cam.region_fail_item(reg)
+            if c["expect"] is None:
+                self.assertIsNone(got, c["name"])
+                continue
+            self.assertEqual((got["kind"], got["level"]), (c["expect"]["kind"], c["expect"]["level"]), c["name"])
+            for part in c["expect"]["contains"]:
+                self.assertIn(part, got["text"], c["name"])
+            self.assertEqual(set(got), {"kind", "level", "text", "advice"}, c["name"])
+        for c in fx["net_fingerprint"]:
+            self.assertEqual(self.cam.net_fingerprint_of(c["addrs"]), c["expect"], c["name"])
 
     def test_find_account(self):
         fx = shared("find_account.json")
@@ -4287,6 +5299,88 @@ class UpdateTest(unittest.TestCase):
             return []
 
 
+class LauncherTest(unittest.TestCase):
+    """cam 命令怎么启动：平常的命令走快入口 cam_run.py（用得上编译好的字节码），serve 和没有快入口时直接运行 cam.py。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def run_py(self, *args, env=None):
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home, exist_ok=True)
+        e = dict(os.environ, HOME=home, USERPROFILE=home, PYTHONIOENCODING="utf-8", NO_COLOR="1",
+                 CAM_NO_KEYCHAIN="1", CAM_NO_NOTIFY="1", CAM_NO_BG_CHECK="1")
+        for k in ("CAM_HOME", "CLAUDE_CONFIG_DIR"):
+            e.pop(k, None)
+        e.update(env or {})
+        r = subprocess.run([sys.executable, *args], env=e, capture_output=True, text=True, encoding="utf-8", timeout=60)
+        return r.returncode, r.stdout
+
+    def test_fast_entry_behaves_like_cam_py(self):
+        for args in (["--version"], ["list"], ["no-such-command"]):
+            plain = self.run_py(os.path.join(HERE, "cam.py"), *args)
+            fast = self.run_py(os.path.join(HERE, "cam_run.py"), *args)
+            self.assertEqual(fast, plain, args)
+        self.assertEqual(self.run_py(os.path.join(HERE, "cam_run.py"), "--version"), (0, self.cam_version() + "\n"))
+
+    def cam_version(self):
+        with open(os.path.join(HERE, "cam.py"), encoding="utf-8") as f:
+            return re.search(r'^VERSION = "([^"]+)"', f.read(), re.M).group(1)
+
+    def test_import_does_not_load_network_modules(self):
+        """cam list、cam hook 这类不联网的命令不该为 ssl、http.client 这些模块花启动时间：用到才加载。"""
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import cam; "
+                "print(','.join(m for m in ('ssl', 'http.client', 'urllib.request', 'concurrent.futures', 'http.server') "
+                "if m in sys.modules))")
+        rc, out = self.run_py("-c", code, HERE)
+        self.assertEqual((rc, out.strip()), (0, ""))
+
+    @unittest.skipIf(sys.platform == "win32", "sh 启动器；Windows 用 cam.cmd")
+    def test_launcher_picks_the_entry(self):
+        d = os.path.join(self.tmp, "scripts")
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(d)
+        os.makedirs(bindir)
+        shutil.copy(os.path.join(HERE, "cam"), os.path.join(d, "cam"))
+        os.chmod(os.path.join(d, "cam"), 0o755)
+        for name in ("cam.py", "cam_run.py"):
+            write(os.path.join(d, name), f"import sys\nprint({name!r}, *sys.argv[1:])\n")
+        os.symlink(sys.executable, os.path.join(bindir, "python3"))
+        env = dict(os.environ, PATH=os.pathsep.join([bindir, "/usr/bin", "/bin"]))
+
+        def run(cmd, *args):
+            r = subprocess.run([cmd, *args], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
+            return r.stdout.strip()
+
+        cam = os.path.join(d, "cam")
+        self.assertEqual(run(cam, "list"), "cam_run.py list")
+        self.assertEqual(run(cam), "cam_run.py")
+        self.assertEqual(run(cam, "switch", "a b"), "cam_run.py switch a b")
+        # serve 直接运行 cam.py：别的地方靠命令行里的 "cam.py serve" 认出后台在跑的面板服务
+        self.assertEqual(run(cam, "serve", "--port", "1"), "cam.py serve --port 1")
+        # 软链到 PATH 里的目录（install.sh 的装法），相对的软链也认
+        link = os.path.join(bindir, "cam")
+        os.symlink(cam, link)
+        self.assertEqual(run(link, "list"), "cam_run.py list")
+        os.remove(link)
+        os.symlink(os.path.relpath(cam, bindir), link)
+        self.assertEqual(run(link, "serve"), "cam.py serve")
+        # 旁边没有 cam_run.py（只更新了一半的旧安装）：照旧运行 cam.py
+        os.remove(os.path.join(d, "cam_run.py"))
+        self.assertEqual(run(cam, "list"), "cam.py list")
+
+    def test_windows_launcher_mirrors_the_sh_one(self):
+        with open(os.path.join(HERE, "cam.cmd"), "rb") as f:
+            raw = f.read()
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""))  # 全是 CRLF：cmd 读只有 LF 的批处理会出怪错
+        text = raw.decode("utf-8")
+        self.assertIn('if /i "%~1"=="serve" goto plain', text)
+        self.assertIn('if not exist "%~dp0cam_run.py" goto plain', text)
+        self.assertEqual(text.count('"%~dp0cam_run.py" %*'), 2)  # python 和 py -3 各一处
+        self.assertEqual(text.count('"%~dp0cam.py" %*'), 2)
+
+
 class ShellScriptTest(unittest.TestCase):
     """shell 脚本要能在 macOS 自带的 bash 3.2 上跑。"""
 
@@ -4329,9 +5423,10 @@ class InstallTest(unittest.TestCase):
                     "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1", "CAM_NO_KEYCHAIN": "1", "CAM_NO_NOTIFY": "1",
                     "CAM_NO_BG_CHECK": "1", "CAM_IP_LOOKUP": "off", "CAM_RDAP_URL": "",
                     "CAM_TEST_LOCALE": "en_US", "CAM_TEST_DNS": "192.168.1.1", "CAM_TEST_PROXY": "",
-                    "CAM_TEST_TZ": "America/New_York=US", "CAM_TEST_ROUTE_IF": ""}
+                    "CAM_TEST_TZ": "America/New_York=US", "CAM_TEST_ROUTE_IF": "", "CAM_TEST_NET": "net-a"}
         for k in ("CAM_API_BASE", "CAM_CLAUDE_WEB_BASE", "CAM_STATUS_URL", "CAM_CF_META_URL", "CAM_IPINFO_URL",
-                  "CAM_IPAPI_URL", "CAM_IPAPI_IS_URL", "CAM_CF_TRACE4_URL", "CAM_CF_TRACE6_URL", "CAM_CLAUDE_RELEASES_URL"):
+                  "CAM_IPAPI_URL", "CAM_IPAPI_IS_URL", "CAM_CF_TRACE4_URL", "CAM_CF_TRACE6_URL", "CAM_CF_TRACE_URL",
+                  "CAM_CLAUDE_RELEASES_URL"):
             self.env[k] = OFFLINE
         self.env["CAM_TOKEN_URLS"] = OFFLINE + "/v1/oauth/token"
         self.env["CAM_STATUS_SUMMARY_URLS"] = OFFLINE + "/summary.json"

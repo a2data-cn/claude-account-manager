@@ -4,12 +4,15 @@
 
 use super::claude::{oauth_block, read_live};
 use super::store::*;
-use super::usage::{api_base, get_oauth, get_with, http_json_timeout, http_text, web_base};
+use super::usage::{
+    api_base, get_oauth, get_with_in, http_json_timeout, http_text, http_text_in, wait_of, web_base,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::process::Command;
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 /// Anthropic 官方公布的支持国家/地区（https://www.anthropic.com/supported-countries，2026-10 抓取），
 /// ISO 3166-1 alpha-2。名单会变，变了改这里。
@@ -80,6 +83,22 @@ pub const ACCOUNT_REGION_KEEP: usize = 8;
 pub const CLOCK_SKEW_WARN: i64 = 120;
 /// 切换账号时，多久以内的出口地区检测结果算有效（秒）
 pub const REGION_FRESH_SECS: i64 = 3600;
+/// claude.ai 的 trace 这么久（秒）没回音，就同时问 Cloudflare 自己的，谁先答用谁的
+pub const TRACE_HEDGE_SECS: u64 = 2;
+/// 运营商 / 注册国 / IPv4 / IPv6 这几项第三方查询加起来最多等多久（秒），到点没答的当作查不到
+pub const META_BUDGET_SECS: u64 = 8;
+/// 其中每个运营商数据源最多等多久（秒）
+pub const META_SOURCE_TIMEOUT: u64 = 4;
+/// 一次完整的环境检测最多等多久（秒：出口 6 秒 + 第三方 + 一点余量）
+pub const REGION_CHECK_BUDGET: u64 = 6 + META_BUDGET_SECS + 2;
+/// 环境检测没连上时，最快多久（秒）以后重试；连续失败每次翻一倍
+pub const REGION_RETRY_SECS: i64 = 60;
+/// 发现本机换了网络就补测一次，最多这么久（秒）一次
+pub const NET_RECHECK_SECS: i64 = 30;
+/// 服务检测里解析一个域名最多等多久（秒）
+pub const SERVICE_DNS_SECS: u64 = 5;
+/// 服务检测里连 api.anthropic.com、claude.ai 各最多等多久（秒）
+pub const SERVICE_PROBE_SECS: u64 = 10;
 /// 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
 const TUNNEL_PREFIXES: &[&str] = &[
     "utun",
@@ -294,6 +313,21 @@ fn cf_trace6_url() -> String {
     std::env::var("CAM_CF_TRACE6_URL")
         .unwrap_or_else(|_| "https://[2606:4700:4700::1111]/cdn-cgi/trace".into())
 }
+/// claude.ai 的 trace 没回音时改问 Cloudflare 自己的（同一个出口，看到的一样）；空字符串表示不问
+fn cf_trace_url() -> String {
+    std::env::var("CAM_CF_TRACE_URL")
+        .unwrap_or_else(|_| "https://www.cloudflare.com/cdn-cgi/trace".into())
+}
+// 下面三个时限平时就是上面的常数；测试里用环境变量（毫秒）改短
+fn trace_hedge() -> Duration {
+    wait_of("CAM_TEST_TRACE_HEDGE_MS", TRACE_HEDGE_SECS)
+}
+fn meta_budget() -> Duration {
+    wait_of("CAM_TEST_META_BUDGET_MS", META_BUDGET_SECS)
+}
+fn meta_source_timeout() -> Duration {
+    wait_of("CAM_TEST_META_SOURCE_MS", META_SOURCE_TIMEOUT)
+}
 
 pub fn ip_type_name(t: &str) -> &'static str {
     match t {
@@ -396,7 +430,7 @@ const HOSTING_WORDS: &[&str] = &[
 
 pub fn region_advice(status: &str) -> &'static str {
     match status {
-        "unsupported" => "按 Anthropic 政策这个地区不提供服务，继续使用可能导致账号被限制或封禁。建议换到支持地区的网络出口后再使用。",
+        "unsupported" => "按 Anthropic 政策这个地区不提供服务，继续使用可能导致账号被限制或封禁。Anthropic 按使用者实际所在地判断，不按出口 IP：人在支持地区的话，多半是代理 / VPN 把出口带到了这里，查一下它的设置。",
         "unknown" => "连不上 Cloudflare，判断不了出口地区。检查网络或代理后重新检测。",
         "supported" => "出口 IP 这一项没问题。Anthropic 结合 IP 和其他信号综合判断所在地，下面的代理 / VPN、时区、出口变化等就是这些信号里本机能看到的部分。",
         _ => "",
@@ -493,20 +527,80 @@ pub fn parse_trace(txt: &str, t0: Instant) -> Value {
     })
 }
 
+/// 在另一个线程里做一件事，结果用 wait_job 收。线程不 join（不用 thread::scope）：
+/// 卡在连不上的网络里的那件（域名解析没有超时可设）不拖着调用方。对应 cam.py 的 run_parallel。
+fn spawn_job<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f()); // 调用方等不及先走了也没关系
+    });
+    rx
+}
+
+/// 等 spawn_job 的那件事到 end 为止：到点还没做完（或者它自己崩了）是 None，不接着等；已经做完的过了点也收得到。
+/// 同时等几件、时限又不一样的，先等时限最长的那件（它等完时别的多半也做完了），和 run_parallel 等到的一样多。
+fn wait_job<T>(rx: &mpsc::Receiver<T>, end: Instant) -> Option<T> {
+    rx.recv_timeout(end.saturating_duration_since(Instant::now()))
+        .ok()
+}
+
+/// 出口信息（parse_trace 的结果）或 None。先问 claude.ai；它答不上来、或者 TRACE_HEDGE_SECS 秒还没回音，
+/// 就同时问 Cloudflare 自己的 trace（fallback=false 时不问），谁先给出结果用谁的。总共最多等 timeout。
+/// 与 cam.py 的 exit_trace 一致。
+pub fn exit_trace(timeout: Duration, fallback: bool) -> Option<Value> {
+    let (tx, rx) = mpsc::channel::<Option<Value>>();
+    let ask = |url: String, wait: Duration| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            let (st, txt) = http_text_in(&url, wait);
+            let got = (st == 200 && txt.contains("loc=")).then(|| parse_trace(&txt, t0));
+            let _ = tx.send(got);
+        });
+    };
+    let start = Instant::now();
+    ask(format!("{}/cdn-cgi/trace", web_base()), timeout);
+    let spare_url = cf_trace_url();
+    let (mut pending, mut spare) = (1, fallback && !spare_url.is_empty());
+    loop {
+        let end = start
+            + if spare {
+                trace_hedge().min(timeout)
+            } else {
+                timeout
+            };
+        match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            Ok(got) => {
+                pending -= 1;
+                if got.is_some() {
+                    return got;
+                }
+            }
+            Err(_) if !spare => return None,
+            Err(_) => {}
+        }
+        if spare {
+            spare = false;
+            let left = (start + timeout).saturating_duration_since(Instant::now());
+            if left > Duration::from_millis(200) {
+                ask(spare_url.clone(), left);
+                pending += 1;
+            }
+        }
+        if pending == 0 {
+            return None;
+        }
+    }
+}
+
 /// 从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的），再并行查运营商 / 类型 / 注册国 /
 /// IPv4 / IPv6 出口。出口 IP 和数据源都没变、且 meta_ttl 内查过时，运营商那几项直接沿用 prev，不再问第三方。
-/// 设置为 off 时只查 claude.ai。与 cam.py 的 detect_region 一致。
+/// 设置为 off 时只查 claude.ai。返回 None 是 claude.ai 和 Cloudflare 都没回音。
+/// 最多等 6 + META_BUDGET_SECS 秒：第三方那几项到时限还没答的当作查不到，不拖着出口地区。
+/// 与 cam.py 的 detect_region 一致。
 pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
     let off = cfg.mode == "off";
-    let t0 = Instant::now();
-    let (mut st, mut txt) = http_text(&format!("{}/cdn-cgi/trace", web_base()), 6);
-    if (st != 200 || !txt.contains("loc=")) && !off {
-        (st, txt) = http_text("https://www.cloudflare.com/cdn-cgi/trace", 6);
-    }
-    if st != 200 || !txt.contains("loc=") {
-        return None;
-    }
-    let mut out = parse_trace(&txt, t0);
+    let mut out = exit_trace(Duration::from_secs(6), !off)?;
     for k in META_FIELDS.iter().chain(STACK_FIELDS) {
         out[*k] = Value::Null;
     }
@@ -519,22 +613,28 @@ pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
         .and_then(parse_time)
         .map(|t| chrono::Utc::now().signed_duration_since(t).num_seconds() < meta_ttl())
         .unwrap_or(false);
-    let reuse = s(prev, "ip") == Some(ip.as_str())
+    let reuse = !ip.is_empty()
+        && s(prev, "ip") == Some(ip.as_str())
         && s(prev, "lookup_mode") == Some(cfg.mode.as_str())
         && fresh;
     let need_rdap = !reuse && cfg.ipapi_key.is_empty(); // 带 key 的 ipapi.is 自己会给注册国
-    let (v4, v6, meta, rdap) = std::thread::scope(|sc| {
-        let h4 = sc.spawn(|| trace_only(&cf_trace4_url()));
-        let h6 = sc.spawn(|| trace_only(&cf_trace6_url()));
-        let hm = (!reuse).then(|| sc.spawn(|| fetch_exit_meta(cfg)));
-        let hr = need_rdap.then(|| sc.spawn(|| fetch_ip_registration(&ip)));
-        (
-            h4.join().ok().flatten(),
-            h6.join().ok().flatten(),
-            hm.and_then(|h| h.join().ok()).flatten(),
-            hr.and_then(|h| h.join().ok()).flatten(),
-        )
+    let budget = meta_budget();
+    let t0 = Instant::now();
+    let j4 = spawn_job(|| trace_only(&cf_trace4_url()));
+    let j6 = spawn_job(|| trace_only(&cf_trace6_url()));
+    let jm = (!reuse).then(|| {
+        let cfg = cfg.clone();
+        spawn_job(move || fetch_exit_meta(&cfg))
     });
+    let jr = need_rdap.then(|| {
+        let ip = ip.clone();
+        spawn_job(move || fetch_ip_registration(&ip, Duration::from_secs(5)))
+    });
+    let end = t0 + budget;
+    let v4 = wait_job(&j4, end).flatten();
+    let v6 = wait_job(&j6, end).flatten();
+    let meta = jm.and_then(|j| wait_job(&j, end)).flatten();
+    let rdap = jr.and_then(|j| wait_job(&j, end)).flatten();
     if reuse {
         for k in META_FIELDS {
             out[*k] = prev.get(*k).cloned().unwrap_or(Value::Null);
@@ -551,7 +651,13 @@ pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
             out["reg_loc"] = json!(if need_rdap {
                 rdap
             } else {
-                fetch_ip_registration(&ip)
+                // 带了 key 但 ipapi.is 这次没给注册国：时限里还有剩才补问 RDAP
+                let left = budget.saturating_sub(t0.elapsed());
+                if left >= Duration::from_secs(1) {
+                    fetch_ip_registration(&ip, left.min(Duration::from_secs(5)))
+                } else {
+                    None
+                }
             });
         }
         if s(&out, "org").is_some() || s(&out, "meta_loc").is_some() {
@@ -575,12 +681,19 @@ pub fn detect_region() -> Option<Value> {
 }
 
 /// 出口 IP 的 ASN、运营商、城市、国家和类型，按 meta_sources 的顺序问，第一个查到的为准。查不到返回 None。
+/// 每个数据源最多等 META_SOURCE_TIMEOUT 秒，加起来不超过 META_BUDGET_SECS 秒：前面的卡住了，后面的就少等或不问。
 pub fn fetch_exit_meta(cfg: &LookupConfig) -> Option<Value> {
+    let timeout = meta_source_timeout();
+    let end = Instant::now() + meta_budget();
     for (name, url) in meta_sources(cfg) {
         if url.is_empty() {
             continue;
         }
-        let (st, txt) = http_text(&url, 5);
+        let left = end.saturating_duration_since(Instant::now());
+        if left < timeout.min(Duration::from_millis(500)) {
+            break;
+        }
+        let (st, txt) = http_text_in(&url, timeout.min(left));
         if st != 200 {
             continue;
         }
@@ -702,12 +815,12 @@ pub fn parse_exit_meta(j: &Value) -> Option<Value> {
 }
 
 /// IP 在 RIR 登记的国家（RDAP）。查不到返回 None（ARIN 的分配记录常常没写国家）。
-pub fn fetch_ip_registration(ip: &str) -> Option<String> {
+pub fn fetch_ip_registration(ip: &str, timeout: Duration) -> Option<String> {
     let base = rdap_url();
     if base.is_empty() || ip.is_empty() {
         return None;
     }
-    let (st, txt) = http_text(&format!("{}{}", base, ip), 6);
+    let (st, txt) = http_text_in(&format!("{}{}", base, ip), timeout);
     if st != 200 {
         return None;
     }
@@ -979,13 +1092,19 @@ fn run_text(cmd: &str, args: &[&str]) -> String {
 }
 
 /// 跑系统命令，最多等 timeout；超时就结束它，返回已经读到的输出。卡住的命令不会拖住整轮检测。
-fn run_with_timeout(mut c: Command, timeout: std::time::Duration) -> String {
+pub(crate) fn run_with_timeout(c: Command, timeout: std::time::Duration) -> String {
+    run_command(c, timeout).1
+}
+
+/// 同 run_with_timeout，另外说明命令跑完没有：Some(退出码是不是 0)；没起来、超时被结束的是 None。
+/// 要分清“命令说没有”和“命令没跑成”的地方用这个（查 claude 进程）。
+pub(crate) fn run_command(mut c: Command, timeout: std::time::Duration) -> (Option<bool>, String) {
     use std::io::Read;
     c.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let Ok(mut child) = c.spawn() else {
-        return String::new();
+        return (None, String::new());
     };
     let mut out = child.stdout.take();
     let reader = std::thread::spawn(move || {
@@ -996,20 +1115,21 @@ fn run_with_timeout(mut c: Command, timeout: std::time::Duration) -> String {
         buf
     });
     let deadline = Instant::now() + timeout;
-    loop {
+    let done = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break Some(status.success()),
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(30))
             }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break;
+                break None;
             }
         }
-    }
-    String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned()
+    };
+    let out = String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned();
+    (done, out)
 }
 
 /// 本机时区 (时区名, 国家代码列表) 或 None。国家代码来自 tzdata 的 zone1970.tab，查不到时为空列表。
@@ -1284,13 +1404,14 @@ pub fn cached_region_loc(data: &Value, max_age: i64) -> Option<String> {
 }
 
 /// 界面常显用的出口地区状态（不联网，用后台上次检测的结果）。没检测过时 status 为 null。
+/// failed_at / fail_count：最近一次检测没连上（这时其它字段还是上一次查到的，checked_at 是那一次的时间）。
 pub fn region_view(data: &Value) -> Value {
     let c = data.get("region").cloned().unwrap_or(Value::Null);
     let Some(checked) = s(&c, "checked_at").map(String::from) else {
         return json!({"loc": null, "loc_name": null, "ip": null, "status": null, "checked_at": null,
                       "message": "还没有检测过出口地区", "advice": "", "warp": false, "prev_loc": null, "changed_at": null,
                       "org": null, "asn": null, "city": null, "ip_type": null, "reg_loc": null, "reg_loc_name": null,
-                      "meta_source": null, "lookup_mode": null});
+                      "meta_source": null, "lookup_mode": null, "failed_at": null, "fail_count": 0});
     };
     let loc = s(&c, "loc").map(String::from);
     let status = region_status(loc.as_deref());
@@ -1302,87 +1423,256 @@ pub fn region_view(data: &Value) -> Value {
         "prev_loc": s(&c, "prev_loc"), "changed_at": s(&c, "changed_at"),
         "org": s(&c, "org"), "asn": c.get("asn").cloned().unwrap_or(Value::Null), "city": s(&c, "city"), "ip_type": s(&c, "ip_type"),
         "reg_loc": reg_loc, "reg_loc_name": region_name(s(&c, "reg_loc")),
-        "meta_source": s(&c, "meta_source"), "lookup_mode": s(&c, "lookup_mode")
+        "meta_source": s(&c, "meta_source"), "lookup_mode": s(&c, "lookup_mode"),
+        "failed_at": s(&c, "failed_at"), "fail_count": c.get("fail_count").and_then(|v| v.as_i64()).unwrap_or(0)
     })
 }
 
-/// 后台定时调用：检测出口地区（连带 WARP、时钟偏差）和 Anthropic 官方状态页，记到 data["region"] / data["status_page"]，
-/// 并给当前账号记一笔地区。max_age 秒内查过就跳过。只记录，不干预任何操作。
-pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
-    let data = store.load()?;
-    if let Some(at) = data
-        .get("region")
-        .and_then(|c| s(c, "checked_at"))
-        .and_then(parse_time)
+/// 离 iso 那个时间过了几秒；没有、看不懂是 None
+fn age_secs(iso: Option<&str>) -> Option<f64> {
+    let t = iso.and_then(parse_time)?;
+    Some(
+        chrono::Utc::now()
+            .signed_duration_since(t)
+            .num_milliseconds() as f64
+            / 1000.0,
+    )
+}
+
+/// 本机现在连的是哪张网（短哈希，只在本机比较用）：默认路由用的本机地址，IPv6 只取前 64 位（后半截隔一阵自己会换）。
+/// 换 Wi-Fi、插拔网线、开关接管整机流量的 VPN 时会变；代理换节点在本机看不出来，那种靠定时检测。
+/// 不发任何数据包（UDP 的 connect 只让系统选路）。没有网络时返回 ""。与 cam.py 的 net_fingerprint 一致。
+pub fn net_fingerprint() -> String {
+    use std::net::{IpAddr, UdpSocket};
+    if let Ok(fake) = std::env::var("CAM_TEST_NET") {
+        return fake;
+    }
+    let addrs: Vec<IpAddr> = [
+        ("0.0.0.0:0", "1.1.1.1:53"),
+        ("[::]:0", "[2606:4700:4700::1111]:53"),
+    ]
+    .iter()
+    .filter_map(|(local, remote)| {
+        let sock = UdpSocket::bind(local).ok()?;
+        sock.connect(remote).ok()?;
+        sock.local_addr().ok().map(|a| a.ip())
+    })
+    .collect();
+    net_fingerprint_of(&addrs)
+}
+
+/// net_fingerprint 的计算部分：addrs 是默认路由用的本机地址（IPv4 在前、IPv6 在后）。
+/// IPv6 只取前 64 位；链路本地地址（fe80::/10）哪张网都是它，不算。一个能用的都没有返回 ""。
+/// 两个版本读写同一个 region.net，算出来的必须是同一个值：规则和 cam.py 的 net_fingerprint_of 一致
+/// （tests/shared/region_check.json）。
+pub fn net_fingerprint_of(addrs: &[std::net::IpAddr]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::net::IpAddr;
+    let parts: Vec<String> = addrs
+        .iter()
+        .filter_map(|a| match a {
+            IpAddr::V4(ip) => Some(ip.to_string()),
+            IpAddr::V6(ip) if ip.segments()[0] & 0xffc0 != 0xfe80 => {
+                Some(hex::encode(&ip.octets()[..8]))
+            }
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    hex::encode(Sha256::digest(parts.join("|").as_bytes()))[..12].to_string()
+}
+
+/// 上次环境检测的结果现在还能直接用：一小时内查到的，之后没有失败过，本机也没换网络。与 cam.py 的 region_trusted 一致。
+pub fn region_trusted(data: &Value) -> bool {
+    let reg = data.get("region");
+    if cached_region_loc(data, REGION_FRESH_SECS).is_none()
+        || reg.and_then(|r| s(r, "failed_at")).is_some()
     {
-        if chrono::Utc::now().signed_duration_since(at).num_seconds() < max_age {
-            return Ok(region_view(&data));
+        return false;
+    }
+    let fp = net_fingerprint();
+    !(!fp.is_empty() && reg.and_then(|r| s(r, "net")).is_some_and(|n| n != fp))
+}
+
+/// check_region 这一次可以跳过：max_age 秒内查到过，本机没换网络；上次没连上的话只看离那次失败有没有到
+/// REGION_RETRY_SECS 秒（max_age 更短就按它）。age / fage：离上次查到 / 上次没连上过了几秒，没有过是 None。
+/// 规则和 cam.py 的 region_check_fresh 一致（tests/shared/region_check.json）。
+pub fn region_check_fresh(age: Option<f64>, fage: Option<f64>, max_age: i64, moved: bool) -> bool {
+    if let Some(f) = fage {
+        return f < max_age.min(REGION_RETRY_SECS) as f64;
+    }
+    age.is_some_and(|a| a < max_age as f64) && !moved
+}
+
+/// 环境检测没连上之后隔几秒重试：从 REGION_RETRY_SECS 起每连着失败一次翻一倍（最多翻四次），
+/// 最长不超过定时检测的间隔。规则和 cam.py 的 region_retry_wait 一致（tests/shared/region_check.json）。
+pub fn region_retry_wait(fail_count: i64, refresh_min: i64) -> i64 {
+    let n = fail_count.max(1);
+    (REGION_RETRY_SECS << (n - 1).min(4)).min(REGION_RETRY_SECS.max(refresh_min.saturating_mul(60)))
+}
+
+/// 后台循环在两次定时检测之间记的状态（region_recheck_due 用）：上次看到本机连的是哪张网、什么时候看到的（Unix 秒）
+#[derive(Clone, Debug, Default)]
+pub struct RegionRecheck {
+    pub net: String,
+    pub net_at: f64,
+}
+
+impl RegionRecheck {
+    /// 这一轮本来就要测，记下现在连的是哪张网
+    pub fn note_net(&mut self) {
+        let fp = net_fingerprint();
+        if !fp.is_empty() {
+            self.net = fp;
         }
     }
+}
+
+/// 两次定时检测之间要不要补测一次环境（后台循环每轮问一次，st 是它的状态）：
+/// 本机换了网络（net_fingerprint 和上次不一样；NET_RECHECK_SECS 秒内最多补测一次），
+/// 或者上次没连上、到了重试的时候（从 REGION_RETRY_SECS 起每失败一次翻一倍，最长不超过定时检测的间隔）。
+/// 与 cam.py 的 region_recheck_due 一致。
+pub fn region_recheck_due(data: &Value, st: &mut RegionRecheck, refresh_min: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    region_recheck_due_at(data, st, refresh_min, now)
+}
+
+/// 同 region_recheck_due，现在是几点（Unix 秒）由调用方给
+pub fn region_recheck_due_at(
+    data: &Value,
+    st: &mut RegionRecheck,
+    refresh_min: u64,
+    now: f64,
+) -> bool {
+    let reg = data.get("region").cloned().unwrap_or(Value::Null);
+    let fp = net_fingerprint();
+    let seen = if st.net.is_empty() {
+        s(&reg, "net").unwrap_or("").to_string()
+    } else {
+        st.net.clone()
+    };
+    if !fp.is_empty()
+        && fp != seen
+        && (seen.is_empty() || now - st.net_at >= NET_RECHECK_SECS as f64)
+    {
+        st.net = fp;
+        st.net_at = now;
+        if !seen.is_empty() {
+            return true;
+        }
+    }
+    if let Some(failed) = s(&reg, "failed_at") {
+        let fails = reg.get("fail_count").and_then(|v| v.as_i64()).unwrap_or(1);
+        let wait = region_retry_wait(fails, i64::try_from(refresh_min).unwrap_or(i64::MAX));
+        return age_secs(Some(failed)).is_none_or(|age| age >= wait as f64);
+    }
+    false
+}
+
+/// 后台定时调用：检测出口地区（连带 WARP、时钟偏差）和 Anthropic 官方状态页，记到 data["region"] / data["status_page"]，
+/// 并给当前账号记一笔地区。max_age 秒内查到过就跳过（本机换了网络的不跳）；上次没连上的话 REGION_RETRY_SECS 秒内不重试
+/// （max_age 更短就按它）。
+///
+/// 这次没连上、以前查到过：出口那一份留着不动（checked_at 还是查到那次的时间），只记 failed_at / fail_count，
+/// 界面据此说“最近一次没连上，先用上一次的结果”；连上了就清掉。从没查到过的还是记成查不到。
+/// 本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。最多等 REGION_CHECK_BUDGET 秒。只记录，不干预任何操作。
+/// 与 cam.py 的 check_region 一致。
+pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
+    let data = store.load()?;
+    let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
+    let fp = net_fingerprint();
+    // 本机换了网络：上次查到的是另一张网的，没到 max_age 也重测
+    let moved = !fp.is_empty() && s(&old, "net").is_some_and(|n| n != fp);
+    if region_check_fresh(
+        age_secs(s(&old, "checked_at")),
+        age_secs(s(&old, "failed_at")),
+        max_age,
+        moved,
+    ) {
+        return Ok(region_view(&data));
+    }
     let cfg = ip_lookup_config(Some(store));
-    let prev = data.get("region").cloned().unwrap_or(Value::Null);
-    // 出口、状态页、本机设置三件事并行，互不等待
-    let (r, sp, env) = std::thread::scope(|sc| {
-        let hr = sc.spawn(|| detect_region_with(&cfg, &prev));
-        let hs = sc.spawn(fetch_status_page);
-        let he = sc.spawn(local_env);
-        (
-            hr.join().ok().flatten().unwrap_or_else(|| json!({})),
-            hs.join().ok().flatten(),
-            he.join().unwrap_or(Value::Null),
-        )
-    });
+    // 出口、状态页、本机设置几件事并行，互不等待；各有各的时限，到点没做完的当作没查到
+    let t0 = Instant::now();
+    let within = |secs: u64| t0 + Duration::from_secs(secs.min(REGION_CHECK_BUDGET));
+    let jr = {
+        let (cfg, old) = (cfg.clone(), old.clone());
+        spawn_job(move || detect_region_with(&cfg, &old))
+    };
+    let je = spawn_job(local_env);
+    let js = spawn_job(fetch_status_page);
+    let jn = spawn_job(net_fingerprint);
+    let r = wait_job(&jr, within(REGION_CHECK_BUDGET))
+        .flatten()
+        .unwrap_or_else(|| json!({}));
+    let env = wait_job(&je, within(10));
+    let sp = wait_job(&js, within(7)).flatten();
+    let net = wait_job(&jn, within(2)).unwrap_or_default();
     let _g = store.lock()?;
     let mut data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
     let now = now_iso();
     let new_loc = s(&r, "loc").map(String::from);
-    let mut reg = json!({
-        "loc": new_loc, "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
-        "warp": r.get("warp").and_then(|v| v.as_bool()).unwrap_or(false), "skew": r.get("skew"),
-        "lookup_mode": cfg.mode, "env": env, "checked_at": now
-    });
-    for k in META_FIELDS.iter().chain(STACK_FIELDS) {
-        reg[*k] = r.get(*k).cloned().unwrap_or(Value::Null);
-    }
-    // 中间失败过一次也和最后一次知道的出口比，出口变化不漏报（与 cam.py 一致）
-    let last = s(&old, "loc")
-        .or_else(|| s(&old, "last_loc"))
-        .map(String::from);
-    reg["last_loc"] = json!(new_loc.clone().or_else(|| last.clone()));
-    match (last.as_deref(), new_loc.as_deref()) {
-        (Some(o), Some(n)) if o != n => {
-            reg["prev_loc"] = json!(o);
-            reg["changed_at"] = json!(now);
+    let mut reg = if new_loc.is_some() || s(&old, "loc").is_none() {
+        let mut reg = json!({
+            "loc": new_loc, "ip": r.get("ip"), "colo": r.get("colo"), "ms": r.get("ms"),
+            "warp": r.get("warp").and_then(|v| v.as_bool()).unwrap_or(false), "skew": r.get("skew"),
+            "lookup_mode": cfg.mode, "env": old.get("env"), "env_at": old.get("env_at"),
+            "checked_at": now, "net": net
+        });
+        for k in META_FIELDS.iter().chain(STACK_FIELDS) {
+            reg[*k] = r.get(*k).cloned().unwrap_or(Value::Null);
         }
-        _ => {
-            if let Some(p) = s(&old, "prev_loc") {
-                reg["prev_loc"] = json!(p);
-                reg["changed_at"] = old.get("changed_at").cloned().unwrap_or(Value::Null);
+        // 中间失败过一次也和最后一次知道的出口比，出口变化不漏报（与 cam.py 一致）
+        let last = s(&old, "loc")
+            .or_else(|| s(&old, "last_loc"))
+            .map(String::from);
+        reg["last_loc"] = json!(new_loc.clone().or_else(|| last.clone()));
+        match (last.as_deref(), new_loc.as_deref()) {
+            (Some(o), Some(n)) if o != n => {
+                reg["prev_loc"] = json!(o);
+                reg["changed_at"] = json!(now);
+            }
+            _ => {
+                if let Some(p) = s(&old, "prev_loc") {
+                    reg["prev_loc"] = json!(p);
+                    reg["changed_at"] = old.get("changed_at").cloned().unwrap_or(Value::Null);
+                }
             }
         }
+        reg
+    } else {
+        old.clone() // 这次没连上，手里有以前查到的：留着那一份
+    };
+    if new_loc.is_none() {
+        let fails = old.get("fail_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        reg["failed_at"] = json!(now);
+        reg["fail_count"] = json!(fails + 1);
+    }
+    if let Some(env) = env {
+        reg["env"] = env;
+        reg["env_at"] = json!(now);
     }
     data["region"] = reg;
-    match sp {
-        Some(mut v) => {
-            v["checked_at"] = json!(now);
-            data["status_page"] = v;
-        }
-        None => {
-            if let Some(o) = data.as_object_mut() {
-                o.remove("status_page");
-            }
-        }
+    // 状态页这次没连上就留着上次的（它自己带时间，过一小时不再算数）
+    if let Some(mut v) = sp {
+        v["checked_at"] = json!(now);
+        data["status_page"] = v;
     }
-    let act = active_code_id(&data);
-    let reg_now = data.get("region").cloned();
-    note_account_region(
-        &mut data,
-        act.as_deref(),
-        new_loc.as_deref(),
-        reg_now.as_ref(),
-    );
     if new_loc.is_some() {
+        let act = active_code_id(&data);
+        let reg_now = data.get("region").cloned();
+        note_account_region(
+            &mut data,
+            act.as_deref(),
+            new_loc.as_deref(),
+            reg_now.as_ref(),
+        );
         // 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
         let mut drop_all = false;
         if let Some(items) = data
@@ -1403,6 +1693,34 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     Ok(region_view(&data))
 }
 
+/// 最近一次环境检测没连上、手里还有以前查到的出口时的那一条提示；顶部环境卡（risk_items）和服务检测共用，两边扣分才一致。
+/// 那份结果还新（一小时内）：只说一声，不扣分；已经旧了：出口现在是哪里说不准，按“查不到”提醒。
+/// 上一次查到的出口不在支持名单时也只说一声：“不在名单”那条已经提醒并扣过分了，不再叠一条。没失败过返回 None。
+/// 规则和 cam.py 的 region_fail_item 一致（tests/shared/region_check.json）。
+pub fn region_fail_item(reg: &Value) -> Option<Value> {
+    let (failed, loc, checked) = (s(reg, "failed_at")?, s(reg, "loc")?, s(reg, "checked_at")?);
+    if age_secs(Some(checked)).is_some_and(|a| a <= REGION_FRESH_SECS as f64)
+        || region_status(Some(loc)) == "unsupported"
+    {
+        return Some(json!({
+            "kind": "env_failed", "level": "info",
+            "text": format!("最近一次环境检测没连上（{}），先用上一次查到的结果（{}）", fmt_ago(failed), fmt_ago(checked)),
+            "advice": ENV_FAILED_ADVICE
+        }));
+    }
+    let n = reg.get("fail_count").and_then(|v| v.as_i64()).unwrap_or(1);
+    let times = if n > 1 {
+        format!("连续 {} 次检测都", n)
+    } else {
+        "最近一次检测".to_string()
+    };
+    Some(json!({
+        "kind": "region_unknown", "level": "warn",
+        "text": format!("出口地区现在查不到：{}没连上 claude.ai 和 Cloudflare，上一次查到是 {}（{}）", times, region_label(Some(loc)), fmt_ago(checked)),
+        "advice": region_advice("unknown")
+    }))
+}
+
 /// 后台连上了 claude.ai 的 trace，就能证明这条服务检测问题已经好了：DNS、证书、claude.ai 连不上。
 /// 人机验证、服务端错误、api.anthropic.com 的问题证明不了，留到下次服务检测或一小时后过期。与 cam.py 一致。
 fn resolved_by_trace(item: &Value) -> bool {
@@ -1417,18 +1735,51 @@ fn resolved_by_trace(item: &Value) -> bool {
 
 /// 根据后台缓存和本机设置算出的风险提示（不联网）：[{kind, level, text, advice}]。
 /// 只提示，不拦任何操作；界面把 warn / bad 的常显在顶部，info 只在服务检查里列出。
-pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
-    let mut add = |kind: &str, level: &str, text: String, advice: &str| {
-        out.push(json!({"kind": kind, "level": level, "text": text, "advice": advice}))
-    };
+/// 上次环境检测超过一小时（后台没在跑时会这样）：从那次结果里算出来的每一条后面标上是多久以前测的，
+/// 再加一条 env_stale 说明怎么重新检测；官方状态页的故障过了一小时不再算数。note_age=false 不标（调用方自己说了是多久前的）。
+/// 最近一次检测没连上（failed_at）：出口还按上一次查到的算，另加一条 region_fail_item 说明。
+/// 与 cam.py 的 risk_items 一致。
+pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Value> {
     let now = chrono::Utc::now();
     let reg = data.get("region").cloned().unwrap_or_else(|| json!({}));
+    // 过了多少毫秒；时间看不懂是 None
+    let age_ms = |iso: Option<&str>| {
+        iso.and_then(parse_time)
+            .map(|t| now.signed_duration_since(t).num_milliseconds())
+    };
+    let checked = s(&reg, "checked_at");
+    let old = match checked {
+        Some(at) if note_age && age_ms(checked).is_some_and(|a| a > REGION_FRESH_SECS * 1000) => {
+            format!("（{}检测的）", fmt_ago(at))
+        }
+        _ => String::new(),
+    };
+    // 本机设置每次都更新，出口没连上那次也是
+    let env_at = s(&reg, "env_at").or(checked);
+    let env_old = match env_at {
+        Some(at) if note_age && age_ms(env_at).is_some_and(|a| a > REGION_FRESH_SECS * 1000) => {
+            format!("（{}检测的）", fmt_ago(at))
+        }
+        _ => String::new(),
+    };
+    let out: std::cell::RefCell<Vec<Value>> = std::cell::RefCell::new(Vec::new());
+    // cached：这一条是从上次环境检测的结果里算出来的，结果旧了要标出来；自己带时间或不靠那次检测的传 false
+    let push = |kind: &str, level: &str, text: String, advice: &str, cached: bool| {
+        let text = if cached { text + &old } else { text };
+        out.borrow_mut()
+            .push(json!({"kind": kind, "level": level, "text": text, "advice": advice}))
+    };
+    let add =
+        |kind: &str, level: &str, text: String, advice: &str| push(kind, level, text, advice, true);
+    let add_plain = |kind: &str, level: &str, text: String, advice: &str| {
+        push(kind, level, text, advice, false)
+    };
     let loc: Option<String> = if s(&reg, "checked_at").is_some() {
         s(&reg, "loc").map(String::from)
     } else {
         None
     };
+    let fail = region_fail_item(&reg);
     if include_region {
         if let Some(l) = loc.as_deref() {
             if region_status(Some(l)) == "unsupported" {
@@ -1447,15 +1798,18 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                 region_advice("unknown"),
             );
         }
+        if let Some(f) = &fail {
+            out.borrow_mut().push(f.clone());
+        }
         // 代理 / VPN：和服务检测用同一份缓存，扣分一致
         if s(&reg, "checked_at").is_some() {
             if let Some(e) = reg.get("env").filter(|e| e.get("proxy").is_some()) {
                 for it in proxy_vpn_items(e) {
                     if s(&it, "level") != Some("ok") {
-                        add(
+                        add_plain(
                             s(&it, "kind").unwrap_or(""),
                             s(&it, "level").unwrap_or("info"),
-                            s(&it, "text").unwrap_or("").to_string(),
+                            s(&it, "text").unwrap_or("").to_string() + &env_old,
                             s(&it, "advice").unwrap_or(""),
                         );
                     }
@@ -1475,7 +1829,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
                     .cloned()
                     .unwrap_or_default()
                 {
-                    add(
+                    add_plain(
                         s(&it, "kind").unwrap_or(""),
                         s(&it, "level").unwrap_or("warn"),
                         s(&it, "text").unwrap_or("").to_string(),
@@ -1490,7 +1844,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
     {
         if let Some(t) = parse_time(changed) {
             if now.signed_duration_since(t).num_seconds() < REGION_CHANGE_HOURS * 3600 {
-                add(
+                add_plain(
                     "region_change",
                     "warn",
                     format!("出口地区变化：{} → {}（{}）", region_label(Some(prev)), region_label(Some(l)), fmt_ago(changed)),
@@ -1629,14 +1983,17 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
         }
     }
     if let Some(sp) = data.get("status_page") {
-        if let Some(ind) = s(sp, "indicator").filter(|i| *i != "none") {
+        // 旧版没单独记时间，和出口是同一次查的；一小时前的故障现在多半已经恢复，不再提
+        let sp_fresh =
+            age_ms(s(sp, "checked_at").or(checked)).is_some_and(|a| a <= REGION_FRESH_SECS * 1000);
+        if let Some(ind) = s(sp, "indicator").filter(|i| *i != "none" && sp_fresh) {
             let level = if ind == "major" || ind == "critical" {
                 "bad"
             } else {
                 "warn"
             };
             let desc = s(sp, "description").unwrap_or(ind);
-            add(
+            add_plain(
                 "status",
                 level,
                 format!("Anthropic 官方状态页：{}（{}）", desc, ind),
@@ -1720,7 +2077,7 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
             })
             .unwrap_or_default();
         if locs.len() > 1 {
-            add(
+            add_plain(
                 "account_regions",
                 "warn",
                 format!(
@@ -1739,15 +2096,32 @@ pub fn risk_items(data: &Value, include_region: bool) -> Vec<Value> {
         .filter(|a| s(a, "kind") == Some("claude_code"))
         .count();
     if n >= 2 {
-        add(
+        add_plain(
             "accounts",
             "info",
             format!("本机保存了 {} 个 Claude Code 账号", n),
             "按 Anthropic 消费者条款，账号和登录信息不能给别人用或分享；一个人自己用多个号条款没有明确禁止。",
         );
     }
-    out
+    // 没连上那一条已经说了结果是多久前的、怎么重新检测
+    if let Some(at) = checked.filter(|_| !old.is_empty() && fail.is_none()) {
+        add_plain(
+            "env_stale",
+            "info",
+            format!(
+                "环境检测结果是 {}的，出口、代理、时区这些可能已经变了",
+                fmt_ago(at)
+            ),
+            ENV_STALE_ADVICE,
+        );
+    }
+    out.into_inner()
 }
+
+/// 环境检测结果旧了（env_stale）时告诉用户怎么重新检测。与 cam.py 的 ENV_STALE_ADVICE 一致
+const ENV_STALE_ADVICE: &str = "重新检测：运行 cam doctor，或在面板的“环境”里点“重新检测”。开着面板（cam serve）、桌面版或菜单栏小工具时会定时自动检测。";
+/// 最近一次环境检测没连上（env_failed）时的说明。与 cam.py 的 ENV_FAILED_ADVICE 一致
+const ENV_FAILED_ADVICE: &str = "多半是网络刚好断了一下，或者代理在换节点。开着面板（cam serve）、桌面版或菜单栏小工具时过一会儿会自动重试，连上就恢复；想马上重测：运行 cam doctor，或在面板的“环境”里点“重新检测”。";
 
 const LOCALE_ADVICE: &str = "系统语言只代表语言习惯，不代表所在地，所以只作参考、扣 5 分。想让它和所在地一致：在系统设置的“语言与地区”里\
                              把“地区”改成你实际所在的国家（语言可以继续用中文）。";
@@ -1888,6 +2262,17 @@ fn or_dash(msg: &str) -> &str {
     }
 }
 
+/// 解析一个域名：排好序、去了重的地址，或者错误的文字
+fn resolve_host(host: &str) -> Result<Vec<String>, String> {
+    let addrs = (host, 443u16)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?;
+    let mut ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
+    ips.sort();
+    ips.dedup();
+    Ok(ips)
+}
+
 /// 检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、代理、VPN，
 /// 再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
 /// 返回 [{kind, level, text, advice}]，级别为 ok / bad / warn / info，第一项是总体结论。不包含任何密钥。
@@ -1919,58 +2304,124 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     if web_host != api_host {
         hosts.push(web_host.clone());
     }
-    for host in &hosts {
-        match (host.as_str(), 443u16).to_socket_addrs() {
-            Ok(addrs) => {
-                let mut ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
-                ips.sort();
-                ips.dedup();
-                add(
-                    "dns",
-                    "ok",
-                    format!(
-                        "DNS：{} → {}",
-                        host,
-                        ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-                    ),
-                    "",
-                );
-            }
-            Err(e) => add(
+    // 有登录就用当前登录实测 api.anthropic.com；读登录可能要问钥匙串，留在主线程做
+    let at = read_live()
+        .ok()
+        .and_then(|(c, _)| c)
+        .and_then(|c| s(&oauth_block(&c), "accessToken").map(String::from));
+    // 解析域名、出口地区、api.anthropic.com、claude.ai 这几件事同时做，各有各的时限：哪件卡住了都不拖着别的
+    let t0 = Instant::now();
+    let within = |secs: u64| t0 + Duration::from_secs(secs);
+    let j_dns: Vec<_> = hosts
+        .iter()
+        .map(|h| {
+            let h = h.clone();
+            spawn_job(move || resolve_host(&h))
+        })
+        .collect();
+    let j_region = {
+        let store = Store {
+            root: store.root.clone(),
+        };
+        // 顺便更新界面常显的缓存和账号的地区记录
+        spawn_job(move || check_region(&store, 0).is_ok())
+    };
+    let j_api = {
+        let at = at.clone();
+        spawn_job(move || {
+            let t0 = Instant::now();
+            let (st, body) = match &at {
+                Some(t) => get_oauth(t, "/api/oauth/profile", SERVICE_PROBE_SECS),
+                None => http_json_timeout(
+                    "GET",
+                    &format!("{}/api/oauth/usage", api_base()),
+                    &[],
+                    None,
+                    SERVICE_PROBE_SECS,
+                ),
+            };
+            (st, body, t0.elapsed().as_millis())
+        })
+    };
+    let j_web = spawn_job(|| {
+        let t0 = Instant::now();
+        let (code, body) = get_with_in(
+            &format!("{}/api/organizations", web_base()),
+            &[("Cookie".to_string(), "sessionKey=".to_string())],
+            Duration::from_secs(SERVICE_PROBE_SECS),
+        );
+        (code, body, t0.elapsed().as_millis())
+    });
+    // 先等时限最长的那件（见 wait_job）
+    let _ = wait_job(&j_region, within(REGION_CHECK_BUDGET + 2));
+    let api = wait_job(&j_api, within(SERVICE_PROBE_SECS + 1));
+    let web = wait_job(&j_web, within(SERVICE_PROBE_SECS + 1));
+    let dns_advice = if proxies.is_empty() {
+        "检查本机 DNS 或代理设置"
+    } else {
+        "检查本机 DNS 或代理设置；设了代理的话通常由代理解析，可忽略"
+    };
+    for (host, job) in hosts.iter().zip(&j_dns) {
+        match wait_job(job, within(SERVICE_DNS_SECS)) {
+            Some(Ok(ips)) if !ips.is_empty() => add(
+                "dns",
+                "ok",
+                format!(
+                    "DNS：{} → {}",
+                    host,
+                    ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+                ),
+                "",
+            ),
+            Some(Err(e)) => add(
                 "dns",
                 "bad",
                 format!("DNS：{} 解析失败（{}）", host, e),
-                if proxies.is_empty() {
-                    "检查本机 DNS 或代理设置"
-                } else {
-                    "检查本机 DNS 或代理设置；设了代理的话通常由代理解析，可忽略"
-                },
+                dns_advice,
+            ),
+            _ => add(
+                "dns",
+                "bad",
+                format!("DNS：{} 解析超过 {} 秒没有回应", host, SERVICE_DNS_SECS),
+                dns_advice,
             ),
         }
     }
-    // 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息。
-    // 顺便更新界面常显的缓存和账号的地区记录。
-    let _ = check_region(store, 0);
+    // 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息
     let data = store.load().unwrap_or_else(|_| json!({}));
     let r = data.get("region").cloned().unwrap_or_else(|| json!({}));
     match s(&r, "loc") {
         Some(l) => {
             let status = region_status(Some(l));
+            let kept = match (s(&r, "failed_at"), s(&r, "checked_at")) {
+                (Some(_), Some(at)) => format!("；这次没连上，这是{}查到的", fmt_ago(at)),
+                _ => String::new(),
+            };
             add(
                 "region",
                 if status == "supported" { "ok" } else { "warn" },
                 format!(
-                    "{}（IP {}{}，Cloudflare 节点 {}，{} ms）",
+                    "{}（IP {}{}，Cloudflare 节点 {}，{} ms{}）",
                     region_message(Some(l), status),
                     s(&r, "ip").unwrap_or("?"),
                     s(&r, "city")
                         .map(|c| format!("，{}", c))
                         .unwrap_or_default(),
                     s(&r, "colo").unwrap_or("?"),
-                    r.get("ms").and_then(|v| v.as_u64()).unwrap_or(0)
+                    r.get("ms").and_then(|v| v.as_u64()).unwrap_or(0),
+                    kept
                 ),
                 region_advice(status),
             );
+            // 和顶部环境卡同一条，两边分数才一致
+            if let Some(f) = region_fail_item(&r) {
+                add(
+                    s(&f, "kind").unwrap_or(""),
+                    s(&f, "level").unwrap_or("info"),
+                    s(&f, "text").unwrap_or("").to_string(),
+                    s(&f, "advice").unwrap_or(""),
+                );
+            }
         }
         None => add(
             "region_unknown",
@@ -2076,25 +2527,12 @@ pub fn service_check(store: &Store) -> Vec<Value> {
              人在支持地区的话，用当地网络自动获取的 DNS 或任播 DNS 即可；出差前手动填过国内 DNS 的，到了支持地区记得在系统网络设置里改回自动获取。只读本机配置，没有做泄漏探测",
         );
     }
-    // api.anthropic.com：有登录就用当前登录实测
-    let at = read_live()
-        .ok()
-        .and_then(|(c, _)| c)
-        .and_then(|c| s(&oauth_block(&c), "accessToken").map(String::from));
-    let t0 = Instant::now();
-    let (st, body) = match &at {
-        Some(t) => get_oauth(t, "/api/oauth/profile", 10),
-        None => http_json_timeout(
-            "GET",
-            &format!("{}/api/oauth/usage", api_base()),
-            &[],
-            None,
-            10,
-        ),
-    };
-    let ms = t0.elapsed().as_millis();
+    // api.anthropic.com
+    let no_answer =
+        json!({"error": {"message": format!("超过 {} 秒没有回应", SERVICE_PROBE_SECS)}});
+    let (st, body, ms) = api.unwrap_or_else(|| (0, no_answer.clone(), 0));
     let msg = err_message(&body);
-    let region_hint = "通常是出口地区不在 Anthropic 支持范围，换一个出口后重试";
+    let region_hint = "通常是出口地区不在 Anthropic 支持范围。Anthropic 按使用者实际所在地判断；人在支持地区的话，查一下代理 / VPN 把出口带到了哪里";
     if st == 0 {
         add(
             "api",
@@ -2149,12 +2587,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         );
     }
     // claude.ai：不带登录，看可达性和有没有被网络管控拦截
-    let t0 = Instant::now();
-    let (code, body) = get_with(
-        &format!("{}/api/organizations", web_base()),
-        &[("Cookie".to_string(), "sessionKey=".to_string())],
-    );
-    let ms = t0.elapsed().as_millis();
+    let (code, body, ms) = web.unwrap_or_else(|| (0, no_answer.clone(), 0));
     let msg = err_message(&body);
     if code == 0 {
         add(
@@ -2208,7 +2641,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         .cloned()
         .unwrap_or_else(local_env);
     out.extend(proxy_vpn_items(&env));
-    out.extend(risk_items(&data, false));
+    out.extend(risk_items(&data, false, true));
     out.push(json!({
         "kind": "device", "level": "info",
         "text": format!("设备：{} {}，{}", std::env::consts::OS, os_release(), std::env::consts::ARCH),
@@ -2238,11 +2671,17 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         sc["score"],
         s(&sc, "label").unwrap_or("")
     );
+    // 出口这次没测到，别说成“在支持名单内”
+    let fine = if out.iter().any(|i| s(i, "kind") == Some("env_failed")) {
+        "；Claude 服务连得上，这次没测到出口地区，先按上一次查到的算，其它没有发现风险点"
+    } else {
+        "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"
+    };
     let summary = match &worst {
         Some(w) => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
                           "text": format!("{} —— {}", head, s(w, "text").unwrap_or("")), "advice": w["advice"]}),
         None => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
-                       "text": format!("{}；Claude 服务正常，出口地区在支持名单内，没有发现风险点", head), "advice": RISK_SCORE_ADVICE}),
+                       "text": format!("{}{}", head, fine), "advice": RISK_SCORE_ADVICE}),
     };
     out.insert(0, summary);
     // 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
@@ -2324,7 +2763,7 @@ pub fn privacy_sources(cfg: &LookupConfig) -> Vec<Value> {
     ));
     out.push(src(
         "www.cloudflare.com",
-        "claude.ai 连不上时，代替它看出口国家",
+        "claude.ai 连不上或两秒没回音时，代替它看出口国家",
         "third",
         false,
     ));
@@ -2461,6 +2900,44 @@ mod proxy_mask_tests {
         assert_eq!(mask_proxy("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
         assert_eq!(mask_proxy("HTTPS 127.0.0.1:7890"), "HTTPS 127.0.0.1:7890");
         assert_eq!(mask_proxy("http://u:p@host:port"), "http://***@host:port"); // 端口不是数字也照样遮
+    }
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::{spawn_job, wait_job};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn waits_no_longer_than_each_limit() {
+        // 对应 test_cam.py 的 test_run_parallel_budget_and_limits
+        fn ms(n: u64) -> Duration {
+            Duration::from_millis(n)
+        }
+        let stuck = || spawn_job(|| std::thread::sleep(ms(3000)));
+        assert_eq!(
+            wait_job(&spawn_job(|| 1), Instant::now() + ms(2000)),
+            Some(1)
+        );
+        // 到了时限还没做完的那件是 None，不接着等
+        let t0 = Instant::now();
+        assert_eq!(wait_job(&stuck(), t0 + ms(200)), None);
+        assert!(t0.elapsed() < ms(2000));
+        // 时限不一样的几件，先等时限长的：慢一点但在自己时限内的照样等到；
+        // 时限短的那件早做完了，过了点也收得到；卡住的那件不再多等
+        let t0 = Instant::now();
+        let slowish = spawn_job(|| {
+            std::thread::sleep(ms(300));
+            "done"
+        });
+        let (fast, hung) = (spawn_job(|| 1), stuck());
+        assert_eq!(wait_job(&slowish, t0 + ms(5000)), Some("done"));
+        assert_eq!(wait_job(&fast, t0 + ms(100)), Some(1));
+        assert_eq!(wait_job(&hung, t0 + ms(100)), None);
+        assert!(t0.elapsed() < ms(2000));
+        // 自己崩了的那件也是 None
+        let boom = spawn_job(|| -> i32 { panic!("boom") });
+        assert_eq!(wait_job(&boom, Instant::now() + ms(2000)), None);
     }
 }
 

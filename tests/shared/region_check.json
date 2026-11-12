@@ -1,0 +1,59 @@
+{
+  "_说明": "环境检测没连上之后的三条规则：这一次检测能不能跳过 region_check_fresh(离上次查到几秒, 离上次没连上几秒, max_age, 本机换没换网络)、隔几秒重试 region_retry_wait(连着失败几次, 定时检测间隔的分钟数)、界面上提示哪一条 region_fail_item(出口记录)。另有本机连的是哪张网 net_fingerprint_of(默认路由用的本机地址)：两个版本读写同一个 region.net，算出来的必须是同一个值。Python 与 Rust 两边按同一份数据跑。出口记录里的时间写成“几秒之前”，测试里换算成时间。",
+  "fresh": [
+    {"name": "从没检测过：要测", "age": null, "fage": null, "max_age": 300, "moved": false, "expect": false},
+    {"name": "两分钟前查到过：定时检测跳过", "age": 120, "fage": null, "max_age": 300, "moved": false, "expect": true},
+    {"name": "满五分钟：要测", "age": 300, "fage": null, "max_age": 300, "moved": false, "expect": false},
+    {"name": "手动检测（max_age=0）从不跳过", "age": 5, "fage": null, "max_age": 0, "moved": false, "expect": false},
+    {"name": "换了网络：刚测过也要测", "age": 120, "fage": null, "max_age": 300, "moved": true, "expect": false},
+    {"name": "上次没连上：一分钟内不重试", "age": 5000, "fage": 30, "max_age": 300, "moved": false, "expect": true},
+    {"name": "上次没连上：满一分钟重试（不看上次查到是多久前）", "age": 120, "fage": 60, "max_age": 300, "moved": false, "expect": false},
+    {"name": "上次没连上、又换了网络：一分钟内还是不重试", "age": 5000, "fage": 30, "max_age": 300, "moved": true, "expect": true},
+    {"name": "上次没连上：启动 claude 前的检测（max_age=60）一分钟内不重试", "age": 5000, "fage": 59, "max_age": 60, "moved": false, "expect": true},
+    {"name": "上次没连上：max_age 比一分钟短就按 max_age", "age": 5000, "fage": 10, "max_age": 5, "moved": false, "expect": false},
+    {"name": "上次没连上：手动检测马上重试", "age": 5000, "fage": 1, "max_age": 0, "moved": false, "expect": false},
+    {"name": "从没查到过、上次没连上：一分钟内不重试", "age": null, "fage": 20, "max_age": 300, "moved": false, "expect": true}
+  ],
+  "retry_wait": [
+    {"fail_count": 1, "refresh_min": 10, "expect": 60},
+    {"fail_count": 2, "refresh_min": 10, "expect": 120},
+    {"fail_count": 3, "refresh_min": 10, "expect": 240},
+    {"fail_count": 4, "refresh_min": 10, "expect": 480},
+    {"fail_count": 5, "refresh_min": 10, "expect": 600},
+    {"fail_count": 9, "refresh_min": 10, "expect": 600},
+    {"fail_count": 5, "refresh_min": 30, "expect": 960},
+    {"fail_count": 8, "refresh_min": 30, "expect": 960},
+    {"fail_count": 3, "refresh_min": 2, "expect": 120},
+    {"fail_count": 3, "refresh_min": 1, "expect": 60},
+    {"fail_count": 3, "refresh_min": 0, "expect": 60},
+    {"fail_count": 0, "refresh_min": 10, "expect": 60},
+    {"fail_count": null, "refresh_min": 10, "expect": 60}
+  ],
+  "fail_item": [
+    {"name": "没失败过：没有这一条", "region": {"loc": "US", "checked_secs_ago": 600}, "expect": null},
+    {"name": "从没查到过：没有这一条（按查不到另外提醒）", "region": {"loc": null, "checked_secs_ago": 30, "failed_secs_ago": 30, "fail_count": 1}, "expect": null},
+    {"name": "上次的结果还新：只说一声", "region": {"loc": "US", "checked_secs_ago": 600, "failed_secs_ago": 30, "fail_count": 1},
+     "expect": {"kind": "env_failed", "level": "info", "contains": ["最近一次环境检测没连上（刚刚）", "先用上一次查到的结果（10 分钟前）"]}},
+    {"name": "上次的结果快一小时了：还算新", "region": {"loc": "US", "checked_secs_ago": 3500, "failed_secs_ago": 200, "fail_count": 4},
+     "expect": {"kind": "env_failed", "level": "info", "contains": ["最近一次环境检测没连上（3 分钟前）"]}},
+    {"name": "上次的结果过了一小时：按查不到提醒", "region": {"loc": "US", "checked_secs_ago": 3700, "failed_secs_ago": 30, "fail_count": 1},
+     "expect": {"kind": "region_unknown", "level": "warn", "contains": ["出口地区现在查不到：最近一次检测没连上 claude.ai 和 Cloudflare", "上一次查到是 US（美国）（1 小时前）"]}},
+    {"name": "结果旧了、连着失败三次：写上次数", "region": {"loc": "JP", "checked_secs_ago": 7300, "failed_secs_ago": 90, "fail_count": 3},
+     "expect": {"kind": "region_unknown", "level": "warn", "contains": ["出口地区现在查不到：连续 3 次检测都没连上 claude.ai 和 Cloudflare", "上一次查到是 JP（日本）（2 小时前）"]}},
+    {"name": "结果旧了、上次查到的不在支持名单：不在名单那条已经提醒过，只说一声", "region": {"loc": "CN", "checked_secs_ago": 7300, "failed_secs_ago": 90, "fail_count": 2},
+     "expect": {"kind": "env_failed", "level": "info", "contains": ["最近一次环境检测没连上", "先用上一次查到的结果（2 小时前）"]}},
+    {"name": "结果还新、上次查到的不在支持名单：只说一声", "region": {"loc": "CN", "checked_secs_ago": 300, "failed_secs_ago": 90, "fail_count": 1},
+     "expect": {"kind": "env_failed", "level": "info", "contains": ["最近一次环境检测没连上"]}}
+  ],
+  "net_fingerprint": [
+    {"name": "只有 IPv4", "addrs": ["192.168.1.23"], "expect": "cc6b08f9e38f"},
+    {"name": "IPv4 和 IPv6：IPv6 只取前 64 位", "addrs": ["192.168.1.23", "2001:db8:1234:5678:1c2d:3e4f:5a6b:7c8d"], "expect": "8f7badb3f22b"},
+    {"name": "IPv6 后半截换了（隐私地址隔一阵自己会换）：还是同一张网", "addrs": ["192.168.1.23", "2001:db8:1234:5678:ffff:eeee:dddd:cccc"], "expect": "8f7badb3f22b"},
+    {"name": "IPv6 前缀换了：换了一张网", "addrs": ["192.168.1.23", "2001:db8:1234:9999:1c2d:3e4f:5a6b:7c8d"], "expect": "60d4129e629b"},
+    {"name": "IPv4 换了：换了一张网", "addrs": ["10.0.0.8"], "expect": "c1f84a1e1728"},
+    {"name": "只有 IPv6", "addrs": ["2001:db8:1234:5678:1c2d:3e4f:5a6b:7c8d"], "expect": "689144d84b7d"},
+    {"name": "IPv6 是链路本地地址：不算，和只有 IPv4 一样", "addrs": ["192.168.1.23", "fe80::a865:cfc:4121:ea48"], "expect": "cc6b08f9e38f"},
+    {"name": "只有链路本地地址：当作没有网络", "addrs": ["fe80::1"], "expect": ""},
+    {"name": "没有网络", "addrs": [], "expect": ""}
+  ]
+}

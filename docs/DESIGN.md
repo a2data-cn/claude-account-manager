@@ -2,7 +2,9 @@
 
 脚本版（`scripts/cam.py`）和桌面版（`desktop/`）读写**同一份数据目录**、实现**同一套 HTTP API**，所以两者可以混用：在桌面版里添加的账号，脚本里能直接切换，反过来也一样。Web 面板（`web/panel.html`）只认这套 API，不关心后端是 Python 还是 Rust。
 
-桌面版的核心逻辑在独立的 crate `cam-engine`（`desktop/src-tauri/engine/`），不依赖 Tauri，可以单独 `cargo test -p cam-engine`。身份识别、账号查找、切号规则、自动续期、编辑账号和到期日这几处容易两边写得不一样，判断规则写成数据放在 `tests/shared/`，`scripts/test_cam.py` 和 `engine/tests/shared.rs` 跑的是同一份。
+桌面版的核心逻辑在独立的 crate `cam-engine`（`desktop/src-tauri/engine/`），不依赖 Tauri，可以单独 `cargo test -p cam-engine`。身份识别、账号查找、切号规则、自动续期、编辑账号和到期日、环境检测没连上时怎么算这几处容易两边写得不一样，判断规则写成数据放在 `tests/shared/`，`scripts/test_cam.py` 和 `engine/tests/shared.rs` 跑的是同一份。
+
+`cam` 启动器（`scripts/cam`、`scripts/cam.cmd`）除了 `serve` 都从 `scripts/cam_run.py` 进：它把 `cam` 当模块运行（`runpy.run_module`），用得上 `__pycache__` 里编译好的字节码，不用每条命令都把 `cam.py` 重新编译一遍；`cam.py` 里只有少数命令用得上的标准库模块（`ssl`、`http.client`、`urllib.request`、`http.server`、`concurrent.futures`）到用的时候才导入。旁边没有 `cam_run.py` 时启动器直接运行 `cam.py`。`cam serve` 一直直接运行 `cam.py`：别的地方靠命令行里的 `cam.py serve` 认出后台在跑的面板服务。
 
 ## 数据目录
 
@@ -20,6 +22,8 @@
 ├── env-backups/<时间戳>/  # cam env clean --purge 移走的整个 Claude Code 配置
 ├── accounts.lock          # 数据锁，见“并发与锁”
 ├── background.lock        # 后台任务锁，见“并发与锁”
+├── attention.json         # 哪些 Claude Code 会话弹着权限确认在等你（钩子写的，没有会话在等时没有这个文件），见“并发与锁”
+├── attention.lock         # 写 attention.json 时的锁
 ├── update-check.json      # 上次 cam update --check 的结果（菜单栏、面板据它显示“更新（N 个新改动）”）
 ├── update.lock            # 同一时间只让一个 cam update 在跑
 └── server-token           # Web 面板访问令牌
@@ -49,7 +53,8 @@
         "price": "$100/月", "note": ""
       },
       "usage": {                              // 最近一次拉取结果
-        "fetched_at": "…", "source": "oauth",
+        "fetched_at": "…", "source": "oauth", // fetched_at：这些数字是什么时候取到的；没取到（error 不为空）时数字和它都是上一次的
+        "checked_at": "…",                    // 最近一次去查的时间，没取到也记
         "five_hour": { "utilization": 37.0, "resets_at": "…" },
         "seven_day": { "utilization": 12.0, "resets_at": "…" },
         "seven_day_opus": null, "seven_day_sonnet": null,   // 新接口里同名的按模型额度已在 models 里时置空
@@ -101,7 +106,7 @@ React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同�
 - 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。进入时有 `claude` 会话在跑就登记成 `pending_switch`（见“切换流程”），会话退出后再切；时间段过了还没切成就作废。
 - 目录规则：`cam claude` 启动时按当前目录做最长前缀匹配，切换后再执行 `claude`。
 - 额度提醒：当前账号 5 小时额度 ≥ 阈值时提醒一次（同一个额度窗口只提醒一次），附上多久后重置。**不会自动切换，也不推荐换哪个号。**
-- 启动前风险提醒（只在 `cam claude`）：缓存超过一小时时，`spawn_background_check` 另起 `cam.py _check-region` 后台进程做完整检测（同一时间只跑一个），前台只用 `quick_trace` 花最多 3 秒问一次 claude.ai，套到数据副本上算提醒（`with_quick_region`，出口 IP 变了时丢掉旧运营商信息）。`launch_tier(score, region_status, prefs)` 给出 ok / remind / confirm / strong 四档——≥90 一行带过；< 90 打印提醒；< `risk_confirm_below`（默认 60）问 y/N；< `risk_strong_below`（默认 30）或出口不在支持名单内要输入"继续"。非交互环境只打印。`risk_prompt: false` 或 `CAM_NO_RISK_PROMPT=1` 关掉。**不是拦截**：每一档都是用户自己选择继续或取消。
+- 启动前风险提醒（只在 `cam claude`）：缓存不能直接用时（`region_trusted`：超过一小时、最近一次检测没连上、或者本机换了网络），`spawn_background_check` 另起 `cam.py _check-region` 后台进程做完整检测（同一时间只跑一个），前台只用 `quick_trace` 花最多 3 秒问一次 claude.ai，套到数据副本上算提醒（`with_quick_region`，出口 IP 变了时丢掉旧运营商信息）。`launch_tier(score, region_status, prefs)` 给出 ok / remind / confirm / strong 四档——≥90 一行带过；< 90 打印提醒；< `risk_confirm_below`（默认 60）问 y/N；< `risk_strong_below`（默认 30）或出口不在支持名单内要输入"继续"。非交互环境只打印。`risk_prompt: false` 或 `CAM_NO_RISK_PROMPT=1` 关掉。**不是拦截**：每一档都是用户自己选择继续或取消。
 - 自动发现：后台检测凭据文件变化（macOS 每 30 秒查一次钥匙串），发现没见过的账号就自动导入。
 
 ## 四类账号
@@ -182,7 +187,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
   - 换新在数据锁里进行，拿到锁后再确认一次这个号仍然不是当前账号、也没被别的进程刷新过，所以和切换互斥：不会出现刚切过去、Claude Code 和这里拿着同一个 refresh token 各刷一次，把号弄成需要重新登录的情况。锁里的请求超时 8 秒。
   - token 接口返回 400/401 说明 refresh token 已失效，提示用这个号重新登录 Claude Code 后 `cam import`；其它错误提示稍后再试。
   - 切换到一个 access token 过期的号时，切换前在同一把锁里先换新（见“切换流程”第 3 步），换不了就不切。
-- **拉用量前先核对**：先请求 `/api/oauth/profile`，返回的 uuid / 邮箱和账号记录的不一致（凭据被旧会话覆盖了），就不拿这份凭据查用量，直接报错。
+- **拉用量前先核对**：先请求 `/api/oauth/profile`，返回的 uuid / 邮箱和账号记录的不一致（凭据被旧会话覆盖了），就不拿这份凭据查用量，直接报错。资料和用量两个请求各最多等 `USAGE_TIMEOUT` = 12 秒；资料那个等了 `USAGE_GIVE_UP` = 5 秒以上还没连上（断网、代理节点挂了）就不接着读用量（也是白等同样久），一下就失败的（连接被重置）才接着试。
 
 **添加账号（`cam login`）**：先像 `cam` 一样把当前登录存回它的账号（没见过的号自动导入），再运行 `claude auth login` 换号登录，最后导入新登录（已有的号就更新）。直接 `/login` 的话，当前账号在上次保存之后续过的 token 还没存进来，换号后就作废了。当前登录认不出是谁的（会被暂存，见“暂存认不出主人的登录”）时不换号，免得丢掉它。
 
@@ -192,6 +197,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 
 - **数据锁 `accounts.lock`**：读改写 `accounts.json` 和 `secrets/` 时持有。Unix 用 `flock`，Windows 用 `LockFileEx`，Python 和 Rust 用的是同一种系统锁，所以两边互斥；每次加锁单独打开文件，同一进程的不同线程之间也互斥。锁由操作系统持有，进程崩溃时自动释放，不会有残留锁。等锁最多 30 秒。旧版本用的是独占创建 `.lock` 文件、超过 60 秒当残留删掉，换了文件名就不会和旧版互相误删。
 - **后台任务锁 `background.lock`**：自动导入、时间规则、定时刷新、额度提醒只让一个进程做，不等待，谁先拿到谁做。桌面版和 `cam serve` 拿到后一直持有到退出，没拿到的每隔一会儿再试一次（接手退出的那个），期间只同步显示数据；菜单栏插件每次运行时试一下，拿不到就只画菜单。
+- **等你确认的会话 `attention.json`**：`cam hooks install` 装的钩子（`PermissionRequest` 记下会话，`PostToolUse`、`PostToolUseFailure`、`PermissionDenied`、`UserPromptSubmit`、`Stop`、`SessionEnd` 清掉）每个事件起一个进程，几个工具并行跑完时是好几个一起来，读改写时持有 `attention.lock`（一直等到拿到，Windows 上最多 5 秒）。没有会话在等时清除事件一看没有这个文件就退出，不拿锁、不写；最后一个会话清掉后文件删掉；内容没变不重写。只记工具名和说明，不记命令。钩子的命令是 `python scripts/cam_hook.py`：它把 `cam` 当模块运行，用得上 `__pycache__` 里的字节码，`cam.py` 最前面的快路径（只用 `json`、`os`、`sys`、`time`）记完就退出；旁边没有 `cam_hook.py` 时是 `python cam.py hook`，同一段代码，每次多花一百毫秒左右编译。`hooks_status` 把旧写法算作已装并标 `slow`，指向别的路径或别的 python 才算过期。体检（`hook_items`）在“cam 自己”一节加一行：装好了是正常，钩子命令里的 python 或脚本已经不在了是警告（每次工具调用白起一个跑不起来的命令、灯也不闪），只装了一部分是警告，旧写法、指向另一份还在的 cam 只是告诉一声；没装钩子不提。引擎只读这个文件
 - **`~/.claude.json`**：读出来改完，写之前再读一次，内容变了（Claude Code 刚写过）就基于新内容重新改；写完再读回确认 `oauthAccount` 是想要的值。最多重试 5 次，还不行就提示先退出正在运行的 claude。
 - **符号链接**：`~/.claude.json` 等文件是符号链接（比如用 dotfiles 管理）时，写到链接指向的文件，保留链接本身。
 
@@ -202,15 +208,18 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 - 联网时几件事并行：`refresh_usage(store)`（和 `cam usage` 一样：不在用的 Claude Code 号 access token 两分钟内过期就由 `ensure_fresh_token` → `renew_saved_login` 用它自己的 refresh token 续，当前登录从不续）、`service_check`、官方状态页 `summary.json`（`STATUS_SUMMARY_URLS`，先 status.claude.com 再 status.anthropic.com）、`downloads.claude.ai/claude-code-releases/<渠道>` 的版本号、聊天机器人的 `doctor`（60 秒超时）。续没续看续之前保存的 `expiresAt` 有没有变大；续不上（`登录已失效`）记 ✗ 并给 `cam login 名字`
 - `--offline`：上面这些都不做，账号用上次的用量和保存的 `expiresAt`，服务一节用后台缓存（`region_view` + `risk_items`）
 - 会话（只有 Linux）：`/proc/<pid>/cmdline` 认出 claude（同 `running_claude_processes`），`environ` 里 `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` 只记有没有，`CLAUDE_CONFIG_DIR` 的值只和本机配置目录比；`FEISHU_SESSION` / `DINGTALK_SESSION` / `DISCORD_STATE_DIR`、tmux socket（`claude-discord[-名称]` 等，从 `TMUX` 取）认出机器人会话；运行时长按 `stat` 第 22 项和 `uptime` 算。测试用 `CAM_TEST_PROC_ROOT` 指向假的 `/proc`
-- 后台：`background.lock` 拿不到就是有人在做；`cam serve` 每分钟写 `.serve-state.json`（pid、时间、刷新间隔、上次出错），菜单栏插件每轮写 `.menubar-state.json`（看修改时间），桌面版不记，按进程名认。各账号用量的新旧用体检之前的 `fetched_at` 判断（桌面版账号用 `checked_at`）
+- 后台：`background.lock` 拿不到就是有人在做；`cam serve` 每分钟写 `.serve-state.json`（pid、时间、刷新间隔、上次出错），菜单栏插件每轮写 `.menubar-state.json`（看修改时间），桌面版不记，按进程名认。各账号用量的新旧（后台有没有在查）用体检之前的 `checked_at` 判断；旧版本没记它，那时的 `fetched_at` 就是查的时间。离线体检只读：后台锁文件不存在时不去建它
 
 ## 服务检查与环境风险提示（只提示，不拦）
 
 `cam doctor` / `GET /api/service-check` 实测服务，并把使用环境里的风险点逐项列出，每项带 `kind`、`level`、`text`、`advice`。所有判断只用来提示，**不拦任何操作**，是否继续由用户决定。
 
-- 出口地区：`claude.ai/cdn-cgi/trace`（连不上退到 `www.cloudflare.com`）的 `loc`，对照 `SUPPORTED_REGIONS`（Anthropic 官网公布的支持国家/地区）+ `REGION_DEPENDENCIES`（属地按所属国家看待）。同一个 trace 还给出 `warp`（经过 Cloudflare WARP / Zero Trust）和 `ts`（算本机时钟偏差）。再查出口 IP 的 `asn`、运营商（`org`）、城市、国家（`meta_loc`，和 trace 的 `loc` 交叉核对）和类型（`ip_type`：residential / hosting / proxy / tor / mobile / null）：来源由 `prefs.ip_lookup`（auto / ip-api / off）决定，`meta_sources` 给出顺序：ip-api 模式先问 ip-api.com（免费接口仅限非商业），然后 `api.ipapi.is`（有 key 带标记）→ `ipinfo.io` → `speed.cloudflare.com/meta`，第一个查到的为准并记下 `meta_source`（界面注明来源）；`parse_exit_meta` 统一几种格式（含 ipapi.is 不带 key 的简版）；没配 ipapi.is key 时并行查 `rdap.org` 拿注册国 `reg_loc`；`1.1.1.1` 和 `[2606:4700:4700::1111]` 的 trace 分别拿 `v4_loc` / `v6_loc`。这些查询并行进行；出口 IP 和设置都没变、且 `META_TTL`（默认一天）内查过时，运营商那几项（`META_FIELDS`）直接沿用缓存，不再问第三方。off 模式只问 `claude.ai/cdn-cgi/trace` 和状态页。key 存在 `secrets/_ip-lookup.json`，不进 accounts.json；`save_privacy` 改设置或 key 时清掉缓存的运营商信息，`clear_region_history` 清掉 `region`、`status_page` 和各账号的 `regions`。`local_env()` 把时区、系统语言、本机 DNS 配置一起存进 `region.env`，界面刷新时不用再跑系统命令。
-- 后台缓存：持有后台租约的进程每隔几分钟调一次 `check_region`，把结果写进 `accounts.json` 的 `region`（`loc`、`ip`、`colo`、`ms`、`warp`、`skew`、`checked_at`，出口换了国家时另记 `prev_loc`、`changed_at`）和 `status_page`（`status.anthropic.com/api/v2/status.json` 的 `indicator`、`description`；连不上时删掉这个字段），并给当前账号的 `regions`（`[{"loc", "at"}]`，最多 8 个）记一笔。切换账号时也用一小时内的缓存给目标账号记一笔。
-- `risk_items(data)` 不联网，只看缓存和本机设置：出口不在名单（warn）、24 小时内出口变化（warn）、两个接口看到的国家不一致（warn）、IP 类型为 Tor（warn）/ 代理（warn）/ 机房（数据库标记，或没有标记时按 `HOSTING_WORDS`，warn）、注册国与定位国不同（info）、IPv4 / IPv6 出口地区不同（warn）、本机 DNS 是某个国家的公共 DNS 且与出口不同（不支持地区 → warn，否则 info；只读配置，`KNOWN_DNS`）、WARP（info）、时钟偏差超过 120 秒（warn）、官方状态页有故障（minor → warn，major / critical → bad）、系统时区指向的国家和出口不一致（指向不支持地区 → warn，否则 info；时区来自 `TZ` / `/etc/localtime` / `tzutil`，国家来自 tzdata 的 `zone1970.tab`）、系统语言 / 区域指向的国家和出口不一致（一律 info、扣 5 分：语言只代表语言习惯；来自 `AppleLocale` / `Get-Culture` / `LANG`）、当前账号 7 天内多地区使用（warn）、本机有 2 个以上 Claude Code 账号（info）。`/api/state` 的 `risks` 就是它，三个界面把 warn / bad 常显在顶部，`cam`、`cam switch` 和切换接口也会带上。
+- 出口地区：`claude.ai/cdn-cgi/trace` 的 `loc`（`exit_trace`：它答不上来、或者 `TRACE_HEDGE_SECS` = 2 秒还没回音，就同时问 `www.cloudflare.com` 的同一个接口，谁先给出结果用谁的，总共最多等 6 秒；off 模式不问 Cloudflare），对照 `SUPPORTED_REGIONS`（Anthropic 官网公布的支持国家/地区）+ `REGION_DEPENDENCIES`（属地按所属国家看待）。同一个 trace 还给出 `warp`（经过 Cloudflare WARP / Zero Trust）和 `ts`（算本机时钟偏差）。再查出口 IP 的 `asn`、运营商（`org`）、城市、国家（`meta_loc`，和 trace 的 `loc` 交叉核对）和类型（`ip_type`：residential / hosting / proxy / tor / mobile / null）：来源由 `prefs.ip_lookup`（auto / ip-api / off）决定，`meta_sources` 给出顺序：ip-api 模式先问 ip-api.com（免费接口仅限非商业），然后 `api.ipapi.is`（有 key 带标记）→ `ipinfo.io` → `speed.cloudflare.com/meta`，第一个查到的为准并记下 `meta_source`（界面注明来源）；`parse_exit_meta` 统一几种格式（含 ipapi.is 不带 key 的简版）；没配 ipapi.is key 时并行查 `rdap.org` 拿注册国 `reg_loc`；`1.1.1.1` 和 `[2606:4700:4700::1111]` 的 trace 分别拿 `v4_loc` / `v6_loc`。这些查询并行进行（`run_parallel`：每件事一个 daemon 线程，结果进队列，到时限就返回——域名解析没有超时可设，卡在里面的那件不拖着调用方，也不拦着进程退出），合起来最多等 `META_BUDGET_SECS` = 8 秒，其中每个运营商数据源最多 `META_SOURCE_TIMEOUT` = 4 秒，到点没答的当作查不到，不拖着出口地区；出口 IP 和设置都没变、且 `META_TTL`（默认一天）内查过时，运营商那几项（`META_FIELDS`）直接沿用缓存，不再问第三方。off 模式只问 `claude.ai/cdn-cgi/trace` 和状态页。key 存在 `secrets/_ip-lookup.json`，不进 accounts.json；`save_privacy` 改设置或 key 时清掉缓存的运营商信息，`clear_region_history` 清掉 `region`、`status_page` 和各账号的 `regions`。`local_env()` 把时区、系统语言、本机 DNS 配置一起存进 `region.env`，界面刷新时不用再跑系统命令。
+- 后台缓存：持有后台租约的进程每隔几分钟调一次 `check_region`，把结果写进 `accounts.json` 的 `region`（`loc`、`ip`、`colo`、`ms`、`warp`、`skew`、`checked_at`、`net`，出口换了国家时另记 `prev_loc`、`changed_at`）和 `status_page`（`status.anthropic.com/api/v2/status.json` 的 `indicator`、`description`；这次没读到就留着上一次的，它自带 `checked_at`，超过一小时不再算），并给当前账号的 `regions`（`[{"loc", "at"}]`，最多 8 个）记一笔。整个 `check_region`（出口、状态页、本机设置、`net_fingerprint` 同时做）最多等 `REGION_CHECK_BUDGET` = 16 秒。
+  - 没连上时保留上一次的结果：这次没问到 trace 而以前查到过，记录原样留着（`checked_at` 还是上次查到的时间），只加 `failed_at`、`fail_count`（连续失败次数）；下次连上写新记录，这两个字段就没有了。从来没查到过的写 `loc: null`。本机设置（`env`、`env_at`）每次都更新。`region_view` 多给 `failed_at`、`fail_count`，界面据此写“最近一次没连上 · 上面是上一次查到的”。
+  - `net` 是 `net_fingerprint()`：默认路由用的本机 IPv4 地址和 IPv6 地址的前 64 位（UDP 的 connect 只让系统选路，不发数据包；链路本地地址 fe80::/10 哪张网都是它，不算）合起来的 sha256 前 12 位，只在本机比较；两个版本读写的是同一个字段，算出来的必须一样，计算部分 `net_fingerprint_of` 两边按 `tests/shared/region_check.json` 里的同一份数据测。换 Wi-Fi、插拔网线、开关接管整机流量的 VPN 时会变。
+  - `check_region(max_age)` 这次跳不跳过看 `region_check_fresh`：`max_age` 秒内查到过且没换网络就跳过；上次没连上的话只看离那次失败有没有到 `REGION_RETRY_SECS` = 60 秒。两次定时检测之间，`background_round` 每轮问一次 `region_recheck_due`：本机换了网络（`NET_RECHECK_SECS` = 30 秒内最多补测一次），或者上次没连上、到了重试的时候（`region_retry_wait`：60 秒起每连着失败一次翻一倍，最多翻四次，最长不超过定时检测的间隔），就 `check_region(max_age=0)` 补测一次。这三条规则和下面的 `region_fail_item` 两个版本跑同一份 `tests/shared/region_check.json`。切换账号时也用一小时内的缓存给目标账号记一笔。
+- `risk_items(data)` 不联网，只看缓存和本机设置：出口不在名单（warn）、24 小时内出口变化（warn）、两个接口看到的国家不一致（warn）、IP 类型为 Tor（warn）/ 代理（warn）/ 机房（数据库标记，或没有标记时按 `HOSTING_WORDS`，warn）、注册国与定位国不同（info）、IPv4 / IPv6 出口地区不同（warn）、本机 DNS 是某个国家的公共 DNS 且与出口不同（不支持地区 → warn，否则 info；只读配置，`KNOWN_DNS`）、WARP（info）、时钟偏差超过 120 秒（warn）、官方状态页有故障（minor → warn，major / critical → bad）、系统时区指向的国家和出口不一致（指向不支持地区 → warn，否则 info；时区来自 `TZ` / `/etc/localtime` / `tzutil`，国家来自 tzdata 的 `zone1970.tab`）、系统语言 / 区域指向的国家和出口不一致（一律 info、扣 5 分：语言只代表语言习惯；来自 `AppleLocale` / `Get-Culture` / `LANG`）、当前账号 7 天内多地区使用（warn）、本机有 2 个以上 Claude Code 账号（info）。`/api/state` 的 `risks` 就是它，三个界面把 warn / bad 常显在顶部，`cam`、`cam switch` 和切换接口也会带上。缓存旧了（`region.checked_at` 超过 `REGION_FRESH_SECS` = 一小时，后台没在跑时会这样）：从那次检测算出来的每条后面标“（N 天前检测的）”，末尾加一条 `env_stale`（info，不扣分）说怎么重新检测；`status_page` 自带 `checked_at`，超过一小时的故障不再提；`note_age=False`（离线体检，开头已经说了时间）不标。最近一次检测没连上（`region.failed_at`）：出口还按上一次查到的算，另加一条 `region_fail_item`——那份结果还在一小时内、或者那个出口本来就不在名单（已经提醒并扣过分了），是 `env_failed`（info，不扣分）；超过一小时是 `region_unknown`（warn，扣 30：出口现在是哪里说不准）；有这一条就不再加 `env_stale`。后台一轮（`background_round`）里哪一步出了错都记进 `last_error`，同一轮后面的刷新成功也不清，等下一次整轮都没出错才清，`cam doctor` 的“后台上一轮出错”才看得到
 - 评分 `risk_score(items)`：满分 100，按 `RISK_WEIGHTS` 的 (kind, level) 扣分（出口不在名单 60、Tor 出口 40、代理 IP 25、时区指向不支持地区 25、机房出口 20、账号多地区 20、出口变化 15、两接口不一致 15、IPv4 / IPv6 不同 15、DNS 在不支持地区 15、系统语言不一致 5、时钟 10、VPN 10、官方故障 30 / 10、api 连不上 40……没列出的 warn 扣 10、bad 扣 30），档位 ≥90 low / 70–89 medium / <70 high。`/api/state` 的 `risk_score` 据缓存的 `risks` 算；服务检查的第一项 `summary` 带实测的 `score`、`grade`，`level` 取 bad / warn / ok 中更严重的（档位 high → bad，medium → warn）。只是把提醒汇总成一个数，不拦任何操作。
 - 服务检查另外实测：DNS、`api.anthropic.com`（有登录就用当前登录）、`claude.ai`（不带登录，识别人机验证页）、代理（环境变量 + `scutil --proxy` / 注册表 `Internet Settings` / GNOME `gsettings`）、VPN（默认路由的接口名或适配器描述像隧道：`route -n get default` / `ip route show default` / `Get-NetRoute`）。`device` 列出系统和架构（设备环境信息只列出，不改动、不伪装）。最后一条 `scope` 说明检测范围：只有本机能看到的信号，账号侧的信号看不到，所以“没有发现风险点”不等于一定合规。
 - 测试钩子：`CAM_STATUS_URL`、`CAM_CF_META_URL`、`CAM_IPINFO_URL`、`CAM_IPAPI_URL`、`CAM_IPAPI_IS_URL` / `CAM_IPAPI_IS_KEY`、`CAM_RDAP_URL`、`CAM_CF_TRACE4_URL` / `CAM_CF_TRACE6_URL`、`CAM_IPINFO_TOKEN`、`CAM_IP_LOOKUP`、`CAM_META_TTL`、`CAM_NO_BG_CHECK`、`CAM_TEST_DNS`、`CAM_CLAUDE_WEB_BASE`、`CAM_TEST_TZ="Asia/Hong_Kong=HK"`、`CAM_TEST_LOCALE="zh_CN"`、`CAM_TEST_ROUTE_IF="utun4"`。
@@ -222,7 +231,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | Web 面板 |
-| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；每个账号带 `health`（`level`: ok / info / warn / error，`label`: 正常 / 注意 / 异常，`issues`: [{`kind`, `level`, `text`, `advice`, `detail`}]，由 `account_health` 根据有没有保存凭据、用量报错和到期日算出，两边规则见 `tests/shared/health.json`）；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
+| GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；每个账号带 `health`（`level`: ok / info / warn / error，`label`: 正常 / 注意 / 异常，`issues`: [{`kind`, `level`, `text`, `advice`, `detail`}]，由 `account_health` 根据有没有保存凭据、用量报错和到期日算出，两边规则见 `tests/shared/health.json`）；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`；`failed_at`、`fail_count`：最近一次检测没连上的时间和连续次数，这时其它字段是上一次查到的），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
 | POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"claude_desktop"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
 | POST | `/api/accounts/{id}/switch` | 切换 Claude Code 账号。body 可带 `{"mode": "now"|"wait"}`：有会话在跑且没给 `mode` 时返回 `{"ok": false, "choice_required": true, "running_claude", "message"}` 让前端问用户；`wait` 登记等待并返回 `deferred: true`；`now` 或没有会话时直接切，返回 `changed`、`account`、`running_claude`、`message`、`backup`。每种返回都带 `risks`（warn / bad 的风险提示），只提醒不拦 |
@@ -231,7 +240,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 | PUT | `/api/privacy` | body 可带 `ip_lookup`、`ipapi_key`、`ipinfo_token`（空字符串删除），返回同 GET |
 | DELETE | `/api/privacy/history` | 清除缓存的出口信息和各账号的使用地区记录，返回同 GET |
 | GET | `/api/checkup` | 全面体检，同 `cam doctor --json`（格式见“全面体检”），要十几秒；`?offline=1` 不联网；`?probe=1` 只回 `{"ok": true}`，面板据此显示按钮。只有脚本版有，桌面版返回 404 |
-| GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`，带 `score`、`grade`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。只检测和提示，不干预任何操作 |
+| GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`，带 `score`、`grade`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。解析域名、出口地区、api.anthropic.com、claude.ai 四件事同时做，各有时限（解析 `SERVICE_DNS_SECS` = 5 秒，连接 `SERVICE_PROBE_SECS` = 10 秒），哪件卡住了都不拖着别的，到点没答的写“超过 N 秒没有回应”；出口这次没连上而以前查到过时，`region` 那行照旧给上一次的并注明“这次没连上，这是…查到的”，后面跟一条 `env_failed` 或 `region_unknown`（和 `/api/state` 的 `risks` 同一条，两边分数一致）。只检测和提示，不干预任何操作 |
 | POST | `/api/accounts/{id}/open` | 打开该网页账号的独立浏览器，或退出并重新打开目标 Claude Desktop 配置 |
 | POST | `/api/accounts/{id}/identify` | 尝试从对应登录资料补全邮箱，Desktop 会核对当前账号 UUID |
 | GET / POST | `/api/vault`、`/api/vault/*` | 本地加密账号库、邮箱授权和验证码；完整接口见 [账号库与邮箱设计](VAULT_API.md) |

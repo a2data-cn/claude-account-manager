@@ -62,6 +62,7 @@ fn health_text(kind: &str) -> (&'static str, &'static str, &'static str) {
         "login_invalid" => ("error", "登录已失效，无法续期", "用这个账号在 Claude Code 里重新登录一次（/login），会自动保存。在那之前切换到它也用不了。"),
         "session_invalid" => ("error", "sessionKey 已失效", "在浏览器里重新登录 claude.ai，复制新的 sessionKey 填到“编辑”里。"),
         "key_invalid" => ("error", "API Key 无效或没有填写", "在“编辑”里换一个有效的 Key。"),
+        "pending_login" => ("info", "有一份更新的登录暂存着，还没核对", "切换到这个账号时会核对并用上；正在运行的 claude 会话退出后点“刷新”也会处理。不用重新登录。"),
         "stale" => ("info", "用量没更新：登录过期了，后台不替不常用的账号续登录", "点“刷新”会续一次；切换到这个账号时也会自动续。"),
         "live_expired" => ("info", "用量没更新：当前登录的 access token 过期了，等 Claude Code 自己续", "在 claude 里发一句话它就会续上；cam 不碰当前正在用的登录。"),
         "network" => ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
@@ -93,7 +94,8 @@ pub fn incident_kind(acc: &Value, new_usage: &Value) -> Option<&'static str> {
 }
 
 /// 出问题那一刻的现场：出口（IP、地区、运营商、IP 类型）、本机环境（时区、语言、代理、VPN、DNS）、几个 claude 会话在跑、环境评分。
-/// 从整份数据算一次，给每个出问题的号共用；只记录不干预（和 cam.py 的 note_incident 一致）
+/// 从整份数据算一次，给每个出问题的号共用；只记录不干预（和 cam.py 的 note_incident 一致）。
+/// sessions 是调用方数好的会话数（claude::sessions_view）：调用方多半拿着数据锁，不在这里查进程表
 pub struct IncidentScene {
     pub region: Value,
     pub env: Value,
@@ -102,7 +104,7 @@ pub struct IncidentScene {
     pub sessions: usize,
 }
 
-pub fn incident_scene(data: &Value) -> IncidentScene {
+pub fn incident_scene(data: &Value, sessions: usize) -> IncidentScene {
     let reg = data
         .get("region")
         .cloned()
@@ -120,7 +122,7 @@ pub fn incident_scene(data: &Value) -> IncidentScene {
         }
         Value::Object(o)
     };
-    let risks = super::health::risk_items(data, true);
+    let risks = super::health::risk_items(data, true, true);
     let score = super::health::risk_score(&risks)
         .get("score")
         .cloned()
@@ -146,7 +148,7 @@ pub fn incident_scene(data: &Value) -> IncidentScene {
         env: pick(&env, &["tz", "locale", "dns", "proxy", "tunnel"]),
         active: active_code_id(data),
         score,
-        sessions: running_claude_processes().len(),
+        sessions,
     }
 }
 
@@ -167,8 +169,10 @@ pub fn push_incident(acc: &mut Value, scene: &IncidentScene, kind: &str, err: &s
 }
 
 /// 把用量报错归类成健康问题的种类；None 表示这不是问题（例如网页号本来就没填 sessionKey）。
-fn health_kind_of_error(err: &str) -> Option<&'static str> {
-    if err.contains("实际属于") {
+pub(crate) fn health_kind_of_error(err: &str) -> Option<&'static str> {
+    if err.contains(PENDING_HELD) {
+        Some("pending_login") // 排在最前：这句话里可能带着“被服务端拒绝”，但结论还没下
+    } else if err.contains("实际属于") {
         Some("wrong_owner")
     } else if err.contains("没有保存凭据") {
         Some("no_credentials")
@@ -261,7 +265,7 @@ const PUBLIC_FIELDS: [&str; 13] = [
 ];
 
 pub fn public_state(store: &Store, data: &Value) -> Value {
-    let risks = super::health::risk_items(data, true);
+    let risks = super::health::risk_items(data, true, true);
     let risk_score = super::health::risk_score(&risks);
     let active = active_code_id(data);
     let active_desktop = data
@@ -389,7 +393,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "linux" => "Linux",
         o => o,
     };
-    let procs = running_claude_processes();
+    let (sessions, busy) = sessions_view();
     json!({
         "version": VERSION, "backend": "desktop", "host": host, "platform": platform,
         "active": data.get("active").cloned().unwrap_or(json!({})), "accounts": accs,
@@ -399,8 +403,8 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "region": super::health::region_view(data),
         "risks": risks,
         "risk_score": risk_score,
-        "sessions": json!({ "count": procs.len(), "busy": !procs.is_empty() && claude_busy() }),  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算
-        "attention": attention_view(!procs.is_empty()),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
+        "sessions": json!({ "count": sessions, "busy": busy }),  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算
+        "attention": attention_view(sessions > 0),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
         "generated_at": now_iso()
     })
 }
@@ -638,7 +642,7 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
     let tid = s(&target, "id").unwrap_or_default().to_string();
     let label = s(&target, "label").unwrap_or("").to_string();
     // 只提醒，不拦：把 warn / bad 的风险点随结果带给前端
-    let risks: Vec<Value> = super::health::risk_items(&data, true)
+    let risks: Vec<Value> = super::health::risk_items(&data, true, true)
         .into_iter()
         .filter(|r| matches!(s(r, "level"), Some("warn") | Some("bad")))
         .collect();
@@ -665,7 +669,7 @@ pub fn api_switch(store: &Store, key: &str, mode: Option<&str>) -> R<Value> {
             "message": format!("有 {} 个 claude 会话在运行，等它们退出后会自动切换到 {}", procs.len(), label)
         }));
     }
-    let r = switch_account(store, key)?;
+    let r = switch_account(store, key, true)?; // 到这里要么没有会话在跑，要么用户选了“现在就切”
     let procs = if r.changed {
         running_claude_processes()
     } else {

@@ -244,11 +244,18 @@ button { font: inherit; color: inherit; }
       <div class="chips">${sug.map((n) => `<button type="button" data-nick="${esc(n)}">${esc(n)}</button>`).join("")}</div>`;
   }
 
-  async function api(method, path, body) {
-    const res = await fetch(path, { method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body) });
-    let data = null;
-    try { data = await res.json(); } catch (_) {}
+  // ms：这么久没回应就放弃。只给定时读取的接口用：后端卡住、电脑睡醒后连接半断时，那一次请求不结束，后面的定时刷新就全被它挡住了
+  async function api(method, path, body, ms) {
+    const ctl = ms ? new AbortController() : null;
+    const timer = ctl && setTimeout(() => ctl.abort(), ms);
+    let res, data = null;
+    try {
+      res = await fetch(path, { method, headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body), signal: ctl ? ctl.signal : undefined });
+      try { data = await res.json(); } catch (_) {}
+    } catch (e) {
+      throw e && e.name === "AbortError" ? new Error("后端没有响应") : e;
+    } finally { clearTimeout(timer); }
     if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
     return data;
   }
@@ -500,7 +507,8 @@ button { font: inherit; color: inherit; }
     };
     const group = (list, label, wide) => list.length ? `<div class="sec">${label}</div>${wide ? `<div class="pills one">${list.map(pill).join("")}</div>` : `<div class="cards">${list.map(card).join("")}</div>`}` : "";
     const sc = state.risk_score, reg = state.region || {};
-    const left = (reg.loc ? `出口 ${esc(reg.loc)}${reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}` : "")
+    // 最近一次环境检测没连上：留着的是上一次查到的出口，标一个问号（详情在管理面板的环境区块）
+    const left = (reg.loc ? `<span${reg.failed_at ? ` title="最近一次环境检测没连上，这是${ago(reg.checked_at)}查到的"` : ""}>出口 ${esc(reg.loc)}${reg.failed_at ? " ?" : reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}</span>` : "")
       + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
     const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
     paint({ light: lightHtml(cur, pos), cur: curTile, code: group(codeOthers, "其它 Claude Code 账号 · 点一下切换"),
@@ -513,7 +521,7 @@ button { font: inherit; color: inherit; }
     if (Date.now() - loadedAt < 1500) return Promise.resolve();
     loading = (async () => {
       try {
-        state = await api("GET", "/api/state"); loadedAt = Date.now();
+        state = await api("GET", "/api/state", undefined, 15000); loadedAt = Date.now();
         if (stamp && state.code_stamp && state.code_stamp !== stamp) { location.reload(); return; }  // 弹窗常驻：代码更新、cam serve 换了新版后整页重新加载一次
         stamp = state.code_stamp || stamp;
         render();
@@ -525,7 +533,7 @@ button { font: inherit; color: inherit; }
   }
   async function loadLocal() {  // 本机记录要扫日志文件，比 /api/state 慢：等卡片先画出来再要，弹窗没显示时不要
     if (document.hidden) return;
-    try { local = await api("GET", "/api/local-usage?days=1"); } catch (_) { local = { rows: [] }; }
+    try { local = await api("GET", "/api/local-usage?days=1", undefined, 30000); } catch (_) { local = { rows: [] }; }
     render();
   }
   function say(text, cls) {  // 成功的提示 2.5 秒，出错的 6 秒

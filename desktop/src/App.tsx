@@ -24,6 +24,10 @@ import { StatusLight } from "./components/StatusLight";
 import type { Account, RegionInfo, ServiceCheckItem, State, SwitchResult } from "./types";
 
 type Tab = "accounts" | "vault" | "settings";
+/** 这几项变了要整份换状态：等着的切换、后端的提醒、当前用的是哪些号 */
+const headOf = (s: State) => JSON.stringify([s.pending_switch ?? null, s.warning ?? null, s.accounts.filter((a) => a.is_active).map((a) => a.id)]);
+/** 红绿灯跟着走的两项：claude 会话（几个、在不在执行）、是不是弹着确认在等你 */
+const lightOf = (s: State) => JSON.stringify([s.sessions ?? null, s.attention ?? null]);
 const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 /** 检测结果分组（和手机面板同样的分组） */
@@ -136,6 +140,7 @@ const ENV_ROWS: [string, string, string[]][] = [
   ["change", "出口变化", ["region_change"]],
   ["account", "账号", ["account_regions", "accounts"]],
   ["service", "Claude 服务", ["api", "web", "tls", "status"]],
+  ["stale", "检测时间", ["env_stale", "env_failed"]], // 结果是一小时前的、或者最近一次没连上才有这一行
 ];
 const LEVEL_RANK: Record<string, number> = { bad: 3, warn: 2, info: 1, ok: 0 };
 
@@ -157,14 +162,32 @@ function ExitCard({ reg }: { reg: RegionInfo | null | undefined }) {
     );
   }
   const off = reg.lookup_mode === "off";
-  const status =
-    reg.status === "supported" ? (
-      <span className="chip c-ok">支持名单内</span>
-    ) : reg.status === "unsupported" ? (
-      <span className="chip st-error">不在支持名单</span>
-    ) : (
-      <span className="chip st-warn">查不到</span>
-    );
+  // 最近一次检测没连上：上面留着的是以前查到的出口（从没查到过就是“查不到”），在这里说清楚是哪一次的
+  const failed = !!reg.failed_at;
+  const kept = failed && !!reg.loc;
+  const status = (
+    <>
+      {reg.status === "supported" ? (
+        <span className="chip c-ok">支持名单内</span>
+      ) : reg.status === "unsupported" ? (
+        <span className="chip st-error">不在支持名单</span>
+      ) : (
+        <span className="chip st-warn">查不到</span>
+      )}
+      {kept && <span className="chip st-warn">最近一次没连上</span>}
+    </>
+  );
+  const source = reg.meta_source ? " · 数据来自 " + reg.meta_source : "";
+  const when: ReactNode = failed ? (
+    <>
+      <span className="bad">{ago(reg.failed_at)}没连上</span>
+      {(reg.fail_count ?? 0) > 1 ? `，连续 ${reg.fail_count} 次` : ""}
+      {kept ? ` · 上面是上一次查到的（${ago(reg.checked_at)}）` : ""}
+      <span className="sub">后台过一会儿自动重试，换了网络也会自动重测；也可以点“重新检测”</span>
+    </>
+  ) : (
+    `${ago(reg.checked_at)} · 后台每隔几分钟自动检测，换了网络也会自动重测${source}`
+  );
   const where = [reg.loc ? regName(reg.loc, reg.loc_name) : "", reg.city || "", reg.org || ""].filter(Boolean).join(" · ");
   const native =
     reg.reg_loc && reg.loc ? (reg.reg_loc === reg.loc ? <span className="chip c-ok">原生 IP</span> : <span className="chip st-warn">广播 IP</span>) : null;
@@ -214,7 +237,7 @@ function ExitCard({ reg }: { reg: RegionInfo | null | undefined }) {
           </>,
         ],
     reg.warp ? ["WARP", "出口经过 Cloudflare WARP / Zero Trust，上面是 WARP 的出口，不是本机网络的真实出口"] : null,
-    ["检测", `${ago(reg.checked_at)} · 后台每隔几分钟自动检测${reg.meta_source ? " · 数据来自 " + reg.meta_source : ""}`],
+    ["检测", when],
   ];
   return (
     <div className="panel ecard">
@@ -245,7 +268,7 @@ function ScoreCard({ state }: { state: State }) {
   const pct = has && sc ? sc.score : 0;
   const risks = state.risks ?? [];
   const okText: Record<string, string> = {
-    region: `${regName(reg?.loc, reg?.loc_name)} · 在 Anthropic 支持名单内`,
+    region: `${regName(reg?.loc, reg?.loc_name)} · 在 Anthropic 支持名单内${reg?.failed_at ? `（${ago(reg.checked_at)}查到的）` : ""}`,
     iptype: reg?.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg?.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
     proxy: "没发现代理，默认路由没走隧道",
     local: "没发现和出口地区不一致的设置",
@@ -282,7 +305,7 @@ function ScoreCard({ state }: { state: State }) {
         </div>
         {has ? (
           <dl className="kv">
-            {rows.map(({ title, hits, ok }) => {
+            {rows.filter((row) => row.hits.length || row.ok).map(({ title, hits, ok }) => {
               const level = hits.reduce<string>((m, x) => (LEVEL_RANK[x.level] > LEVEL_RANK[m] ? x.level : m), "ok");
               return (
                 <Fragment key={title}>
@@ -339,6 +362,10 @@ function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
+  const stateRef = useRef<State | null>(null);
+  stateRef.current = state;
+  const stateSeq = useRef(0); // 每次整份换状态加一：在这之前问的 /api/state 回来了也不要
+  const lightPolling = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const busyRef = useRef(false);
@@ -373,14 +400,47 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToastMsg(null), bad ? 5000 : 2600);
   }, []);
 
+  /** 操作接口直接给回来的新状态 */
+  const putState = useCallback((s: State) => {
+    stateSeq.current += 1;
+    setState(s);
+  }, []);
+
   const load = useCallback(async () => {
+    const seq = ++stateSeq.current;
     try {
-      setState(await api<State>("GET", "/api/state"));
+      const s = await api<State>("GET", "/api/state");
+      if (seq !== stateSeq.current) return; // 后问的那次（或某个操作的结果）已经用上了：先问后到的这份是旧的
+      setState(s);
       setError(null);
     } catch (e) {
-      setError((e as Error).message);
+      if (seq === stateSeq.current) setError((e as Error).message);
     }
   }, []);
+
+  // 红绿灯要跟上 Claude Code 的状态（在不在执行、是不是弹着确认等你）：窗口开着时每 15 秒问一次，变了才换，而且只换这两项，
+  // generated_at 不动，本机用量和规则不会跟着重新取。等着的切换有变化、当前号换了、后端的提醒变了，才整份换掉（和手机面板一样）
+  const pollLight = useCallback(async () => {
+    if (document.hidden || lightPolling.current || busyRef.current) return;
+    if (!stateRef.current) return void load(); // 一开始就没问到：隔一会儿再试
+    lightPolling.current = true;
+    const seq = stateSeq.current;
+    try {
+      const s = await api<State>("GET", "/api/state");
+      const cur = stateRef.current;
+      if (seq !== stateSeq.current || busyRef.current || !cur) return; // 这期间状态整份换过，或者正在做别的操作：这份不用了
+      if (headOf(s) !== headOf(cur)) {
+        putState(s);
+        setError(null);
+      } else if (lightOf(s) !== lightOf(cur)) {
+        setState((p) => p && { ...p, sessions: s.sessions, attention: s.attention });
+      }
+    } catch {
+      /* 这一轮没问到：灯先不动，下一轮再问 */
+    } finally {
+      lightPolling.current = false;
+    }
+  }, [load, putState]);
 
   useEffect(() => {
     load();
@@ -389,6 +449,7 @@ export default function App() {
       onEvent<{ message: string; bad?: boolean }>("toast", (p) => toast(p.message, !!p.bad)),
     ];
     const t = window.setInterval(() => tick((n) => n + 1), 60000); // 倒计时每分钟更新
+    const light = window.setInterval(() => void pollLight(), 15000);
     const vis = () => !document.hidden && load();
     document.addEventListener("visibilitychange", vis);
     // 页面上任何一段命令（<code>），点一下就复制；账号库里显示出来的密码有自己的“复制密码”按钮，不走这里
@@ -402,10 +463,11 @@ export default function App() {
     return () => {
       unsubs.forEach((p) => p.then((f) => f()));
       window.clearInterval(t);
+      window.clearInterval(light);
       document.removeEventListener("visibilitychange", vis);
       document.removeEventListener("click", copyCode);
     };
-  }, [load, toast]);
+  }, [load, toast, pollLight]);
 
   // 当前账号最前；同类账号按 5 小时余量从多到少
   const sorted = useMemo(() => {
@@ -452,7 +514,7 @@ export default function App() {
   const refresh = (id?: string) =>
     run(id || "all", async () => {
       const s = await api<State>("POST", "/api/refresh", id ? { id } : {});
-      setState(s);
+      putState(s);
       const errs = s.accounts.filter((a) => (!id || a.id === id) && a.usage?.error).length;
       toast(errs ? `已刷新，${errs} 个账号没拿到用量` : id && s.accounts.find((a) => a.id === id)?.kind === "claude_desktop" ? "已重新读取本地额度记录" : "用量已更新");
     });
@@ -471,7 +533,7 @@ export default function App() {
 
   const cancelPending = () =>
     run("pending", async () => {
-      setState(await api<State>("DELETE", "/api/pending-switch"));
+      putState(await api<State>("DELETE", "/api/pending-switch"));
       toast("已取消等待");
     });
 
@@ -484,14 +546,14 @@ export default function App() {
 
   const saveEdit = (a: Account, v: EditValues) =>
     run(a.id, async () => {
-      setState(await api<State>("PATCH", `/api/accounts/${a.id}`, v));
+      putState(await api<State>("PATCH", `/api/accounts/${a.id}`, v));
       setEditing(null);
       toast("已保存");
     });
 
   const remove = (a: Account) =>
     run(a.id, async () => {
-      setState(await api<State>("DELETE", `/api/accounts/${a.id}`));
+      putState(await api<State>("DELETE", `/api/accounts/${a.id}`));
       setRemoving(null);
       setEditing(null);
       if (selectedId === a.id) setSelectedId(null);
@@ -503,7 +565,7 @@ export default function App() {
     run("detect", async () => {
       const before = new Set((state?.accounts ?? []).map((a) => a.id));
       const s = await api<State>("POST", "/api/accounts", { kind: "claude_code" });
-      setState(s);
+      putState(s);
       const added = s.accounts.find((a) => !before.has(a.id));
       const cur = s.accounts.find((a) => a.kind === "claude_code" && a.is_active);
       if (added) {
@@ -516,7 +578,7 @@ export default function App() {
 
   const add = (v: AddValues) =>
     run("add", async () => {
-      setState(await api<State>("POST", "/api/accounts", v));
+      putState(await api<State>("POST", "/api/accounts", v));
       setAdding(false);
       toast(
         v.kind === "claude_code"
@@ -572,7 +634,7 @@ export default function App() {
         )}
       </header>
 
-      {tab === "vault" ? <AccountVault accounts={state?.accounts || []} onAccountsChanged={setState} toast={toast} /> : tab === "settings" ? (
+      {tab === "vault" ? <AccountVault accounts={state?.accounts || []} onAccountsChanged={putState} toast={toast} /> : tab === "settings" ? (
         <>
           <PhoneAccess toast={toast} />
           <section className="block">

@@ -70,7 +70,7 @@ export interface Account {
 }
 
 export interface HealthIssue {
-  kind: string; // no_credentials / wrong_owner / login_invalid / session_invalid / key_invalid / stale / network / usage_error / expired
+  kind: string; // no_credentials / wrong_owner / login_invalid / session_invalid / key_invalid / pending_login / stale / live_expired / network / usage_error / expired
   level: "info" | "warn" | "error";
   text: string;
   advice: string;
@@ -156,6 +156,8 @@ export interface RegionInfo {
   ip_type?: "residential" | "hosting" | "proxy" | "tor" | "mobile" | null; // 数据库判定的 IP 类型，null = 数据源没有标记
   meta_source?: string | null; // 运营商信息来自哪家（ipapi.is / ipinfo.io / Cloudflare / ip-api.com），界面上注明来源
   lookup_mode?: "auto" | "ip-api" | "off" | null; // 检测时的外部 IP 查询设置
+  failed_at?: string | null; // 最近一次检测没连上的时间；有它时上面留着的是以前查到的出口
+  fail_count?: number; // 连续几次没连上
 }
 
 /** GET / PUT /api/privacy：外部 IP 查询设置和会访问哪些服务 */

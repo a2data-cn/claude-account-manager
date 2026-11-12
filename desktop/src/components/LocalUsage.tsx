@@ -25,9 +25,17 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
   const [rows, setRows] = useState<LocalRow[] | null>(null);
 
   useEffect(() => {
+    let stale = false; // 换了范围或数据又更新了：先问后到的那份是旧的，不要盖上去
     api<{ rows: LocalRow[] }>("GET", `/api/local-usage?days=${range}`)
-      .then((r) => setRows(r.rows))
-      .catch(() => setRows(null));
+      .then((r) => {
+        if (!stale) setRows(r.rows);
+      })
+      .catch(() => {
+        if (!stale) setRows(null);
+      });
+    return () => {
+      stale = true;
+    };
   }, [stamp, range]);
 
   const pick = (v: string) => {
