@@ -975,25 +975,25 @@ class CamTest(unittest.TestCase):
             self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
         finally:
             os.environ.pop("CAM_NO_RISK_PROMPT")
-        # 出口回到美国但时区指向香港：75 分 → 60–89 档只提醒不问；把 confirm 阈值调到 80 后变成要问 y/N
+        # 出口回到美国但时区指向香港：历史出口变化只记录，时区和账号地区仍扣分，继续验证各档提醒
         MockAnthropic.trace_loc = "US"
         os.environ["CAM_TEST_TZ"] = "Asia/Hong_Kong=HK"
         self.cam.check_region(store, max_age=0)  # 时区随出口一起缓存，改了要重新检测
         try:
             sc = self.cam.risk_score(self.cam.risk_items(self.data()))
-            self.assertEqual(sc["score"], 40)  # 时区指向不支持地区 25 + 出口变化 15 + 当前账号两地使用 20
+            self.assertEqual(sc["score"], 55)  # 时区指向不支持地区 25 + 当前账号两地使用 20；恢复后的出口变化不扣分
             prefs = self.cam.risk_prefs(self.data())
             self.assertEqual(self.cam.launch_tier(60, "supported", prefs), "remind")
             self.assertEqual(self.cam.launch_tier(59, "supported", prefs), "confirm")
             self.assertEqual(self.cam.launch_tier(29, "supported", prefs), "strong")
             self.assertEqual(self.cam.launch_tier(100, "unsupported", prefs), "strong")
             self.assertEqual(self.cam.launch_tier(95, "supported", prefs), "ok")
-            # 40 分：默认 60 以下问 y/N，默认不继续
+            # 55 分：默认 60 以下问 y/N，默认不继续
             asked.clear()
             self.assertFalse(self.cam.risk_prompt_before_launch(store, ask=ask_with("n"), interactive=True))
             self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with("Y"), interactive=True))
             self.assertIn("[y/N]", asked[-1])
-            # 阈值调到 confirm 30 / strong 20 后，40 分只提醒不问
+            # 阈值调到 confirm 30 / strong 20 后，55 分只提醒不问
             self.assertEqual(self.run_cam("risk", "--confirm", "30", "--strong", "20"), 0)
             asked.clear()
             self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=ask_with(""), interactive=True))
@@ -2761,11 +2761,12 @@ class CamTest(unittest.TestCase):
             self.assertEqual(risks_with(CAM_TEST_LOCALE="ja-JP")["locale"]["level"], "info")
         finally:
             os.environ["CAM_TEST_LOCALE"] = "en_US"
-        # DNS 解析器：局域网和任播的不提；不支持地区的公共 DNS 与出口不一致 → warn；和出口同国不提
+        # DNS 配置不代表实际解析出口：地区不一致仅记录，不扣分；局域网、任播、同国不提
         try:
             self.assertNotIn("dns_resolver", risks_with(CAM_TEST_DNS="192.168.1.1,8.8.8.8"))
             d = risks_with(CAM_TEST_DNS="192.168.1.1,223.5.5.5")["dns_resolver"]
-            self.assertEqual(d["level"], "warn")
+            self.assertEqual(d["level"], "info")
+            self.assertEqual(self.cam.risk_score([d])["score"], 100)
             self.assertIn("223.5.5.5（阿里 DNS，CN（中国大陆））与出口地区 SG（新加坡） 不一致", d["text"])
             self.assertEqual(risks_with(CAM_TEST_DNS="168.95.1.1")["dns_resolver"]["level"], "info")
         finally:
@@ -2859,7 +2860,10 @@ class CamTest(unittest.TestCase):
         # 切换接口带上提醒，但照样切；切过去的账号也记了一笔当前地区
         res = self.cam.api_switch(store, "A")
         self.assertTrue(res["changed"])
-        self.assertIn("region_change", [r["kind"] for r in res["risks"]])
+        self.assertNotIn("region_change", [r["kind"] for r in res["risks"]])  # 切换接口只带 warn / bad
+        self.assertIn("account_regions", [r["kind"] for r in res["risks"]])
+        change = next(r for r in self.cam.risk_items(self.data()) if r["kind"] == "region_change")
+        self.assertEqual(change["level"], "info")  # 面板仍保留网络变化记录
         self.assertEqual(self.data()["active"]["claude_code"], a_id)
         a = next(x for x in self.data()["accounts"] if x["id"] == a_id)
         self.assertEqual(a["regions"][0]["loc"], "SG")
@@ -4954,7 +4958,9 @@ exit 2""")
         with socket.create_connection(("127.0.0.1", port), timeout=5) as sk:  # 负的 Content-Length：直接拒绝，不挂住线程
             sk.sendall(f"POST /api/refresh HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Length: -1\r\n\r\n".encode())
             self.assertIn(b" 400 ", sk.recv(200))
-        self.assertEqual(call("PUT", "/api/menubar", {"mode": "stream"})[0], 400)  # 没装插件：不跑安装脚本
+        # macOS 的 defaults 不跟着临时 HOME 变，显式隔离插件目录，避免读到真实 SwiftBar 安装。
+        with mock.patch.dict(os.environ, {"CAM_SWIFTBAR_DIR": os.path.join(self.tmp, "no-swiftbar-plugin")}):
+            self.assertEqual(call("PUT", "/api/menubar", {"mode": "stream"})[0], 400)  # 没装插件：不跑安装脚本
         # 卡片的“切换前确认”开关：记在 prefs 里，卡片再打开还在；只能是 true / false
         self.assertEqual(call("PUT", "/api/menubar", {"confirm_switch": "yes"})[0], 400)
         st, body, _ = call("PUT", "/api/menubar", {"confirm_switch": True})
@@ -5059,6 +5065,27 @@ class SharedFixtureTest(unittest.TestCase):
             got = self.cam.desktop_login_state(c["dir_exists"], c["token_cache"], c["known_account"], c["cookies"],
                                                c["cookie_files"], c["now"])
             self.assertEqual(got, c["expect"], c["name"])
+
+    def test_environment_risk(self):
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+        raw = json.dumps(shared("environment_risk.json"))
+        fx = json.loads(raw.replace("$past_day", (now - dt.timedelta(hours=25)).isoformat()).replace("$now", now.isoformat()))
+        for c in fx["cases"]:
+            with self.subTest(c["name"]):
+                before = json.dumps(c["data"], sort_keys=True)
+                items = self.cam.risk_items(c["data"], note_age=False)
+                self.assertEqual({i["kind"]: i["level"] for i in items}, c["expect"]["levels"])
+                self.assertEqual(self.cam.risk_score(items)["score"], c["expect"]["score"])
+                self.assertEqual(json.dumps(c["data"], sort_keys=True), before)
+                by_kind = {i["kind"]: i for i in items}
+                for kind, text in c["expect"].get("contains", {}).items():
+                    self.assertIn(text, by_kind[kind]["text"] + by_kind[kind]["advice"])
+        for c in fx["proxy_display"]:
+            items = {i["kind"]: i for i in self.cam.proxy_vpn_items(c["env"])}
+            for field in ("text", "advice"):
+                for kind, text in c["expect_" + field].items():
+                    self.assertIn(text, items[kind][field], c["name"])
 
     def test_find_account(self):
         fx = shared("find_account.json")

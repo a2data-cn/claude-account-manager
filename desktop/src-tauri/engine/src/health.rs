@@ -1082,7 +1082,7 @@ pub fn proxy_vpn_items(env: &Value) -> Vec<Value> {
         })
         .unwrap_or_default();
     let mut out = vec![if parts.is_empty() {
-        json!({"kind": "proxy", "level": "ok", "text": "代理：无（直连）", "advice": "直连，出口地区就是本机网络的出口"})
+        json!({"kind": "proxy", "level": "ok", "text": "代理：未配置显式代理", "advice": "没有代理环境变量或系统代理设置；TUN、透明代理仍可能接管流量，不能据此判断为直连"})
     } else {
         json!({"kind": "proxy", "level": "info", "text": format!("代理：{}", parts.join("；")),
                "advice": "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口"})
@@ -1095,8 +1095,8 @@ pub fn proxy_vpn_items(env: &Value) -> Vec<Value> {
         Some(t) => json!({"kind": "vpn", "level": "info",
                           "text": format!("VPN：默认路由走 {}（{}）", t[0].as_str().unwrap_or("?"), t[1].as_str().unwrap_or("")),
                           "advice": "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。"}),
-        None => json!({"kind": "vpn", "level": "ok", "text": "VPN：默认路由没有经过隧道接口",
-                       "advice": "只看本机默认路由；透明代理和路由器上的 VPN 看不出来"}),
+        None => json!({"kind": "vpn", "level": "ok", "text": "VPN / TUN：默认路由未检出隧道",
+                       "advice": "只检查默认路由；TUN 可以通过更具体的路由接管流量，未检出不代表 TUN 未开启。透明代理和路由器上的 VPN 也可能无法识别"}),
     });
     out
 }
@@ -2154,12 +2154,22 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
     {
         if let Some(t) = parse_time(changed) {
             if now.signed_duration_since(t).num_seconds() < REGION_CHANGE_HOURS * 3600 {
+                // 网络探测不等于账号登录；当前出口已支持时只保留历史，避免恢复后仍因旧出口扣分。
+                let supported_change = region_status(Some(l)) == "supported";
                 add_plain(
                     "region_change",
-                    "warn",
-                    format!("出口地区变化：{} → {}（{}）", region_label(Some(prev)), region_label(Some(l)), fmt_ago(changed)),
-                    "网络环境变了（出差、换网络、开关 VPN 或代理都会这样）。Anthropic 按使用者实际所在地判断是否支持，\
-                     同一账号短时间内从多个地区使用也容易触发风控。确认现在人所在的地区在支持名单内再继续。",
+                    if supported_change { "info" } else { "warn" },
+                    format!(
+                        "出口地区变化：{} → {}（{}）",
+                        region_label(Some(prev)),
+                        region_label(Some(l)),
+                        fmt_ago(changed)
+                    ),
+                    if supported_change {
+                        "当前出口在支持名单内。换网络、出差或开关 TUN / 代理都可能造成变化；这是网络检测记录，不等于账号异地登录。保留 24 小时供排查，不额外扣分；账号使用地区另列提示。"
+                    } else {
+                        "网络检测出口发生变化，当前出口不在支持名单内。请结合当前出口地区和 Claude 服务实测判断；这条记录不等于账号异地登录，账号使用地区另列提示。"
+                    },
                 );
             }
         }
@@ -2246,28 +2256,19 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
                 continue;
             }
             let text = format!(
-                "DNS 解析器 {}（{}，{}）与出口地区 {} 不一致",
+                "系统 DNS 配置 {}（{}，{}）与出口地区 {} 不一致（仅配置）",
                 s(&d, "ip").unwrap_or("?"),
                 s(&d, "name").unwrap_or("公共 DNS"),
                 region_label(Some(c)),
                 region_label(Some(l))
             );
-            if region_status(Some(c)) == "unsupported" {
-                add(
-                    "dns_resolver",
-                    "warn",
-                    text,
-                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。\
-                     如果人确实已经在支持地区，多半是以前手动填的 DNS 没改回来：系统网络设置里把 DNS 改回自动获取（或 1.1.1.1 / 8.8.8.8 这类任播 DNS）。",
-                );
-            } else {
-                add(
-                    "dns_resolver",
-                    "info",
-                    text,
-                    "出差或代理分流都会这样；人所在地在支持名单内就没问题。",
-                );
-            }
+            add(
+                "dns_resolver",
+                "info",
+                text,
+                "TUN / 代理可能接管 DNS；这里只读取系统配置，未测实际解析出口，不能据此判断 DNS 泄漏或所在地，不扣分。\
+                 解析是否成功请看 DNS 实测项；需要排查旧的手动配置时，可在系统网络设置中恢复自动获取。",
+            );
             break;
         }
     }
@@ -2455,7 +2456,7 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("proxy_ip", "warn", 25),
     ("ipv6_mismatch", "warn", 15),
     ("dns_resolver", "warn", 15),
-    ("dns_resolver", "info", 3),
+    ("dns_resolver", "info", 0),
     ("ip_origin", "info", 5),
     ("ipv6", "info", 0),
     ("dns_servers", "info", 0),
@@ -3176,9 +3177,9 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         add(
             "dns_servers",
             "info",
-            format!("DNS 解析器：{}", parts.join("；")),
-            "局域网 DNS 最终走路由器配置的上游；Google / Cloudflare 这类任播 DNS 全球有节点，不代表位置；某国公共 DNS 说明本机网络大概率在那个国家。\
-             人在支持地区的话，用当地网络自动获取的 DNS 或任播 DNS 即可；出差前手动填过国内 DNS 的，到了支持地区记得在系统网络设置里改回自动获取。只读本机配置，没有做泄漏探测",
+            format!("系统 DNS 配置：{}", parts.join("；")),
+            "这是系统配置中的解析器，不一定是请求实际使用的 DNS；TUN / 代理可能接管解析。未做 DNS 出口或泄漏探测，\
+             不能用解析器的登记地区推断所在地；解析是否成功请看 DNS 实测项。",
         );
     }
     // api.anthropic.com

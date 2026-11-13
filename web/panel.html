@@ -688,8 +688,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
           <li><span class="sm"><svg class="mring warn" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="15.1"/></svg></span><span class="t"><b>70–89</b>有风险</span></li>
           <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="33.9"/></svg></span><span class="t"><b>70 以下</b>高风险</span></li>
         </ul>
-        <div class="tagrow"><span class="lab">扣分项</span><span class="tg">出口不在支持名单</span><span class="tg">机房或代理 IP</span><span class="tg">代理 / VPN</span><span class="tg">时区语言和出口不一致</span><span class="tg">出口变化</span><span class="tg">同一账号多地区</span></div>
-        <p class="hint">100 分起扣，每项扣一些。只提醒，不拦任何操作。</p></div>
+        <div class="tagrow"><span class="lab">扣分项</span><span class="tg">出口不在支持名单</span><span class="tg">机房或代理 IP</span><span class="tg">代理 / VPN</span><span class="tg">时区语言和出口不一致</span><span class="tg">切换到不支持地区的出口变化</span><span class="tg">同一账号多地区</span></div>
+        <p class="hint">100 分起扣，每项扣一些。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。只提醒，不拦任何操作。</p></div>
       <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>检测结果里的标记<span class="hint">“全面体检”“重新检测”列出来的每一行前面</span></h3>
         <ul class="lgd row">
           <li><span class="sm"><span class="mark ok">正常</span></span><span class="t">这一项没问题</span></li>
@@ -1212,7 +1212,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const okText = {
       region: `${regName(reg.loc, reg.loc_name)} · 在 Anthropic 支持名单内${reg.failed_at ? `（${ago(reg.checked_at)}查到的）` : ""}`,
       iptype: reg.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
-      proxy: "没发现代理，默认路由没走隧道",
+      proxy: "未检出显式代理或默认隧道；TUN 分流仍可能生效",
       local: "没发现和出口地区不一致的设置",
       dns: "没发现问题",
       change: reg.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${esc(reg.prev_loc)} 换到 ${esc(reg.loc)}，已过了观察期` : "最近没变",
@@ -1271,7 +1271,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       : `<p class="hint" style="margin:0">检测过一次后这里按项列出：出口地区、IP 类型、代理 / VPN、时区语言、DNS、出口变化、账号地区、Claude 服务。</p>`;
     return `<div class="panel ecard"><h3><span class="eico"><svg><use href="#i-shield"/></svg></span>环境评分 <span class="chip">只提醒，不拦任何操作</span></h3>
       <div class="score-row">${ring}${rows}</div>
-      <p class="hint">100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70 以下高风险。${has ? esc(sc.advice) : ""}</p></div>`;
+      <p class="hint">100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、切换到不支持地区的出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70 以下高风险。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。${has ? esc(sc.advice) : ""}</p></div>`;
   }
   function envCard(st) {
     const reg = st.region || {};

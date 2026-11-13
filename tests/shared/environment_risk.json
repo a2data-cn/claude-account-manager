@@ -1,0 +1,362 @@
+{
+  "cases": [
+    {
+      "name": "只有静态 DNS 地区差异不能认定泄漏",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "114.114.114.114",
+                "name": "114DNS",
+                "country": "CN",
+                "private": false
+              }
+            ],
+            "proxy": [],
+            "tunnel": null
+          }
+        }
+      },
+      "expect": {
+        "levels": {
+          "dns_resolver": "info"
+        },
+        "score": 100,
+        "contains": {
+          "dns_resolver": "未测实际解析出口"
+        }
+      }
+    },
+    {
+      "name": "TUN 下静态 DNS 不重复扣分，隧道提示仍保留",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "114.114.114.114",
+                "name": "114DNS",
+                "country": "CN",
+                "private": false
+              }
+            ],
+            "proxy": [],
+            "tunnel": [
+              "utun4",
+              "VPN / 隧道接口"
+            ]
+          }
+        }
+      },
+      "expect": {
+        "levels": {
+          "vpn": "info",
+          "dns_resolver": "info"
+        },
+        "score": 90
+      }
+    },
+    {
+      "name": "显式代理下静态 DNS 仅作信息",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "114.114.114.114",
+                "name": "114DNS",
+                "country": "CN",
+                "private": false
+              }
+            ],
+            "proxy": [
+              "HTTPS_PROXY=http://127.0.0.1:7890"
+            ],
+            "tunnel": null
+          }
+        }
+      },
+      "expect": {
+        "levels": {
+          "proxy": "info",
+          "dns_resolver": "info"
+        },
+        "score": 95
+      }
+    },
+    {
+      "name": "真实 DNS 解析失败仍扣分",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "114.114.114.114",
+                "name": "114DNS",
+                "country": "CN",
+                "private": false
+              }
+            ],
+            "proxy": [],
+            "tunnel": null
+          }
+        },
+        "service_status": {
+          "checked_at": "$now",
+          "items": [
+            {
+              "kind": "dns",
+              "level": "bad",
+              "text": "DNS：解析失败",
+              "advice": ""
+            }
+          ]
+        }
+      },
+      "expect": {
+        "levels": {
+          "dns": "bad",
+          "dns_resolver": "info"
+        },
+        "score": 80
+      }
+    },
+    {
+      "name": "API 403 仍扣分",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "114.114.114.114",
+                "name": "114DNS",
+                "country": "CN",
+                "private": false
+              }
+            ],
+            "proxy": [],
+            "tunnel": null
+          }
+        },
+        "service_status": {
+          "checked_at": "$now",
+          "items": [
+            {
+              "kind": "api",
+              "level": "bad",
+              "text": "HTTP 403",
+              "advice": ""
+            }
+          ]
+        }
+      },
+      "expect": {
+        "levels": {
+          "api": "bad",
+          "dns_resolver": "info"
+        },
+        "score": 60
+      }
+    },
+    {
+      "name": "实测双栈出口不一致仍扣分",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "114.114.114.114",
+                "name": "114DNS",
+                "country": "CN",
+                "private": false
+              }
+            ],
+            "proxy": [],
+            "tunnel": null
+          },
+          "v4_loc": "SG",
+          "v6_loc": "CN",
+          "v6_ip": "2001:db8::1"
+        }
+      },
+      "expect": {
+        "levels": {
+          "ipv6_mismatch": "warn",
+          "dns_resolver": "info"
+        },
+        "score": 85
+      }
+    },
+    {
+      "name": "支持地区之间的网络变化只记录",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "prev_loc": "US",
+          "checked_at": "$now",
+          "changed_at": "$now"
+        }
+      },
+      "expect": {
+        "levels": {
+          "region_change": "info"
+        },
+        "score": 100,
+        "contains": {
+          "region_change": "不等于账号异地登录"
+        }
+      }
+    },
+    {
+      "name": "出口恢复到支持地区后只保留历史，不继续扣旧出口的分",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "prev_loc": "CN",
+          "checked_at": "$now",
+          "changed_at": "$now"
+        }
+      },
+      "expect": {
+        "levels": {
+          "region_change": "info"
+        },
+        "score": 100,
+        "contains": {
+          "region_change": "不等于账号异地登录"
+        }
+      }
+    },
+    {
+      "name": "当前不支持地区仍提醒并扣分",
+      "data": {
+        "region": {
+          "loc": "CN",
+          "prev_loc": "US",
+          "checked_at": "$now",
+          "changed_at": "$now"
+        }
+      },
+      "expect": {
+        "levels": {
+          "region": "warn",
+          "region_change": "warn"
+        },
+        "score": 25,
+        "contains": {
+          "region_change": "不等于账号异地登录"
+        }
+      }
+    },
+    {
+      "name": "超过 24 小时不再显示出口变化，原始记录保留",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "prev_loc": "US",
+          "checked_at": "$now",
+          "changed_at": "$past_day"
+        }
+      },
+      "expect": {
+        "levels": {},
+        "score": 100
+      }
+    },
+    {
+      "name": "网络变化不重复扣分，账号多地区提示仍保留",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "prev_loc": "US",
+          "checked_at": "$now",
+          "changed_at": "$now"
+        },
+        "active": {
+          "claude_code": "a"
+        },
+        "accounts": [
+          {
+            "id": "a",
+            "kind": "claude_code",
+            "label": "测试账号",
+            "regions": [
+              {
+                "loc": "US",
+                "at": "$now"
+              },
+              {
+                "loc": "SG",
+                "at": "$now"
+              }
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "levels": {
+          "region_change": "info",
+          "account_regions": "warn"
+        },
+        "score": 80
+      }
+    },
+    {
+      "name": "支持地区 DNS 配置差异也不扣分",
+      "data": {
+        "region": {
+          "loc": "SG",
+          "checked_at": "$now",
+          "env": {
+            "dns": [
+              {
+                "ip": "168.95.1.1",
+                "name": "HiNet",
+                "country": "TW",
+                "private": false
+              }
+            ],
+            "proxy": [],
+            "tunnel": null
+          }
+        }
+      },
+      "expect": {
+        "levels": {
+          "dns_resolver": "info"
+        },
+        "score": 100
+      }
+    }
+  ],
+  "proxy_display": [
+    {
+      "name": "未配置显式代理时不宣称直连或 TUN 关闭",
+      "env": {
+        "proxy": [],
+        "tunnel": null
+      },
+      "expect_text": {
+        "proxy": "未配置显式代理",
+        "vpn": "默认路由未检出隧道"
+      },
+      "expect_advice": {
+        "proxy": "不能据此判断为直连",
+        "vpn": "未检出不代表 TUN 未开启"
+      }
+    }
+  ]
+}

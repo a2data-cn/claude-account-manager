@@ -1995,7 +1995,7 @@ fn risk_items_and_reminders() {
         "info"
     );
     std::env::set_var("CAM_TEST_LOCALE", "en_US");
-    // DNS 解析器：局域网和任播的不提；不支持地区的公共 DNS 与出口不一致 → warn；支持地区 → info
+    // DNS 配置不代表实际解析出口：地区不一致仅记录，不扣分；局域网、任播不提
     assert!(by_kind(
         &risks_with("CAM_TEST_DNS", "192.168.1.1,8.8.8.8"),
         "dns_resolver"
@@ -2007,7 +2007,8 @@ fn risk_items_and_reminders() {
     )
     .cloned()
     .unwrap();
-    assert_eq!(d["level"], "warn");
+    assert_eq!(d["level"], "info");
+    assert_eq!(risk_score(std::slice::from_ref(&d))["score"], 100);
     assert!(
         d["text"]
             .as_str()
@@ -2249,7 +2250,7 @@ fn risk_items_and_reminders() {
     let res = api_switch(&store, "A", None).unwrap();
     assert_eq!(res["changed"], true);
     assert!(
-        res["risks"]
+        !res["risks"]
             .as_array()
             .unwrap()
             .iter()
@@ -2258,6 +2259,15 @@ fn risk_items_and_reminders() {
         res
     );
     let d = e.data();
+    assert!(res["risks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["kind"] == "account_regions"));
+    assert_eq!(
+        by_kind(&risk_items(&d, true, true), "region_change").unwrap()["level"],
+        "info"
+    );
     assert_eq!(d["active"]["claude_code"], json!(a));
     let acc = d["accounts"]
         .as_array()

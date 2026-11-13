@@ -270,7 +270,7 @@ function ScoreCard({ state }: { state: State }) {
   const okText: Record<string, string> = {
     region: `${regName(reg?.loc, reg?.loc_name)} · 在 Anthropic 支持名单内${reg?.failed_at ? `（${ago(reg.checked_at)}查到的）` : ""}`,
     iptype: reg?.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg?.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
-    proxy: "没发现代理，默认路由没走隧道",
+    proxy: "未检出显式代理或默认隧道；TUN 分流仍可能生效",
     local: "没发现和出口地区不一致的设置",
     dns: "没发现问题",
     change: reg?.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${reg.prev_loc} 换到 ${reg.loc}，已过了观察期` : "最近没变",
@@ -334,8 +334,8 @@ function ScoreCard({ state }: { state: State }) {
         )}
       </div>
       <p className="hint">
-        100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70
-        以下高风险。{has && sc ? sc.advice : ""}
+        100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、切换到不支持地区的出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70
+        以下高风险。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。{has && sc ? sc.advice : ""}
       </p>
     </div>
   );

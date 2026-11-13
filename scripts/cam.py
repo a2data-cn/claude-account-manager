@@ -6144,15 +6144,15 @@ def proxy_vpn_items(env):
     """代理、VPN 两行（服务检测和顶部环境卡共用）。env 是 local_env() 的结果。"""
     out = []
     parts = env.get("proxy") or []
-    out.append({"kind": "proxy", "level": "info" if parts else "ok", "text": "代理：" + ("；".join(parts) if parts else "无（直连）"),
-                "advice": "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" if parts else "直连，出口地区就是本机网络的出口"})
+    out.append({"kind": "proxy", "level": "info" if parts else "ok", "text": "代理：" + ("；".join(parts) if parts else "未配置显式代理"),
+                "advice": "请求经过代理，上面的出口地区是代理的出口，不是本机网络的出口" if parts else "没有代理环境变量或系统代理设置；TUN、透明代理仍可能接管流量，不能据此判断为直连"})
     tun = env.get("tunnel")
     if tun:
         out.append({"kind": "vpn", "level": "info", "text": f"VPN：默认路由走 {tun[0]}（{tun[1]}）",
                     "advice": "出口地区是 VPN 的出口，不代表本机所在地；Anthropic 按使用者实际所在地判断是否支持。"})
     else:
-        out.append({"kind": "vpn", "level": "ok", "text": "VPN：默认路由没有经过隧道接口",
-                    "advice": "只看本机默认路由；透明代理和路由器上的 VPN 看不出来"})
+        out.append({"kind": "vpn", "level": "ok", "text": "VPN / TUN：默认路由未检出隧道",
+                    "advice": "只检查默认路由；TUN 可以通过更具体的路由接管流量，未检出不代表 TUN 未开启。透明代理和路由器上的 VPN 也可能无法识别"})
     return out
 
 
@@ -6620,10 +6620,14 @@ def risk_items(data, include_region=True, note_age=True):
                 add(it["kind"], it["level"], it["text"], it.get("advice", ""), cached=False)
     changed = parse_iso(reg.get("changed_at"))
     if reg.get("prev_loc") and loc and changed and (now - changed).total_seconds() < REGION_CHANGE_HOURS * 3600:
-        add("region_change", "warn",
+        # 网络探测不等于账号登录；当前出口已支持时只保留历史，避免恢复后仍因旧出口扣分。
+        supported_change = region_status(loc) == "supported"
+        add("region_change", "info" if supported_change else "warn",
             f"出口地区变化：{region_label(reg['prev_loc'])} → {region_label(loc)}（{fmt_ago(reg['changed_at'])}）",
-            "网络环境变了（出差、换网络、开关 VPN 或代理都会这样）。Anthropic 按使用者实际所在地判断是否支持，"
-            "同一账号短时间内从多个地区使用也容易触发风控。确认现在人所在的地区在支持名单内再继续。", cached=False)
+            "当前出口在支持名单内。换网络、出差或开关 TUN / 代理都可能造成变化；这是网络检测记录，不等于账号异地登录。"
+            "保留 24 小时供排查，不额外扣分；账号使用地区另列提示。" if supported_change else
+            "网络检测出口发生变化，当前出口不在支持名单内。请结合当前出口地区和 Claude 服务实测判断；"
+            "这条记录不等于账号异地登录，账号使用地区另列提示。", cached=False)
     if loc and reg.get("meta_loc") and reg["meta_loc"] != loc:
         add("region_mismatch", "warn",
             f"出口地区判定不一致：trace 接口看到 {region_label(loc)}，meta 接口看到 {region_label(reg['meta_loc'])}",
@@ -6650,13 +6654,10 @@ def risk_items(data, include_region=True, note_age=True):
     env = reg.get("env") if isinstance(reg.get("env"), dict) else None  # 旧版缓存没有这一段，就当作不知道
     for d in (env or {}).get("dns") or []:
         if d.get("country") and loc and d["country"] != loc:
-            text = f"DNS 解析器 {d['ip']}（{d.get('name') or '公共 DNS'}，{region_label(d['country'])}）与出口地区 {region_label(loc)} 不一致"
-            if region_status(d["country"]) == "unsupported":
-                add("dns_resolver", "warn", text,
-                    "本机在用不支持地区的公共 DNS，说明人或网络可能在不支持地区；服务端也可能据此看出实际网络。政策按实际所在地判断。"
-                    "如果人确实已经在支持地区，多半是以前手动填的 DNS 没改回来：系统网络设置里把 DNS 改回自动获取（或 1.1.1.1 / 8.8.8.8 这类任播 DNS）。")
-            else:
-                add("dns_resolver", "info", text, "出差或代理分流都会这样；人所在地在支持名单内就没问题。")
+            text = f"系统 DNS 配置 {d['ip']}（{d.get('name') or '公共 DNS'}，{region_label(d['country'])}）与出口地区 {region_label(loc)} 不一致（仅配置）"
+            add("dns_resolver", "info", text,
+                "TUN / 代理可能接管 DNS；这里只读取系统配置，未测实际解析出口，不能据此判断 DNS 泄漏或所在地，不扣分。"
+                "解析是否成功请看 DNS 实测项；需要排查旧的手动配置时，可在系统网络设置中恢复自动获取。")
             break
     if reg.get("warp"):
         add("warp", "info", "出口经过 Cloudflare WARP / Zero Trust",
@@ -6715,7 +6716,7 @@ RISK_WEIGHTS = {
     ("status", "bad"): 30, ("status", "warn"): 10, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
     ("web", "warn"): 5, ("dns", "bad"): 20, ("accounts", "info"): 0, ("device", "info"): 0, ("scope", "info"): 0,
     ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15, ("dns_resolver", "warn"): 15,
-    ("dns_resolver", "info"): 3, ("ip_origin", "info"): 5, ("ipv6", "info"): 0, ("dns_servers", "info"): 0,
+    ("dns_resolver", "info"): 0, ("ip_origin", "info"): 5, ("ipv6", "info"): 0, ("dns_servers", "info"): 0,
     ("auth", "bad"): 20, ("auth", "warn"): 5, ("proxy_down", "bad"): 0, ("tls_intercept", "warn"): 0,
 }
 # 服务检测发现的这些问题记进 data["service_status"]，界面顶部的环境卡也列出来（一小时内，或者后台检测证明已经好了为止）
@@ -7039,9 +7040,9 @@ def service_check(store=None):
     dns = (r.get("env") or {}).get("dns") or []
     if dns:
         parts = [f"{d['ip']}（{'局域网 / 本机' if d['private'] else d.get('name') or '公共 DNS'}{'，' + region_label(d['country']) if d.get('country') else ''}）" for d in dns]
-        add("dns_servers", "info", "DNS 解析器：" + "；".join(parts),
-            "局域网 DNS 最终走路由器配置的上游；Google / Cloudflare 这类任播 DNS 全球有节点，不代表位置；某国公共 DNS 说明本机网络大概率在那个国家。"
-            "人在支持地区的话，用当地网络自动获取的 DNS 或任播 DNS 即可；出差前手动填过国内 DNS 的，到了支持地区记得在系统网络设置里改回自动获取。只读本机配置，没有做泄漏探测")
+        add("dns_servers", "info", "系统 DNS 配置：" + "；".join(parts),
+            "这是系统配置中的解析器，不一定是请求实际使用的 DNS；TUN / 代理可能接管解析。未做 DNS 出口或泄漏探测，"
+            "不能用解析器的登记地区推断所在地；解析是否成功请看 DNS 实测项。")
     # api.anthropic.com
     no_answer = f"超过 {SERVICE_PROBE_SECS} 秒没有回应"
     st, body, ms = res["api"] or (0, {"error": {"message": no_answer}}, None)

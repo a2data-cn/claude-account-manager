@@ -5,8 +5,8 @@ use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::desktop_app::{login_state, version_from_path};
 use cam_engine::health::{
     auth_item, der_issuer, net_fingerprint_of, parse_status_summary, proxy_endpoints,
-    region_check_fresh, region_fail_item, region_retry_wait, risk_score, status_relevant,
-    status_risk, tls_issuer_item,
+    proxy_vpn_items, region_check_fresh, region_fail_item, region_retry_wait, risk_items,
+    risk_score, status_relevant, status_risk, tls_issuer_item,
 };
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::store::{accounts, find_index, parse_day, s};
@@ -357,5 +357,68 @@ fn region_check_cases() {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["advice", "kind", "level", "text"], "{}", c["name"]);
+    }
+}
+
+/// 静态配置与实测异常分开；网络出口变化不重复当成账号异地登录。
+#[test]
+fn environment_risk_cases() {
+    let now = chrono::Utc::now();
+    let raw = fixture("environment_risk.json").to_string();
+    let fx: Value = serde_json::from_str(
+        &raw.replace(
+            "$past_day",
+            &(now - chrono::Duration::hours(25)).to_rfc3339(),
+        )
+        .replace("$now", &now.to_rfc3339()),
+    )
+    .unwrap();
+    for c in cases(&fx, "cases") {
+        let before = c["data"].clone();
+        let items = risk_items(&c["data"], true, false);
+        let levels: serde_json::Map<String, Value> = items
+            .iter()
+            .map(|i| (i["kind"].as_str().unwrap().to_owned(), i["level"].clone()))
+            .collect();
+        assert_eq!(json!(levels), c["expect"]["levels"], "{}", c["name"]);
+        assert_eq!(
+            risk_score(&items)["score"],
+            c["expect"]["score"],
+            "{}",
+            c["name"]
+        );
+        assert_eq!(c["data"], before, "{}：保留原始历史", c["name"]);
+        if let Some(parts) = c["expect"]["contains"].as_object() {
+            for (kind, part) in parts {
+                let item = items.iter().find(|i| i["kind"] == kind.as_str()).unwrap();
+                let text = format!(
+                    "{}{}",
+                    item["text"].as_str().unwrap(),
+                    item["advice"].as_str().unwrap()
+                );
+                assert!(
+                    text.contains(part.as_str().unwrap()),
+                    "{}: {}",
+                    c["name"],
+                    text
+                );
+            }
+        }
+    }
+    for c in cases(&fx, "proxy_display") {
+        let items = proxy_vpn_items(&c["env"]);
+        for field in ["text", "advice"] {
+            for (kind, part) in c[format!("expect_{}", field)].as_object().unwrap() {
+                let item = items.iter().find(|i| i["kind"] == kind.as_str()).unwrap();
+                assert!(
+                    item[field]
+                        .as_str()
+                        .unwrap()
+                        .contains(part.as_str().unwrap()),
+                    "{}",
+                    c["name"]
+                );
+            }
+        }
     }
 }
