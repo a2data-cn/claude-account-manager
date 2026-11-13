@@ -788,8 +788,17 @@ class CamTest(unittest.TestCase):
             self.assertFalse(self.cam.save_menubar_settings(store, {"mode": "stream"})["restarting"])  # 已经是流式，不动
             ran = []
             fake = lambda cmd, **kw: (ran.append(cmd), types.SimpleNamespace(returncode=0, stdout="", stderr=""))[1]  # noqa: E731
-            with mock.patch.object(self.cam.subprocess, "run", side_effect=fake):
+            # 安装脚本和重启应用都必须模拟：真实 Popen 会把临时 HOME / 假接口带进 SwiftBar，
+            # 再由插件启动测试目录里的后台面板，测试结束后仍占着真实端口。
+            with mock.patch.object(self.cam.subprocess, "run", side_effect=fake), \
+                    mock.patch.object(self.cam.subprocess, "Popen") as restart:
                 r = self.cam.save_menubar_settings(store, {"mode": "classic"})
+            self.assertEqual(restart.call_count, int(self.cam.IS_MAC))
+            if self.cam.IS_MAC:
+                args, kwargs = restart.call_args
+                self.assertEqual(args[0][:2], ["bash", "-c"])
+                self.assertIn('open -a SwiftBar', args[0][2])
+                self.assertTrue(kwargs["start_new_session"])
             self.assertTrue(r["restarting"])
             self.assertTrue(ran and ran[0][0] == "bash" and ran[0][1].replace("\\", "/").endswith("extras/swiftbar/install.sh")
                             and ran[0][2] == "--classic", ran)  # Windows 上是反斜杠
