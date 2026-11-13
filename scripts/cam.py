@@ -5726,7 +5726,7 @@ REGION_RETRY_SECS = 60        # 环境检测没连上时，最快多久以后重
 NET_RECHECK_SECS = 30         # 发现本机换了网络就补测一次，最多这么久一次
 SERVICE_DNS_SECS = 5          # 服务检测里解析一个域名最多等多久
 SERVICE_PROBE_SECS = 10       # 服务检测里连 api.anthropic.com、claude.ai 各最多等多久
-PROXY_PROBE_SECS = 2          # 服务检测里看本机设的代理在不在运行：连它的端口最多等多久
+PROXY_PROBE_SECS = 3          # 服务检测里看本机设的代理在不在运行：连它的端口最多等多久（Windows 连一个没人听的本机端口要重试两秒左右才报“拒绝”）
 TLS_PROBE_SECS = 6            # 服务检测里看 api.anthropic.com 的证书是谁签的：每次连接最多等多久
 # 常见的公共证书机构（证书颁发者的组织名、通用名里有这些字）：api.anthropic.com、claude.ai 正常拿到的证书都是它们签的。
 # 不是它们签的，多半是网络里有设备在解密 HTTPS。和 Rust 版 PUBLIC_CA_WORDS 一致（tests/shared/service.json）

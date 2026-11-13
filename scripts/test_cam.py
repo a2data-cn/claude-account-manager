@@ -2582,7 +2582,10 @@ class CamTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CAM_TEST_PROXY": f"HTTPS 127.0.0.1:{port}"}):
             items = self.cam.service_check(store)
             down = next(i for i in items if i["kind"] == "proxy_down")
-            self.assertEqual((down["level"], down["text"]), ("bad", f"代理 127.0.0.1:{port}（系统设置）连不上：连接被拒绝"))
+            self.assertEqual(down["level"], "bad")
+            why = "连接被拒绝" if not self.cam.IS_WIN else down["text"].rsplit("：", 1)[-1]  # Windows 上偶尔重试到超时
+            self.assertEqual(down["text"], f"代理 127.0.0.1:{port}（系统设置）连不上：{why}")
+            self.assertIn(why, ("连接被拒绝", f"超过 {self.cam.PROXY_PROBE_SECS} 秒没有回应"))
             self.assertIn("代理软件", down["advice"])
             self.assertIn("proxy_down", [r["kind"] for r in self.cam.risk_items(self.data())])
             with socket.socket() as srv:

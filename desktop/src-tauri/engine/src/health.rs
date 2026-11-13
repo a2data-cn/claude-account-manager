@@ -100,8 +100,8 @@ pub const NET_RECHECK_SECS: i64 = 30;
 pub const SERVICE_DNS_SECS: u64 = 5;
 /// 服务检测里连 api.anthropic.com、claude.ai 各最多等多久（秒）
 pub const SERVICE_PROBE_SECS: u64 = 10;
-/// 服务检测里看本机设的代理在不在运行：连它的端口最多等多久（秒）
-pub const PROXY_PROBE_SECS: u64 = 2;
+/// 服务检测里看本机设的代理在不在运行：连它的端口最多等多久（秒）。Windows 连一个没人听的本机端口要重试两秒左右才报“拒绝”
+pub const PROXY_PROBE_SECS: u64 = 3;
 /// 服务检测里看 api.anthropic.com 的证书是谁签的：每次连接最多等多久（秒）
 pub const TLS_PROBE_SECS: u64 = 6;
 /// 常见的公共证书机构（证书颁发者的组织名、通用名里有这些字）：api.anthropic.com、claude.ai 正常拿到的证书都是它们签的。
