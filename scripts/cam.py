@@ -2551,7 +2551,7 @@ def privacy_sources(cfg):
         return {"name": name, "what": what, "group": group, "warn": warn}
 
     out = [src("claude.ai/cdn-cgi/trace", "出口国家、IP、时钟。访问 Claude 时它本来就看得到", "anthropic"),
-           src("status.anthropic.com", "官方状态页，不带任何本机信息", "anthropic")]
+           src("status.claude.com", "官方状态页（连不上时换 status.anthropic.com），不带任何本机信息", "anthropic")]
     if cfg["mode"] == "off":
         return out
     if cfg["mode"] == "ip-api":
@@ -3034,6 +3034,11 @@ def _desktop_profile_from_files(pid):
 
 def _desktop_processes():
     """返回 [(pid, profile 或 None)]。查不到进程列表时必须报错，不能当作已退出。"""
+    return [(pid, profile) for pid, _, profile in _desktop_scan()]
+
+
+def _desktop_scan():
+    """返回 [(pid, 命令行, profile 或 None)]。查不到进程列表时报错（CamError）。"""
     if os.environ.get("CAM_DESKTOP_DRY_RUN") == "1":
         return []
     found = []
@@ -3063,12 +3068,200 @@ def _desktop_processes():
             profile = _desktop_profile_from_command(cmd)
             if profile is None and IS_MAC:
                 profile = _desktop_profile_from_files(pid)
-            found.append((pid, profile))
+            found.append((pid, cmd, profile))
     return found
 
 
 def _desktop_pids():
     return [pid for pid, _ in _desktop_processes()]
+
+
+# ---- 桌面版的状态（装没装、版本、开着没有、开着的是哪个号、各号本机有没有登录）：只读，给面板、小组件、体检显示用。
+# 切换和移除前的判断不走这里，用 _desktop_processes 现查。
+
+def desktop_version_from_path(path):
+    """安装路径里带的版本号：Windows 的 AnthropicClaude/app-0.14.10/claude.exe（反斜杠也行）、商店版的 AnthropicPBC.Claude_1.0.734.0_x64__…。
+    没有返回 None。规则和 Rust 版 desktop_app::version_from_path 一致（tests/shared/desktop_status.json）。"""
+    m = re.search(r"(?:[/\\]app-|anthropic(?:pbc)?\.claude_)(\d+(?:\.\d+)+)", str(path or ""), re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _desktop_installed():
+    """(安装位置, 版本号)；没装返回 (None, None)。macOS 读 Claude.app 的 Info.plist，Windows 看安装目录名。"""
+    app = None
+    try:
+        app = _find_claude_desktop()
+    except CamError:
+        return None, None
+    if app.endswith(".app"):
+        import plistlib  # noqa: PLC0415
+        try:
+            with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
+                v = plistlib.load(f).get("CFBundleShortVersionString")
+            return app, str(v) if v else None
+        except (OSError, ValueError, AttributeError):
+            return app, None
+    v = desktop_version_from_path(app)
+    if not v and not IS_MAC and not IS_WIN and shutil.which("dpkg-query"):  # Linux 上社区打的 deb 包：版本看包管理器
+        v = _run_text(["dpkg-query", "-W", "-f=${Version}", "claude-desktop"], timeout=3).strip() or None
+    return app, v
+
+
+DESKTOP_STATUS_SECS = 20  # 桌面版开着没有：缓存多久（查进程表要几百毫秒，Windows 上一秒多）
+_DESKTOP_STATUS = {"t": 0.0, "v": None}
+_DESKTOP_STATUS_LOCK = threading.Lock()
+
+
+def _scan_desktop_status():
+    app, version = _desktop_installed()
+    try:
+        rows = _desktop_scan()
+        running = bool(rows)
+    except CamError:
+        rows, running = [], None  # 查不出来
+    if not version:  # 商店版不在固定位置：从正在运行的那个程序的路径看
+        version = next((v for v in (desktop_version_from_path(cmd) for _, cmd, _ in rows) if v), None)
+    profiles = []
+    for _, cmd, profile in rows:
+        if profile is None and not IS_MAC and "--user-data-dir" not in cmd:
+            profile = os.path.normcase(os.path.realpath(default_desktop_user_data()))  # 没带参数就是 Electron 的默认目录
+        profiles.append(profile)
+    return {"installed": bool(app or rows), "app": app, "version": version, "running": running, "profiles": profiles}
+
+
+def desktop_app_status(max_age=DESKTOP_STATUS_SECS):
+    """{"installed", "app", "version", "running"（None 是查不出来）, "profiles"（开着的实例用的数据目录，看不出的是 None）}。
+    缓存 max_age 秒；过期了先给上次的、在后台重查（和 session_count 一样），还没查过和 max_age=0 时当场查。"""
+    now = time.monotonic()
+    if _DESKTOP_STATUS["v"] is not None and now - _DESKTOP_STATUS["t"] < max_age:
+        return _DESKTOP_STATUS["v"]
+    if _DESKTOP_STATUS["v"] is None or max_age <= 0:
+        _DESKTOP_STATUS.update(t=now, v=_scan_desktop_status())
+        return _DESKTOP_STATUS["v"]
+    if _DESKTOP_STATUS_LOCK.acquire(blocking=False):
+        _DESKTOP_STATUS["t"] = now
+
+        def bg():
+            try:
+                _DESKTOP_STATUS.update(t=time.monotonic(), v=_scan_desktop_status())
+            except Exception:  # noqa: BLE001  查不出来就沿用上次的
+                pass
+            finally:
+                _DESKTOP_STATUS_LOCK.release()
+        threading.Thread(target=bg, daemon=True).start()
+    return _DESKTOP_STATUS["v"]
+
+
+# Chromium 的 Cookie 时间从 1601-01-01 起算，单位微秒
+_CHROME_EPOCH = 11644473600
+
+
+def _desktop_cookie_dbs(directory):
+    dbs = [os.path.join(directory, "Cookies"), os.path.join(directory, "Network", "Cookies")]
+    dbs += sorted(glob.glob(os.path.join(directory, "Partitions", "*", "Cookies")))
+    dbs += sorted(glob.glob(os.path.join(directory, "Partitions", "*", "Network", "Cookies")))
+    return [db for db in dbs if os.path.isfile(db)]
+
+
+def _desktop_session_cookies(directory):
+    """这个数据目录里 claude.ai 登录 Cookie（sessionKey）的到期时间 [Unix 秒，会话 Cookie 是 0]；一个 Cookie 库都读不了返回 None。
+    只读名字、域名和到期时间，不读 Cookie 的值；用只读、不加锁的方式打开（客户端开着也能读，不影响它）。"""
+    import sqlite3  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+    found, readable = [], False
+    for db in _desktop_cookie_dbs(directory):
+        try:
+            con = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1)
+            try:
+                rows = con.execute("SELECT expires_utc FROM cookies WHERE name = 'sessionKey' AND "
+                                   "(host_key = 'claude.ai' OR host_key LIKE '%.claude.ai')").fetchall()
+            finally:
+                con.close()
+        except (sqlite3.Error, ValueError, OSError):
+            continue
+        readable = True
+        found += [max(0, int(r[0] or 0) // 1_000_000 - _CHROME_EPOCH) if r[0] else 0 for r in rows]
+    return found if readable else None
+
+
+def _desktop_token_cache(directory):
+    """config.json 里有没有客户端存的登录缓存（只看有没有这一项，不读内容）。"""
+    try:
+        with open(os.path.join(directory, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return False, False
+    if not isinstance(cfg, dict):
+        return False, False
+    return any(cfg.get(k) for k in ("oauth:tokenCache", "oauth:tokenCacheV2")), bool(cfg.get("lastKnownAccountUuid"))
+
+
+def desktop_login_state(dir_exists, token_cache, known_account, cookies, cookie_files, now):
+    """本机记录里这个桌面号的登录：{"login": yes / expired / no / never / unknown, "expires": Unix 秒或 None}。
+    cookies：claude.ai 登录 Cookie（sessionKey）的到期时间列表（0 是会话 Cookie），Cookie 库都读不了或者没有是 None；
+    cookie_files：目录里有没有 Cookie 库文件。
+    yes：有没过期的登录 Cookie，或者有客户端的登录缓存；expired：登录 Cookie 都过期了；
+    no：Cookie 库读得到但没有登录 Cookie，或者记着上次登录的账号；never：目录还没有、或者里面还没有 Cookie 库（第一次打开时要登录）；
+    unknown：有 Cookie 库但读不了。只是本机记录：服务端那边作废了的登录这里看不出来。
+    规则和 Rust 版 desktop_app::login_state 一致（tests/shared/desktop_status.json）。"""
+    if not dir_exists:
+        return {"login": "never", "expires": None}
+    live = [c for c in cookies or [] if c == 0 or c > now]
+    if live or token_cache:
+        dated = [c for c in live if c > 0]
+        return {"login": "yes", "expires": max(dated) if dated and not any(c == 0 for c in live) else None}
+    if cookies:
+        return {"login": "expired", "expires": max(cookies)}
+    if cookies is not None or known_account:
+        return {"login": "no", "expires": None}
+    return {"login": "unknown" if cookie_files else "never", "expires": None}
+
+
+_DESKTOP_LOGIN = {}  # 数据目录 -> (查的时间, 结果)：菜单栏流式模式每 0.25 秒画一帧，不用每帧都读 Cookie 库
+
+
+def desktop_login(store, acc, now=None, max_age=DESKTOP_STATUS_SECS):
+    """这个桌面号本机记录里的登录（desktop_login_state 的结果，expires 换成时间文字），缓存 max_age 秒。只读文件，不碰登录。"""
+    directory = desktop_profile_dir(store, acc)
+    hit = _DESKTOP_LOGIN.get(directory)
+    if hit and max_age > 0 and now is None and time.monotonic() - hit[0] < max_age:
+        return hit[1]
+    res = _desktop_login_now(directory, now)
+    _DESKTOP_LOGIN[directory] = (time.monotonic(), res)
+    return res
+
+
+def _desktop_login_now(directory, now=None):
+    """desktop_login 不看缓存的那一次。"""
+    exists = os.path.isdir(directory)
+    token, known = _desktop_token_cache(directory) if exists else (False, False)
+    st = desktop_login_state(exists, token, known, _desktop_session_cookies(directory) if exists else None,
+                             exists and bool(_desktop_cookie_dbs(directory)), int(time.time() if now is None else now))
+    exp = st["expires"]
+    return {"login": st["login"],
+            "login_expires": dt.datetime.fromtimestamp(exp, dt.timezone.utc).isoformat() if exp else None}
+
+
+def desktop_view(store, data, max_age=DESKTOP_STATUS_SECS):
+    """面板、小组件、体检看的桌面版状态：({"installed", "version", "running", "account", "known"}, {账号 id: {"running", "login", "login_expires"}})。
+    account：开着的实例用的是哪个桌面号；known：开着的实例都看得出用的哪个目录。没有桌面号时返回 (None, {})，不去查进程。"""
+    desk = [a for a in data.get("accounts") or [] if a.get("kind") == "claude_desktop"]
+    if not desk:
+        return None, {}
+    st = desktop_app_status(max_age)
+    profiles = st["profiles"]
+    per = {}
+    running_ids = []
+    for a in desk:
+        key = os.path.normcase(os.path.realpath(desktop_profile_dir(store, a)))
+        on = key in profiles
+        if on:
+            running_ids.append(a["id"])
+        per[a["id"]] = dict(desktop_login(store, a, max_age=max_age), running=on)
+    app = {"installed": st["installed"], "version": st["version"], "running": st["running"],
+           "account": running_ids[0] if len(running_ids) == 1 else None,
+           "known": bool(profiles) and None not in profiles}
+    return app, per
 
 
 def _find_claude_desktop():
@@ -3347,6 +3540,10 @@ def public_state(store, data):
     accs = []
     active = data["active"].get("claude_code")
     active_desktop = data["active"].get("claude_desktop")
+    try:
+        desk_app, desk = desktop_view(store, data)
+    except Exception:  # noqa: BLE001  桌面版的状态只是显示用，出错不影响别的
+        desk_app, desk = None, {}
     for a in data["accounts"]:
         p = {k: a.get(k) for k in PUBLIC_FIELDS}
         legacy_desktop = (a.get("kind") == "claude_desktop" and
@@ -3355,6 +3552,8 @@ def public_state(store, data):
             p["usage"] = None
         elif a.get("kind") == "claude_desktop":
             p["usage"] = _desktop_usage_view(a["usage"])
+        if a.get("kind") == "claude_desktop":
+            p["desktop"] = desk.get(a["id"])
         p["is_active"] = a["id"] == (active_desktop if a.get("kind") == "claude_desktop" else active)
         p["days_left"] = days_left(a)
         p["plan_display"] = a.get("plan") or (a.get("manual") or {}).get("plan")
@@ -3382,7 +3581,7 @@ def public_state(store, data):
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
             "risk_score": risk_score(risks), "sessions": {"count": session_count(), "busy": session_busy()},
-            "attention": attention_view(), "generated_at": now_iso()}
+            "desktop_app": desk_app, "attention": attention_view(), "generated_at": now_iso()}
 
 
 _SESSION_CACHE = [0.0, 0]  # [上次数的时间, 个数]
@@ -5527,6 +5726,26 @@ REGION_RETRY_SECS = 60        # 环境检测没连上时，最快多久以后重
 NET_RECHECK_SECS = 30         # 发现本机换了网络就补测一次，最多这么久一次
 SERVICE_DNS_SECS = 5          # 服务检测里解析一个域名最多等多久
 SERVICE_PROBE_SECS = 10       # 服务检测里连 api.anthropic.com、claude.ai 各最多等多久
+PROXY_PROBE_SECS = 2          # 服务检测里看本机设的代理在不在运行：连它的端口最多等多久
+TLS_PROBE_SECS = 6            # 服务检测里看 api.anthropic.com 的证书是谁签的：每次连接最多等多久
+# 常见的公共证书机构（证书颁发者的组织名、通用名里有这些字）：api.anthropic.com、claude.ai 正常拿到的证书都是它们签的。
+# 不是它们签的，多半是网络里有设备在解密 HTTPS。和 Rust 版 PUBLIC_CA_WORDS 一致（tests/shared/service.json）
+PUBLIC_CA_WORDS = ("google trust services", "let's encrypt", "isrg", "digicert", "amazon", "sectigo", "comodo", "usertrust",
+                   "globalsign", "cloudflare", "microsoft", "entrust", "godaddy", "starfield", "zerossl", "ssl.com",
+                   "ssl corporation", "certainly", "identrust", "baltimore", "geotrust", "thawte", "rapidssl", "buypass",
+                   "harica", "actalis")
+TLS_INTERCEPT_ADVICE = ("多半是公司的安全网关、杀毒软件的“HTTPS 扫描 / 网页防护”，或者开着抓包工具。Claude Code 不认这个证书时会报 "
+                        "SELF_SIGNED_CERT_IN_CHAIN 或 unable to get local issuer certificate：向网络管理员要这个根证书"
+                        "（杀毒软件的话在它的设置里关掉 HTTPS 扫描），再把环境变量 NODE_EXTRA_CA_CERTS 设成证书文件的路径。")
+AUTH_PARTIAL_ADVICE = ("Claude Code 续登录用的正好是连不上的那个地址时就续不上，表现为突然要重新登录、cam 显示“需要登录”。"
+                       "检查网络或代理有没有拦这个域名（公司网络、代理的规则都可能拦）。")
+AUTH_DOWN_ADVICE = ("登录大约每 8 小时要续一次，这些地址连不上就续不上：Claude Code 会要求重新登录，cam 显示“需要登录”。"
+                    "先检查网络或代理设置。")
+PROXY_DOWN_ADVICE = ("代理软件多半没开、已经退出，或者端口改了。设着代理但它没在运行时，走它的请求（Claude Code、cam）都会失败。"
+                     "打开代理软件，或者把这个代理设置去掉（环境变量在启动终端的配置文件里删，系统代理在系统的网络设置里关）。")
+RATE_LIMIT_ADVICE = "Anthropic 那边在限流（短时间请求太多），不是网络或账号的问题；过几分钟再试。"
+OVERLOAD_ADVICE = "Anthropic 那边负载太高，不是网络或账号的问题；稍后再试，可查看 status.claude.com。"
+STATUS_ADVICE = "这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 status.claude.com。"
 # 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
 TUNNEL_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec", "tailscale", "zt", "nebula", "proton", "nordlynx",
                    "mullvad", "clash", "mihomo", "sing", "hysteria", "surge")
@@ -5971,8 +6190,17 @@ def system_locale():
 
 
 def fetch_status_page(timeout=6):
-    """Anthropic 官方状态页（status.anthropic.com）的总体状态：{indicator, description} 或 None（连不上）。"""
-    st, txt = http_text(STATUS_URL, timeout)
+    """官方状态页，按 data["status_page"] 存的样子：先要 summary.json（各组件和没解决的事件，只留和这里有关的，见 parse_status_summary），
+    连不上再要 status.json 的总体状态 {indicator, description}（这种没有 components，status_risk 按总体算）。
+    都连不上返回 None。总共最多等 timeout 秒。"""
+    end = time.monotonic() + timeout
+    s = fetch_status_summary(timeout, end)
+    if s:
+        return s
+    left = end - time.monotonic()
+    if left < 0.5:
+        return None
+    st, txt = http_text(STATUS_URL, left)
     if st != 200:
         return None
     try:
@@ -6275,9 +6503,10 @@ def check_region(store, max_age=300):
         return region_view(data)
     cfg = ip_lookup_config(store)
     # 出口、状态页、本机设置几件事并行，互不等待
-    res = run_parallel({"r": lambda: detect_region(6, cfg, old), "sp": fetch_status_page, "env": local_env, "net": net_fingerprint},
-                       REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2})
-    r, sp, env = res["r"] or {}, res["sp"], res["env"]
+    res = run_parallel({"r": lambda: detect_region(6, cfg, old), "sp": fetch_status_page, "env": local_env, "net": net_fingerprint,
+                        "proxy": lambda: proxies_back(data)},
+                       REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2, "proxy": PROXY_PROBE_SECS + 1})
+    r, sp, env, back = res["r"] or {}, res["sp"], res["env"], res["proxy"] or set()
     with store.lock():
         data = store.load()
         old = data.get("region") or {}
@@ -6303,11 +6532,13 @@ def check_region(store, max_age=300):
             data["status_page"] = dict(sp, checked_at=now)
         if r.get("loc"):
             note_account_region(data, (data.get("active") or {}).get("claude_code"), reg["loc"], reg)
-            ss = data.get("service_status")
-            if isinstance(ss, dict):  # 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
-                ss["items"] = [i for i in ss.get("items") or [] if not resolved_by_trace(i)]
-                if not ss["items"]:
-                    data.pop("service_status", None)
+        ss = data.get("service_status")
+        if isinstance(ss, dict):
+            # 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）；代理又连得上了的也清掉
+            ss["items"] = [i for i in ss.get("items") or []
+                           if not (r.get("loc") and resolved_by_trace(i)) and proxy_key(i) not in back]
+            if not ss["items"]:
+                data.pop("service_status", None)
         store.save(data)
     return region_view(data)
 
@@ -6328,6 +6559,17 @@ def region_fail_item(reg):
             "text": f"出口地区现在查不到：{f'连续 {n} 次检测都' if n > 1 else '最近一次检测'}没连上 claude.ai 和 Cloudflare，"
                     f"上一次查到是 {region_label(reg['loc'])}（{fmt_ago(reg['checked_at'])}）",
             "advice": REGION_ADVICE["unknown"]}
+
+
+def proxy_key(item):
+    """服务检测记下的“代理连不上”那一条对应的 (主机, 端口)；别的条目返回 None。"""
+    return (item.get("host"), item.get("port")) if item.get("kind") == "proxy_down" and item.get("host") else None
+
+
+def proxies_back(data):
+    """上次服务检测记下连不上的代理，现在又连得上了的：{(主机, 端口)}。只连一下本机设的代理端口，不发别的。"""
+    keys = {proxy_key(i) for i in (data.get("service_status") or {}).get("items") or []} - {None}
+    return {k for k in keys if isinstance(k[1], int) and port_open(k[0], k[1], PROXY_PROBE_SECS) == ""}
 
 
 def resolved_by_trace(item):
@@ -6424,12 +6666,10 @@ def risk_items(data, include_region=True, note_age=True):
         add("clock", "warn", f"本机时钟与服务器相差 {int(skew):+d} 秒",
             "时钟偏差大会让登录续期和 HTTPS 校验失败，也是常见的风控信号。打开系统的自动校时。")
     sp = data.get("status_page") or {}
-    ind = sp.get("indicator")
     sp_age = _age_secs(sp.get("checked_at") or reg.get("checked_at"))  # 旧版没单独记时间，和出口是同一次查的
-    if ind and ind != "none" and sp_age is not None and sp_age <= REGION_FRESH_SECS:  # 一小时前的故障现在多半已经恢复，不再提
-        add("status", "bad" if ind in ("major", "critical") else "warn",
-            f"Anthropic 官方状态页：{sp.get('description') or ind}（{ind}）",
-            "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。", cached=False)
+    risk = status_risk(sp) if sp_age is not None and sp_age <= REGION_FRESH_SECS else None  # 一小时前的故障现在多半已经恢复，不再提
+    if risk:
+        add("status", risk[0], risk[1], STATUS_ADVICE, cached=False)
     tz = (env["tz"], env.get("tz_cc") or []) if loc and env and env.get("tz") else None
     if tz and loc and tz[1] and loc not in tz[1]:
         zone, home = tz[0], tz[1][0]
@@ -6476,7 +6716,10 @@ RISK_WEIGHTS = {
     ("web", "warn"): 5, ("dns", "bad"): 20, ("accounts", "info"): 0, ("device", "info"): 0, ("scope", "info"): 0,
     ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15, ("dns_resolver", "warn"): 15,
     ("dns_resolver", "info"): 3, ("ip_origin", "info"): 5, ("ipv6", "info"): 0, ("dns_servers", "info"): 0,
+    ("auth", "bad"): 20, ("auth", "warn"): 5, ("proxy_down", "bad"): 0, ("tls_intercept", "warn"): 0,
 }
+# 服务检测发现的这些问题记进 data["service_status"]，界面顶部的环境卡也列出来（一小时内，或者后台检测证明已经好了为止）
+SERVICE_STATUS_KINDS = ("api", "web", "dns", "tls", "auth", "proxy_down", "tls_intercept")
 RISK_GRADES = (  # (最低分, 档位, 说明)
     (90, "low", "风险低，可以使用"),
     (70, "medium", "有风险，建议先处理提醒项再使用"),
@@ -6502,9 +6745,181 @@ def region_denied(msg):
     return any(k in low for k in ("region", "country", "not available", "unsupported", "not allowed", "地区"))
 
 
+def proxy_endpoints(entries):
+    """[(来源, 设置值)] → [(来源, 主机, 端口)]：本机设的代理要连的地址，服务检测拿来看它在不在运行。最多 4 个，同一个地址只留一次；
+    PAC 和没写端口的不看。来源是环境变量名或“系统设置”；设置值是环境变量的值（http://user:pass@127.0.0.1:7890），
+    或 system_proxy() 的一项（“HTTPS 127.0.0.1:7890”“系统代理 http=127.0.0.1:7890;https=127.0.0.1:7890”，前面的说明去掉）。
+    规则和 Rust 版 health::proxy_endpoints 一致（tests/shared/service.json）。"""
+    out, seen = [], set()
+    for src, v in entries:
+        v = str(v or "").strip()
+        if src == "系统设置":
+            if v.upper().startswith("PAC"):
+                continue
+            v = v.rsplit(" ", 1)[-1]
+        for part in v.split(";"):
+            part = part.strip()
+            if "=" in part.split("://", 1)[0]:  # Windows 的 http=…;https=…
+                part = part.split("=", 1)[1]
+            part = part.split("://", 1)[-1]
+            part = part[part.rfind("@") + 1:].split("/", 1)[0]  # 账号密码、路径都不要
+            if part.startswith("["):
+                host, _, rest = part[1:].partition("]")
+                port = rest[1:] if rest.startswith(":") else ""
+            else:
+                host, _, port = part.rpartition(":")
+            if not host or not port.isdigit() or not 0 < int(port) < 65536:
+                continue
+            if (host.lower(), int(port)) not in seen:
+                seen.add((host.lower(), int(port)))
+                out.append((src, host, int(port)))
+    return out[:4]
+
+
+def port_open(host, port, timeout):
+    """连一下 host:port（只建 TCP 连接，马上断开，不发数据）：连上了返回 ""，没连上返回原因。"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return ""
+    except socket.timeout:
+        return f"超过 {timeout} 秒没有回应"
+    except ConnectionRefusedError:
+        return "连接被拒绝"
+    except OSError as e:
+        return str(e.strerror or e)
+
+
+def proxy_down_item(src, host, port, why):
+    """本机设的代理连不上的那一条；host / port 记着，后台检测时再连一下，连上了就清掉。规则和 Rust 版一致。"""
+    return {"kind": "proxy_down", "level": "bad", "text": f"代理 {host}:{port}（{src}）连不上：{why}",
+            "advice": PROXY_DOWN_ADVICE, "host": host, "port": port}
+
+
+def auth_item(results):
+    """续登录的地址（TOKEN_URLS：Claude Code 和 cam 续登录都用）连不连得上，汇总成一条 {kind: auth}。
+    results：[(域名, HTTP 状态, 返回的文字, 毫秒)]，状态 0 是没连上。这里不带登录、用的是 GET，回什么状态都算连得上（正常是 405）；
+    回人机验证页、因为地区拒绝的算被拦住了。规则和 Rust 版 health::auth_item 一致（tests/shared/service.json）。"""
+    good, bad = [], []
+    for host, st, txt, ms in results:
+        if st == 0:
+            bad.append(f"{host} 连不上")
+        elif st in (403, 503) and is_cloudflare(txt):
+            bad.append(f"{host} 返回人机验证页")
+        elif st == 403 and region_denied(txt):
+            bad.append(f"{host} 拒绝访问（HTTP 403）")
+        else:
+            good.append(f"{host}（{ms} ms）")
+    if not bad:
+        return {"kind": "auth", "level": "ok", "text": "续登录的地址连得上：" + "、".join(good), "advice": ""}
+    if good:
+        return {"kind": "auth", "level": "warn", "text": f"续登录的地址有的连不上：{'、'.join(bad)}；{'、'.join(good)}连得上",
+                "advice": AUTH_PARTIAL_ADVICE}
+    return {"kind": "auth", "level": "bad", "text": "续登录的地址都连不上：" + "、".join(bad), "advice": AUTH_DOWN_ADVICE}
+
+
+def der_issuer(der):
+    """X.509 证书（DER）里颁发者的组织名和通用名 {"org", "cn"}（有哪个给哪个），解析不了返回 None。只读这两项，不做任何校验。
+    和 Rust 版 health::der_issuer 一致（tests/shared/service.json）。"""
+    def tlv(i):  # (标签, 内容开始, 内容结束)
+        tag, n = der[i], der[i + 1]
+        i += 2
+        if n & 0x80:
+            k = n & 0x7F
+            if not 0 < k <= 4:
+                raise ValueError("长度")
+            n, i = int.from_bytes(der[i:i + k], "big"), i + k
+        if i + n > len(der):
+            raise ValueError("越界")
+        return tag, i, i + n
+    names = {b"\x55\x04\x0a": "org", b"\x55\x04\x03": "cn"}  # 2.5.4.10、2.5.4.3
+    try:
+        _, s, _ = tlv(0)  # Certificate
+        _, s, _ = tlv(s)  # tbsCertificate
+        tag, _, e = tlv(s)
+        if tag == 0xA0:  # [0] 版本
+            _, _, e = tlv(e)
+        _, _, e = tlv(e)  # 签名算法（序列号在上一步跳过了）
+        tag, j, end = tlv(e)  # 颁发者
+        if tag != 0x30:
+            return None
+        out = {}
+        while j < end:
+            _, k, j = tlv(j)  # SET
+            while k < j:
+                _, a, k = tlv(k)  # 一项属性
+                _, os_, oe = tlv(a)
+                vt, vs, ve = tlv(oe)
+                key = names.get(bytes(der[os_:oe]))
+                if key and key not in out:
+                    out[key] = bytes(der[vs:ve]).decode("utf-16-be" if vt == 0x1E else "utf-8", "replace")
+        return out or None
+    except (ValueError, IndexError):
+        return None
+
+
+def peer_issuer(host, port=443, timeout=TLS_PROBE_SECS):
+    """host 现在拿到的 HTTPS 证书是谁签的：(颁发者 {"org", "cn"}, 本机 Python 认不认它)；连不上、走的是 SOCKS 代理看不了、
+    证书解析不了时返回 None。和 urllib 一样走代理（环境变量或系统设置里的 http:// 代理，用 CONNECT 打通道，不在代理那头解密）。
+    先按本机 Python 的证书校验着连；校验不过再不校验地连一次，只为看颁发者。只握手，不发任何请求。"""
+    import http.client  # noqa: PLC0415  用到才加载，见文件开头 import 处的说明
+    import ssl  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    proxy = urllib.request.getproxies().get("https")
+    if proxy and urllib.request.proxy_bypass(host):
+        proxy = None
+
+    def cert(ctx):
+        if proxy:
+            u = urllib.parse.urlsplit(proxy if "://" in proxy else "http://" + proxy)
+            if u.scheme != "http" or not u.hostname:
+                return None
+            hdr = {}
+            if u.username:
+                cred = f"{urllib.parse.unquote(u.username)}:{urllib.parse.unquote(u.password or '')}"
+                hdr["Proxy-Authorization"] = "Basic " + base64.b64encode(cred.encode()).decode()
+            conn = http.client.HTTPSConnection(u.hostname, u.port or 80, timeout=timeout, context=ctx)
+            conn.set_tunnel(host, port, headers=hdr)
+        else:
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=ctx)
+        try:
+            conn.connect()
+            return conn.sock.getpeercert(binary_form=True)
+        finally:
+            conn.close()
+
+    try:
+        der, ok = cert(ssl_state()[0]), True
+    except ssl.SSLCertVerificationError:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            der, ok = cert(ctx), False
+        except (OSError, http.client.HTTPException, ValueError):
+            return None
+    except (OSError, http.client.HTTPException, ValueError):
+        return None
+    issuer = der_issuer(der) if der else None
+    return (issuer, ok) if issuer else None
+
+
+def tls_issuer_item(host, issuer, verified):
+    """证书颁发者 → 一条结果。公共证书机构签的：正常；不是的话网络里有设备在解密 HTTPS（公司安全网关、杀毒软件、抓包工具）。
+    verified：本机这一方认不认它（Python 版是 Python 的证书库，Rust 版是系统的证书库）。
+    规则和 Rust 版 health::tls_issuer_item 一致（tests/shared/service.json）。"""
+    name = issuer.get("org") or issuer.get("cn") or "?"
+    low = " ".join(v for v in (issuer.get("org"), issuer.get("cn")) if v).lower()
+    if any(w in low for w in PUBLIC_CA_WORDS):
+        return {"kind": "tls_chain", "level": "ok", "text": f"HTTPS 证书：{host} 由 {name} 签发（公共证书机构，没有被中间设备解密）",
+                "advice": ""}
+    return {"kind": "tls_intercept", "level": "warn",
+            "text": f"HTTPS 证书：{host} 由 {name} 签发，不是公共证书机构：网络里有设备在解密 HTTPS" + ("" if verified else "，本机不认它"),
+            "advice": TLS_INTERCEPT_ADVICE}
+
+
 def service_check(store=None):
-    """检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、代理、VPN，
-    再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
+    """检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书是谁签的、
+    代理（设了的话它在不在运行）、VPN，再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
 
     返回 [{"kind", "level", "text", "advice"}]，级别为 ok / bad / warn / info，第一项是总体结论。
     不打印任何密钥，不干预任何操作。传了 store 会顺便刷新界面常显的缓存。
@@ -6548,11 +6963,26 @@ def service_check(store=None):
         code, body, raw = web_get("/api/organizations", "", timeout=SERVICE_PROBE_SECS)
         return code, body, raw, int((time.time() - t0) * 1000)
 
-    # 解析域名、出口地区、api.anthropic.com、claude.ai 这几件事同时做，各有各的时限：哪件卡住了都不拖着别的
+    def probe_url(url):
+        t0 = time.time()
+        st, txt = http_text(url, SERVICE_PROBE_SECS)
+        return st, txt, int((time.time() - t0) * 1000)
+
+    # 解析域名、出口地区、api.anthropic.com、claude.ai、续登录的地址、证书、本机代理这几件事同时做，各有各的时限：
+    # 哪件卡住了都不拖着别的
+    proxy_eps = proxy_endpoints([(k, os.environ[k]) for k in PROXY_ENV_KEYS if os.environ.get(k)]
+                                + [("系统设置", p) for p in system_proxy()])
+    auth_keys = [f"auth:{u}" for u in TOKEN_URLS]
+    proxy_keys = [f"proxy:{h}:{p}" for _, h, p in proxy_eps]
     jobs = {f"dns:{h}": (lambda h=h: resolve(h)) for h in hosts}
-    jobs.update(region=region, api=probe_api, web=probe_web)
+    jobs.update(region=region, api=probe_api, web=probe_web,
+                tls=lambda: peer_issuer(api_host) if API_BASE.startswith("https://") else None)
+    jobs.update({k: (lambda u=u: probe_url(u)) for k, u in zip(auth_keys, TOKEN_URLS)})
+    jobs.update({k: (lambda h=h, p=p: port_open(h, p, PROXY_PROBE_SECS)) for k, (_, h, p) in zip(proxy_keys, proxy_eps)})
     limits = dict.fromkeys((f"dns:{h}" for h in hosts), SERVICE_DNS_SECS)
-    limits.update(api=SERVICE_PROBE_SECS + 1, web=SERVICE_PROBE_SECS + 1)
+    limits.update(api=SERVICE_PROBE_SECS + 1, web=SERVICE_PROBE_SECS + 1, tls=TLS_PROBE_SECS * 2 + 1)
+    limits.update(dict.fromkeys(auth_keys, SERVICE_PROBE_SECS + 1))
+    limits.update(dict.fromkeys(proxy_keys, PROXY_PROBE_SECS + 1))
     res = run_parallel(jobs, REGION_CHECK_BUDGET + 2, limits)
     dns_advice = "检查本机 DNS 或代理设置" + ("；设了代理的话通常由代理解析，可忽略" if proxies else "")
     for host in hosts:
@@ -6627,8 +7057,12 @@ def service_check(store=None):
         add("api", "warn", f"{api_host}：服务可达，但当前登录已过期或无效（{ms} ms）", "运行一次 claude 会自动续登录，不影响切换账号")
     elif st == 401:
         add("api", "ok", f"{api_host}：服务可达（未登录，{ms} ms）")
+    elif st == 429:
+        add("api", "warn", f"{api_host}：官方在限流（HTTP 429，{ms} ms）", RATE_LIMIT_ADVICE)
+    elif st == 529:
+        add("api", "warn", f"{api_host}：官方服务过载（HTTP 529，{ms} ms）", OVERLOAD_ADVICE)
     elif st >= 500:
-        add("api", "bad", f"{api_host}：服务端错误（HTTP {st}）", "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com")
+        add("api", "bad", f"{api_host}：服务端错误（HTTP {st}）", "可能是 Anthropic 故障，稍后再试，可查看 status.claude.com")
     else:
         add("api", "warn", f"{api_host}：HTTP {st}（{msg or '-'}，{ms} ms）", "少见的返回，稍后重试；持续出现请把这一行发给作者")
     if st:
@@ -6645,18 +7079,37 @@ def service_check(store=None):
         add("web", "bad", f"{web_host}：拒绝访问（HTTP {code}：{msg}）", region_hint)
     elif code in (200, 401, 403):
         add("web", "ok", f"{web_host}：可达（{ms} ms）")
+    elif code == 429:
+        add("web", "warn", f"{web_host}：官方在限流（HTTP 429，{ms} ms）", RATE_LIMIT_ADVICE)
     elif code >= 500:
         add("web", "bad", f"{web_host}：服务端错误（HTTP {code}）", "稍后再试")
     else:
         add("web", "warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
     if code:
         out[-1]["ms"] = ms
-    # 代理：环境变量 + 系统设置；VPN：默认路由
+    # 续登录的地址：Claude Code 和 cam 续登录都用，连不上的话登录到期后续不上
+    out.append(auth_item([(urllib.parse.urlparse(u).hostname or u,) + (res[k] or (0, no_answer, None))
+                          for k, u in zip(auth_keys, TOKEN_URLS)]))
+    # 证书是谁签的：不是公共证书机构的话，网络里有设备在解密 HTTPS
+    if res["tls"]:
+        out.append(tls_issuer_item(api_host, *res["tls"]))
+    # 代理：环境变量 + 系统设置（设了的话看它在不在运行）；VPN：默认路由
     env = r.get("env") if isinstance(r.get("env"), dict) and "proxy" in r.get("env", {}) else local_env()
     out.extend(proxy_vpn_items(env))
+    up = []
+    for k, (src, h, p) in zip(proxy_keys, proxy_eps):
+        why = res[k] if res[k] is not None else f"超过 {PROXY_PROBE_SECS} 秒没有回应"
+        if why:
+            out.append(proxy_down_item(src, h, p, why))
+        else:
+            up.append(f"{h}:{p}")
+    if up:
+        add("proxy_up", "ok", "代理在运行：" + "、".join(up))
     out.extend(risk_items(data, include_region=False))
+    intercepted = any(i["kind"] == "tls_intercept" for i in out)
     if any(is_cert_error(i["text"]) for i in out):
-        add("tls", "bad", "HTTPS 证书校验失败（CERTIFICATE_VERIFY_FAILED），上面连不上的几项都是这个原因", CERT_ADVICE)
+        add("tls", "bad", "HTTPS 证书校验失败（CERTIFICATE_VERIFY_FAILED），上面连不上的几项都是这个原因",
+            "是上面说的 HTTPS 解密造成的。" + TLS_INTERCEPT_ADVICE if intercepted else CERT_ADVICE)
     elif ssl_state()[1]:
         add("tls", "info", f"证书：本机 Python 没带根证书，已自动改用 {ssl_state()[1]}", "证书照常校验；想用 Python 自己的证书可以运行一次 Install Certificates.command")
     add("device", "info", f"设备：{platform.system()} {platform.release()}，{platform.machine()}，Python {platform.python_version()}",
@@ -6684,7 +7137,7 @@ def service_check(store=None):
                    "text": head + (f" —— {worst['text']}" if worst else fine),
                    "advice": worst["advice"] if worst else RISK_SCORE_ADVICE})
     if store is not None:  # 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
-        bad = [i for i in out if i["kind"] in ("api", "web", "dns", "tls") and i["level"] in ("warn", "bad")]
+        bad = [i for i in out if i["kind"] in SERVICE_STATUS_KINDS and i["level"] in ("warn", "bad")]
         with store.lock():
             d = store.load()
             if bad:
@@ -6703,8 +7156,10 @@ STATUS_SUMMARY_URLS = [u for u in os.environ.get(
 ).split(",") if u]
 # 官方原生安装器取版本号的地方（claude.ai/install.sh 里的 DOWNLOAD_BASE_URL），<渠道> 文件里就是版本号；空字符串表示不查
 CLAUDE_RELEASES_URL = os.environ.get("CAM_CLAUDE_RELEASES_URL", "https://downloads.claude.ai/claude-code-releases")
-# 状态页里和这里有关的组件：Claude Code、API、claude.ai，再加上续登录用的 Console（platform.claude.com）
-STATUS_COMPONENT_WORDS = ("claude code", "api", "claude.ai", "console")
+# 状态页里和这里有关的组件：Claude Code、API、claude.ai，再加上续登录用的 Console（platform.claude.com）。按词比，见 status_relevant
+STATUS_COMPONENT_WORDS = ("claude code", "api", "claude.ai", "console", "api.anthropic.com", "platform.claude.com")
+# 有关的组件出了这些状态就提醒：部分 / 严重故障是“要处理”，性能下降、维护中是“留意”
+COMPONENT_LEVEL = {"partial_outage": "bad", "major_outage": "bad", "degraded_performance": "warn", "under_maintenance": "warn"}
 INCIDENT_STATUS = {"investigating": "调查中", "identified": "已找到原因", "monitoring": "已修复，观察中",
                    "scheduled": "已安排", "in_progress": "进行中", "verifying": "验证中"}
 COMPONENT_STATUS = {"degraded_performance": "性能下降", "partial_outage": "部分故障", "major_outage": "严重故障",
@@ -6764,27 +7219,67 @@ def latest_claude_version(timeout=6):
     return (ch, v) if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", v) else None
 
 
+def status_relevant(name):
+    """状态页上的组件 / 事件名和这里有关（Claude Code、API、claude.ai、Console）。按词比，“rapid” 里的 api 不算。
+    规则和 Rust 版 health::status_relevant 一致（tests/shared/status_page.json）。"""
+    words = [w.strip(".") for w in re.sub(r"[^a-z0-9.]+", " ", str(name or "").lower()).split()]
+    text = " " + " ".join(w for w in words if w) + " "
+    return any(f" {w} " in text for w in STATUS_COMPONENT_WORDS)
+
+
 def parse_status_summary(j):
     """Statuspage 的 summary.json → {indicator, description, incidents: [{name, status}], components: [{name, status}]}。
 
-    只留没解决的事件和不正常的相关组件（Claude Code / API / claude.ai / Console）。格式不对返回 None。
+    只留和这里有关（status_relevant）的：不正常的组件，没解决的事件（名字有关，或者影响到的组件里有有关的）。
+    indicator / description 是整个状态页的。格式不对返回 None。规则和 Rust 版一致（tests/shared/status_page.json）。
     """
     st = j.get("status") if isinstance(j, dict) else None
     if not isinstance(st, dict) or not st.get("indicator"):
         return None
     incidents = [{"name": str(i.get("name") or "?"), "status": str(i.get("status") or "")}
-                 for i in j.get("incidents") or [] if isinstance(i, dict) and i.get("status") not in ("resolved", "postmortem")]
+                 for i in j.get("incidents") or [] if isinstance(i, dict) and i.get("status") not in ("resolved", "postmortem")
+                 and (status_relevant(i.get("name"))
+                      or any(isinstance(c, dict) and status_relevant(c.get("name")) for c in i.get("components") or []))]
     comps = [{"name": str(c["name"]), "status": str(c["status"])}
              for c in j.get("components") or [] if isinstance(c, dict) and c.get("name") and c.get("status")
-             and c["status"] != "operational" and any(w in str(c["name"]).lower() for w in STATUS_COMPONENT_WORDS)]
+             and c["status"] != "operational" and status_relevant(c["name"])]
     return {"indicator": str(st["indicator"]), "description": str(st.get("description") or ""),
             "incidents": incidents, "components": comps}
 
 
-def fetch_status_summary(timeout=6):
-    """官方状态页的摘要：先 status.claude.com，连不上再 status.anthropic.com。都不行返回 None。"""
+def status_risk(sp):
+    """官方状态页这一条提醒：(级别, 文字) 或 None。sp 是 data["status_page"] 或 fetch_status_summary 的结果。
+
+    有 components（来自 summary.json）：只看和这里有关的组件和事件，别的组件（Chrome 插件、Cowork 之类）出故障不提醒；
+    有关的组件部分 / 严重故障是 bad，性能下降、维护中，或者只有没解决的事件是 warn。
+    没有 components（status.json 的总体状态，或者旧版本记的）：按总体 indicator 算。
+    规则和 Rust 版 health::status_risk 一致（tests/shared/status_page.json）。"""
+    if not isinstance(sp, dict):
+        return None
+    if "components" not in sp:
+        ind = sp.get("indicator")
+        if not ind or ind == "none":
+            return None
+        return ("bad" if ind in ("major", "critical") else "warn"), f"Anthropic 官方状态页：{sp.get('description') or ind}（{ind}）"
+    comps = [c for c in sp.get("components") or [] if c.get("status") in COMPONENT_LEVEL]
+    incs = sp.get("incidents") or []
+    if not comps and not incs:
+        return None
+    level = "bad" if any(COMPONENT_LEVEL[c["status"]] == "bad" for c in comps) else "warn"
+    parts = [f"{c['name']} {COMPONENT_STATUS[c['status']]}" for c in comps]
+    if incs:
+        parts.append(f"{incs[0]['name']}（{INCIDENT_STATUS.get(incs[0]['status'], incs[0]['status'])}）")
+    return level, "Anthropic 官方状态页：" + "；".join(parts)
+
+
+def fetch_status_summary(timeout=6, end=None):
+    """官方状态页的摘要：先 status.claude.com，连不上再 status.anthropic.com。都不行返回 None。
+    每个地址最多等 timeout 秒；给了 end（time.monotonic() 的时刻）就总共不超过它。"""
     for url in STATUS_SUMMARY_URLS:
-        st, txt = http_text(url, timeout)
+        left = timeout if end is None else min(timeout, end - time.monotonic())
+        if left < 0.5:
+            break
+        st, txt = http_text(url, left)
         if st != 200:
             continue
         try:
@@ -6800,15 +7295,17 @@ def status_summary_items(s):
     if s is None:
         hosts = "、".join(dict.fromkeys(urllib.parse.urlparse(u).hostname or u for u in STATUS_SUMMARY_URLS))
         return [ck("warn", f"官方状态页连不上（{hosts}）", "不影响别的检查；需要时在浏览器里打开 status.claude.com 看")]
-    ind = s["indicator"]
-    out = [ck("ok", f"官方状态页：全部正常（{s['page']}）") if ind == "none" else
-           ck("bad" if ind in ("major", "critical") else "warn", f"官方状态页：{s['description'] or ind}（{ind}）",
-              f"这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 {s['page']}")]
-    for i in s["incidents"]:
+    risk = status_risk(s)
+    if risk:  # 有关的组件、事件都写在这一行里（第一件事件也在）
+        out = [ck(risk[0], risk[1].replace("Anthropic 官方状态页", "官方状态页", 1),
+                  f"这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 {s['page']}")]
+    elif s["indicator"] != "none":
+        out = [ck("ok", f"官方状态页：Claude Code、API、claude.ai 都正常（别的服务有故障：{s['description'] or s['indicator']}；"
+                        f"{s['page']}）")]
+    else:
+        out = [ck("ok", f"官方状态页：全部正常（{s['page']}）")]
+    for i in s["incidents"][1:]:
         out.append(ck("info", f"没解决的事件：{i['name']}（{INCIDENT_STATUS.get(i['status'], i['status'])}）"))
-    for c in s["components"]:  # 总体正常时组件出问题也要提醒；总体已经报了就只列出来
-        out.append(ck("warn" if ind == "none" else "info", f"{c['name']}：{COMPONENT_STATUS.get(c['status'], c['status'])}",
-                      f"详情见 {s['page']}" if ind == "none" else ""))
     return out
 
 
@@ -7078,6 +7575,7 @@ def checkup_account(store, p, live_ob, before_exp, offline):
     # 用量：网页号就是 sessionKey 能不能用，API 号是 Key 能不能用
     hk = _health_kind_of_error(kind, err) if err else None
     if kind == "claude_desktop":
+        out += desktop_login_items(p, label)
         if u.get("cache_status") == "ok":
             out.append(ck("ok" if not u.get("cache_stale") else "info", f"本地额度：记录于 {fmt_ago(u.get('fetched_at'))}"
                           + ("（超过 30 分钟的旧快照）" if u.get("cache_stale") else "")))
@@ -7140,8 +7638,61 @@ def checkup_account(store, p, live_ob, before_exp, offline):
     return out
 
 
+def desktop_login_items(p, label):
+    """体检里一个桌面号的“开着没有、本机有没有登录”。p 是 public_state 里的账号。只是本机记录，服务端作废的登录看不出。"""
+    d = p.get("desktop") or {}
+    out = [ck("ok", "Claude 桌面版现在开着的就是这个号")] if d.get("running") else []
+    exp = parse_iso(d.get("login_expires"))
+    left = (exp - dt.datetime.now(dt.timezone.utc)).total_seconds() if exp else None
+    reopen = f"cam open {label}，在打开的 Claude 窗口里登录（邮箱链接或 Google）"
+    login = d.get("login")
+    if login == "yes":
+        out.append(ck("info" if left is not None and left < 3 * 86400 else "ok",
+                      "本机登录：有" + (f"，{fmt_span(left)}后到期，到期后打开要重新登录" if left is not None else "")))
+    elif login == "expired":
+        out.append(ck("warn", f"本机登录：已过期（{fmt_ago(d.get('login_expires'))}），下次打开要重新登录", reopen))
+    elif login == "no":
+        out.append(ck("warn", "本机登录：没有（可能在客户端里退出了），下次打开要重新登录", reopen))
+    elif login == "never":
+        out.append(ck("info", "本机登录：还没登录过，第一次打开时在 Claude 窗口里登录一次", reopen))
+    elif login == "unknown":
+        out.append(ck("info", "本机登录：看不出来（客户端的本机记录读不了）"))
+    return out
+
+
+def desktop_app_items(store, data):
+    """体检第 3 节里 Claude 桌面版那几行：装在哪、版本、开着没有、开着的是哪个号。没有桌面号也没装时不写。"""
+    app, _ = desktop_view(store, data, max_age=0)
+    if app is None:
+        st = desktop_app_status(0)
+        if not st["installed"]:
+            return []
+        app = {"installed": True, "version": st["version"], "running": st["running"], "account": None, "known": False}
+        path = st["app"]
+    else:
+        path = desktop_app_status()["app"]
+    if not app["installed"]:
+        return [ck("warn", "Claude 桌面版：没找到", "到 claude.ai/download 下载安装；装在别处的话设环境变量 CAM_CLAUDE_DESKTOP 指向它")]
+    out = [ck("ok", f"Claude 桌面版：{path or '在运行（商店版，装在系统目录）'}（{'版本 ' + app['version'] if app['version'] else '版本看不出'}）")]
+    names = {a["id"]: a.get("label") or a.get("email") or a["id"] for a in data.get("accounts") or []}
+    if app["running"] is None:
+        out.append(ck("info", "Claude 桌面版开没开：查不出来（读不了进程列表）"))
+    elif not app["running"]:
+        out.append(ck("info", "Claude 桌面版：没开"))
+    elif app["account"]:
+        out.append(ck("ok", f"Claude 桌面版正开着，用的是“{names.get(app['account'], app['account'])}”"))
+    elif app["known"]:
+        out.append(ck("info", "Claude 桌面版正开着，用的不是 cam 里登记的号", "想用 cam 管它：cam add-desktop --label 名字 --current 绑定本机已经登录的那份"))
+    else:
+        out.append(ck("info", "Claude 桌面版正开着，看不出用的哪个号"))
+    return out
+
+
 def checkup_accounts(store, before_exp, offline, refresh_error=None):
     data = store.load()
+    if any(a.get("kind") == "claude_desktop" for a in data.get("accounts") or []):
+        desktop_app_status(0)  # 体检要现查：桌面版开没开、用的哪个号
+        _DESKTOP_LOGIN.clear()
     st = public_state(store, data)
     out = []
     if refresh_error:
@@ -7267,6 +7818,10 @@ def checkup_local_claude(store, latest=None):
     for key in ("live_mismatch", "live_unverified"):
         if (data.get(key) or {}).get("message"):
             out.append(ck("warn", data[key]["message"]))
+    try:
+        out += desktop_app_items(store, data)
+    except Exception as e:  # noqa: BLE001  桌面版这几行出错不影响别的
+        out.append(ck("info", f"Claude 桌面版：没查完（{e}）"))
     return out + session_items()
 
 

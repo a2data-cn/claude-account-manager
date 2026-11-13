@@ -2,8 +2,11 @@
 
 use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
+use cam_engine::desktop_app::{login_state, version_from_path};
 use cam_engine::health::{
-    net_fingerprint_of, region_check_fresh, region_fail_item, region_retry_wait,
+    auth_item, der_issuer, net_fingerprint_of, parse_status_summary, proxy_endpoints,
+    region_check_fresh, region_fail_item, region_retry_wait, risk_score, status_relevant,
+    status_risk, tls_issuer_item,
 };
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::store::{accounts, find_index, parse_day, s};
@@ -21,6 +24,123 @@ fn fixture(name: &str) -> Value {
 
 fn cases<'a>(v: &'a Value, key: &str) -> &'a Vec<Value> {
     v[key].as_array().unwrap()
+}
+
+#[test]
+fn desktop_status_cases() {
+    let fx = fixture("desktop_status.json");
+    for c in cases(&fx, "version_from_path") {
+        let got = version_from_path(c["path"].as_str().unwrap());
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "login_state") {
+        let cookies: Option<Vec<i64>> = c["cookies"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_i64().unwrap()).collect());
+        let got = login_state(
+            c["dir_exists"].as_bool().unwrap(),
+            c["token_cache"].as_bool().unwrap(),
+            c["known_account"].as_bool().unwrap(),
+            cookies.as_deref(),
+            c["cookie_files"].as_bool().unwrap(),
+            c["now"].as_i64().unwrap(),
+        );
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn status_page_cases() {
+    let fx = fixture("status_page.json");
+    for c in cases(&fx, "relevant") {
+        let got = status_relevant(c["name"].as_str().unwrap_or(""));
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "parse") {
+        assert_eq!(
+            parse_status_summary(&c["summary"]).unwrap_or(Value::Null),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "risk") {
+        let got = status_risk(&c["status_page"])
+            .map(|(level, text)| json!([level, text]))
+            .unwrap_or(Value::Null);
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn service_cases() {
+    let fx = fixture("service.json");
+    let text = |v: &Value| v.as_str().unwrap().to_string();
+    for c in cases(&fx, "proxy_endpoints") {
+        let entries: Vec<(String, String)> = c["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (text(&e[0]), text(&e[1])))
+            .collect();
+        let got: Vec<Value> = proxy_endpoints(&entries)
+            .into_iter()
+            .map(|(src, host, port)| json!([src, host, port]))
+            .collect();
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "auth_item") {
+        let results: Vec<(String, u16, String, u128)> = c["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    text(&r[0]),
+                    r[1].as_u64().unwrap() as u16,
+                    text(&r[2]),
+                    r[3].as_u64().unwrap_or(0) as u128,
+                )
+            })
+            .collect();
+        let it = auth_item(&results);
+        assert_eq!(
+            json!({"level": it["level"], "text": it["text"]}),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "der_issuer") {
+        let hex = c["der_hex"].as_str().unwrap();
+        let der: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(
+            der_issuer(&der).unwrap_or(Value::Null),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "tls_issuer_item") {
+        let it = tls_issuer_item(
+            c["host"].as_str().unwrap(),
+            &c["issuer"],
+            c["verified"].as_bool().unwrap(),
+        );
+        assert_eq!(
+            json!({"kind": it["kind"], "level": it["level"], "text": it["text"]}),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "risk_score") {
+        let items: Vec<Value> = c["items"].as_array().unwrap().clone();
+        assert_eq!(risk_score(&items)["score"], c["expect"], "{}", c["name"]);
+    }
 }
 
 #[test]

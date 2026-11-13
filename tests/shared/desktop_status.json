@@ -1,0 +1,26 @@
+{
+  "_说明": "Claude 桌面版状态的两条规则：version_from_path(安装路径或命令行) 路径里带的版本号；login_state(...) 本机记录里一个桌面号的登录（yes / expired / no / never / unknown，到期时间是 Unix 秒）。Python 与 Rust 两边按同一份数据跑。",
+  "version_from_path": [
+    {"name": "Windows 安装版", "path": "C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-0.14.10\\claude.exe", "expect": "0.14.10"},
+    {"name": "Windows 安装版（正斜杠）", "path": "C:/Users/me/AppData/Local/AnthropicClaude/app-1.0.3218/claude.exe", "expect": "1.0.3218"},
+    {"name": "商店版", "path": "C:\\Program Files\\WindowsApps\\AnthropicPBC.Claude_1.0.734.0_x64__pzs8sxrjxfjjc\\app\\claude.exe", "expect": "1.0.734.0"},
+    {"name": "商店版（另一种包名）", "path": "C:/Program Files/WindowsApps/Anthropic.Claude_2.1.5.0_x64__abc/claude.exe", "expect": "2.1.5.0"},
+    {"name": "命令行里带参数", "path": "\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-0.9.1\\claude.exe\" --user-data-dir=C:\\x", "expect": "0.9.1"},
+    {"name": "没带版本号", "path": "C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\claude.exe", "expect": null},
+    {"name": "macOS", "path": "/Applications/Claude.app", "expect": null},
+    {"name": "名字里有 app- 但不在目录开头", "path": "/opt/myapp-1.2/claude", "expect": null},
+    {"name": "空的", "path": "", "expect": null}
+  ],
+  "login_state": [
+    {"name": "目录还没有：第一次打开时登录", "dir_exists": false, "token_cache": false, "known_account": false, "cookies": null, "cookie_files": false, "now": 1800000000, "expect": {"login": "never", "expires": null}},
+    {"name": "目录有了但还没有 Cookie 库：还没登录过", "dir_exists": true, "token_cache": false, "known_account": false, "cookies": null, "cookie_files": false, "now": 1800000000, "expect": {"login": "never", "expires": null}},
+    {"name": "有没过期的登录 Cookie：到期时间取最晚的", "dir_exists": true, "token_cache": false, "known_account": false, "cookies": [1800086400, 1801728000, 1799999995], "cookie_files": true, "now": 1800000000, "expect": {"login": "yes", "expires": 1801728000}},
+    {"name": "会话 Cookie 不知道什么时候到期", "dir_exists": true, "token_cache": false, "known_account": false, "cookies": [0, 1800086400], "cookie_files": true, "now": 1800000000, "expect": {"login": "yes", "expires": null}},
+    {"name": "登录 Cookie 都过期了", "dir_exists": true, "token_cache": false, "known_account": true, "cookies": [1799913600, 1799999990], "cookie_files": true, "now": 1800000000, "expect": {"login": "expired", "expires": 1799999990}},
+    {"name": "Cookie 库读得到但没有登录 Cookie", "dir_exists": true, "token_cache": false, "known_account": false, "cookies": [], "cookie_files": true, "now": 1800000000, "expect": {"login": "no", "expires": null}},
+    {"name": "没有 Cookie 但有客户端的登录缓存", "dir_exists": true, "token_cache": true, "known_account": true, "cookies": [], "cookie_files": true, "now": 1800000000, "expect": {"login": "yes", "expires": null}},
+    {"name": "Cookie 库读不了，但记着上次登录的账号", "dir_exists": true, "token_cache": false, "known_account": true, "cookies": null, "cookie_files": true, "now": 1800000000, "expect": {"login": "no", "expires": null}},
+    {"name": "Cookie 库读不了，别的也没有", "dir_exists": true, "token_cache": false, "known_account": false, "cookies": null, "cookie_files": true, "now": 1800000000, "expect": {"login": "unknown", "expires": null}},
+    {"name": "刚好在到期那一秒算过期", "dir_exists": true, "token_cache": false, "known_account": false, "cookies": [1800000000], "cookie_files": true, "now": 1800000000, "expect": {"login": "expired", "expires": 1800000000}}
+  ]
+}

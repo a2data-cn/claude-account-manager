@@ -1,4 +1,4 @@
-import type { Account, LocalWindow, Window5, WindowKey } from "../types";
+import type { Account, DesktopApp, LocalWindow, Window5, WindowKey } from "../types";
 import { Ico } from "./Icon";
 import { BREAKDOWN, KIND, PLAN, WINDOW_KEYS, WINDOW_MS, WINDOW_NAME, ago, dur, noReset, planTier, resetText, usd, wan } from "../format";
 import { maskMail, usePrefs } from "../prefs";
@@ -124,14 +124,47 @@ function dueInfo(a: Account) {
   };
 }
 
-/** 正在用 / 异常 / 注意 / 快到期 */
+/** 桌面号本机记录里有登录问题时的小标签（cam 只读本机文件看出来的） */
+const DESK_LOGIN_CHIP: Record<string, [string, string]> = { expired: ["st-warn", "登录过期"], no: ["st-warn", "没有登录"], never: ["", "还没登录"] };
+
+/** 桌面号本机记录里的登录，详情里的一行 */
+export function deskLoginText(a: Account): string {
+  const d = a.desktop;
+  const e = d?.login_expires ? new Date(d.login_expires) : null;
+  const day = e ? `${e.getMonth() + 1}月${e.getDate()}日` : "";
+  const text: Record<string, string> = {
+    yes: `有${day ? `，${day}到期` : ""}`,
+    expired: `已过期${day ? `（${day}）` : ""}，下次打开要在窗口里重新登录`,
+    no: "没有，下次打开要在窗口里登录",
+    never: "还没登录过，第一次打开时在窗口里登录",
+    unknown: "看不出来",
+  };
+  return (d && text[d.login]) || "–";
+}
+
+/** 客户端：版本、开着没有、开着的是不是这个号 */
+export function deskAppText(a: Account, app: DesktopApp): string {
+  const ver = !app.installed ? "没找到 Claude 桌面版" : app.version ? `版本 ${app.version}` : "已安装";
+  const run =
+    app.running === null || app.running === undefined ? "" : !app.running ? "没开"
+      : app.account === a.id ? "开着的就是这个号" : app.account ? "开着别的号" : app.known ? "开着，用的不是这里的号" : "开着，看不出用的哪个号";
+  return run ? `${ver} · ${run}` : ver;
+}
+
+/** 正在用（桌面号：开着 / 上次打开、登录问题）/ 异常 / 注意 / 快到期 */
 export function StatusChips({ a }: { a: Account }) {
   const h = a.health;
   const due = dueInfo(a);
   const expiredIssue = h?.issues.some((i) => i.kind === "expired");
+  const login = a.kind === "claude_desktop" ? DESK_LOGIN_CHIP[a.desktop?.login ?? ""] : undefined;
   return (
     <>
-      {a.is_active && <span className="chip live">{a.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>}
+      {a.kind === "claude_desktop" ? (
+        a.desktop?.running ? <span className="chip live">开着</span> : a.is_active && <span className="chip">上次打开</span>
+      ) : (
+        a.is_active && <span className="chip live">正在用</span>
+      )}
+      {login && <span className={`chip ${login[0]}`}>{login[1]}</span>}
       {h?.level === "error" && <span className="chip st-error">异常</span>}
       {h?.level === "warn" && <span className="chip st-warn">注意</span>}
       {due && due.cls && !expiredIssue && <span className={`chip ${due.cls}`}>{due.short}</span>}
@@ -188,6 +221,7 @@ export function AccountTile({ a, selected, onSelect }: { a: Account; selected: b
 
 export interface DetailProps {
   a: Account;
+  desktopApp?: DesktopApp | null;
   busy: boolean;
   onSwitch: (a: Account) => void;
   onOpen: (a: Account) => void;
@@ -197,7 +231,7 @@ export interface DetailProps {
 }
 
 /** 选中账号的详情：问题和修复建议、额度、信息、操作 */
-export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, onRemove }: DetailProps) {
+export function AccountDetail({ a, desktopApp, busy, onSwitch, onOpen, onRefresh, onEdit, onRemove }: DetailProps) {
   const { mask } = usePrefs();
   const u = a.usage || {};
   const m = a.manual || {};
@@ -347,6 +381,14 @@ export function AccountDetail({ a, busy, onSwitch, onOpen, onRefresh, onEdit, on
               <dd><span className="v">{u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"}</span></dd>
               <dt>记录时间</dt>
               <dd><span className="v">{ago(u.fetched_at)}</span></dd>
+              <dt>本机登录</dt>
+              <dd><span className="v">{deskLoginText(a)}</span></dd>
+              {desktopApp && (
+                <>
+                  <dt>客户端</dt>
+                  <dd><span className="v">{deskAppText(a, desktopApp)}</span></dd>
+                </>
+              )}
               <dt>最近读取</dt>
               <dd><span className="v">{ago(u.checked_at)}</span></dd>
             </>

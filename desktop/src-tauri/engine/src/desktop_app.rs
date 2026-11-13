@@ -2,9 +2,10 @@
 //! 不读取或覆盖 Claude Code 的凭据和会话。
 
 use super::store::*;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub fn default_user_data() -> PathBuf {
@@ -69,7 +70,8 @@ struct DesktopProcess {
     profile: Option<PathBuf>,
 }
 
-fn path_key(path: &Path) -> String {
+/// 比较两个目录用的写法（解开链接、斜杠统一，Windows 上不分大小写）
+pub fn path_key(path: &Path) -> String {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let key = path.to_string_lossy().replace('\\', "/");
     if cfg!(target_os = "windows") {
@@ -220,100 +222,7 @@ struct SystemRuntime;
 
 impl DesktopRuntime for SystemRuntime {
     fn processes(&self, app: Option<&Path>) -> R<Vec<DesktopProcess>> {
-        let candidates = executable_candidates(app);
-        let mut found = Vec::new();
-        #[cfg(target_os = "windows")]
-        {
-            let script = "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine) | ConvertTo-Json -Compress";
-            let out = Command::new("powershell")
-                .args(["-NoProfile", "-Command", script])
-                .output()
-                .map_err(|e| format!("无法检查 Claude 桌面版进程：{e}"))?;
-            if !out.status.success() {
-                return Err("无法检查 Claude 桌面版进程（PowerShell 查询失败）".into());
-            }
-            let rows: Value = serde_json::from_slice(&out.stdout)
-                .map_err(|e| format!("无法解析桌面版进程列表：{e}"))?;
-            let rows = rows.as_array().cloned().unwrap_or_else(|| vec![rows]);
-            for row in rows {
-                let Some(exe) = s(&row, "ExecutablePath") else {
-                    if s(&row, "Name").is_some_and(|n| n.eq_ignore_ascii_case("claude.exe")) {
-                        return Err("无法读取 Claude 进程路径，不能安全区分桌面版和 Claude Code；请先手动退出后再操作".into());
-                    }
-                    continue;
-                };
-                let norm = exe.replace('\\', "/").to_lowercase();
-                let known = (norm.contains("/anthropicclaude/")
-                    || (norm.contains("/windowsapps/anthropic.claude")
-                        || norm.contains("/windowsapps/anthropicpbc.claude")))
-                    && norm.ends_with("/claude.exe");
-                if !known && !candidates.iter().any(|p| same_path(p, Path::new(exe))) {
-                    continue;
-                }
-                let cmd = s(&row, "CommandLine").unwrap_or("");
-                if cmd
-                    .split_whitespace()
-                    .any(|a| a == "--type" || a.starts_with("--type="))
-                {
-                    continue;
-                }
-                if let Some(pid) = row["ProcessId"]
-                    .as_u64()
-                    .and_then(|p| u32::try_from(p).ok())
-                {
-                    found.push(DesktopProcess {
-                        pid,
-                        profile: command_profile(cmd),
-                    });
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let out = Command::new("ps")
-                .args(["-axww", "-o", "pid=,command="])
-                .output()
-                .map_err(|e| format!("无法检查 Claude 桌面版进程：{e}"))?;
-            if !out.status.success() {
-                return Err("无法检查 Claude 桌面版进程（ps 查询失败）".into());
-            }
-            let listing = String::from_utf8(out.stdout)
-                .map_err(|e| format!("无法解析桌面版进程列表：{e}"))?;
-            for line in listing.lines() {
-                let line = line.trim();
-                let Some((pid, cmd)) = line.split_once(char::is_whitespace) else {
-                    continue;
-                };
-                let Some(args) = unix_desktop_command(cmd.trim_start(), &candidates) else {
-                    continue;
-                };
-                let pid = pid
-                    .parse::<u32>()
-                    .map_err(|e| format!("无效桌面版进程编号：{e}"))?;
-                let profile = command_profile(args);
-                #[cfg(target_os = "macos")]
-                let profile = match profile {
-                    Some(p) => Some(p),
-                    None => {
-                        // 默认从 Dock 打开的实例没有 user-data-dir 参数。以打开的登录数据库
-                        // 验证真实目录，不能把缓存 active 或“缺少参数”当成默认目录。
-                        let out = Command::new("lsof")
-                            .args(["-a", "-p", &pid.to_string(), "-Fn"])
-                            .output()
-                            .map_err(|e| format!("无法确认 Claude 桌面版的数据目录：{e}"))?;
-                        if out.status.success() {
-                            profile_from_open_files(&String::from_utf8_lossy(&out.stdout))
-                        } else if out.status.code() != Some(1) {
-                            return Err("无法确认 Claude 桌面版的数据目录（lsof 查询失败）".into());
-                        } else {
-                            None
-                        }
-                    }
-                };
-                found.push(DesktopProcess { pid, profile });
-            }
-        }
-        Ok(found)
+        Ok(scan(app)?.into_iter().map(|(p, _)| p).collect())
     }
 
     fn quit(&self, app: &Path) -> R<()> {
@@ -368,6 +277,107 @@ impl DesktopRuntime for SystemRuntime {
     fn launch(&self, app: &Path, dir: &Path) -> R<()> {
         launch_verified(app, dir, || self.processes(Some(app)))
     }
+}
+
+/// 桌面版主进程和它的命令行（Windows 上是程序路径加参数）。查不到进程列表时报错，不能当作已退出。
+fn scan(app: Option<&Path>) -> R<Vec<(DesktopProcess, String)>> {
+    let candidates = executable_candidates(app);
+    let mut found = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        let script = "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine) | ConvertTo-Json -Compress";
+        let out = Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .output()
+            .map_err(|e| format!("无法检查 Claude 桌面版进程：{e}"))?;
+        if !out.status.success() {
+            return Err("无法检查 Claude 桌面版进程（PowerShell 查询失败）".into());
+        }
+        let rows: Value = serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("无法解析桌面版进程列表：{e}"))?;
+        let rows = rows.as_array().cloned().unwrap_or_else(|| vec![rows]);
+        for row in rows {
+            let Some(exe) = s(&row, "ExecutablePath") else {
+                if s(&row, "Name").is_some_and(|n| n.eq_ignore_ascii_case("claude.exe")) {
+                    return Err("无法读取 Claude 进程路径，不能安全区分桌面版和 Claude Code；请先手动退出后再操作".into());
+                }
+                continue;
+            };
+            let norm = exe.replace('\\', "/").to_lowercase();
+            let known = (norm.contains("/anthropicclaude/")
+                || (norm.contains("/windowsapps/anthropic.claude")
+                    || norm.contains("/windowsapps/anthropicpbc.claude")))
+                && norm.ends_with("/claude.exe");
+            if !known && !candidates.iter().any(|p| same_path(p, Path::new(exe))) {
+                continue;
+            }
+            let cmd = s(&row, "CommandLine").unwrap_or("");
+            if cmd
+                .split_whitespace()
+                .any(|a| a == "--type" || a.starts_with("--type="))
+            {
+                continue;
+            }
+            if let Some(pid) = row["ProcessId"]
+                .as_u64()
+                .and_then(|p| u32::try_from(p).ok())
+            {
+                found.push((
+                    DesktopProcess {
+                        pid,
+                        profile: command_profile(cmd),
+                    },
+                    format!("{exe} {cmd}"),
+                ));
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let out = Command::new("ps")
+            .args(["-axww", "-o", "pid=,command="])
+            .output()
+            .map_err(|e| format!("无法检查 Claude 桌面版进程：{e}"))?;
+        if !out.status.success() {
+            return Err("无法检查 Claude 桌面版进程（ps 查询失败）".into());
+        }
+        let listing =
+            String::from_utf8(out.stdout).map_err(|e| format!("无法解析桌面版进程列表：{e}"))?;
+        for line in listing.lines() {
+            let line = line.trim();
+            let Some((pid, cmd)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let Some(args) = unix_desktop_command(cmd.trim_start(), &candidates) else {
+                continue;
+            };
+            let pid = pid
+                .parse::<u32>()
+                .map_err(|e| format!("无效桌面版进程编号：{e}"))?;
+            let profile = command_profile(args);
+            #[cfg(target_os = "macos")]
+            let profile = match profile {
+                Some(p) => Some(p),
+                None => {
+                    // 默认从 Dock 打开的实例没有 user-data-dir 参数。以打开的登录数据库
+                    // 验证真实目录，不能把缓存 active 或“缺少参数”当成默认目录。
+                    let out = Command::new("lsof")
+                        .args(["-a", "-p", &pid.to_string(), "-Fn"])
+                        .output()
+                        .map_err(|e| format!("无法确认 Claude 桌面版的数据目录：{e}"))?;
+                    if out.status.success() {
+                        profile_from_open_files(&String::from_utf8_lossy(&out.stdout))
+                    } else if out.status.code() != Some(1) {
+                        return Err("无法确认 Claude 桌面版的数据目录（lsof 查询失败）".into());
+                    } else {
+                        None
+                    }
+                }
+            };
+            found.push((DesktopProcess { pid, profile }, args.to_string()));
+        }
+    }
+    Ok(found)
 }
 
 // 进程观察可注入，测试真实启动器退出码时无需访问用户正在运行的应用。
@@ -746,6 +756,365 @@ fn ensure_profile_unused(dir: &Path, procs: &[DesktopProcess]) -> R<()> {
         );
     }
     Ok(())
+}
+
+// ---- 桌面版的状态（装没装、版本、开着没有、开着的是哪个号、各号本机有没有登录）：只读，给面板、小组件显示用。
+// 切换和移除前的判断不走这里，用 SystemRuntime 现查。与 cam.py 的 desktop_view 一致。
+
+/// 安装路径（或命令行）里带的版本号：Windows 的 AnthropicClaude\app-0.14.10\claude.exe、商店版的
+/// AnthropicPBC.Claude_1.0.734.0_x64__…。没有返回 None。与 cam.py 的 desktop_version_from_path 一致（tests/shared/desktop_status.json）。
+pub fn version_from_path(path: &str) -> Option<String> {
+    let low = path.to_ascii_lowercase(); // 只改 ASCII，下标和原文一一对应
+    let b = low.as_bytes();
+    let mut starts: Vec<(usize, usize)> = low
+        .match_indices("app-")
+        .filter(|(i, _)| *i > 0 && matches!(b[i - 1], b'/' | b'\\'))
+        .map(|(i, _)| (i - 1, i + 4))
+        .collect();
+    for pre in ["anthropicpbc.claude_", "anthropic.claude_"] {
+        starts.extend(low.match_indices(pre).map(|(i, _)| (i, i + pre.len())));
+    }
+    starts.sort();
+    let digits = |mut k: usize| {
+        while k < b.len() && b[k].is_ascii_digit() {
+            k += 1;
+        }
+        k
+    };
+    for (_, v) in starts {
+        let mut k = digits(v);
+        if k == v {
+            continue;
+        }
+        let mut parts = 0;
+        while k + 1 < b.len() && b[k] == b'.' && b[k + 1].is_ascii_digit() {
+            k = digits(k + 1);
+            parts += 1;
+        }
+        if parts > 0 {
+            return Some(path[v..k].to_string());
+        }
+    }
+    None
+}
+
+/// 装好的桌面版的版本号：macOS 读 Claude.app 的 Info.plist（XML 格式的），Windows 看安装目录名，Linux 社区的 deb 包问 dpkg。
+fn installed_version(app: &Path) -> Option<String> {
+    if app.extension().and_then(|e| e.to_str()) == Some("app") {
+        let text = std::fs::read_to_string(app.join("Contents/Info.plist")).ok()?;
+        let rest = &text[text.find("<key>CFBundleShortVersionString</key>")?..];
+        let start = rest.find("<string>")? + "<string>".len();
+        let end = rest[start..].find("</string>")?;
+        return Some(rest[start..start + end].trim().to_string()).filter(|v| !v.is_empty());
+    }
+    if let Some(v) = version_from_path(&app.to_string_lossy()) {
+        return Some(v);
+    }
+    if cfg!(target_os = "linux") {
+        let out = Command::new("dpkg-query")
+            .args(["-W", "-f=${Version}", "claude-desktop"])
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return (out.status.success() && !v.is_empty()).then_some(v);
+    }
+    None
+}
+
+/// 桌面版开着没有：缓存多久（查进程表要几百毫秒，Windows 上一秒多）
+pub const STATUS_MAX_AGE: Duration = Duration::from_secs(20);
+
+#[derive(Default)]
+struct StatusCache {
+    at: Option<Instant>,
+    value: Option<Value>,
+    busy: bool,
+}
+
+fn status_cache() -> &'static Mutex<StatusCache> {
+    static C: OnceLock<Mutex<StatusCache>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn scan_status() -> Value {
+    let app = find_app().ok();
+    let (running, rows) = match scan(app.as_deref()) {
+        Ok(rows) => (Some(!rows.is_empty()), rows),
+        Err(_) => (None, Vec::new()), // 查不出来
+    };
+    // 商店版不在固定位置：从正在运行的那个程序的路径看
+    let version = app
+        .as_deref()
+        .and_then(installed_version)
+        .or_else(|| rows.iter().find_map(|(_, cmd)| version_from_path(cmd)));
+    let profiles: Vec<Value> = rows
+        .iter()
+        .map(|(p, cmd)| {
+            // 没带 --user-data-dir 参数就是 Electron 的默认目录（macOS 的命令行可能不全，那边靠 lsof）
+            let dir = p.profile.clone().or_else(|| {
+                (!cfg!(target_os = "macos") && !cmd.contains("--user-data-dir"))
+                    .then(default_user_data)
+            });
+            dir.map(|d| json!(path_key(&d))).unwrap_or(Value::Null)
+        })
+        .collect();
+    json!({"installed": app.is_some() || !rows.is_empty(),
+           "app": app.map(|a| a.display().to_string()), "version": version,
+           "running": running, "profiles": profiles})
+}
+
+/// {installed, app, version, running（null 是查不出来）, profiles（开着的实例用的数据目录，看不出的是 null）}。
+/// 缓存 max_age；过期了先给上次的、在后台重查，还没查过和 max_age 为 0 时当场查。与 cam.py 的 desktop_app_status 一致。
+pub fn app_status(max_age: Duration) -> Value {
+    let now = Instant::now();
+    {
+        let mut c = status_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(at), Some(v)) = (c.at, c.value.clone()) {
+            if now.duration_since(at) < max_age {
+                return v;
+            }
+            if !max_age.is_zero() {
+                if !c.busy {
+                    c.busy = true;
+                    c.at = Some(now);
+                    std::thread::spawn(|| {
+                        let v = scan_status();
+                        let mut c = status_cache().lock().unwrap_or_else(|e| e.into_inner());
+                        c.value = Some(v);
+                        c.at = Some(Instant::now());
+                        c.busy = false;
+                    });
+                }
+                return v;
+            }
+        }
+    }
+    let v = scan_status();
+    let mut c = status_cache().lock().unwrap_or_else(|e| e.into_inner());
+    c.value = Some(v.clone());
+    c.at = Some(Instant::now());
+    v
+}
+
+/// Chromium 的 Cookie 时间从 1601-01-01 起算，单位微秒
+const CHROME_EPOCH: i64 = 11_644_473_600;
+
+fn cookie_dbs(dir: &Path) -> Vec<PathBuf> {
+    let mut dbs = vec![dir.join("Cookies"), dir.join("Network").join("Cookies")];
+    let mut parts: Vec<PathBuf> = std::fs::read_dir(dir.join("Partitions"))
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    parts.sort();
+    dbs.extend(parts.iter().map(|p| p.join("Cookies")));
+    dbs.extend(parts.iter().map(|p| p.join("Network").join("Cookies")));
+    dbs.into_iter().filter(|p| p.is_file()).collect()
+}
+
+/// 只读、不加锁地打开 SQLite 文件（客户端开着也能读，不影响它）要用的 URI
+fn sqlite_uri(path: &Path) -> String {
+    let mut p = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = p.strip_prefix("//?/") {
+        p = rest.to_string();
+    }
+    if !p.starts_with('/') {
+        p.insert(0, '/');
+    }
+    let enc: String = p
+        .bytes()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || b"-._~/:".contains(&c) {
+                (c as char).to_string()
+            } else {
+                format!("%{:02X}", c)
+            }
+        })
+        .collect();
+    format!("file://{}?mode=ro&immutable=1", enc)
+}
+
+/// claude.ai 登录 Cookie（sessionKey）的到期时间 [Unix 秒，会话 Cookie 是 0]；一个 Cookie 库都读不了返回 None。
+/// 只读名字、域名和到期时间，不读 Cookie 的值。与 cam.py 的 _desktop_session_cookies 一致。
+fn session_cookies(dbs: &[PathBuf]) -> Option<Vec<i64>> {
+    use rusqlite::{Connection, OpenFlags};
+    let mut found = Vec::new();
+    let mut readable = false;
+    for db in dbs {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let Ok(con) = Connection::open_with_flags(sqlite_uri(db), flags) else {
+            continue;
+        };
+        let rows = con
+            .prepare(
+                "SELECT expires_utc FROM cookies WHERE name = 'sessionKey' AND \
+                 (host_key = 'claude.ai' OR host_key LIKE '%.claude.ai')",
+            )
+            .and_then(|mut st| {
+                st.query_map([], |r| r.get::<_, Option<i64>>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            });
+        let Ok(rows) = rows else {
+            continue;
+        };
+        readable = true;
+        found.extend(rows.into_iter().map(|e| match e {
+            Some(e) if e != 0 => (e / 1_000_000 - CHROME_EPOCH).max(0),
+            _ => 0,
+        }));
+    }
+    readable.then_some(found)
+}
+
+/// config.json 里有没有客户端存的登录缓存、记不记着上次登录的账号（只看有没有这一项，不读内容）
+fn token_cache(dir: &Path) -> (bool, bool) {
+    let Ok(Some(cfg)) = read_json(&dir.join("config.json")) else {
+        return (false, false);
+    };
+    let truthy = |k: &str| match cfg.get(k) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(x)) => !x.is_empty(),
+        Some(Value::Array(x)) => !x.is_empty(),
+        Some(Value::Object(x)) => !x.is_empty(),
+        Some(Value::Number(n)) => n.as_f64() != Some(0.0),
+    };
+    (
+        truthy("oauth:tokenCache") || truthy("oauth:tokenCacheV2"),
+        truthy("lastKnownAccountUuid"),
+    )
+}
+
+/// 本机记录里这个桌面号的登录：{login: yes / expired / no / never / unknown, expires: Unix 秒或 null}。
+/// 与 cam.py 的 desktop_login_state 一致（tests/shared/desktop_status.json）。
+pub fn login_state(
+    dir_exists: bool,
+    token_cache: bool,
+    known_account: bool,
+    cookies: Option<&[i64]>,
+    cookie_files: bool,
+    now: i64,
+) -> Value {
+    if !dir_exists {
+        return json!({"login": "never", "expires": null});
+    }
+    let live: Vec<i64> = cookies
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .filter(|c| *c == 0 || *c > now)
+        .collect();
+    if !live.is_empty() || token_cache {
+        let dated = live.iter().copied().filter(|c| *c > 0).max();
+        let exp = if live.contains(&0) { None } else { dated };
+        return json!({"login": "yes", "expires": exp});
+    }
+    if let Some(c) = cookies.filter(|c| !c.is_empty()) {
+        return json!({"login": "expired", "expires": c.iter().max()});
+    }
+    if cookies.is_some() || known_account {
+        return json!({"login": "no", "expires": null});
+    }
+    json!({"login": if cookie_files { "unknown" } else { "never" }, "expires": null})
+}
+
+fn login_now(dir: &Path) -> Value {
+    let exists = dir.is_dir();
+    let (token, known) = if exists {
+        token_cache(dir)
+    } else {
+        (false, false)
+    };
+    let dbs = if exists { cookie_dbs(dir) } else { Vec::new() };
+    let cookies = if exists { session_cookies(&dbs) } else { None };
+    let st = login_state(
+        exists,
+        token,
+        known,
+        cookies.as_deref(),
+        !dbs.is_empty(),
+        chrono::Utc::now().timestamp(),
+    );
+    let exp = st["expires"]
+        .as_i64()
+        .and_then(|e| chrono::DateTime::from_timestamp(e, 0))
+        .map(|d| d.format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
+    json!({"login": st["login"], "login_expires": exp})
+}
+
+/// 这个数据目录本机记录里的登录 {login, login_expires}，缓存 max_age（菜单栏、卡片刷新得勤）。只读文件，不碰登录。
+pub fn login(dir: &Path, max_age: Duration) -> Value {
+    static C: OnceLock<Mutex<std::collections::HashMap<PathBuf, (Instant, Value)>>> =
+        OnceLock::new();
+    let cache = C.get_or_init(Default::default);
+    if !max_age.is_zero() {
+        if let Some((at, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(dir) {
+            if at.elapsed() < max_age {
+                return v.clone();
+            }
+        }
+    }
+    let v = login_now(dir);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(dir.to_path_buf(), (Instant::now(), v.clone()));
+    v
+}
+
+/// 面板、小组件看的桌面版状态：({installed, version, running, account, known}, {账号 id: {running, login, login_expires}})。
+/// 没有桌面号时返回 (None, 空)，不去查进程。与 cam.py 的 desktop_view 一致。
+pub fn desktop_view(
+    store: &Store,
+    data: &Value,
+    max_age: Duration,
+) -> (Option<Value>, serde_json::Map<String, Value>) {
+    if !accounts(data)
+        .iter()
+        .any(|a| s(a, "kind") == Some("claude_desktop"))
+    {
+        return (None, serde_json::Map::new());
+    }
+    view_with(store, data, &app_status(max_age), max_age)
+}
+
+/// desktop_view 的计算部分：status 是 app_status 的结果（测试里直接给）。
+pub fn view_with(
+    store: &Store,
+    data: &Value,
+    status: &Value,
+    max_age: Duration,
+) -> (Option<Value>, serde_json::Map<String, Value>) {
+    let profiles: Vec<Option<&str>> = status["profiles"]
+        .as_array()
+        .map(|a| a.iter().map(|p| p.as_str()).collect())
+        .unwrap_or_default();
+    let mut per = serde_json::Map::new();
+    let mut running_ids = Vec::new();
+    for a in accounts(data)
+        .iter()
+        .filter(|a| s(a, "kind") == Some("claude_desktop"))
+    {
+        let dir = profile_dir(store, a);
+        let key = path_key(&dir);
+        let on = profiles.contains(&Some(key.as_str()));
+        let id = s(a, "id").unwrap_or_default().to_string();
+        if on {
+            running_ids.push(id.clone());
+        }
+        let mut v = login(&dir, max_age);
+        v["running"] = json!(on);
+        per.insert(id, v);
+    }
+    let app = json!({
+        "installed": status["installed"].as_bool().unwrap_or(false),
+        "version": status["version"],
+        "running": status["running"],
+        "account": if running_ids.len() == 1 { json!(running_ids[0]) } else { Value::Null },
+        "known": !profiles.is_empty() && profiles.iter().all(|p| p.is_some()),
+    });
+    (Some(app), per)
 }
 
 #[cfg(test)]

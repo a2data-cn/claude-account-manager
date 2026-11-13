@@ -661,7 +661,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     <div class="cards help">
       <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-tag"/></svg></span>账号状态标签</h3>
         <ul class="lgd">
-          <li><span class="sm"><span class="chip live">正在用</span></span><span class="t">Claude Code 当前登录的号；桌面版的号显示“上次打开”</span></li>
+          <li><span class="sm"><span class="chip live">正在用</span></span><span class="t">Claude Code 当前登录的号；桌面版的号客户端开着时显示“开着”，没开时显示“上次打开”；本机记录里没有登录的标“没有登录”</span></li>
           <li><span class="sm"><span class="chip st-warn">注意</span></span><span class="t">用量暂时拿不到、订阅已过期、登录过期了后台没替它续</span></li>
           <li><span class="sm"><span class="chip st-error">异常</span></span><span class="t">登录失效、凭据属于别的号、sessionKey 或 API Key 无效；点进详情看怎么办</span></li>
           <li><span class="sm"><span class="chip due-soon">3 天后到期</span></span><span class="t">套餐 7 天内到期，2 天内变红；到期日在“编辑”里记</span></li>
@@ -972,10 +972,30 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     return { d, cls: d < 0 || d <= 2 ? "due-now" : d <= 7 ? "due-soon" : "",
              short: d > 0 ? `${d} 天后到期` : d === 0 ? "今天到期" : `已过期 ${-d} 天` };
   }
+  // 桌面号：客户端开着没有、本机记录里有没有登录（cam 只读本机文件看出来的；服务端那边作废的登录看不出）
+  const DESK_LOGIN_CHIP = { expired: ["st-warn", "登录过期"], no: ["st-warn", "没有登录"], never: ["", "还没登录"] };
+  function deskLoginText(a) {
+    const d = a.desktop || {}, e = d.login_expires ? new Date(d.login_expires) : null;
+    const day = e ? `${e.getMonth() + 1}月${e.getDate()}日` : "";
+    return { yes: `有${day ? `，${day}到期` : ""}`, expired: `已过期${day ? `（${day}）` : ""}，下次打开要在窗口里重新登录`,
+             no: "没有，下次打开要在窗口里登录", never: "还没登录过，第一次打开时在窗口里登录", unknown: "看不出来" }[d.login] || "–";
+  }
+  function deskAppText(a) {
+    const app = state.desktop_app || {};
+    const ver = !app.installed ? "没找到 Claude 桌面版" : app.version ? `版本 ${app.version}` : "已安装";
+    const run = app.running === null || app.running === undefined ? "" : !app.running ? "没开"
+      : app.account === a.id ? "开着的就是这个号" : app.account ? "开着别的号" : app.known ? "开着，用的不是这里的号" : "开着，看不出用的哪个号";
+    return run ? `${ver} · ${run}` : ver;
+  }
   function statusChips(a) {
     const h = a.health || {};
     const out = [];
-    if (a.is_active) out.push(`<span class="chip live">${a.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>`);
+    if (a.kind === "claude_desktop") {
+      const d = a.desktop || {}, l = DESK_LOGIN_CHIP[d.login];
+      if (d.running) out.push(`<span class="chip live">开着</span>`);
+      else if (a.is_active) out.push(`<span class="chip">上次打开</span>`);
+      if (l) out.push(`<span class="chip ${l[0]}">${l[1]}</span>`);
+    } else if (a.is_active) out.push(`<span class="chip live">正在用</span>`);
     if (h.level === "error") out.push(`<span class="chip st-error">异常</span>`);
     else if (h.level === "warn") out.push(`<span class="chip st-warn">注意</span>`);
     const due = dueInfo(a);
@@ -1050,6 +1070,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       a.kind === "claude_code" || a.kind === "claude_desktop" ? [a.kind === "claude_desktop" ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : a.kind === "claude_desktop" ? "还没打开过" : "还没切换过"] : null,
       a.kind === "claude_desktop" ? ["额度来源", u.source === "desktop_history" ? "Claude 本地用量历史" : u.source === "desktop_cache" ? "Claude 本地缓存" : "等待本地记录"] : ["用量更新", ago(u.fetched_at)],
       a.kind === "claude_desktop" ? ["记录时间", ago(u.fetched_at)] : null,
+      a.kind === "claude_desktop" ? ["本机登录", esc(deskLoginText(a))] : null,
+      a.kind === "claude_desktop" && state.desktop_app ? ["客户端", esc(deskAppText(a))] : null,
       a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${flag(a.last_incident.loc)}${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${Number(a.last_incident.sessions) || 0} 个会话在跑`] : null,
       a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${flag(e.loc)}${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${Number(e.times) || 1} 次`).join(" · ")] : null,
       a.kind === "claude_desktop" ? ["最近读取", ago(u.checked_at)] : null,
@@ -1093,9 +1115,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 
   // ---- 环境状态卡 / 检测结果分组（和桌面版同样的分组）
   const CHECK_GROUPS = [
-    ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
+    ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
     ["本机", ["clock", "timezone", "locale", "device"]],
-    ["服务", ["api", "web", "status"]],
+    ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
     ["账号", ["account_regions", "accounts"]],
     ["说明", ["scope"]],
   ];
@@ -1122,7 +1144,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   // “重新检测”的完整结果直接展开在环境区块里（和桌面版一样），重绘时保留
   let envChecks = null, envChecking = false;
-  const CHECK_TIP = "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
+  const CHECK_TIP = "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书、代理 / VPN（设了代理的话看它在不在运行）、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
   // “全面体检”（同 cam doctor）只有脚本版 cam serve 有：桌面版内置的服务返回 404，按钮不显示。结果展开在同一个位置
   let checkup = null, checkupBusy = false, checkupAvail = false, checkupProbed = false;
   const CHECKUP_TIP = "逐项检查每个账号的登录还能不能续（不在用的号快过期了会替它续一次，当前登录不碰）、到期日和用量，Claude 服务和官方状态页，本机 Claude Code 的版本和正在运行的会话，cam 的后台任务、更新和文件校验，装了的话还有聊天机器人。要等十几秒。";
@@ -1176,12 +1198,12 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   const ENV_ROWS = [
     ["region", "出口地区", ["region", "region_unknown", "region_mismatch", "ipv6_mismatch", "warp"]],
     ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
-    ["proxy", "代理 / VPN", ["proxy", "vpn"]],
+    ["proxy", "代理 / VPN", ["proxy", "vpn", "proxy_down"]],
     ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
     ["dns", "DNS", ["dns", "dns_resolver", "dns_servers"]],
     ["change", "出口变化", ["region_change"]],
     ["account", "账号", ["account_regions", "accounts"]],
-    ["service", "Claude 服务", ["api", "web", "tls", "status"]],
+    ["service", "Claude 服务", ["api", "web", "tls", "status", "auth", "tls_intercept"]],
     ["stale", "检测时间", ["env_stale", "env_failed"]],  // 结果是一小时前的、或者最近一次没连上才有这一行
   ];
   const LEVEL_RANK = { bad: 3, warn: 2, info: 1, ok: 0 };

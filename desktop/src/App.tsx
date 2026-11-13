@@ -32,9 +32,9 @@ const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 /** 检测结果分组（和手机面板同样的分组） */
 const CHECK_GROUPS: [string, string[]][] = [
-  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
+  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
   ["本机", ["clock", "timezone", "locale", "device"]],
-  ["服务", ["api", "web", "status"]],
+  ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
   ["账号", ["account_regions", "accounts"]],
   ["说明", ["scope"]],
 ];
@@ -104,7 +104,7 @@ function useServiceCheck(toast: (m: string, bad?: boolean) => void, after?: () =
 type ServiceCheckState = ReturnType<typeof useServiceCheck>;
 
 const CHECK_TIP =
-  "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、代理 / VPN、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
+  "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书、代理 / VPN（设了代理的话看它在不在运行）、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
 
 function EnvActs({ label, sc: { items, checking, check, reset } }: { label: string; sc: ServiceCheckState }) {
   return (
@@ -134,12 +134,12 @@ function Flag({ cc }: { cc?: string | null }) {
 const ENV_ROWS: [string, string, string[]][] = [
   ["region", "出口地区", ["region", "region_unknown", "region_mismatch", "ipv6_mismatch", "warp"]],
   ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
-  ["proxy", "代理 / VPN", ["proxy", "vpn"]],
+  ["proxy", "代理 / VPN", ["proxy", "vpn", "proxy_down"]],
   ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
   ["dns", "DNS", ["dns", "dns_resolver", "dns_servers"]],
   ["change", "出口变化", ["region_change"]],
   ["account", "账号", ["account_regions", "accounts"]],
-  ["service", "Claude 服务", ["api", "web", "tls", "status"]],
+  ["service", "Claude 服务", ["api", "web", "tls", "status", "auth", "tls_intercept"]],
   ["stale", "检测时间", ["env_stale", "env_failed"]], // 结果是一小时前的、或者最近一次没连上才有这一行
 ];
 const LEVEL_RANK: Record<string, number> = { bad: 3, warn: 2, info: 1, ok: 0 };
@@ -749,6 +749,7 @@ export default function App() {
               </div>
               <AccountDetail
                 a={selected}
+                desktopApp={state?.desktop_app}
                 busy={!!busy}
                 onSwitch={switchTo}
                 onOpen={openWeb}

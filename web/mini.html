@@ -370,6 +370,19 @@ button { font: inherit; color: inherit; }
   }
   // 鼠标放到账号上弹出的说明（放 350 毫秒才出，扫过去不闪）：邮箱、套餐、到期、每个额度窗口和重置时间、用量是几分钟前取的、最近切换、有问题时问题和怎么办
   let tipTimer = null, tipFor = null;
+  // 桌面号：客户端开着没有、本机记录里有没有登录（cam 只读本机文件看出来的）
+  function deskState(a) {
+    const d = a.desktop || {};
+    return [d.running ? "开着" : "", { expired: "登录过期", no: "没有登录", never: "还没登录" }[d.login] || ""].filter(Boolean).join(" · ");
+  }
+  function deskLoginText(a) {
+    const d = a.desktop || {}, e = d.login_expires ? new Date(d.login_expires) : null;
+    const day = e ? `${e.getMonth() + 1}月${e.getDate()}日` : "";
+    return { yes: `有${day ? `，${day}到期` : ""}`, expired: `已过期${day ? `（${day}）` : ""}，下次打开要重新登录`,
+             no: "没有，下次打开要在窗口里登录", never: "还没登录过，第一次打开时登录", unknown: "看不出来" }[d.login] || null;
+  }
+  const liveChip = (a) => a.kind !== "claude_desktop" ? (a.is_active ? `<span class="chip live">正在用</span>` : "")
+    : (a.desktop || {}).running ? `<span class="chip live">开着</span>` : a.is_active ? `<span class="chip">上次打开</span>` : "";
   function tipHtml(a, pos) {
     const u = a.usage || {}, h = a.health || {}, m = a.manual || {}, due = dueInfo(a), desk = a.kind === "claude_desktop";
     const tier = (a.rate_limit_tier || "").match(/max_(\d+)x/);
@@ -387,6 +400,7 @@ button { font: inherit; color: inherit; }
       ...(u.models || []).map((w) => win(w.name, w)),
       [desk ? "记录时间" : "用量更新", ago(u.fetched_at)],
       [desk ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : desk ? "还没打开过" : "还没切换过"],
+      desk && deskLoginText(a) ? ["本机登录", deskLoginText(a), ["expired", "no"].includes((a.desktop || {}).login) ? "warn" : ""] : null,
       m.note ? ["备注", m.note] : null,
       ...(h.issues || []).map((i) => [i.level === "error" ? "问题" : "注意", `${i.text}${i.advice ? "。" + i.advice : ""}`, i.level === "error" ? "hot" : "warn"]),
     ].filter(Boolean);
@@ -476,7 +490,7 @@ button { font: inherit; color: inherit; }
     const p5 = pct(u.five_hour), curName = nameOf(cur, pos);
     const sub = cur.email && cur.email !== curName ? cur.email : (p5 === null ? "还没有用量" : "");
     const nameBlock = renaming === cur.id ? renameForm(cur)
-      : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${cur.is_active ? `<span class="chip live">${cur.kind === "claude_desktop" ? "上次打开" : "正在用"}</span>` : ""}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
+      : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${liveChip(cur)}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
         <div class="sub">${esc(sub)}</div>`;
     const curTile = `<div class="tile glass"><div class="who" data-tip="${esc(cur.id)}"><div class="circle on">${ring(p5, 44, 5)}</div>
       <div>${nameBlock}</div></div>
@@ -503,7 +517,7 @@ button { font: inherit; color: inherit; }
       const q = q5 === null ? null : `5 小时 ${q5.toFixed(0)}%${resetShort((uu.five_hour || {}).resets_at) ? " · " + resetShort(uu.five_hour.resets_at) : ""}`;
       return `<button type="button" class="acc glass open" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}">
         <span class="circle">${q5 === null ? ICON.desktop : ring(q5, 32, 4)}</span>
-        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(`桌面版 · ${q || "点一下打开"}`)}</span></span><span class="go">${ICON.open}</span></button>`;
+        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(`桌面版${deskState(a) ? " · " + deskState(a) : ""} · ${q || "点一下打开"}`)}</span></span><span class="go">${ICON.open}</span></button>`;
     };
     const group = (list, label, wide) => list.length ? `<div class="sec">${label}</div>${wide ? `<div class="pills one">${list.map(pill).join("")}</div>` : `<div class="cards">${list.map(card).join("")}</div>`}` : "";
     const sc = state.risk_score, reg = state.region || {};

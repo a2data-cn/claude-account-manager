@@ -1,0 +1,36 @@
+{
+  "_说明": "官方状态页的三条规则：status_relevant(组件或事件名) 和这里有没有关系（按词比）；parse_status_summary(summary.json) 只留有关的；status_risk(data.status_page) 顶部环境卡那一条提醒 [级别, 文字] 或 null（有 components 的按有关组件算，没有的按总体 indicator 算）。Python 与 Rust 两边按同一份数据跑。",
+  "relevant": [
+    {"name": "Claude Code", "expect": true},
+    {"name": "Claude API (api.anthropic.com)", "expect": true},
+    {"name": "claude.ai", "expect": true},
+    {"name": "Claude Console (platform.claude.com)", "expect": true},
+    {"name": "Claude Cowork", "expect": false},
+    {"name": "Claude in Chrome", "expect": false},
+    {"name": "Rapid response tooling", "expect": false},
+    {"name": "Elevated errors on claude.ai.", "expect": true},
+    {"name": "Claude Platform on AWS", "expect": false},
+    {"name": "Elevated errors on Claude Opus 5 via the API", "expect": true},
+    {"name": "", "expect": false},
+    {"name": null, "expect": false}
+  ],
+  "parse": [
+    {"name": "各组件：有关的不正常组件留下，别的不要；事件看名字或影响到的组件", "summary": {"status": {"indicator": "minor", "description": "Partially Degraded Service"}, "components": [{"name": "claude.ai", "status": "degraded_performance"}, {"name": "Claude Code", "status": "operational"}, {"name": "Claude Cowork", "status": "degraded_performance"}, {"name": "Claude API (api.anthropic.com)", "status": "partial_outage"}], "incidents": [{"name": "Elevated errors affecting the Microsoft 365 connector", "status": "identified", "components": [{"name": "claude.ai"}, {"name": "Claude Cowork"}]}, {"name": "Elevated errors on Claude Code", "status": "monitoring"}, {"name": "Earlier issue on Claude Code", "status": "resolved"}, {"name": "Cowork sessions failing", "status": "investigating", "components": [{"name": "Claude Cowork"}]}]}, "expect": {"indicator": "minor", "description": "Partially Degraded Service", "incidents": [{"name": "Elevated errors affecting the Microsoft 365 connector", "status": "identified"}, {"name": "Elevated errors on Claude Code", "status": "monitoring"}], "components": [{"name": "claude.ai", "status": "degraded_performance"}, {"name": "Claude API (api.anthropic.com)", "status": "partial_outage"}]}},
+    {"name": "只有无关的组件出故障：组件和事件都是空的，总体照抄", "summary": {"status": {"indicator": "major", "description": "Partial System Outage"}, "components": [{"name": "Claude Cowork", "status": "major_outage"}], "incidents": [{"name": "Cowork down", "status": "identified", "components": [{"name": "Claude Cowork"}]}]}, "expect": {"indicator": "major", "description": "Partial System Outage", "incidents": [], "components": []}},
+    {"name": "格式不对", "summary": {"status": {}}, "expect": null},
+    {"name": "不是对象", "summary": ["x"], "expect": null}
+  ],
+  "risk": [
+    {"name": "旧格式（status.json）：严重按总体算", "status_page": {"indicator": "major", "description": "Partial System Outage"}, "expect": ["bad", "Anthropic 官方状态页：Partial System Outage（major）"]},
+    {"name": "旧格式：正常", "status_page": {"indicator": "none", "description": "All Systems Operational"}, "expect": null},
+    {"name": "旧格式：没写说明", "status_page": {"indicator": "minor"}, "expect": ["warn", "Anthropic 官方状态页：minor（minor）"]},
+    {"name": "新格式：只有无关的组件出故障，不提醒", "status_page": {"indicator": "major", "description": "Partial System Outage", "components": [], "incidents": []}, "expect": null},
+    {"name": "新格式：Claude Code 部分故障，带第一件事件", "status_page": {"indicator": "major", "description": "Partial System Outage", "components": [{"name": "Claude Code", "status": "partial_outage"}], "incidents": [{"name": "Elevated errors on Claude Code", "status": "identified"}, {"name": "Second", "status": "investigating"}]}, "expect": ["bad", "Anthropic 官方状态页：Claude Code 部分故障；Elevated errors on Claude Code（已找到原因）"]},
+    {"name": "新格式：claude.ai 性能下降只是留意", "status_page": {"indicator": "minor", "description": "x", "components": [{"name": "claude.ai", "status": "degraded_performance"}], "incidents": []}, "expect": ["warn", "Anthropic 官方状态页：claude.ai 性能下降"]},
+    {"name": "新格式：组件都正常但还有没解决的事件", "status_page": {"indicator": "none", "description": "x", "components": [], "incidents": [{"name": "Elevated errors on Claude Code", "status": "monitoring"}]}, "expect": ["warn", "Anthropic 官方状态页：Elevated errors on Claude Code（已修复，观察中）"]},
+    {"name": "新格式：维护中", "status_page": {"indicator": "maintenance", "description": "x", "components": [{"name": "Claude API (api.anthropic.com)", "status": "under_maintenance"}], "incidents": []}, "expect": ["warn", "Anthropic 官方状态页：Claude API (api.anthropic.com) 维护中"]},
+    {"name": "新格式：一个严重一个下降，按严重的算", "status_page": {"indicator": "major", "description": "x", "components": [{"name": "claude.ai", "status": "degraded_performance"}, {"name": "Claude API (api.anthropic.com)", "status": "major_outage"}], "incidents": []}, "expect": ["bad", "Anthropic 官方状态页：claude.ai 性能下降；Claude API (api.anthropic.com) 严重故障"]},
+    {"name": "新格式：不认识的组件状态不算", "status_page": {"indicator": "minor", "description": "x", "components": [{"name": "Claude Code", "status": "something_new"}], "incidents": []}, "expect": null},
+    {"name": "新格式：事件状态不认识时照写", "status_page": {"indicator": "minor", "description": "x", "components": [], "incidents": [{"name": "API errors", "status": "new_state"}]}, "expect": ["warn", "Anthropic 官方状态页：API errors（new_state）"]}
+  ]
+}

@@ -211,9 +211,9 @@ Windows 用 `scripts\cam.cmd`（一键安装后直接 `cam`），用法相同。
 
 `cam doctor`（也可以写成 `cam env doctor` / `cam env check`）是全面体检，分五节逐项列出，每行 ✓ 正常、! 留意、✗ 要处理、· 说明，有问题的下一行是“→ 怎么办”，最后一行是“N 项要处理，M 项留意”。不显示任何密钥；`--json` 输出同样的内容给脚本用，`--offline` 不联网。
 
-1. **账号**：每个号一段。Claude Code 号看保存的登录还能不能续：不在用的号 access token 过期或快过期时，用它自己的 refresh token 续一次（和刷新用量走同一条路），续不上就是“✗ 登录已失效 → cam login 名字”，不用等到切换时才发现。**当前登录从不替它续**（交给 Claude Code），只说多久过期、用量接口能不能用。另外每个号列出套餐、到期日（7 天内提醒，过了算要处理）、上次取用量的错误（比如 429 限流、401）和健康状态；网页号看 sessionKey 能不能用，API 号看 Key 能不能用
-2. **Claude 服务**：下面“服务检查”的全部内容，加上 api.anthropic.com 和 claude.ai 的延迟，以及官方状态页（status.claude.com，连不上再试 status.anthropic.com）的总体状态、没解决的事件、不正常的组件（Claude Code、API、claude.ai、Console）。状态页连不上只算留意
-3. **本机 Claude Code**：装在哪、版本、有没有新版本（查官方原生安装器的版本号，查不到就不显示）、下面几类“切换了却不生效”、凭据文件（权限不是 600 会提醒 chmod 600）、当前登录；还有正在运行的 `claude` 会话，每个一行：pid、工作目录、运行了多久、用的哪个登录。Linux 上读 `/proc/<pid>/environ` 里有没有 `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `CLAUDE_CONFIG_DIR`（只看有没有，不读出值），用本机登录的标“切号会跟着换”，用自己 token 的标“用自己的号，切号不影响”；Discord / 飞书 / 钉钉机器人的会话按 tmux 名和启动时设的环境变量认出来，写成“Discord 机器人主会话”“飞书机器人 shop”。macOS / Windows 只列出 `ps` 看到的，说明看不出用的哪个登录
+1. **账号**：每个号一段。Claude Code 号看保存的登录还能不能续：不在用的号 access token 过期或快过期时，用它自己的 refresh token 续一次（和刷新用量走同一条路），续不上就是“✗ 登录已失效 → cam login 名字”，不用等到切换时才发现。**当前登录从不替它续**（交给 Claude Code），只说多久过期、用量接口能不能用。另外每个号列出套餐、到期日（7 天内提醒，过了算要处理）、上次取用量的错误（比如 429 限流、401）和健康状态；网页号看 sessionKey 能不能用，API 号看 Key 能不能用；桌面版的号看客户端现在开着的是不是它、本机记录里有没有登录（见下面“Claude Desktop 客户端切换”）
+2. **Claude 服务**：下面“服务检查”的全部内容，加上 api.anthropic.com 和 claude.ai 的延迟，以及官方状态页（status.claude.com，连不上再试 status.anthropic.com）上和这里有关的组件（Claude Code、API、claude.ai、Console）出的故障和没解决的事件；只有别的组件（Cowork、Chrome 插件之类）出故障时写“Claude Code、API、claude.ai 都正常”，不算问题。状态页连不上只算留意
+3. **本机 Claude Code**（和 Claude 桌面版）：装在哪、版本、有没有新版本（查官方原生安装器的版本号，查不到就不显示）、下面几类“切换了却不生效”、凭据文件（权限不是 600 会提醒 chmod 600）、当前登录；还有正在运行的 `claude` 会话，每个一行：pid、工作目录、运行了多久、用的哪个登录。Linux 上读 `/proc/<pid>/environ` 里有没有 `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `CLAUDE_CONFIG_DIR`（只看有没有，不读出值），用本机登录的标“切号会跟着换”，用自己 token 的标“用自己的号，切号不影响”；Discord / 飞书 / 钉钉机器人的会话按 tmux 名和启动时设的环境变量认出来，写成“Discord 机器人主会话”“飞书机器人 shop”。macOS / Windows 只列出 `ps` 看到的，说明看不出用的哪个登录。有桌面版的号或者装了 Claude 桌面版时，最后几行是桌面版：装在哪、版本、现在开没开、开着的是哪个号
 4. **cam 自己**：后台任务谁在做（桌面版 / `cam serve` / 菜单栏插件）、上一轮是什么时候；各账号上次刷新用量的时间（有后台在跑却超过 30 分钟没刷新会提醒）；上次检查更新的结果（不联网）；`SHA256SUMS` 校验；数据目录和密钥文件的权限（700 / 600）；备份有几份、最新的是哪份、一共多大
 5. **聊天机器人**：装了 `~/.local/bin/claude-discord`、`claude-feishu`、`claude-dingtalk` 的，分别运行它们的 `doctor`（最多等 60 秒），列出 ✗ 的项，没有就是“全部正常”；没装就不显示这一节
 
@@ -233,13 +233,15 @@ python.org 装的 Python（macOS 上常见）默认不带根证书，https 请�
 - 出口地区判定一致性：两个接口看到的国家不一致（代理只分流了一部分）时提醒
 - DNS 解析器：本机配置的 DNS 服务器是局域网的、任播公共 DNS（Google、Cloudflare 等，不拿来判断位置）还是某个国家的公共 DNS（阿里、腾讯、114、HiNet 等）；用的是不支持地区的公共 DNS 而出口在支持地区时提醒。**只读本机配置，不做泄漏探测**（泄漏探测要往第三方的记录服务发带标识的查询，没有做）
 - `api.anthropic.com`：用当前登录实测，区分"服务正常 / 登录已过期 / 拒绝访问（通常是地区不支持）/ 连不上 / 服务端故障"，并显示时延
-- `claude.ai`：是否可达，是否被公司网络的人机验证页拦住（只影响网页账号读额度，不影响切号）
-- 代理：当前终端的代理环境变量，以及系统级代理设置（macOS 网络设置、Windows Internet 选项、GNOME）；有代理时出口地区就是代理的出口
+- `claude.ai`：是否可达，是否被公司网络的人机验证页拦住（只影响网页账号读额度，不影响切号）。`api.anthropic.com`、`claude.ai` 回 429（官方限流）、529（官方过载）时单独说明是 Anthropic 那边忙，不是网络或账号的问题
+- 续登录的地址：`platform.claude.com`、`console.anthropic.com`（Claude Code 和 cam 续登录用的地方）连不连得上。不带登录、只发一个 GET（正常会回 405），回什么都算连得上，回人机验证页或因为地区拒绝才算被拦。都连不上时登录到期（大约 8 小时）后就续不上，会出现“需要登录”；只连得上一个算留意
+- HTTPS 证书：`api.anthropic.com` 现在拿到的证书是谁签的（只握手，不发请求；有 http 代理时经代理打通道再看）。正常是 Google Trust Services、Let's Encrypt 这类公共证书机构；不是的话网络里有设备在解密 HTTPS（公司安全网关、杀毒软件的 HTTPS 扫描、抓包工具），Claude Code 可能报 `SELF_SIGNED_CERT_IN_CHAIN`，建议向网络管理员要根证书并设 `NODE_EXTRA_CA_CERTS`。不扣环境分
+- 代理：当前终端的代理环境变量，以及系统级代理设置（macOS 网络设置、Windows Internet 选项、GNOME）；有代理时出口地区就是代理的出口。设了代理的话再连一下它的端口（最多 2 秒，不发数据），没在运行就直接说“代理 127.0.0.1:7890（系统设置）连不上：连接被拒绝”，代理软件开起来以后后台检测会把这一条清掉
 - VPN：本机默认路由是否走隧道接口（utun / tun / wg / TAP 等）；走隧道时出口地区是 VPN 的出口，不代表人在哪里。只看默认路由，透明代理和路由器上的 VPN 看不出来
 - 出口地区变化：和上一次检测相比出口换了国家（出差、换网络、开关 VPN），24 小时内持续提醒。Anthropic 按使用者实际所在地判断，同一账号短时间内多地区使用也容易触发风控
 - Cloudflare WARP / Zero Trust：请求经过 WARP 时说明出口不是本机真实出口
 - 本机时钟：和服务器相差超过 2 分钟会提醒（影响登录续期、HTTPS 校验，也是风控信号）
-- Anthropic 官方状态页：`status.anthropic.com` 当前有无故障，有故障时说明是 Anthropic 侧的问题
+- Anthropic 官方状态页：`status.claude.com`（连不上换 `status.anthropic.com`）上 Claude Code、API、claude.ai、Console 这几个组件有没有故障、有没有没解决的事件，有的话写出组件和事件名，说明是 Anthropic 侧的问题；别的组件出故障不提醒、不扣分。部分 / 严重故障扣 30 分，性能下降、维护中扣 10 分
 - 系统时区：时区指向的国家和出口地区不一致时提醒；指向不支持地区时特别说明"政策按人所在地判断，不按出口 IP"
 - 系统语言 / 区域：和出口不一致时只作参考、扣 5 分（语言只代表语言习惯，新加坡、美国很多人也用 zh_CN），建议在"语言与地区"里把地区改成所在国家（macOS 的 AppleLocale、Windows 的 Get-Culture、Linux 的 LANG）
 - 设备：系统和架构。设备环境信息 Anthropic 会收集，这里只列出来，**本工具不会改动或伪装任何设备标识**
@@ -320,7 +322,7 @@ cam risk --off                  # 关掉启动前提醒（--on 打开）；CAM_N
 
 | 设置 | 会访问 | 说明 |
 |---|---|---|
-| 关闭 `off` | `claude.ai/cdn-cgi/trace`、`status.anthropic.com` | 只看出口国家和官方状态，不查运营商、IP 类型、IPv6、注册国 |
+| 关闭 `off` | `claude.ai/cdn-cgi/trace`、`status.claude.com` | 只看出口国家和官方状态，不查运营商、IP 类型、IPv6、注册国 |
 | 自动 `auto`（默认） | 上面两个，加 `www.cloudflare.com/cdn-cgi/trace`（claude.ai 两秒内没回音或连不上时才问）、`api.ipapi.is` → `ipinfo.io` → `speed.cloudflare.com`（按顺序，第一个查到的为准）、`rdap.org`、`1.1.1.1` 和 Cloudflare IPv6 | 都可以商用。ipapi.is 免费注册 key 每天 1000 次、带机房 / VPN / Tor 标记（官方写明可商用）；不配 key 每天 30 次、不带标记。ipinfo.io 免费版可商用但要求注明来源，界面上会写"数据：ipinfo.io" |
 | 加上 ip-api `ip-api` | 自动的那些，并优先用 `ip-api.com` | ip-api.com 免费接口**仅限非商业用途**、只有 http，个人自用才选 |
 
@@ -366,6 +368,11 @@ API 账号填了 Admin Key 后会显示本月花费。
 ### Claude Desktop 客户端切换
 
 在“添加账号”中选择“Claude 桌面版”。第一个号可勾选“使用这台电脑上已经登录的 Claude”；其它号创建独立配置，打开后在 Claude 窗口内登录。每次点击“切换桌面版”或“重新打开”，工具都会正常退出当前 Claude Desktop，等待退出后备份登录文件，再用目标目录启动。请先处理好 Desktop 中正在运行的任务；无法确认已经退出时会停止切换。
+
+面板、卡片、菜单栏和 `cam doctor` 还会显示客户端的状态（都是只读的，不启动客户端、不碰它的登录）：
+- 版本：macOS 读 Claude.app 的版本号，Windows 看安装目录名（商店版看正在运行的程序路径），Linux 社区打的包问 dpkg
+- 开着的是哪个号：客户端开着时那个号标“开着”（看的是进程用的是哪份数据目录），没开时上次用 cam 打开的那个标“上次打开”；开着的用的不是 cam 里登记的目录会说明
+- 本机有没有登录：只读客户端数据目录里 Cookie 库中 claude.ai 登录 Cookie 的名字和到期时间（不读值），用只读、不加锁的方式打开，客户端开着也不影响。有登录的写到期日，过期了标“登录过期”，退出过的标“没有登录”，新建的配置还没登录过标“还没登录”。这只是本机记录：在网页上“退出所有设备”这类服务端作废的登录，要打开客户端才知道
 
 只使用 Claude 客户端时，每个账号首次在客户端登录一次即可；读取本地额度无需再登录 Claude Code 或网页版。管理工具的桌面界面、手机面板和命令行共用同一份账号记录，不必分别添加。官方 Desktop、Claude Code 和网页的登录认证各自独立，工具不会把其中一次登录转换成另两个产品的登录；会话过期或被撤销后仍可能需要重新验证。
 
@@ -471,7 +478,7 @@ extras/windows-tray/  Windows 托盘小工具（PowerShell 画图标和菜单，
 web/panel.html        Web 面板（手机 / 浏览器），脚本版和桌面版共用
 desktop/              Tauri 桌面版
 desktop/src-tauri/engine/  核心逻辑 crate cam-engine，与 cam.py 对应的 Rust 实现，不依赖 Tauri
-tests/shared/         两边共用的测试数据（身份识别、账号查找、切号规则、自动续期、编辑账号和到期日、环境检测没连上时怎么算）
+tests/shared/         两边共用的测试数据（身份识别、账号查找、切号规则、自动续期、编辑账号和到期日、环境检测没连上时怎么算、官方状态页、服务检测、桌面版状态）
 docs/DESIGN.md        数据格式、切换流程、锁、HTTP API
 ```
 

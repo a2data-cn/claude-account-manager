@@ -67,6 +67,17 @@ export interface Account {
   has_session_key?: boolean;
   last_switched_at?: string | null;
   health?: AccountHealth; // 后端算的健康状态：正常 / 注意 / 异常，附原因和修复建议
+  /** claude_desktop：客户端开着的是不是这个号；本机记录里的登录（cam 只读本机文件，服务端作废的看不出） */
+  desktop?: { running: boolean; login: "yes" | "expired" | "no" | "never" | "unknown"; login_expires: string | null } | null;
+}
+
+/** Claude 桌面版：装没装、版本、开着没有（running 为 null 是查不出来）、开着的是哪个号（account）、开着的实例都看得出用的哪个目录（known） */
+export interface DesktopApp {
+  installed: boolean;
+  version: string | null;
+  running: boolean | null;
+  account: string | null;
+  known: boolean;
 }
 
 export interface HealthIssue {
@@ -97,6 +108,7 @@ export interface State {
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
   sessions?: { count: number; busy?: boolean } | null; // 本机开着的 claude 会话数，以及有没有真的在执行任务（标题旁的红绿灯用）
   attention?: { count: number; text: string; since?: string | null } | null; // Claude Code 弹着权限确认在等你（cam 的钩子记的）
+  desktop_app?: DesktopApp | null; // 有桌面版的号时才有
 }
 
 /** 环境风险评分：满分 100，≥90 低 / 70–89 中 / <70 高。只是把提醒汇总成一个数 */

@@ -47,7 +47,7 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     rdap_country = "US"  # /rdap/<ip> 返回的注册国，None 表示记录没写
     trace6_loc = None  # /trace6 的地区，None 表示 IPv6 不可用
     status_indicator = "none"  # 官方状态页：none / minor / major / critical
-    status_summary = "operational"  # 状态页摘要 /summary.json：operational / incident；/summary-down.json 总是 503
+    status_summary = "operational"  # 状态页摘要 /summary.json：operational / incident / other（只有无关的 Cowork 坏了）；/summary-down.json 总是 503
     usage_code = None  # 设了就让 /api/oauth/usage 返回这个状态码（比如 429 限流）
     release_latest = "2.1.0"  # /releases/latest：Claude Code 原生安装器的最新版本号
     down = ()  # 这些路径（按前缀）一律回 503：接口连得上但答不上来
@@ -185,6 +185,10 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
                 status = {"indicator": "major", "description": "Partial System Outage"}
                 incidents = [{"name": "Elevated errors on Claude Code", "status": "identified", "impact": "major"},
                              {"name": "Earlier issue", "status": "resolved", "impact": "minor"}]
+            elif self.status_summary == "other":
+                comps[3]["status"] = "major_outage"
+                status = {"indicator": "major", "description": "Partial System Outage"}
+                incidents = [{"name": "Cowork sessions failing", "status": "identified", "components": [{"name": "Claude Cowork"}]}]
             return self._send(200, {"page": {"name": "Claude"}, "status": status, "components": comps, "incidents": incidents})
         if self.path == "/summary-down.json":
             return self._send(503, {"error": "down"})
@@ -228,6 +232,13 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
                 return self._send(400, {"error": {"message": "invalid_grant"}})
             return self._send(200, {"access_token": new[0], "refresh_token": new[1], "expires_in": 28800})
         self._send(404, {})
+
+
+def free_port():
+    """本机一个现在没人在听的端口（测“连不上”用）。"""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def creds(at, rt, expires_ms, sub="max"):
@@ -323,6 +334,8 @@ class CamTest(unittest.TestCase):
         MockAnthropic.down = ()
         MockAnthropic.slow = {}
         os.environ["CAM_TEST_NET"] = "net-a"
+        self.cam._DESKTOP_STATUS.update(t=0.0, v=None)  # 桌面版状态的缓存不跨用例
+        self.cam._DESKTOP_LOGIN.clear()
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有；cam doctor 读的 /proc 换成一个空的假目录
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
@@ -1966,7 +1979,7 @@ class CamTest(unittest.TestCase):
         return next(a for a in self.data()["accounts"] if a["id"] == acc_id)
 
     def _token_calls(self):
-        return [c[2] for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"]
+        return [c[2] for c in MockAnthropic.calls if c[:2] == ("POST", "/v1/oauth/token")]  # 服务检测会 GET 一下看连不连得上，不算
 
     def _parked_b_then_on_a(self, released_secs_ago=None):
         """B 换过 token（rt-B2），cam 运行时核对不了，暂存着；随后切到 A。B 名下保存的还是被顶掉的 rt-B1。
@@ -2547,6 +2560,150 @@ class CamTest(unittest.TestCase):
         self.assertEqual(cf["level"], "warn")
         self.assertIn("不影响 Claude Code 切换", cf["advice"])
 
+    def test_service_check_login_endpoint_proxy_and_rate_limit(self):
+        """服务检测新加的几项：续登录的地址、本机设的代理在不在运行、官方限流 / 过载。"""
+        store = self.cam.Store()
+        items = self.cam.service_check(store)
+        auth = next(i for i in items if i["kind"] == "auth")
+        self.assertEqual(auth["level"], "ok")
+        self.assertRegex(auth["text"], r"^续登录的地址连得上：127\.0\.0\.1（\d+ ms）$")
+        self.assertFalse([i for i in items if i["kind"] in ("proxy_down", "proxy_up")])  # 没设代理
+        # 续登录的地址连不上：要处理，记进 service_status，顶部环境卡也列出来
+        with mock.patch.object(self.cam, "TOKEN_URLS", [f"http://127.0.0.1:{free_port()}/v1/oauth/token"]):
+            items = self.cam.service_check(store)
+        auth = next(i for i in items if i["kind"] == "auth")
+        self.assertEqual((auth["level"], auth["text"]), ("bad", "续登录的地址都连不上：127.0.0.1 连不上"))
+        self.assertIn("需要登录", auth["advice"])
+        self.assertIn("auth", [i["kind"] for i in self.data()["service_status"]["items"]])
+        self.assertIn("auth", [r["kind"] for r in self.cam.risk_items(self.data())])
+        self.assertEqual(items[0]["score"], self.cam.public_state(store, self.data())["risk_score"]["score"])  # 两边分数一致
+        # 系统设置里的代理没在运行：说清楚是哪个；代理开起来以后，后台检测把这一条清掉
+        port = free_port()
+        with mock.patch.dict(os.environ, {"CAM_TEST_PROXY": f"HTTPS 127.0.0.1:{port}"}):
+            items = self.cam.service_check(store)
+            down = next(i for i in items if i["kind"] == "proxy_down")
+            self.assertEqual((down["level"], down["text"]), ("bad", f"代理 127.0.0.1:{port}（系统设置）连不上：连接被拒绝"))
+            self.assertIn("代理软件", down["advice"])
+            self.assertIn("proxy_down", [r["kind"] for r in self.cam.risk_items(self.data())])
+            with socket.socket() as srv:
+                srv.bind(("127.0.0.1", port))
+                srv.listen()
+                self.cam.check_region(store, max_age=0)
+                self.assertNotIn("proxy_down", [r["kind"] for r in self.cam.risk_items(self.data())])
+                items = self.cam.service_check(store)
+                self.assertEqual(next(i for i in items if i["kind"] == "proxy_up")["text"], f"代理在运行：127.0.0.1:{port}")
+                self.assertFalse([i for i in items if i["kind"] == "proxy_down"])
+        # 官方限流、过载：留意，说清楚不是网络或账号的问题
+        for code, word in ((429, "官方在限流（HTTP 429"), (529, "官方服务过载（HTTP 529")):
+            MockAnthropic.usage_code = code
+            api = next(i for i in self.cam.service_check(None) if i["kind"] == "api")
+            self.assertEqual(api["level"], "warn", code)
+            self.assertIn(word, api["text"])
+            self.assertIn("不是网络或账号的问题", api["advice"])
+
+    def test_status_page_counts_only_claude_components(self):
+        """官方状态页按组件看：别的组件出故障不提醒、不扣分；summary.json 连不上时退回 status.json 的总体状态。"""
+        store = self.cam.Store()
+        MockAnthropic.status_summary = "other"
+        self.cam.check_region(store, max_age=0)
+        d = self.data()
+        self.assertEqual((d["status_page"]["indicator"], d["status_page"]["components"], d["status_page"]["incidents"]),
+                         ("major", [], []))
+        self.assertNotIn("status", [r["kind"] for r in self.cam.risk_items(d)])
+        items = self.cam.status_summary_items(self.cam.fetch_status_summary())
+        self.assertEqual([(i["level"], i["text"]) for i in items],
+                         [("ok", "官方状态页：Claude Code、API、claude.ai 都正常（别的服务有故障：Partial System Outage；127.0.0.1）")])
+        MockAnthropic.status_indicator = "minor"
+        base = os.environ["CAM_API_BASE"]
+        with mock.patch.object(self.cam, "STATUS_SUMMARY_URLS", [base + "/summary-down.json"]):
+            self.cam.check_region(store, max_age=0)
+        d = self.data()
+        self.assertNotIn("components", d["status_page"])
+        st = next(r for r in self.cam.risk_items(d) if r["kind"] == "status")
+        self.assertEqual((st["level"], st["text"]), ("warn", "Anthropic 官方状态页：Degraded Performance（minor）"))
+
+    def test_peer_issuer_direct_and_through_proxy(self):
+        """证书是谁签的：直连、经过 http 代理（CONNECT 打通道）都看得到；本机不认的证书也能看到颁发者。只握手，不发请求。"""
+        import ssl
+        openssl = shutil.which("openssl")
+        if not openssl:
+            self.skipTest("没有 openssl 命令，造不了测试证书")
+        cert, key = os.path.join(self.tmp, "c.pem"), os.path.join(self.tmp, "k.pem")
+        r = subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1",
+                            "-subj", "/O=Fortinet/CN=FortiGate CA"], capture_output=True)
+        if r.returncode or not os.path.exists(cert):
+            self.skipTest("openssl 造测试证书失败")
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        listeners = []
+
+        def listen(handle):
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            s.listen(8)
+            listeners.append(s)
+
+            def loop():
+                while True:
+                    try:
+                        c, _ = s.accept()
+                    except OSError:
+                        return
+                    threading.Thread(target=handle, args=(c,), daemon=True).start()
+            threading.Thread(target=loop, daemon=True).start()
+            return s.getsockname()[1]
+
+        def tls_server(c):
+            try:
+                with ctx.wrap_socket(c, server_side=True) as t:
+                    t.recv(1)
+            except OSError:
+                pass
+
+        connects = []
+
+        def pump(a, b):
+            try:
+                while True:
+                    chunk = a.recv(4096)
+                    if not chunk:
+                        break
+                    b.sendall(chunk)
+            except OSError:
+                pass
+
+        def connect_proxy(c):
+            with c:
+                req = b""
+                while b"\r\n\r\n" not in req:
+                    chunk = c.recv(1024)
+                    if not chunk:
+                        return
+                    req += chunk
+                line = req.split(b"\r\n")[0].decode()
+                connects.append(line)
+                host, _, p = line.split(" ")[1].rpartition(":")
+                with socket.create_connection((host, int(p))) as up:
+                    c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    threading.Thread(target=pump, args=(up, c), daemon=True).start()
+                    pump(c, up)
+
+        try:
+            port = listen(tls_server)
+            want = ({"org": "Fortinet", "cn": "FortiGate CA"}, False)
+            self.assertEqual(self.cam.peer_issuer("127.0.0.1", port, 5), want)
+            pport = listen(connect_proxy)
+            with mock.patch.dict(os.environ, {"HTTPS_PROXY": f"http://127.0.0.1:{pport}", "https_proxy": f"http://127.0.0.1:{pport}"}):
+                self.assertEqual(self.cam.peer_issuer("127.0.0.1", port, 5), want)
+            self.assertTrue(connects and all(c.startswith(f"CONNECT 127.0.0.1:{port} ") for c in connects), connects)
+            self.assertIsNone(self.cam.peer_issuer("127.0.0.1", free_port(), 2))  # 连不上
+            item = self.cam.tls_issuer_item("api.anthropic.com", *want)
+            self.assertEqual(item["kind"], "tls_intercept")
+            self.assertIn("NODE_EXTRA_CA_CERTS", item["advice"])
+        finally:
+            for s in listeners:
+                s.close()
+
     def test_risk_items_and_reminders(self):
         a_id, b_id = self._two_accounts()  # 当前登录 B
         store = self.cam.Store()
@@ -2657,7 +2814,7 @@ class CamTest(unittest.TestCase):
         # WARP、时钟偏差、官方状态页
         MockAnthropic.trace_warp = True
         MockAnthropic.trace_ts_offset = -600
-        MockAnthropic.status_indicator = "major"
+        MockAnthropic.status_summary = "incident"
         self.cam.check_region(store, max_age=0)
         d = self.data()
         kinds = {r["kind"]: r for r in self.cam.risk_items(d)}
@@ -2665,7 +2822,8 @@ class CamTest(unittest.TestCase):
         self.assertEqual(kinds["clock"]["level"], "warn")
         self.assertIn("+600 秒", kinds["clock"]["text"])
         self.assertEqual(kinds["status"]["level"], "bad")
-        self.assertIn("Partial System Outage", kinds["status"]["text"])
+        self.assertEqual(kinds["status"]["text"],
+                         "Anthropic 官方状态页：Claude Code 部分故障；Elevated errors on Claude Code（已找到原因）")
         self.assertEqual(d["status_page"]["indicator"], "major")
         # 服务检查把风险项都列出来，总体结论跟着最严重的走；出口地区只出现一次
         items = self.cam.service_check(store)
@@ -2690,7 +2848,7 @@ class CamTest(unittest.TestCase):
         self.assertEqual(kinds[-1], "scope")
         self.assertIn("不等于一定合规", items[-1]["advice"])
         # 状态恢复后缓存里的状态页记录也清掉
-        MockAnthropic.status_indicator = "none"
+        MockAnthropic.status_summary = "operational"
         MockAnthropic.trace_warp = False
         MockAnthropic.trace_ts_offset = 0
         self.cam.check_region(store, max_age=0)
@@ -2779,12 +2937,12 @@ class CamTest(unittest.TestCase):
         self.assertEqual(self.data()["region"]["meta_source"], "ip-api.com")
         # 关闭：只问 claude.ai 和状态页
         pv = self.cam.save_privacy(store, {"ip_lookup": "off"})
-        self.assertEqual([s["name"] for s in pv["sources"]], ["claude.ai/cdn-cgi/trace", "status.anthropic.com"])
+        self.assertEqual([s["name"] for s in pv["sources"]], ["claude.ai/cdn-cgi/trace", "status.claude.com"])
         self.assertEqual({s["group"] for s in pv["sources"]}, {"anthropic"})
         self.assertEqual([m["title"] for m in pv["modes"]], ["自动（推荐）", "加上 ip-api.com", "关闭"])
         MockAnthropic.calls = []
         self.cam.check_region(store, max_age=0)
-        self.assertEqual(sorted({c[1] for c in MockAnthropic.calls}), ["/cdn-cgi/trace", "/status.json"])
+        self.assertEqual(sorted({c[1] for c in MockAnthropic.calls}), ["/cdn-cgi/trace", "/summary.json"])
         reg = self.data()["region"]
         self.assertEqual((reg["loc"], reg["lookup_mode"], reg["org"], reg["ip_type"]), ("US", "off", None, None))
         items = self.cam.service_check(store)
@@ -3717,7 +3875,7 @@ class CamTest(unittest.TestCase):
         self.assertEqual(a[-1]["text"], "账号状态：正常")
         self.assertEqual(self.cam.Store().load_secret(a_id)["claudeAiOauth"]["refreshToken"], "rt-A2")
         # 当前登录从不替它续：只说过期了，用量接口的 401 也只是提示
-        self.assertEqual([c for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"], [("POST", "/v1/oauth/token", "rt-A1")])
+        self.assertEqual([c for c in MockAnthropic.calls if c[:2] == ("POST", "/v1/oauth/token")], [("POST", "/v1/oauth/token", "rt-A1")])
         self.assertEqual(self.live()[0]["refreshToken"], "rt-B1")
         self.assertIn("（Claude Code，Max，当前登录）", b[0]["group"])
         self.assertIn("当前登录：access token 已过期", b[0]["text"])
@@ -3760,7 +3918,7 @@ class CamTest(unittest.TestCase):
         pick = lambda label: [(i["level"], i["text"]) for i in self._group(acc, label)]
         a, b = pick("A"), pick("B")
         self.assertIn(("warn", "用量接口不认这个登录（HTTP 401）"), a)
-        self.assertEqual([c[2] for c in MockAnthropic.calls if c[1] == "/v1/oauth/token"], ["rt-A1"])  # 只续一次，不反复试
+        self.assertEqual([c[2] for c in MockAnthropic.calls if c[:2] == ("POST", "/v1/oauth/token")], ["rt-A1"])  # 只续一次，不反复试
         self.assertIn(("warn", f"3 天后到期（{(today + dt.timedelta(days=3)).isoformat()}）"), a)
         self.assertIn(("bad", f"订阅已过期 2 天（{(today - dt.timedelta(days=2)).isoformat()}）"), b)
         self.assertEqual(sum(1 for _, t in b if "订阅已过期" in t), 1)  # 健康状态里不重复
@@ -3784,9 +3942,7 @@ class CamTest(unittest.TestCase):
         self.assertEqual(s["components"], [{"name": "Claude Code", "status": "partial_outage"}])  # Cowork 和这里无关
         items = self.cam.status_summary_items(s)
         self.assertEqual([(i["level"], i["text"]) for i in items], [
-            ("bad", "官方状态页：Partial System Outage（major）"),
-            ("info", "没解决的事件：Elevated errors on Claude Code（已找到原因）"),
-            ("info", "Claude Code：部分故障")])
+            ("bad", "官方状态页：Claude Code 部分故障；Elevated errors on Claude Code（已找到原因）")])
         self.assertIsNone(self.cam.parse_status_summary({"status": {}}))
         self.assertIsNone(self.cam.parse_status_summary(["x"]))
         # 第一个地址连不上就换下一个；都连不上只是“留意”，不算要处理
@@ -3800,7 +3956,7 @@ class CamTest(unittest.TestCase):
         MockAnthropic.status_indicator = "major"
         svc = self._section(self._checkup(), "service")
         self.assertEqual([i for i in svc if i.get("kind") == "status"], [])
-        self.assertIn("没解决的事件：Elevated errors on Claude Code（已找到原因）", [i["text"] for i in svc])
+        self.assertIn("官方状态页：Claude Code 部分故障；Elevated errors on Claude Code（已找到原因）", [i["text"] for i in svc])
         lat = [i for i in svc if i.get("kind") == "latency"]
         self.assertRegex(lat[0]["text"], r"^延迟：127\.0\.0\.1 \d+ ms，127\.0\.0\.1 \d+ ms$")
         self.assertEqual(svc[[i.get("kind") for i in svc].index("latency") - 1]["kind"], "web")
@@ -4193,6 +4349,76 @@ exit 2""")
             os.environ.pop("CAM_DESKTOP_DRY_RUN", None)
             os.environ.pop("CAM_CLAUDE_DESKTOP_DATA", None)
 
+
+    def test_desktop_status_running_account_and_local_login(self):
+        """桌面版的状态：版本、开着的是哪个号、各号本机记录里有没有登录（只读名字和到期时间，不读 Cookie 的值，也不写 Cookie 库）。"""
+        import sqlite3
+        data_dir = os.path.join(self.tmp, "Claude Default")
+        os.makedirs(data_dir)
+        app = os.path.join(self.tmp, "AnthropicClaude", "app-1.2.3", "claude.exe")
+        os.makedirs(os.path.dirname(app))
+        open(app, "w").close()
+
+        def cookies(d, rows):
+            os.makedirs(os.path.join(d, "Network"), exist_ok=True)
+            con = sqlite3.connect(os.path.join(d, "Network", "Cookies"))
+            con.execute("CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, expires_utc INTEGER)")
+            con.executemany("INSERT INTO cookies VALUES (?, ?, '', x'00', ?)",
+                            [(h, n, (e + 11644473600) * 10 ** 6 if e else 0) for h, n, e in rows])
+            con.commit()
+            con.close()
+        now = int(time.time())
+        with mock.patch.dict(os.environ, {"CAM_CLAUDE_DESKTOP_DATA": data_dir, "CAM_CLAUDE_DESKTOP": app}):
+            store = self.cam.Store()
+            cur = self.cam.add_account(store, "claude_desktop", "当前", use_current=True)
+            other = self.cam.add_account(store, "claude_desktop", "第二个")
+            third = self.cam.add_account(store, "claude_desktop", "第三个")
+            cookies(data_dir, [(".claude.ai", "sessionKey", now + 10 * 86400), (".claude.ai", "other", now + 99 * 86400)])
+            cookies(self.cam.desktop_profile_dir(store, other), [("claude.ai", "sessionKey", now - 86400)])
+            running = os.path.normcase(os.path.realpath(data_dir))
+            with mock.patch.object(self.cam, "_desktop_scan", return_value=[(42, app, running)]):
+                st = self.cam.public_state(store, store.load())
+                self.assertEqual(st["desktop_app"], {"installed": True, "version": "1.2.3", "running": True,
+                                                     "account": cur["id"], "known": True})
+                desk = {a["id"]: a["desktop"] for a in st["accounts"]}
+                self.assertEqual((desk[cur["id"]]["running"], desk[cur["id"]]["login"]), (True, "yes"))
+                self.assertTrue(desk[cur["id"]]["login_expires"])
+                self.assertEqual((desk[other["id"]]["running"], desk[other["id"]]["login"]), (False, "expired"))
+                self.assertEqual(desk[third["id"]]["login"], "never")  # 目录有了，还没登录过
+                # 体检：这几行
+                by = {a["id"]: a for a in st["accounts"]}
+                self.assertEqual([(i["level"], i["text"]) for i in self.cam.desktop_login_items(by[cur["id"]], "当前")][0],
+                                 ("ok", "Claude 桌面版现在开着的就是这个号"))
+                lines = self.cam.desktop_login_items(by[other["id"]], "第二个")
+                self.assertEqual(lines[0]["level"], "warn")
+                self.assertIn("已过期", lines[0]["text"])
+                self.assertIn("cam open 第二个", lines[0]["advice"])
+                self.assertIn("第一次打开", self.cam.desktop_login_items(by[third["id"]], "第三个")[0]["text"])
+                local = [i["text"] for i in self.cam.desktop_app_items(store, store.load())]
+                self.assertIn(f"Claude 桌面版：{app}（版本 1.2.3）", local)
+                self.assertIn("Claude 桌面版正开着，用的是“当前”", local)
+                # 菜单栏：开着的、登录过期的都标出来
+                cam_menu = self._menu_plugin()
+                out = []
+                cam_menu.render(store, {}, out=out.append, rich=False)
+                text = "\n".join(out)
+                self.assertIn("当前 · 开着", text)
+                self.assertIn("第二个 · 登录过期", text)
+                self.assertIn("第三个 · 还没登录", text)
+            # 只读：Cookie 库没被改、旁边没多出日志文件
+            self.assertEqual(sorted(os.listdir(os.path.join(data_dir, "Network"))), ["Cookies"])
+            # 没开、查不出来
+            with mock.patch.object(self.cam, "_desktop_scan", return_value=[]):
+                app_st, per = self.cam.desktop_view(store, store.load(), max_age=0)
+                self.assertEqual((app_st["running"], app_st["account"]), (False, None))
+                self.assertFalse(any(d["running"] for d in per.values()))
+                self.assertIn("Claude 桌面版：没开", [i["text"] for i in self.cam.desktop_app_items(store, store.load())])
+            with mock.patch.object(self.cam, "_desktop_scan", side_effect=self.cam.CamError("ps 不让读")):
+                self.assertIsNone(self.cam.desktop_view(store, store.load(), max_age=0)[0]["running"])
+            # 用的不是这里登记的目录
+            with mock.patch.object(self.cam, "_desktop_scan", return_value=[(7, app, "/somewhere/else")]):
+                app_st, _ = self.cam.desktop_view(store, store.load(), max_age=0)
+                self.assertEqual((app_st["running"], app_st["account"], app_st["known"]), (True, None, True))
 
     def test_desktop_refresh_skips_api_and_hides_old_errors(self):
         store = self.cam.Store()
@@ -4793,6 +5019,43 @@ class SharedFixtureTest(unittest.TestCase):
             self.assertEqual(set(got), {"kind", "level", "text", "advice"}, c["name"])
         for c in fx["net_fingerprint"]:
             self.assertEqual(self.cam.net_fingerprint_of(c["addrs"]), c["expect"], c["name"])
+
+    def test_status_page_rules(self):
+        """官方状态页：哪些组件 / 事件和这里有关、summary.json 怎么留、顶部环境卡那一条怎么写。"""
+        fx = shared("status_page.json")
+        for c in fx["relevant"]:
+            self.assertEqual(self.cam.status_relevant(c["name"]), c["expect"], c["name"])
+        for c in fx["parse"]:
+            self.assertEqual(self.cam.parse_status_summary(c["summary"]), c["expect"], c["name"])
+        for c in fx["risk"]:
+            got = self.cam.status_risk(c["status_page"])
+            self.assertEqual(list(got) if got else None, c["expect"], c["name"])
+
+    def test_service_rules(self):
+        """服务检测：要看的代理地址、续登录的地址那一条、证书颁发者和那一条、新条目怎么扣分。"""
+        fx = shared("service.json")
+        for c in fx["proxy_endpoints"]:
+            self.assertEqual([list(x) for x in self.cam.proxy_endpoints(c["entries"])], c["expect"], c["name"])
+        for c in fx["auth_item"]:
+            it = self.cam.auth_item([tuple(r) for r in c["results"]])
+            self.assertEqual({"level": it["level"], "text": it["text"]}, c["expect"], c["name"])
+        for c in fx["der_issuer"]:
+            self.assertEqual(self.cam.der_issuer(bytes.fromhex(c["der_hex"])), c["expect"], c["name"])
+        for c in fx["tls_issuer_item"]:
+            it = self.cam.tls_issuer_item(c["host"], c["issuer"], c["verified"])
+            self.assertEqual({k: it[k] for k in ("kind", "level", "text")}, c["expect"], c["name"])
+        for c in fx["risk_score"]:
+            self.assertEqual(self.cam.risk_score(c["items"])["score"], c["expect"], c["name"])
+
+    def test_desktop_status_rules(self):
+        """桌面版：路径里的版本号、本机记录里的登录怎么算。"""
+        fx = shared("desktop_status.json")
+        for c in fx["version_from_path"]:
+            self.assertEqual(self.cam.desktop_version_from_path(c["path"]), c["expect"], c["name"])
+        for c in fx["login_state"]:
+            got = self.cam.desktop_login_state(c["dir_exists"], c["token_cache"], c["known_account"], c["cookies"],
+                                               c["cookie_files"], c["now"])
+            self.assertEqual(got, c["expect"], c["name"])
 
     def test_find_account(self):
         fx = shared("find_account.json")

@@ -272,6 +272,9 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         .get("active")
         .and_then(|a| s(a, "claude_desktop"))
         .map(String::from);
+    // 桌面版开着没有、各桌面号本机有没有登录（只读，显示用）
+    let (desk_app, desk) =
+        super::desktop_app::desktop_view(store, data, super::desktop_app::STATUS_MAX_AGE);
     let accs: Vec<Value> = accounts(data)
         .iter()
         .map(|a| {
@@ -303,6 +306,12 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
                 active.as_deref() == Some(id)
             };
             p.insert("is_active".into(), json!(is_active));
+            if s(a, "kind") == Some("claude_desktop") {
+                p.insert(
+                    "desktop".into(),
+                    desk.get(id).cloned().unwrap_or(Value::Null),
+                );
+            }
             let dl = days_left(a);
             let has_creds = s(a, "kind") == Some("claude_code")
                 && store
@@ -405,6 +414,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "risk_score": risk_score,
         "sessions": json!({ "count": sessions, "busy": busy }),  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算
         "attention": attention_view(sessions > 0),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
+        "desktop_app": desk_app,  // 有桌面版的号时才有：装没装、版本、开着没有、开着的是哪个号
         "generated_at": now_iso()
     })
 }

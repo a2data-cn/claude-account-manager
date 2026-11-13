@@ -7,8 +7,9 @@ use cam_engine::claude::{
     import_current, is_claude_cmd, pending_held_error, pending_holders, switch_account,
     PENDING_HELD, PENDING_ID,
 };
+use cam_engine::desktop_app::{path_key, view_with};
 use cam_engine::health::{
-    check_region, clear_region_history, exit_trace, parse_exit_meta, privacy_view,
+    check_region, clear_region_history, exit_trace, parse_exit_meta, peer_issuer, privacy_view,
     region_recheck_due_at, risk_items, risk_score, save_privacy, service_check, system_dns_servers,
     tunnel_kind, RegionRecheck,
 };
@@ -42,6 +43,9 @@ struct Mock {
     trace_ts_offset: i64,
     /// 官方状态页：空表示 none
     status_indicator: String,
+    /// 状态页摘要 /summary.json：空表示都正常；"incident"：Claude Code 部分故障；"other"：只有无关的 Cowork 坏了。
+    /// /summary-down.json 总是 503
+    status_summary: String,
     /// /meta 和 /ipapi 返回的运营商，空表示 Comcast
     meta_org: String,
     /// /meta 和 /ipapi 返回的国家，空表示和 trace 一致
@@ -271,6 +275,33 @@ fn mock_base() -> &'static str {
                     let _ = req.respond(tiny_http::Response::from_string(body));
                     continue;
                 }
+                if path == "/summary.json" || path == "/summary-down.json" {
+                    let mut comps = json!([{"name": "claude.ai", "status": "operational"},
+                                           {"name": "Claude API (api.anthropic.com)", "status": "operational"},
+                                           {"name": "Claude Code", "status": "operational"},
+                                           {"name": "Claude Cowork", "status": "operational"}]);
+                    let mut status = json!({"indicator": "none", "description": "All Systems Operational"});
+                    let mut incidents = json!([]);
+                    if m.status_summary == "incident" {
+                        comps[2]["status"] = json!("partial_outage");
+                        comps[3]["status"] = json!("major_outage"); // 和这里无关的组件，不列出来
+                        status = json!({"indicator": "major", "description": "Partial System Outage"});
+                        incidents = json!([{"name": "Elevated errors on Claude Code", "status": "identified"},
+                                           {"name": "Earlier issue", "status": "resolved"}]);
+                    } else if m.status_summary == "other" {
+                        comps[3]["status"] = json!("major_outage");
+                        status = json!({"indicator": "major", "description": "Partial System Outage"});
+                        incidents = json!([{"name": "Cowork sessions failing", "status": "identified",
+                                            "components": [{"name": "Claude Cowork"}]}]);
+                    }
+                    let down = path == "/summary-down.json";
+                    let body = json!({"page": {"name": "Claude"}, "status": status, "components": comps, "incidents": incidents});
+                    drop(m);
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(body.to_string()).with_status_code(if down { 503 } else { 200 }),
+                    );
+                    continue;
+                }
                 if path == "/v1/oauth/token" && !m.token_error.is_empty() {
                     let body = m.token_error.clone();
                     drop(m);
@@ -350,6 +381,7 @@ impl Env {
         std::env::set_var("CAM_CLAUDE_WEB_BASE", base);
         std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", base));
         std::env::set_var("CAM_STATUS_URL", format!("{}/status.json", base));
+        std::env::set_var("CAM_STATUS_SUMMARY_URLS", format!("{}/summary.json", base));
         std::env::set_var("CAM_CF_META_URL", format!("{}/meta", base));
         std::env::set_var("CAM_IPAPI_URL", format!("{}/ipapi", base));
         std::env::set_var("CAM_IPAPI_IS_URL", format!("{}/ipapiis", base));
@@ -1341,7 +1373,7 @@ fn stale_environment_results_are_labelled() {
     // 面板上的风险提示（/api/state）带着标注；实测一遍之后就没有了，状态页和出口记的是同一个检测时间
     let st = public_state(&store, &put(&ago(2 * 86400), Some("same")));
     assert!(kinds(st["risks"].as_array().unwrap()).contains(&"env_stale".to_string()));
-    mock().lock().unwrap().status_indicator = "major".into();
+    mock().lock().unwrap().status_summary = "incident".into();
     check_region(&store, 0).unwrap();
     let d = e.data();
     assert_eq!(d["status_page"]["checked_at"], d["region"]["checked_at"]);
@@ -1358,8 +1390,13 @@ fn stale_environment_results_are_labelled() {
         store.save(&mut d).unwrap();
     }
     std::env::set_var("CAM_STATUS_URL", "http://127.0.0.1:1/status.json");
+    std::env::set_var("CAM_STATUS_SUMMARY_URLS", "http://127.0.0.1:1/summary.json");
     let r = check_region(&store, 0);
     std::env::set_var("CAM_STATUS_URL", format!("{}/status.json", mock_base()));
+    std::env::set_var(
+        "CAM_STATUS_SUMMARY_URLS",
+        format!("{}/summary.json", mock_base()),
+    );
     r.unwrap();
     let d = e.data();
     assert_eq!(d["status_page"], before);
@@ -1706,6 +1743,137 @@ fn service_check_reports_region_and_services() {
     mock().lock().unwrap().trace_loc = String::new();
 }
 
+/// 本机一个现在没人在听的端口（测“连不上”用）
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn service_check_login_endpoint_proxy_and_rate_limit() {
+    // 服务检测新加的几项：续登录的地址、本机设的代理在不在运行、官方限流 / 过载。和 cam.py 的同名用例一样
+    let e = Env::new();
+    let store = Store::new();
+    let items = service_check(&store);
+    let auth = by_kind(&items, "auth").unwrap().clone();
+    assert_eq!(auth["level"], "ok", "{}", auth);
+    let t = auth["text"].as_str().unwrap();
+    assert!(
+        t.starts_with("续登录的地址连得上：127.0.0.1（") && t.ends_with(" ms）"),
+        "{}",
+        t
+    );
+    assert!(by_kind(&items, "proxy_down").is_none() && by_kind(&items, "proxy_up").is_none());
+    // 续登录的地址连不上：要处理，记进 service_status，顶部环境卡也列出来
+    std::env::set_var(
+        "CAM_TOKEN_URLS",
+        format!("http://127.0.0.1:{}/v1/oauth/token", free_port()),
+    );
+    let items = service_check(&store);
+    std::env::set_var("CAM_TOKEN_URLS", format!("{}/v1/oauth/token", mock_base()));
+    let auth = by_kind(&items, "auth").unwrap().clone();
+    assert_eq!(
+        (auth["level"].as_str(), auth["text"].as_str()),
+        (Some("bad"), Some("续登录的地址都连不上：127.0.0.1 连不上"))
+    );
+    assert!(auth["advice"].as_str().unwrap().contains("需要登录"));
+    let d = e.data();
+    assert!(kinds(d["service_status"]["items"].as_array().unwrap()).contains(&"auth".to_string()));
+    assert!(kinds(&risk_items(&d, true, true)).contains(&"auth".to_string()));
+    assert_eq!(
+        items[0]["score"],
+        public_state(&store, &d)["risk_score"]["score"]
+    ); // 两边分数一致
+       // 系统设置里的代理没在运行：说清楚是哪个；代理开起来以后，后台检测把这一条清掉
+    let port = free_port();
+    std::env::set_var("CAM_TEST_PROXY", format!("HTTPS 127.0.0.1:{}", port));
+    let items = service_check(&store);
+    let down = by_kind(&items, "proxy_down").unwrap().clone();
+    assert_eq!(down["level"], "bad");
+    assert_eq!(
+        down["text"],
+        format!("代理 127.0.0.1:{}（系统设置）连不上：连接被拒绝", port)
+    );
+    assert!(down["advice"].as_str().unwrap().contains("代理软件"));
+    assert!(kinds(&risk_items(&e.data(), true, true)).contains(&"proxy_down".to_string()));
+    let srv = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    check_region(&store, 0).unwrap();
+    assert!(!kinds(&risk_items(&e.data(), true, true)).contains(&"proxy_down".to_string()));
+    let items = service_check(&store);
+    assert_eq!(
+        by_kind(&items, "proxy_up").unwrap()["text"],
+        format!("代理在运行：127.0.0.1:{}", port)
+    );
+    assert!(by_kind(&items, "proxy_down").is_none());
+    drop(srv);
+    std::env::set_var("CAM_TEST_PROXY", "");
+    // 官方限流、过载：留意，说清楚不是网络或账号的问题
+    for (code, word) in [
+        (429u16, "官方在限流（HTTP 429"),
+        (529, "官方服务过载（HTTP 529"),
+    ] {
+        mock().lock().unwrap().usage_code = code;
+        let items = service_check(&store);
+        let api = by_kind(&items, "api").unwrap().clone();
+        assert_eq!(api["level"], "warn", "{}", code);
+        assert!(api["text"].as_str().unwrap().contains(word), "{}", api);
+        assert!(api["advice"]
+            .as_str()
+            .unwrap()
+            .contains("不是网络或账号的问题"));
+    }
+    mock().lock().unwrap().usage_code = 0;
+}
+
+#[test]
+fn status_page_counts_only_claude_components() {
+    // 官方状态页按组件看：别的组件出故障不提醒、不扣分；summary.json 连不上时退回 status.json 的总体状态
+    let e = Env::new();
+    let store = Store::new();
+    mock().lock().unwrap().status_summary = "other".into();
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    assert_eq!(d["status_page"]["indicator"], "major");
+    assert_eq!(d["status_page"]["components"], json!([]));
+    assert_eq!(d["status_page"]["incidents"], json!([]));
+    assert!(!kinds(&risk_items(&d, true, true)).contains(&"status".to_string()));
+    mock().lock().unwrap().status_indicator = "minor".into();
+    std::env::set_var(
+        "CAM_STATUS_SUMMARY_URLS",
+        format!("{}/summary-down.json", mock_base()),
+    );
+    let r = check_region(&store, 0);
+    std::env::set_var(
+        "CAM_STATUS_SUMMARY_URLS",
+        format!("{}/summary.json", mock_base()),
+    );
+    r.unwrap();
+    let d = e.data();
+    assert!(
+        d["status_page"].get("components").is_none(),
+        "{}",
+        d["status_page"]
+    );
+    let items = risk_items(&d, true, true);
+    let st = by_kind(&items, "status").unwrap();
+    assert_eq!(
+        (st["level"].as_str(), st["text"].as_str()),
+        (
+            Some("warn"),
+            Some("Anthropic 官方状态页：Degraded Performance（minor）")
+        )
+    );
+}
+
+#[test]
+fn peer_issuer_gives_none_when_nothing_answers() {
+    let _e = Env::new();
+    assert!(peer_issuer("127.0.0.1", free_port(), Duration::from_secs(2)).is_none());
+}
+
 fn kinds(items: &[Value]) -> Vec<String> {
     items
         .iter()
@@ -1970,7 +2138,7 @@ fn risk_items_and_reminders() {
         let mut m = mock().lock().unwrap();
         m.trace_warp = true;
         m.trace_ts_offset = -600;
-        m.status_indicator = "major".into();
+        m.status_summary = "incident".into();
     }
     check_region(&store, 0).unwrap();
     let d = e.data();
@@ -1989,7 +2157,7 @@ fn risk_items_and_reminders() {
         st["text"]
             .as_str()
             .unwrap()
-            .contains("Partial System Outage"),
+            .contains("Claude Code 部分故障；Elevated errors on Claude Code（已找到原因）"),
         "{}",
         st
     );
@@ -2070,7 +2238,7 @@ fn risk_items_and_reminders() {
         let mut m = mock().lock().unwrap();
         m.trace_warp = false;
         m.trace_ts_offset = 0;
-        m.status_indicator = String::new();
+        m.status_summary = String::new();
     }
     check_region(&store, 0).unwrap();
     let items = risk_items(&e.data(), true, true);
@@ -2303,10 +2471,7 @@ fn ip_lookup_sources_and_privacy() {
         .iter()
         .map(|s| s["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        names,
-        vec!["claude.ai/cdn-cgi/trace", "status.anthropic.com"]
-    );
+    assert_eq!(names, vec!["claude.ai/cdn-cgi/trace", "status.claude.com"]);
     assert!(pv["sources"]
         .as_array()
         .unwrap()
@@ -2332,7 +2497,7 @@ fn ip_lookup_sources_and_privacy() {
     paths.dedup();
     assert_eq!(
         paths,
-        vec!["/cdn-cgi/trace".to_string(), "/status.json".to_string()]
+        vec!["/cdn-cgi/trace".to_string(), "/summary.json".to_string()]
     );
     let reg = e.data()["region"].clone();
     assert_eq!(
@@ -3314,6 +3479,139 @@ fn claude_process_detection_rules() {
     for (a, c) in no {
         assert!(!is_claude_cmd(a, c), "不应识别为 claude：{}", a);
     }
+}
+
+#[test]
+fn desktop_status_running_account_and_local_login() {
+    // 桌面版的状态：开着的是哪个号、各号本机记录里有没有登录（只读名字和到期时间，不写 Cookie 库）。和 cam.py 的同名用例一样
+    let e = Env::new();
+    let data_dir = e.root.join("Claude Default");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::env::set_var("CAM_CLAUDE_DESKTOP_DATA", &data_dir);
+    let store = Store::new();
+    let add = |label: &str, current: bool| -> String {
+        let (code, st) = route(
+            &store,
+            "POST",
+            "/api/accounts",
+            &json!({"kind": "claude_desktop", "label": label, "use_current": current}),
+        );
+        assert_eq!(code, 200, "{}", st);
+        st["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["label"] == label)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (cur, other, third) = (
+        add("当前", true),
+        add("第二个", false),
+        add("第三个", false),
+    );
+    let now = chrono::Utc::now().timestamp();
+    let cookies = |dir: &std::path::Path, rows: &[(&str, &str, i64)]| {
+        std::fs::create_dir_all(dir.join("Network")).unwrap();
+        let con = rusqlite::Connection::open(dir.join("Network").join("Cookies")).unwrap();
+        con.execute_batch(
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, expires_utc INTEGER)",
+        )
+        .unwrap();
+        for (h, n, exp) in rows {
+            let utc = if *exp == 0 {
+                0
+            } else {
+                (exp + 11_644_473_600) * 1_000_000
+            };
+            con.execute(
+                "INSERT INTO cookies VALUES (?1, ?2, '', x'00', ?3)",
+                rusqlite::params![h, n, utc],
+            )
+            .unwrap();
+        }
+    };
+    cookies(
+        &data_dir,
+        &[
+            (".claude.ai", "sessionKey", now + 10 * 86400),
+            (".claude.ai", "other", now + 99 * 86400),
+        ],
+    );
+    cookies(
+        &store.root.join("desktop-profiles").join(&other),
+        &[("claude.ai", "sessionKey", now - 86400)],
+    );
+    let data = store.load().unwrap();
+    let status = json!({"installed": true, "app": "x", "version": "1.2.3", "running": true,
+                        "profiles": [path_key(&data_dir)]});
+    let (app, per) = view_with(&store, &data, &status, Duration::ZERO);
+    assert_eq!(
+        app.unwrap(),
+        json!({"installed": true, "version": "1.2.3", "running": true, "account": cur, "known": true})
+    );
+    assert_eq!(
+        (per[&cur]["running"].as_bool(), per[&cur]["login"].as_str()),
+        (Some(true), Some("yes"))
+    );
+    assert!(per[&cur]["login_expires"].is_string());
+    assert_eq!(
+        (
+            per[&other]["running"].as_bool(),
+            per[&other]["login"].as_str()
+        ),
+        (Some(false), Some("expired"))
+    );
+    assert_eq!(per[&third]["login"], "never"); // 目录有了，还没登录过
+                                               // 只读：Cookie 库旁边没多出日志文件
+    let names: Vec<String> = std::fs::read_dir(data_dir.join("Network"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names, vec!["Cookies".to_string()]);
+    // 没开、查不出来、开着的不是这里登记的目录
+    let (app, per) = view_with(
+        &store,
+        &data,
+        &json!({"installed": true, "version": null, "running": false, "profiles": []}),
+        Duration::ZERO,
+    );
+    assert_eq!(
+        (
+            app.as_ref().unwrap()["running"].as_bool(),
+            app.as_ref().unwrap()["account"].is_null()
+        ),
+        (Some(false), true)
+    );
+    assert!(per.values().all(|d| d["running"] == false));
+    let (app, _) = view_with(
+        &store,
+        &data,
+        &json!({"installed": true, "running": null, "profiles": []}),
+        Duration::ZERO,
+    );
+    assert!(app.unwrap()["running"].is_null());
+    let (app, _) = view_with(
+        &store,
+        &data,
+        &json!({"installed": true, "running": true, "profiles": ["/somewhere/else"]}),
+        Duration::ZERO,
+    );
+    assert_eq!(
+        app.unwrap(),
+        json!({"installed": true, "version": null, "running": true, "account": null, "known": true})
+    );
+    // 面板状态里每个桌面号带着 desktop，顶层有 desktop_app
+    let st = public_state(&store, &data);
+    assert!(st["desktop_app"].is_object(), "{}", st["desktop_app"]);
+    assert!(st["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|a| a["desktop"]["login"].is_string()));
+    std::env::remove_var("CAM_CLAUDE_DESKTOP_DATA");
 }
 
 #[test]

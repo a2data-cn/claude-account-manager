@@ -778,9 +778,18 @@ def render(store, st, out=print, rich=None, phase=None):
     if desk:
         out(heading("Claude 桌面版"))
         act = (data.get("active") or {}).get("claude_desktop")
+        try:
+            app, per = cam.desktop_view(store, data)  # 开着没有、本机有没有登录：缓存 20 秒，不是每一帧都去查
+        except Exception:  # noqa: BLE001  只是显示用
+            app, per = None, {}
+        app = app or {}
+        if app.get("installed") is False:
+            out("没找到 Claude 桌面版 | color=gray")
         for a in desk:
             name = esc(a.get("label") or a.get("email") or "未命名")
-            mark = " · 上次打开" if a["id"] == act else ""
+            d = per.get(a["id"]) or {}
+            mark = " · 开着" if d.get("running") else " · 上次打开" if a["id"] == act else ""
+            mark += {"expired": " · 登录过期", "no": " · 没有登录", "never": " · 还没登录"}.get(d.get("login"), "")
             nums = [f"{label} {value:.0f}%" for key, label in (("five_hour", "5h"), ("seven_day", "7d"))
                     if (value := pct(a, key)) is not None]
             summary = " · 缓存 " + " / ".join(nums) if nums else ""

@@ -19,7 +19,7 @@ pub(crate) fn api_base() -> String {
 pub(crate) fn web_base() -> String {
     std::env::var("CAM_CLAUDE_WEB_BASE").unwrap_or_else(|_| "https://claude.ai".into())
 }
-fn token_urls() -> Vec<String> {
+pub fn token_urls() -> Vec<String> {
     std::env::var("CAM_TOKEN_URLS")
         .unwrap_or_else(|_| {
             "https://platform.claude.com/v1/oauth/token,https://console.anthropic.com/v1/oauth/token".into()

@@ -1,11 +1,12 @@
-//! 服务检查、出口地区与使用环境风险检测：DNS、出口地区、api.anthropic.com、claude.ai、代理、VPN，
+//! 服务检查、出口地区与使用环境风险检测：DNS、出口地区、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书、代理、VPN，
 //! 以及出口变化、时区、时钟偏差、官方状态页、账号多地区。与 cam.py 的同名函数一致。
 //! 只检测和提示，不干预任何操作。
 
 use super::claude::{oauth_block, read_live};
 use super::store::*;
 use super::usage::{
-    api_base, get_oauth, get_with_in, http_json_timeout, http_text, http_text_in, wait_of, web_base,
+    api_base, get_oauth, get_with_in, http_json_timeout, http_text, http_text_in, token_urls,
+    wait_of, web_base,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -99,6 +100,74 @@ pub const NET_RECHECK_SECS: i64 = 30;
 pub const SERVICE_DNS_SECS: u64 = 5;
 /// 服务检测里连 api.anthropic.com、claude.ai 各最多等多久（秒）
 pub const SERVICE_PROBE_SECS: u64 = 10;
+/// 服务检测里看本机设的代理在不在运行：连它的端口最多等多久（秒）
+pub const PROXY_PROBE_SECS: u64 = 2;
+/// 服务检测里看 api.anthropic.com 的证书是谁签的：每次连接最多等多久（秒）
+pub const TLS_PROBE_SECS: u64 = 6;
+/// 常见的公共证书机构（证书颁发者的组织名、通用名里有这些字）：api.anthropic.com、claude.ai 正常拿到的证书都是它们签的。
+/// 不是它们签的，多半是网络里有设备在解密 HTTPS。与 cam.py 的 PUBLIC_CA_WORDS 一致（tests/shared/service.json）
+const PUBLIC_CA_WORDS: &[&str] = &[
+    "google trust services",
+    "let's encrypt",
+    "isrg",
+    "digicert",
+    "amazon",
+    "sectigo",
+    "comodo",
+    "usertrust",
+    "globalsign",
+    "cloudflare",
+    "microsoft",
+    "entrust",
+    "godaddy",
+    "starfield",
+    "zerossl",
+    "ssl.com",
+    "ssl corporation",
+    "certainly",
+    "identrust",
+    "baltimore",
+    "geotrust",
+    "thawte",
+    "rapidssl",
+    "buypass",
+    "harica",
+    "actalis",
+];
+const TLS_INTERCEPT_ADVICE: &str = "多半是公司的安全网关、杀毒软件的“HTTPS 扫描 / 网页防护”，或者开着抓包工具。Claude Code 不认这个证书时会报 \
+                                    SELF_SIGNED_CERT_IN_CHAIN 或 unable to get local issuer certificate：向网络管理员要这个根证书\
+                                    （杀毒软件的话在它的设置里关掉 HTTPS 扫描），再把环境变量 NODE_EXTRA_CA_CERTS 设成证书文件的路径。";
+const AUTH_PARTIAL_ADVICE: &str = "Claude Code 续登录用的正好是连不上的那个地址时就续不上，表现为突然要重新登录、cam 显示“需要登录”。\
+                                   检查网络或代理有没有拦这个域名（公司网络、代理的规则都可能拦）。";
+const AUTH_DOWN_ADVICE: &str = "登录大约每 8 小时要续一次，这些地址连不上就续不上：Claude Code 会要求重新登录，cam 显示“需要登录”。\
+                                先检查网络或代理设置。";
+const PROXY_DOWN_ADVICE: &str = "代理软件多半没开、已经退出，或者端口改了。设着代理但它没在运行时，走它的请求（Claude Code、cam）都会失败。\
+                                 打开代理软件，或者把这个代理设置去掉（环境变量在启动终端的配置文件里删，系统代理在系统的网络设置里关）。";
+const RATE_LIMIT_ADVICE: &str =
+    "Anthropic 那边在限流（短时间请求太多），不是网络或账号的问题；过几分钟再试。";
+const OVERLOAD_ADVICE: &str =
+    "Anthropic 那边负载太高，不是网络或账号的问题；稍后再试，可查看 status.claude.com。";
+const STATUS_ADVICE: &str =
+    "这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 status.claude.com。";
+/// 服务检测发现的这些问题记进 data["service_status"]，界面顶部的环境卡也列出来。与 cam.py 一致
+const SERVICE_STATUS_KINDS: &[&str] = &[
+    "api",
+    "web",
+    "dns",
+    "tls",
+    "auth",
+    "proxy_down",
+    "tls_intercept",
+];
+/// 状态页里和这里有关的组件：Claude Code、API、claude.ai，再加上续登录用的 Console（platform.claude.com）。按词比，见 status_relevant
+const STATUS_COMPONENT_WORDS: &[&str] = &[
+    "claude code",
+    "api",
+    "claude.ai",
+    "console",
+    "api.anthropic.com",
+    "platform.claude.com",
+];
 /// 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
 const TUNNEL_PREFIXES: &[&str] = &[
     "utun",
@@ -149,6 +218,19 @@ const TUNNEL_WORDS: &[&str] = &[
 fn status_url() -> String {
     std::env::var("CAM_STATUS_URL")
         .unwrap_or_else(|_| "https://status.anthropic.com/api/v2/status.json".into())
+}
+
+/// 官方状态页的摘要（各组件和没解决的事件）：先 status.claude.com，连不上再 status.anthropic.com
+fn status_summary_urls() -> Vec<String> {
+    std::env::var("CAM_STATUS_SUMMARY_URLS")
+        .unwrap_or_else(|_| {
+            "https://status.claude.com/api/v2/summary.json,https://status.anthropic.com/api/v2/summary.json"
+                .into()
+        })
+        .split(',')
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// 出口 IP 的运营商、城市（Cloudflare 的另一个接口，用来交叉核对和判断是不是机房出口）
@@ -1067,9 +1149,204 @@ pub fn system_locale() -> Option<(String, Option<String>)> {
     Some((name, cc))
 }
 
-/// Anthropic 官方状态页（status.anthropic.com）的总体状态：{indicator, description} 或 None（连不上）。
+/// 有关的组件出了这些状态就提醒：部分 / 严重故障是“要处理”，性能下降、维护中是“留意”
+fn component_level(status: &str) -> Option<&'static str> {
+    match status {
+        "partial_outage" | "major_outage" => Some("bad"),
+        "degraded_performance" | "under_maintenance" => Some("warn"),
+        _ => None,
+    }
+}
+
+fn component_status_name(status: &str) -> &str {
+    match status {
+        "degraded_performance" => "性能下降",
+        "partial_outage" => "部分故障",
+        "major_outage" => "严重故障",
+        "under_maintenance" => "维护中",
+        other => other,
+    }
+}
+
+fn incident_status_name(status: &str) -> &str {
+    match status {
+        "investigating" => "调查中",
+        "identified" => "已找到原因",
+        "monitoring" => "已修复，观察中",
+        "scheduled" => "已安排",
+        "in_progress" => "进行中",
+        "verifying" => "验证中",
+        other => other,
+    }
+}
+
+/// 状态页上的组件 / 事件名和这里有关（Claude Code、API、claude.ai、Console）。按词比，“rapid” 里的 api 不算。
+/// 与 cam.py 的 status_relevant 一致（tests/shared/status_page.json）。
+pub fn status_relevant(name: &str) -> bool {
+    let low: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let words: Vec<&str> = low
+        .split_whitespace()
+        .map(|w| w.trim_matches('.'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let text = format!(" {} ", words.join(" "));
+    STATUS_COMPONENT_WORDS
+        .iter()
+        .any(|w| text.contains(&format!(" {} ", w)))
+}
+
+/// Statuspage 的 summary.json → {indicator, description, incidents: [{name, status}], components: [{name, status}]}。
+/// 只留和这里有关（status_relevant）的：不正常的组件，没解决的事件（名字有关，或者影响到的组件里有有关的）。
+/// indicator / description 是整个状态页的。格式不对返回 None。与 cam.py 的 parse_status_summary 一致（tests/shared/status_page.json）。
+pub fn parse_status_summary(j: &Value) -> Option<Value> {
+    let st = j.get("status").filter(|v| v.is_object())?;
+    let ind = s(st, "indicator").filter(|i| !i.is_empty())?;
+    let incidents: Vec<Value> = j
+        .get("incidents")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|i| i.is_object())
+                .filter(|i| !matches!(s(i, "status"), Some("resolved" | "postmortem")))
+                .filter(|i| {
+                    status_relevant(s(i, "name").unwrap_or(""))
+                        || i.get("components")
+                            .and_then(|c| c.as_array())
+                            .is_some_and(|cs| {
+                                cs.iter()
+                                    .any(|c| status_relevant(s(c, "name").unwrap_or("")))
+                            })
+                })
+                .map(|i| {
+                    json!({"name": s(i, "name").filter(|n| !n.is_empty()).unwrap_or("?"),
+                           "status": s(i, "status").unwrap_or("")})
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let components: Vec<Value> = j
+        .get("components")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| {
+                    let (name, st) = (
+                        s(c, "name").filter(|n| !n.is_empty())?,
+                        s(c, "status").filter(|x| !x.is_empty())?,
+                    );
+                    (st != "operational" && status_relevant(name))
+                        .then(|| json!({"name": name, "status": st}))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(
+        json!({"indicator": ind, "description": s(st, "description").unwrap_or(""),
+                "incidents": incidents, "components": components}),
+    )
+}
+
+/// 官方状态页这一条提醒：(级别, 文字) 或 None。sp 是 data["status_page"]。
+/// 有 components（来自 summary.json）：只看和这里有关的组件和事件，别的组件出故障不提醒；有关的组件部分 / 严重故障是 bad，
+/// 性能下降、维护中，或者只有没解决的事件是 warn。没有 components（status.json 的总体状态，或者旧版本记的）：按总体 indicator 算。
+/// 与 cam.py 的 status_risk 一致（tests/shared/status_page.json）。
+pub fn status_risk(sp: &Value) -> Option<(&'static str, String)> {
+    if !sp.is_object() {
+        return None;
+    }
+    if sp.get("components").is_none() {
+        let ind = s(sp, "indicator").filter(|i| !i.is_empty() && *i != "none")?;
+        let desc = s(sp, "description")
+            .filter(|d| !d.is_empty())
+            .unwrap_or(ind);
+        let level = if ind == "major" || ind == "critical" {
+            "bad"
+        } else {
+            "warn"
+        };
+        return Some((level, format!("Anthropic 官方状态页：{}（{}）", desc, ind)));
+    }
+    let comps: Vec<&Value> = sp["components"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|c| s(c, "status").and_then(component_level).is_some())
+                .collect()
+        })
+        .unwrap_or_default();
+    let incs: Vec<Value> = sp
+        .get("incidents")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if comps.is_empty() && incs.is_empty() {
+        return None;
+    }
+    let level = if comps
+        .iter()
+        .any(|c| s(c, "status").and_then(component_level) == Some("bad"))
+    {
+        "bad"
+    } else {
+        "warn"
+    };
+    let mut parts: Vec<String> = comps
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {}",
+                s(c, "name").unwrap_or(""),
+                component_status_name(s(c, "status").unwrap_or(""))
+            )
+        })
+        .collect();
+    if let Some(i) = incs.first() {
+        parts.push(format!(
+            "{}（{}）",
+            s(i, "name").unwrap_or(""),
+            incident_status_name(s(i, "status").unwrap_or(""))
+        ));
+    }
+    Some((level, format!("Anthropic 官方状态页：{}", parts.join("；"))))
+}
+
+/// 官方状态页，按 data["status_page"] 存的样子：先要 summary.json（只留和这里有关的组件和事件，见 parse_status_summary），
+/// 连不上再要 status.json 的总体状态 {indicator, description}（这种没有 components，status_risk 按总体算）。
+/// 都连不上返回 None。总共最多等 6 秒。与 cam.py 的 fetch_status_page 一致。
 pub fn fetch_status_page() -> Option<Value> {
-    let (st, txt) = http_text(&status_url(), 6);
+    let end = Instant::now() + Duration::from_secs(6);
+    for url in status_summary_urls() {
+        let left = end.saturating_duration_since(Instant::now());
+        if left < Duration::from_millis(500) {
+            break;
+        }
+        let (st, txt) = http_text_in(&url, left);
+        if st != 200 {
+            continue;
+        }
+        let parsed = serde_json::from_str::<Value>(&txt)
+            .ok()
+            .and_then(|j| parse_status_summary(&j));
+        if let Some(mut v) = parsed {
+            v["page"] = json!(host_of(&url));
+            return Some(v);
+        }
+    }
+    let left = end.saturating_duration_since(Instant::now());
+    if left < Duration::from_millis(500) {
+        return None;
+    }
+    let (st, txt) = http_text_in(&status_url(), left);
     if st != 200 {
         return None;
     }
@@ -1607,12 +1884,17 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
     let je = spawn_job(local_env);
     let js = spawn_job(fetch_status_page);
     let jn = spawn_job(net_fingerprint);
+    let jp = {
+        let data = data.clone();
+        spawn_job(move || proxies_back(&data))
+    };
     let r = wait_job(&jr, within(REGION_CHECK_BUDGET))
         .flatten()
         .unwrap_or_else(|| json!({}));
     let env = wait_job(&je, within(10));
     let sp = wait_job(&js, within(7)).flatten();
     let net = wait_job(&jn, within(2)).unwrap_or_default();
+    let back = wait_job(&jp, within(PROXY_PROBE_SECS + 1)).unwrap_or_default();
     let _g = store.lock()?;
     let mut data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
@@ -1673,20 +1955,23 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
             new_loc.as_deref(),
             reg_now.as_ref(),
         );
-        // 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）
-        let mut drop_all = false;
-        if let Some(items) = data
-            .get_mut("service_status")
-            .and_then(|ss| ss.get_mut("items"))
-            .and_then(|i| i.as_array_mut())
-        {
-            items.retain(|i| !resolved_by_trace(i));
-            drop_all = items.is_empty();
-        }
-        if drop_all {
-            if let Some(o) = data.as_object_mut() {
-                o.remove("service_status");
-            }
+    }
+    // 连得上 claude.ai 了：只清掉它能证明已经好了的（DNS、证书、claude.ai 连不上）；代理又连得上了的也清掉
+    let traced = new_loc.is_some();
+    let mut drop_all = false;
+    if let Some(items) = data
+        .get_mut("service_status")
+        .and_then(|ss| ss.get_mut("items"))
+        .and_then(|i| i.as_array_mut())
+    {
+        items.retain(|i| {
+            !(traced && resolved_by_trace(i)) && proxy_key(i).is_none_or(|k| !back.contains(&k))
+        });
+        drop_all = items.is_empty();
+    }
+    if drop_all {
+        if let Some(o) = data.as_object_mut() {
+            o.remove("service_status");
         }
     }
     store.save(&mut data)?;
@@ -1719,6 +2004,31 @@ pub fn region_fail_item(reg: &Value) -> Option<Value> {
         "text": format!("出口地区现在查不到：{}没连上 claude.ai 和 Cloudflare，上一次查到是 {}（{}）", times, region_label(Some(loc)), fmt_ago(checked)),
         "advice": region_advice("unknown")
     }))
+}
+
+/// 服务检测记下的“代理连不上”那一条对应的 (主机, 端口)；别的条目返回 None。与 cam.py 的 proxy_key 一致。
+fn proxy_key(item: &Value) -> Option<(String, u16)> {
+    if s(item, "kind") != Some("proxy_down") {
+        return None;
+    }
+    let host = s(item, "host").filter(|h| !h.is_empty())?;
+    let port = u16::try_from(item.get("port")?.as_u64()?).ok()?;
+    Some((host.to_string(), port))
+}
+
+/// 上次服务检测记下连不上的代理，现在又连得上了的。只连一下本机设的代理端口，不发别的。与 cam.py 的 proxies_back 一致。
+fn proxies_back(data: &Value) -> Vec<(String, u16)> {
+    let mut keys: Vec<(String, u16)> = data
+        .get("service_status")
+        .and_then(|ss| ss.get("items"))
+        .and_then(|i| i.as_array())
+        .map(|a| a.iter().filter_map(proxy_key).collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|(h, p)| port_open(h, *p, Duration::from_secs(PROXY_PROBE_SECS)).is_empty())
+        .collect()
 }
 
 /// 后台连上了 claude.ai 的 trace，就能证明这条服务检测问题已经好了：DNS、证书、claude.ai 连不上。
@@ -1986,19 +2296,8 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
         // 旧版没单独记时间，和出口是同一次查的；一小时前的故障现在多半已经恢复，不再提
         let sp_fresh =
             age_ms(s(sp, "checked_at").or(checked)).is_some_and(|a| a <= REGION_FRESH_SECS * 1000);
-        if let Some(ind) = s(sp, "indicator").filter(|i| *i != "none" && sp_fresh) {
-            let level = if ind == "major" || ind == "critical" {
-                "bad"
-            } else {
-                "warn"
-            };
-            let desc = s(sp, "description").unwrap_or(ind);
-            add_plain(
-                "status",
-                level,
-                format!("Anthropic 官方状态页：{}（{}）", desc, ind),
-                "这是 Anthropic 侧的故障，不是本机或账号的问题；等恢复后再试，详情见 status.anthropic.com。",
-            );
+        if let Some((level, text)) = status_risk(sp).filter(|_| sp_fresh) {
+            add_plain("status", level, text, STATUS_ADVICE);
         }
     }
     let tz_cached = env.as_ref().and_then(|e| {
@@ -2160,6 +2459,10 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("ip_origin", "info", 5),
     ("ipv6", "info", 0),
     ("dns_servers", "info", 0),
+    ("auth", "bad", 20),
+    ("auth", "warn", 5),
+    ("proxy_down", "bad", 0),
+    ("tls_intercept", "warn", 0),
 ];
 /// (最低分, 档位, 说明)
 const RISK_GRADES: &[(i64, &str, &str)] = &[
@@ -2273,8 +2576,304 @@ fn resolve_host(host: &str) -> Result<Vec<String>, String> {
     Ok(ips)
 }
 
-/// 检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、代理、VPN，
-/// 再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
+/// [(来源, 设置值)] → [(来源, 主机, 端口)]：本机设的代理要连的地址，服务检测拿来看它在不在运行。最多 4 个，同一个地址只留一次；
+/// PAC 和没写端口的不看。来源是环境变量名或“系统设置”；设置值是环境变量的值（http://user:pass@127.0.0.1:7890），
+/// 或 system_proxy() 的一项（“HTTPS 127.0.0.1:7890”“系统代理 http=127.0.0.1:7890;https=127.0.0.1:7890”，前面的说明去掉）。
+/// 与 cam.py 的 proxy_endpoints 一致（tests/shared/service.json）。
+pub fn proxy_endpoints(entries: &[(String, String)]) -> Vec<(String, String, u16)> {
+    let mut out: Vec<(String, String, u16)> = Vec::new();
+    let mut seen: Vec<(String, u16)> = Vec::new();
+    for (src, v) in entries {
+        let mut v = v.trim();
+        if src == "系统设置" {
+            if v.to_uppercase().starts_with("PAC") {
+                continue;
+            }
+            v = v.rsplit(' ').next().unwrap_or("");
+        }
+        for part in v.split(';') {
+            let mut part = part.trim();
+            if part.split("://").next().unwrap_or("").contains('=') {
+                // Windows 的 http=…;https=…
+                part = part.split_once('=').map(|x| x.1).unwrap_or(part);
+            }
+            let part = part.split_once("://").map(|x| x.1).unwrap_or(part);
+            let part = &part[part.rfind('@').map(|i| i + 1).unwrap_or(0)..]; // 账号密码、路径都不要
+            let part = part.split('/').next().unwrap_or("");
+            let (host, port) = match part.strip_prefix('[') {
+                Some(rest) => {
+                    let (h, r) = rest.split_once(']').unwrap_or((rest, ""));
+                    (h, r.strip_prefix(':').unwrap_or(""))
+                }
+                None => part.rsplit_once(':').unwrap_or(("", part)),
+            };
+            let port = match port.parse::<u32>() {
+                Ok(p) if port.bytes().all(|b| b.is_ascii_digit()) && p > 0 && p < 65536 => p as u16,
+                _ => continue,
+            };
+            if host.is_empty() {
+                continue;
+            }
+            let key = (host.to_lowercase(), port);
+            if !seen.contains(&key) {
+                seen.push(key);
+                out.push((src.clone(), host.to_string(), port));
+            }
+        }
+    }
+    out.truncate(4);
+    out
+}
+
+/// 连一下 host:port（只建 TCP 连接，马上断开，不发数据）：连上了返回空字符串，没连上返回原因。与 cam.py 的 port_open 一致。
+pub fn port_open(host: &str, port: u16, timeout: Duration) -> String {
+    let addrs: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
+        Ok(a) => a.collect(),
+        Err(e) => return e.to_string(),
+    };
+    let mut why = "解析不了这个地址".to_string();
+    for a in addrs {
+        match std::net::TcpStream::connect_timeout(&a, timeout) {
+            Ok(_) => return String::new(),
+            Err(e) => {
+                why = match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        format!("超过 {} 秒没有回应", timeout.as_secs())
+                    }
+                    std::io::ErrorKind::ConnectionRefused => "连接被拒绝".to_string(),
+                    _ => e.to_string(),
+                }
+            }
+        }
+    }
+    why
+}
+
+/// 本机设的代理连不上的那一条；host / port 记着，后台检测时再连一下，连上了就清掉。与 cam.py 一致。
+fn proxy_down_item(src: &str, host: &str, port: u16, why: &str) -> Value {
+    json!({"kind": "proxy_down", "level": "bad", "text": format!("代理 {}:{}（{}）连不上：{}", host, port, src, why),
+           "advice": PROXY_DOWN_ADVICE, "host": host, "port": port})
+}
+
+/// 续登录的地址（Claude Code 和 cam 续登录都用）连不连得上，汇总成一条 {kind: auth}。
+/// results：(域名, HTTP 状态, 返回的文字, 毫秒)，状态 0 是没连上。这里不带登录、用的是 GET，回什么状态都算连得上（正常是 405）；
+/// 回人机验证页、因为地区拒绝的算被拦住了。与 cam.py 的 auth_item 一致（tests/shared/service.json）。
+pub fn auth_item(results: &[(String, u16, String, u128)]) -> Value {
+    let (mut good, mut bad) = (Vec::new(), Vec::new());
+    for (host, st, txt, ms) in results {
+        if *st == 0 {
+            bad.push(format!("{} 连不上", host));
+        } else if (*st == 403 || *st == 503) && is_cloudflare(txt) {
+            bad.push(format!("{} 返回人机验证页", host));
+        } else if *st == 403 && region_denied(txt) {
+            bad.push(format!("{} 拒绝访问（HTTP 403）", host));
+        } else {
+            good.push(format!("{}（{} ms）", host, ms));
+        }
+    }
+    if bad.is_empty() {
+        return json!({"kind": "auth", "level": "ok", "text": format!("续登录的地址连得上：{}", good.join("、")), "advice": ""});
+    }
+    if !good.is_empty() {
+        return json!({"kind": "auth", "level": "warn",
+                      "text": format!("续登录的地址有的连不上：{}；{}连得上", bad.join("、"), good.join("、")),
+                      "advice": AUTH_PARTIAL_ADVICE});
+    }
+    json!({"kind": "auth", "level": "bad", "text": format!("续登录的地址都连不上：{}", bad.join("、")), "advice": AUTH_DOWN_ADVICE})
+}
+
+/// X.509 证书（DER）里颁发者的组织名和通用名 {"org", "cn"}（有哪个给哪个），解析不了返回 None。只读这两项，不做任何校验。
+/// 与 cam.py 的 der_issuer 一致（tests/shared/service.json）。
+pub fn der_issuer(der: &[u8]) -> Option<Value> {
+    // (标签, 内容开始, 内容结束)
+    fn tlv(der: &[u8], i: usize) -> Option<(u8, usize, usize)> {
+        let tag = *der.get(i)?;
+        let n = *der.get(i + 1)? as usize;
+        let mut i = i + 2;
+        let n = if n & 0x80 != 0 {
+            let k = n & 0x7f;
+            if k == 0 || k > 4 {
+                return None;
+            }
+            let bytes = der.get(i..i + k)?;
+            i += k;
+            bytes.iter().fold(0usize, |a, b| (a << 8) | *b as usize)
+        } else {
+            n
+        };
+        let end = i.checked_add(n)?;
+        (end <= der.len()).then_some((tag, i, end))
+    }
+    let (_, cert, _) = tlv(der, 0)?; // Certificate
+    let (_, tbs, _) = tlv(der, cert)?; // tbsCertificate
+    let (tag, _, mut e) = tlv(der, tbs)?;
+    if tag == 0xa0 {
+        e = tlv(der, e)?.2; // [0] 版本之后是序列号
+    }
+    e = tlv(der, e)?.2; // 签名算法
+    let (tag, mut j, end) = tlv(der, e)?; // 颁发者
+    if tag != 0x30 {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    while j < end {
+        let (_, mut k, set_end) = tlv(der, j)?;
+        j = set_end;
+        while k < set_end {
+            let (_, a, attr_end) = tlv(der, k)?;
+            k = attr_end;
+            let (_, os, oe) = tlv(der, a)?;
+            let (vt, vs, ve) = tlv(der, oe)?;
+            let key = match &der[os..oe] {
+                [0x55, 0x04, 0x0a] => "org", // 2.5.4.10
+                [0x55, 0x04, 0x03] => "cn",  // 2.5.4.3
+                _ => continue,
+            };
+            if !out.contains_key(key) {
+                let raw = &der[vs..ve];
+                let text = if vt == 0x1e {
+                    let units: Vec<u16> = raw
+                        .chunks(2)
+                        .map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+                        .collect();
+                    String::from_utf16_lossy(&units)
+                } else {
+                    String::from_utf8_lossy(raw).into_owned()
+                };
+                out.insert(key.into(), json!(text));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+}
+
+fn pct_decode(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = (b[i] == b'%')
+            .then(|| v.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(x) => {
+                out.push(x);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// host 现在拿到的 HTTPS 证书是谁签的：(颁发者 {"org", "cn"}, 系统的证书库认不认它)；连不上、走的是 SOCKS 代理看不了、
+/// 证书解析不了时返回 None。和 ureq 一样只看环境变量里的代理（http:// 的，用 CONNECT 打通道，不在代理那头解密）。
+/// 先按系统的证书库校验着连；不行再不校验地连一次，只为看颁发者。只握手，不发任何请求。与 cam.py 的 peer_issuer 对应
+/// （那边用的是 Python 的证书库，也看系统代理设置）。
+pub fn peer_issuer(host: &str, port: u16, timeout: Duration) -> Option<(Value, bool)> {
+    use std::io::{Read, Write};
+    let proxy = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()));
+    let open = || -> Option<std::net::TcpStream> {
+        let (h, p, auth) = match &proxy {
+            Some(px) => {
+                let full = if px.contains("://") {
+                    px.clone()
+                } else {
+                    format!("http://{}", px)
+                };
+                let u = url::Url::parse(&full).ok()?;
+                if u.scheme() != "http" {
+                    return None;
+                }
+                let auth = (!u.username().is_empty()).then(|| {
+                    use base64::Engine;
+                    let cred = format!(
+                        "{}:{}",
+                        pct_decode(u.username()),
+                        pct_decode(u.password().unwrap_or(""))
+                    );
+                    base64::engine::general_purpose::STANDARD.encode(cred)
+                });
+                let h = u
+                    .host_str()?
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .to_string();
+                (h, u.port().unwrap_or(80), auth)
+            }
+            None => (host.to_string(), port, None),
+        };
+        let addr = (h.as_str(), p).to_socket_addrs().ok()?.next()?;
+        let mut st = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+        st.set_read_timeout(Some(timeout)).ok()?;
+        st.set_write_timeout(Some(timeout)).ok()?;
+        if proxy.is_some() {
+            let mut req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+            if let Some(a) = auth {
+                req += &format!("Proxy-Authorization: Basic {}\r\n", a);
+            }
+            req += "\r\n";
+            st.write_all(req.as_bytes()).ok()?;
+            let (mut buf, mut b) = (Vec::new(), [0u8; 1]);
+            while !buf.ends_with(b"\r\n\r\n") {
+                if buf.len() > 8192 || st.read(&mut b).ok()? == 0 {
+                    return None;
+                }
+                buf.push(b[0]);
+            }
+            let head = String::from_utf8_lossy(&buf);
+            if head.split_whitespace().nth(1) != Some("200") {
+                return None;
+            }
+        }
+        Some(st)
+    };
+    let fetch = |verify: bool| -> Option<Vec<u8>> {
+        let mut b = native_tls::TlsConnector::builder();
+        if !verify {
+            b.danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true);
+        }
+        let tls = b.build().ok()?.connect(host, open()?).ok()?;
+        tls.peer_certificate().ok()??.to_der().ok()
+    };
+    let (der, ok) = match fetch(true) {
+        Some(d) => (d, true),
+        None => (fetch(false)?, false),
+    };
+    der_issuer(&der).map(|i| (i, ok))
+}
+
+/// 证书颁发者 → 一条结果。公共证书机构签的：正常；不是的话网络里有设备在解密 HTTPS（公司安全网关、杀毒软件、抓包工具）。
+/// verified：本机这一方认不认它。与 cam.py 的 tls_issuer_item 一致（tests/shared/service.json）。
+pub fn tls_issuer_item(host: &str, issuer: &Value, verified: bool) -> Value {
+    let org = s(issuer, "org").filter(|v| !v.is_empty());
+    let cn = s(issuer, "cn").filter(|v| !v.is_empty());
+    let name = org.or(cn).unwrap_or("?");
+    let low = [org, cn]
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if PUBLIC_CA_WORDS.iter().any(|w| low.contains(w)) {
+        return json!({"kind": "tls_chain", "level": "ok",
+                      "text": format!("HTTPS 证书：{} 由 {} 签发（公共证书机构，没有被中间设备解密）", host, name), "advice": ""});
+    }
+    json!({"kind": "tls_intercept", "level": "warn",
+           "text": format!("HTTPS 证书：{} 由 {} 签发，不是公共证书机构：网络里有设备在解密 HTTPS{}", host, name,
+                           if verified { "" } else { "，本机不认它" }),
+           "advice": TLS_INTERCEPT_ADVICE})
+}
+
+/// 检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书是谁签的、
+/// 代理（设了的话它在不在运行）、VPN，再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
 /// 返回 [{kind, level, text, advice}]，级别为 ok / bad / warn / info，第一项是总体结论。不包含任何密钥。
 /// 会顺便刷新界面常显的缓存和账号的地区记录。
 pub fn service_check(store: &Store) -> Vec<Value> {
@@ -2352,10 +2951,65 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         );
         (code, body, t0.elapsed().as_millis())
     });
+    // 续登录的地址、证书、本机设的代理也同时测
+    let auth_urls = token_urls();
+    let j_auth: Vec<_> = auth_urls
+        .iter()
+        .map(|u| {
+            let u = u.clone();
+            spawn_job(move || {
+                let t0 = Instant::now();
+                let (st, txt) = http_text_in(&u, Duration::from_secs(SERVICE_PROBE_SECS));
+                (st, txt, t0.elapsed().as_millis())
+            })
+        })
+        .collect();
+    let mut proxy_entries = proxies.clone();
+    proxy_entries.extend(
+        system_proxy()
+            .into_iter()
+            .map(|p| ("系统设置".to_string(), p)),
+    );
+    let proxy_eps = proxy_endpoints(&proxy_entries);
+    let j_proxy: Vec<_> = proxy_eps
+        .iter()
+        .map(|(_, h, p)| {
+            let (h, p) = (h.clone(), *p);
+            spawn_job(move || port_open(&h, p, Duration::from_secs(PROXY_PROBE_SECS)))
+        })
+        .collect();
+    let j_tls = {
+        let h = api_host.clone();
+        let https = api_base().starts_with("https://");
+        spawn_job(move || {
+            if https {
+                peer_issuer(&h, 443, Duration::from_secs(TLS_PROBE_SECS))
+            } else {
+                None
+            }
+        })
+    };
     // 先等时限最长的那件（见 wait_job）
     let _ = wait_job(&j_region, within(REGION_CHECK_BUDGET + 2));
+    let tls = wait_job(&j_tls, within(TLS_PROBE_SECS * 2 + 1)).flatten();
     let api = wait_job(&j_api, within(SERVICE_PROBE_SECS + 1));
     let web = wait_job(&j_web, within(SERVICE_PROBE_SECS + 1));
+    let auth: Vec<(String, u16, String, u128)> = auth_urls
+        .iter()
+        .zip(&j_auth)
+        .map(|(u, j)| {
+            let (st, txt, ms) =
+                wait_job(j, within(SERVICE_PROBE_SECS + 1)).unwrap_or((0, String::new(), 0));
+            (host_of(u), st, txt, ms)
+        })
+        .collect();
+    let proxy_why: Vec<String> = j_proxy
+        .iter()
+        .map(|j| {
+            wait_job(j, within(PROXY_PROBE_SECS + 1))
+                .unwrap_or_else(|| format!("超过 {} 秒没有回应", PROXY_PROBE_SECS))
+        })
+        .collect();
     let dns_advice = if proxies.is_empty() {
         "检查本机 DNS 或代理设置"
     } else {
@@ -2571,12 +3225,26 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             format!("{}：服务可达（未登录，{} ms）", api_host, ms),
             "",
         );
+    } else if st == 429 {
+        add(
+            "api",
+            "warn",
+            format!("{}：官方在限流（HTTP 429，{} ms）", api_host, ms),
+            RATE_LIMIT_ADVICE,
+        );
+    } else if st == 529 {
+        add(
+            "api",
+            "warn",
+            format!("{}：官方服务过载（HTTP 529，{} ms）", api_host, ms),
+            OVERLOAD_ADVICE,
+        );
     } else if st >= 500 {
         add(
             "api",
             "bad",
             format!("{}：服务端错误（HTTP {}）", api_host, st),
-            "可能是 Anthropic 故障，稍后再试，可查看 status.anthropic.com",
+            "可能是 Anthropic 故障，稍后再试，可查看 status.claude.com",
         );
     } else {
         add(
@@ -2612,6 +3280,13 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         );
     } else if code == 200 || code == 401 || code == 403 {
         add("web", "ok", format!("{}：可达（{} ms）", web_host, ms), "");
+    } else if code == 429 {
+        add(
+            "web",
+            "warn",
+            format!("{}：官方在限流（HTTP 429，{} ms）", web_host, ms),
+            RATE_LIMIT_ADVICE,
+        );
     } else if code >= 500 {
         add(
             "web",
@@ -2633,14 +3308,31 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             "少见的返回，稍后重试",
         );
     }
-    // 代理：环境变量 + 系统设置；VPN：默认路由
     drop(add);
+    // 续登录的地址：Claude Code 和 cam 续登录都用，连不上的话登录到期后续不上
+    out.push(auth_item(&auth));
+    // 证书是谁签的：不是公共证书机构的话，网络里有设备在解密 HTTPS
+    if let Some((issuer, verified)) = &tls {
+        out.push(tls_issuer_item(&api_host, issuer, *verified));
+    }
+    // 代理：环境变量 + 系统设置（设了的话看它在不在运行）；VPN：默认路由
     let env = r
         .get("env")
         .filter(|e| e.get("proxy").is_some())
         .cloned()
         .unwrap_or_else(local_env);
     out.extend(proxy_vpn_items(&env));
+    let mut up = Vec::new();
+    for ((src, h, p), why) in proxy_eps.iter().zip(&proxy_why) {
+        if why.is_empty() {
+            up.push(format!("{}:{}", h, p));
+        } else {
+            out.push(proxy_down_item(src, h, *p, why));
+        }
+    }
+    if !up.is_empty() {
+        out.push(json!({"kind": "proxy_up", "level": "ok", "text": format!("代理在运行：{}", up.join("、")), "advice": ""}));
+    }
     out.extend(risk_items(&data, false, true));
     out.push(json!({
         "kind": "device", "level": "info",
@@ -2688,7 +3380,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     let bad: Vec<Value> = out
         .iter()
         .filter(|i| {
-            matches!(s(i, "kind"), Some("api" | "web" | "dns" | "tls"))
+            s(i, "kind").is_some_and(|k| SERVICE_STATUS_KINDS.contains(&k))
                 && matches!(s(i, "level"), Some("warn" | "bad"))
         })
         .cloned()
@@ -2719,8 +3411,8 @@ pub fn privacy_sources(cfg: &LookupConfig) -> Vec<Value> {
             false,
         ),
         src(
-            "status.anthropic.com",
-            "官方状态页，不带任何本机信息",
+            "status.claude.com",
+            "官方状态页（连不上时换 status.anthropic.com），不带任何本机信息",
             "anthropic",
             false,
         ),
