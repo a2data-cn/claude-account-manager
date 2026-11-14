@@ -248,7 +248,7 @@ pub fn account_health(acc: &Value, has_creds: bool, days: Option<i64>) -> Value 
     json!({"level": level, "label": label, "issues": issues})
 }
 
-const PUBLIC_FIELDS: [&str; 13] = [
+const PUBLIC_FIELDS: [&str; 14] = [
     "id",
     "kind",
     "label",
@@ -262,6 +262,7 @@ const PUBLIC_FIELDS: [&str; 13] = [
     "last_switched_at",
     "auto",
     "desktop_profile",
+    "usage_days",
 ];
 
 pub fn public_state(store: &Store, data: &Value) -> Value {

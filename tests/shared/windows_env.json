@@ -1,0 +1,16 @@
+{
+  "_说明": "Windows 上合并以后的两次 PowerShell 查询怎么解析：parse_windows_env（DNS、系统语言、默认路由的网卡，ConvertTo-Json 的输出）、parse_windows_processes（进程表，每行 pid、程序路径、名字、命令行，用 Tab 分开）。Python 与 Rust 两边按同一份数据跑。",
+  "env": [
+    {"name": "正常：两个 DNS、语言、默认路由的网卡", "output": "{\"dns\":[\"192.168.1.1\",\"fe80::1\"],\"culture\":\"zh-CN\",\"route\":\"WLAN\",\"route_desc\":\"Intel(R) Wi-Fi 6 AX201 160MHz\"}", "expect": {"dns": ["192.168.1.1", "fe80::1"], "culture": "zh-CN", "route": "WLAN", "route_desc": "Intel(R) Wi-Fi 6 AX201 160MHz"}},
+    {"name": "只有一个 DNS 时 PowerShell 可能给成字符串", "output": "{\"dns\":\"10.0.0.1\",\"culture\":\"en-US\",\"route\":\"以太网\",\"route_desc\":\"Realtek PCIe GbE Family Controller\"}", "expect": {"dns": ["10.0.0.1"], "culture": "en-US", "route": "以太网", "route_desc": "Realtek PCIe GbE Family Controller"}},
+    {"name": "前面有警告、后面有空行", "output": "WARNING: something\r\n{\"dns\":[],\"culture\":\"ja-JP\",\"route\":\"\",\"route_desc\":\"\"}\r\n\r\n", "expect": {"dns": [], "culture": "ja-JP", "route": "", "route_desc": ""}},
+    {"name": "走 VPN 的网卡", "output": "{\"dns\":[\"198.18.0.2\"],\"culture\":\"zh-CN\",\"route\":\"Meta\",\"route_desc\":\"Meta Tunnel\"}", "expect": {"dns": ["198.18.0.2"], "culture": "zh-CN", "route": "Meta", "route_desc": "Meta Tunnel"}},
+    {"name": "各项是 null", "output": "{\"dns\":null,\"culture\":null,\"route\":null,\"route_desc\":null}", "expect": {"dns": [], "culture": "", "route": "", "route_desc": ""}},
+    {"name": "不是 JSON", "output": "Get-NetRoute : 找不到", "expect": {"dns": [], "culture": "", "route": "", "route_desc": ""}},
+    {"name": "空的", "output": "", "expect": {"dns": [], "culture": "", "route": "", "route_desc": ""}}
+  ],
+  "processes": [
+    {"name": "正常的几行：程序路径、名字、命令行", "output": "4\t\tSystem\t\r\n1234\tC:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\tclaude.exe\t\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\" --user-data-dir=C:\\x\r\n5678\tC:\\Program Files\\nodejs\\node.exe\tnode.exe\tnode C:\\npm\\claude\\cli.js --resume\tx\r\n", "expect": [[4, "", "System", ""], [1234, "C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe", "claude.exe", "\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\" --user-data-dir=C:\\x"], [5678, "C:\\Program Files\\nodejs\\node.exe", "node.exe", "node C:\\npm\\claude\\cli.js --resume\tx"]]},
+    {"name": "pid 不是数字、少了几列的不要", "output": "abc\tx\ty\tz\n12\tonly\ttwo\n", "expect": []}
+  ]
+}

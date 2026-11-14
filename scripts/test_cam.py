@@ -550,6 +550,10 @@ class CamTest(unittest.TestCase):
         self.assertEqual(b["usage"]["five_hour"]["utilization"], 95.0)
         self.assertEqual(a["plan"], "max")
         self.assertEqual(b["org_name"], "b@x.com's Org")
+        # 每天的最高用量记下了，面板拿得到
+        today = dt.date.today().isoformat()
+        self.assertEqual((a["usage_days"][today], b["usage_days"][today]), ([10.0, 20.0], [95.0, 50.0]))
+        self.assertEqual(self.cam.public_state(self.cam.Store(), d)["accounts"][1]["usage_days"], {today: [95.0, 50.0]})
         # 非当前账号刷新后，轮换的 refresh token 被保存
         self.assertEqual(self.cam.Store().load_secret(a["id"])["claudeAiOauth"]["refreshToken"], "rt-A2")
         # 当前账号从不刷新
@@ -738,6 +742,128 @@ class CamTest(unittest.TestCase):
             body = json.load(r)
         self.assertIn("1.2.3.4", body["text"])
         self.assertTrue(body["filename"].endswith(".md"))
+
+    def test_panel_responses_are_gzipped_when_the_browser_accepts_it(self):
+        """面板页面和接口回复：浏览器说能收 gzip 就压缩（手机、隔着 Tailscale 打开快很多）；不收的照旧，小回复不压。"""
+        import gzip
+        store = self.cam.Store()
+        for i in range(4):  # 几个账号，状态接口的回复才够大
+            self.cam.add_account(store, "claude_web", f"网页号{i}")
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+        def get(path, enc=None, auth=False):
+            h = {"Accept-Encoding": enc} if enc else {}
+            if auth:
+                h["Authorization"] = "Bearer " + token
+            try:
+                with opener.open(urllib.request.Request(base + path, headers=h)) as r:
+                    return r.headers.get("Content-Encoding"), r.headers.get("Vary"), r.read()
+            except urllib.error.HTTPError as e:  # 404 这类：也看头
+                return e.headers.get("Content-Encoding"), e.headers.get("Vary"), e.read()
+        enc, vary, body = get("/", "gzip, deflate, br")
+        self.assertEqual((enc, vary), ("gzip", "Accept-Encoding"))
+        html = gzip.decompress(body)
+        self.assertIn(b"<html", html[:500].lower())
+        self.assertLess(len(body), len(html) / 2)
+        enc, _, plain = get("/")
+        self.assertIsNone(enc)
+        self.assertEqual(plain, html)
+        enc, _, body = get("/api/state", "gzip", auth=True)
+        self.assertEqual(enc, "gzip")
+        self.assertIn("accounts", json.loads(gzip.decompress(body)))
+        enc, _, _ = get("/api/nope", "gzip", auth=True)  # 小回复不压
+        self.assertIsNone(enc)
+        self.assertTrue(self.cam.accepts_gzip("gzip;q=1.0, br"))
+        self.assertTrue(self.cam.accepts_gzip("*"))
+        self.assertFalse(self.cam.accepts_gzip("gzip;q=0, br"))
+        self.assertFalse(self.cam.accepts_gzip("deflate, br"))
+        self.assertFalse(self.cam.accepts_gzip(None))
+
+    def test_completion_scripts_and_account_names(self):
+        """Tab 补全：第一个词补子命令，switch / open 这些后面补账号名（cam _names，只读账号库）。"""
+        store = self.cam.Store()
+        self.cam.add_account(store, "claude_web", "网页号")
+        self.cam.add_account(store, "claude_desktop", "桌面号")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.cam.main(["_names"]), 0)
+        self.assertEqual(out.getvalue().splitlines(), ["网页号", "桌面号"])
+        for shell, marker in (("bash", "complete -o default -F _cam_complete cam"), ("zsh", "compdef _cam_complete cam"),
+                              ("powershell", "Register-ArgumentCompleter -Native -CommandName cam")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(self.cam.main(["completion", shell]), 0)
+            text = out.getvalue()
+            self.assertIn(marker, text)
+            self.assertIn("switch", text)
+            self.assertIn("cam _names", text)
+            self.assertNotIn(" hook ", text)
+        bash = shutil.which("bash")
+        if bash and not self.cam.IS_WIN:
+            script = os.path.join(self.tmp, "c.bash")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(self.cam.completion_script("bash", ["switch", "usage", "open"]))
+            self.assertEqual(subprocess.run([bash, "-n", script]).returncode, 0)
+            r = subprocess.run([bash, "-c", f'source "{script}"; COMP_WORDS=(cam sw); COMP_CWORD=1; _cam_complete; echo "${{COMPREPLY[@]}}"'],
+                               capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), "switch")
+
+    def test_desktop_lsof_lookup_is_remembered_per_process(self):
+        """macOS 上认桌面版用的哪个目录要调 lsof（几百毫秒）：同一个进程查到一次就记着；没查到的下次再查，退出了的就忘掉。"""
+        calls = []
+
+        def fake(pid):
+            calls.append(pid)
+            return "/profiles/a" if pid == 7 else None
+        self.cam._LSOF_PROFILES.clear()
+        with mock.patch.object(self.cam, "_desktop_profile_from_files", side_effect=fake):
+            self.assertEqual(self.cam._desktop_profile_cached(7, "Claude"), "/profiles/a")
+            self.assertEqual(self.cam._desktop_profile_cached(7, "Claude"), "/profiles/a")
+            self.assertIsNone(self.cam._desktop_profile_cached(8, "Claude"))
+            self.assertIsNone(self.cam._desktop_profile_cached(8, "Claude"))
+        self.assertEqual(calls, [7, 8, 8])
+        self.cam._LSOF_PROFILES.clear()
+
+    @unittest.skipUnless(os.name == "nt", "只在 Windows 上真跑一次合并后的 PowerShell 查询")
+    def test_windows_merged_powershell_queries_really_work(self):
+        rows = self.cam.windows_processes(0)
+        self.assertIn(os.getpid(), [r[0] for r in rows])
+        me = next(r for r in rows if r[0] == os.getpid())
+        self.assertTrue(me[1].lower().endswith(".exe"), me)
+        env = self.cam.windows_env(0)
+        self.assertTrue(env["culture"], env)
+        self.assertIsInstance(env["dns"], list)
+
+    def test_alerts_in_the_background_round(self):
+        """后台一轮里的提醒：7 天额度快满、用满的号过了重置时间说“恢复了”、快到期，都只提醒一次。"""
+        a_id, b_id = self._two_accounts()  # 当前登录 B
+        store = self.cam.Store()
+        soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=2)).isoformat()
+        later = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3)).isoformat()
+        with store.lock():
+            d = store.load()
+            for acc in d["accounts"]:
+                if acc["id"] == a_id:  # 不是当前号，5 小时用满了，两秒后重置
+                    acc["usage"] = {"five_hour": {"utilization": 100, "resets_at": soon}}
+                    acc["manual"] = {"expires_at": (dt.date.today() + dt.timedelta(days=1)).isoformat()}
+                else:  # 当前号 7 天快满
+                    acc["usage"] = {"seven_day": {"utilization": 93, "resets_at": later}}
+            store.save(d)
+        st = {}
+        first = [t for t, _ in self.cam.due_alerts(store.load(), st)]
+        self.assertEqual(first, ["B 的 7 天额度已用 93%", "A 还有 1 天到期（" + (dt.date.today() + dt.timedelta(days=1)).isoformat() + "）"])
+        self.assertEqual(list(st["exhausted"]), [f"{a_id}|five_hour|{soon}"])
+        self.assertEqual(self.cam.due_alerts(store.load(), st), [])  # 都提醒过了
+        later_now = time.time() + 5
+        self.assertEqual([t for t, _ in self.cam.due_alerts(store.load(), st, now=later_now)], ["A 的 5 小时额度恢复了"])
+        self.assertEqual(st["exhausted"], {})
+        self.assertEqual(self.cam.due_alerts(store.load(), st, now=later_now), [])
 
     def test_menubar_launcher_fix(self):
         """老版本写的启动脚本（弹窗不常驻，点一下卡半秒）：插件按当时的模式重跑一次安装脚本改写；没装、已是新版的不动，失败也只试一次。"""
@@ -5095,6 +5221,32 @@ class SharedFixtureTest(unittest.TestCase):
             for field in ("text", "advice"):
                 for kind, text in c["expect_" + field].items():
                     self.assertIn(text, items[kind][field], c["name"])
+
+    def test_alert_rules(self):
+        """后台提醒：额度快满（5 小时、7 天）、用满后恢复、快到期 / 过了到期日。"""
+        import datetime as dt
+        for c in shared("alerts.json")["cases"]:
+            st = json.loads(json.dumps(c["st"]))
+            out = self.cam.due_alerts(c["data"], st, now=c["now"], today=dt.date.fromisoformat(c["today"]))
+            self.assertEqual([t for t, _ in out], c["expect_titles"], c["name"])
+            self.assertEqual([None if e is None else b for (_, b), e in zip(out, c["expect_bodies"])], c["expect_bodies"], c["name"])
+            self.assertEqual(st, c["expect_st"], c["name"])
+
+    def test_usage_days_rules(self):
+        """每天的最高用量怎么记。"""
+        import datetime as dt
+        for c in shared("usage_days.json")["cases"]:
+            a = json.loads(json.dumps(c["account"]))
+            self.cam.note_usage_day(a, today=dt.date.fromisoformat(c["today"]))
+            self.assertEqual(a.get("usage_days"), c["expect"], c["name"])
+
+    def test_windows_parsing_rules(self):
+        """Windows 上合并以后的两次 PowerShell 查询怎么解析。"""
+        fx = shared("windows_env.json")
+        for c in fx["env"]:
+            self.assertEqual(self.cam.parse_windows_env(c["output"]), c["expect"], c["name"])
+        for c in fx["processes"]:
+            self.assertEqual([list(r) for r in self.cam.parse_windows_processes(c["output"])], c["expect"], c["name"])
 
     def test_find_account(self):
         fx = shared("find_account.json")

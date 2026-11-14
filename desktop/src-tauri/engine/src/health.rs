@@ -957,15 +957,14 @@ pub fn system_dns_servers() -> Vec<Value> {
             .filter(|x| !x.is_empty())
             .collect();
     } else if cfg!(windows) {
-        let out = run_text(
-            "powershell",
-            &["-NoProfile", "-Command", "Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }"],
-        );
-        ips = out
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
+        ips = windows_env()["dns"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
     } else if cfg!(target_os = "macos") {
         for line in run_text("scutil", &["--dns"]).lines() {
             let line = line.trim();
@@ -1116,12 +1115,7 @@ pub fn system_locale() -> Option<(String, Option<String>)> {
             .trim()
             .to_string()
     } else if cfg!(windows) {
-        run_text(
-            "powershell",
-            &["-NoProfile", "-Command", "(Get-Culture).Name"],
-        )
-        .trim()
-        .to_string()
+        windows_env()["culture"].as_str().unwrap_or("").to_string()
     } else {
         ["LC_ALL", "LC_MESSAGES", "LANG"]
             .iter()
@@ -1356,6 +1350,122 @@ pub fn fetch_status_page() -> Option<Value> {
     Some(json!({"indicator": ind, "description": s(status, "description").unwrap_or("")}))
 }
 
+// ---- Windows 上查进程、查系统设置都要起一次 PowerShell（每次大约半秒 CPU）：几处要用的合并成一次，结果几秒内共用。
+// 与 cam.py 的 windows_env / windows_processes 一致（解析规则见 tests/shared/windows_env.json）。
+
+const WIN_ENV_PS: &str = "$ErrorActionPreference='SilentlyContinue'; \
+    $dns = @(Get-DnsClientServerAddress | ForEach-Object { $_.ServerAddresses }); \
+    $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric \
+    | Select-Object -First 1; $a = $null; if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex }; \
+    [pscustomobject]@{ dns = $dns; culture = (Get-Culture).Name; route = \"$($r.InterfaceAlias)\"; \
+    route_desc = \"$($a.InterfaceDescription)\" } | ConvertTo-Json -Compress";
+const WIN_PROCS_PS: &str =
+    "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { \
+    \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$($_.CommandLine)\" }";
+
+/// WIN_ENV_PS 的输出（ConvertTo-Json）→ {dns: [...], culture, route, route_desc}；前后有别的输出也认，解析不了的项是空的
+pub fn parse_windows_env(text: &str) -> Value {
+    let v = match (text.find('{'), text.rfind('}')) {
+        (Some(i), Some(j)) if i < j => serde_json::from_str::<Value>(&text[i..=j]).ok(),
+        _ => None,
+    }
+    .filter(|v| v.is_object())
+    .unwrap_or_else(|| json!({}));
+    let dns: Vec<String> = match v.get("dns") {
+        Some(Value::String(x)) => vec![x.clone()],
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|d| d.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(|d| d.trim().to_string())
+    .filter(|d| !d.is_empty())
+    .collect();
+    let txt = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    json!({"dns": dns, "culture": txt("culture"), "route": txt("route"), "route_desc": txt("route_desc")})
+}
+
+/// WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行)]
+pub fn parse_windows_processes(text: &str) -> Vec<(u32, String, String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.trim_end_matches('\r').splitn(4, '\t').collect();
+            let [pid, exe, name, cmd] = parts[..] else {
+                return None;
+            };
+            let pid = pid.trim();
+            if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            Some((
+                pid.parse().ok()?,
+                exe.trim().to_string(),
+                name.trim().to_string(),
+                cmd.trim().to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn powershell(script: &str) -> Command {
+    let mut c = Command::new("powershell");
+    c.args(["-NoProfile", "-Command", script]);
+    #[cfg(windows)]
+    {
+        // 桌面版是 GUI 程序，不加这个会闪一下控制台窗口
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    c
+}
+
+/// 一次环境检测里 DNS、系统语言、默认路由三处共用这一次查询，5 秒内的直接用
+fn windows_env() -> Value {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, Value)>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((at, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if at.elapsed() < Duration::from_secs(5) {
+            return v.clone();
+        }
+    }
+    let v = parse_windows_env(&run_with_timeout(
+        powershell(WIN_ENV_PS),
+        Duration::from_secs(20),
+    ));
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));
+    v
+}
+
+/// Windows 上的全部进程：Claude Code 会话、桌面版共用一次 PowerShell 查询，max_age 内查过的直接用（零是现查）。
+/// 查不出来是 None。
+pub fn win_processes(max_age: Duration) -> Option<Vec<(u32, String, String, String)>> {
+    type Rows = Vec<(u32, String, String, String)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, Rows)>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, rows)) = g.as_ref() {
+        if !max_age.is_zero() && at.elapsed() < max_age {
+            return Some(rows.clone());
+        }
+    }
+    let (Some(true), out) = run_command(powershell(WIN_PROCS_PS), Duration::from_secs(20)) else {
+        return None;
+    };
+    let rows = parse_windows_processes(&out);
+    *g = Some((Instant::now(), rows.clone()));
+    Some(rows)
+}
+
 fn run_text(cmd: &str, args: &[&str]) -> String {
     let mut c = Command::new(cmd);
     c.args(args);
@@ -1587,16 +1697,9 @@ pub fn default_route_tunnel() -> Option<(String, &'static str)> {
     }
     let (mut name, mut desc) = (String::new(), String::new());
     if cfg!(windows) {
-        let ps = "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | \
-                  Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1; \
-                  if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue; \
-                  \"$($r.InterfaceAlias)`t$($a.InterfaceDescription)\" }";
-        let txt = run_text("powershell", &["-NoProfile", "-Command", ps]);
-        if let Some(l) = txt.lines().next() {
-            let (n, d) = l.split_once('\t').unwrap_or((l, ""));
-            name = n.trim().to_string();
-            desc = d.trim().to_string();
-        }
+        let w = windows_env();
+        name = w["route"].as_str().unwrap_or("").to_string();
+        desc = w["route_desc"].as_str().unwrap_or("").to_string();
     } else if cfg!(target_os = "macos") {
         for line in run_text("route", &["-n", "get", "default"]).lines() {
             if let Some(v) = line.trim().strip_prefix("interface:") {

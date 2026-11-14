@@ -69,6 +69,8 @@ export interface Account {
   health?: AccountHealth; // 后端算的健康状态：正常 / 注意 / 异常，附原因和修复建议
   /** claude_desktop：客户端开着的是不是这个号；本机记录里的登录（cam 只读本机文件，服务端作废的看不出） */
   desktop?: { running: boolean; login: "yes" | "expired" | "no" | "never" | "unknown"; login_expires: string | null } | null;
+  /** 每天的最高用量：日期（本地）→ [5 小时 %, 7 天 %]，最近 30 天，后台刷新时记的 */
+  usage_days?: Record<string, [number | null, number | null]> | null;
 }
 
 /** Claude 桌面版：装没装、版本、开着没有（running 为 null 是查不出来）、开着的是哪个号（account）、开着的实例都看得出用的哪个目录（known） */

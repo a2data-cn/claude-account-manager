@@ -35,12 +35,31 @@ fn header(k: &str, v: &str) -> Header {
 }
 
 fn send(req: Request, code: u16, ctype: &str, body: Vec<u8>) {
-    let resp = Response::from_data(body)
+    // 浏览器能收 gzip 就压缩：面板页面 180 多 KB，压缩后 60 多 KB，手机、隔着 Tailscale 打开快不少
+    let accept = req
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Accept-Encoding"))
+        .map(|h| h.value.as_str().to_string())
+        .unwrap_or_default();
+    let gz = body.len() > crate::engine::web::GZIP_MIN_BYTES
+        && crate::engine::web::accepts_gzip(&accept);
+    let body = if gz {
+        crate::engine::web::gzip(&body)
+    } else {
+        body
+    };
+    let mut resp = Response::from_data(body)
         .with_status_code(code)
         .with_header(header("Content-Type", ctype))
         .with_header(header("Cache-Control", "no-store"))
         .with_header(header("X-Content-Type-Options", "nosniff"))
         .with_header(header("Referrer-Policy", "no-referrer"));
+    if gz {
+        resp = resp
+            .with_header(header("Content-Encoding", "gzip"))
+            .with_header(header("Vary", "Accept-Encoding"));
+    }
     let _ = req.respond(resp);
 }
 

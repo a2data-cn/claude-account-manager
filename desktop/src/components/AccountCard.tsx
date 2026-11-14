@@ -124,6 +124,32 @@ function dueInfo(a: Account) {
   };
 }
 
+/** 每天的最高用量（后台刷新时记下的，最近 30 天）：一天一根小柱子，没记到的那天是一条细线。idx 0 是 5 小时，1 是 7 天 */
+export function DayBars({ a, idx }: { a: Account; idx: 0 | 1 }) {
+  const days = a.usage_days || {};
+  const n = 30, w = 5, gap = 2, h = 22, now = new Date();
+  const W = n * (w + gap) - gap;
+  const bars = Array.from({ length: n }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (n - 1 - i));
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const v = days[key]?.[idx];
+    const x = i * (w + gap);
+    if (typeof v !== "number") return <rect key={key} x={x} y={h - 2} width={w} height={2} rx={1} fill="var(--line)" />;
+    const bh = Math.max(2, Math.round((Math.min(100, v) / 100) * h));
+    const fill = v >= 90 ? "var(--hot)" : v >= 70 ? "var(--warn)" : "var(--live)";
+    return (
+      <rect key={key} x={x} y={h - bh} width={w} height={bh} rx={1} fill={fill}>
+        <title>{`${d.getMonth() + 1}月${d.getDate()}日 最高 ${Math.round(v)}%`}</title>
+      </rect>
+    );
+  });
+  return (
+    <svg className="daybars" width={W} height={h} viewBox={`0 0 ${W} ${h}`} role="img" aria-label="最近 30 天每天的最高用量">
+      {bars}
+    </svg>
+  );
+}
+
 /** 桌面号本机记录里有登录问题时的小标签（cam 只读本机文件看出来的） */
 const DESK_LOGIN_CHIP: Record<string, [string, string]> = { expired: ["st-warn", "登录过期"], no: ["st-warn", "没有登录"], never: ["", "还没登录"] };
 
@@ -396,6 +422,14 @@ export function AccountDetail({ a, desktopApp, busy, onSwitch, onOpen, onRefresh
             <>
               <dt>用量更新</dt>
               <dd><span className="v">{ago(u.fetched_at)}</span></dd>
+            </>
+          )}
+          {Object.keys(a.usage_days || {}).length >= 2 && (
+            <>
+              <dt>5 小时 · 30 天</dt>
+              <dd><span className="v"><DayBars a={a} idx={0} /></span></dd>
+              <dt>7 天 · 30 天</dt>
+              <dd><span className="v"><DayBars a={a} idx={1} /></span></dd>
             </>
           )}
           {m.note && (

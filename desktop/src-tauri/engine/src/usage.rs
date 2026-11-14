@@ -1023,11 +1023,72 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
             for (k, v) in meta {
                 a[k.as_str()] = v.clone();
             }
+            note_usage_day(a, chrono::Local::now().date_naive());
         }
     }
     roll_renewals(&mut fresh);
     store.save(&mut fresh)?;
     Ok(fresh)
+}
+
+/// 每个号记最近几天的每天最高用量
+pub const USAGE_DAYS_KEEP: usize = 30;
+
+/// 把这个号刚取到的 5 小时 / 7 天已用百分比记进 usage_days[那天]（当天的最高值），只留最近 USAGE_DAYS_KEEP 天。
+/// 这次没取到（有错误，数字还是上一次的）、或者数字不是今天取到的（桌面版的本地记录可能是几天前的）就不记。
+/// 与 cam.py 的 note_usage_day 一致（tests/shared/usage_days.json）。
+pub fn note_usage_day(acc: &mut Value, today: chrono::NaiveDate) {
+    let u = acc.get("usage").cloned().unwrap_or(Value::Null);
+    let failed = s(&u, "error").is_some_and(|e| !e.is_empty());
+    let when = s(&u, "fetched_at")
+        .and_then(parse_time)
+        .map(|t| t.with_timezone(&chrono::Local).date_naive());
+    if failed || when != Some(today) {
+        return;
+    }
+    // 保留一位小数，四舍五入
+    let vals: Vec<Option<f64>> = ["five_hour", "seven_day"]
+        .iter()
+        .map(|k| {
+            u.get(*k)
+                .and_then(|w| w.get("utilization"))
+                .and_then(|v| v.as_f64())
+                .map(|p| (p * 10.0 + 0.5).floor() / 10.0)
+        })
+        .collect();
+    if vals.iter().all(|v| v.is_none()) {
+        return;
+    }
+    let mut days: Map<String, Value> = acc
+        .get("usage_days")
+        .and_then(|d| d.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let key = today.format("%Y-%m-%d").to_string();
+    let old: Vec<Option<f64>> = days
+        .get(&key)
+        .and_then(|d| d.as_array())
+        .filter(|a| a.len() == 2)
+        .map(|a| a.iter().map(|v| v.as_f64()).collect())
+        .unwrap_or_else(|| vec![None, None]);
+    let today_vals: Vec<Value> = old
+        .iter()
+        .zip(&vals)
+        .map(|(o, v)| match (o, v) {
+            (None, None) => Value::Null,
+            _ => json!(o.unwrap_or(f64::MIN).max(v.unwrap_or(f64::MIN))),
+        })
+        .collect();
+    days.insert(key, json!(today_vals));
+    let mut keys: Vec<String> = days.keys().cloned().collect();
+    keys.sort();
+    let start = keys.len().saturating_sub(USAGE_DAYS_KEEP);
+    acc["usage_days"] = Value::Object(
+        keys[start..]
+            .iter()
+            .map(|k| (k.clone(), days[k].clone()))
+            .collect(),
+    );
 }
 
 /// “登录已失效”查出来以后不让后台那轮盖掉。规则和 cam.py 的 keep_login_invalid 一致。

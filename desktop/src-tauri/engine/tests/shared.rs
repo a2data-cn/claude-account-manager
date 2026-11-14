@@ -1,5 +1,6 @@
 //! 跑 tests/shared 里的数据。scripts/test_cam.py 的 SharedFixtureTest 跑的是同一份，两边规则必须一致。
 
+use cam_engine::alerts::due_alerts;
 use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::desktop_app::{login_state, version_from_path};
@@ -8,8 +9,10 @@ use cam_engine::health::{
     proxy_vpn_items, region_check_fresh, region_fail_item, region_retry_wait, risk_items,
     risk_score, status_relevant, status_risk, tls_issuer_item,
 };
+use cam_engine::health::{parse_windows_env, parse_windows_processes};
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::store::{accounts, find_index, parse_day, s};
+use cam_engine::usage::note_usage_day;
 use cam_engine::usage::{message_cost, parse_usage_body, roll_renewals_at};
 use serde_json::{json, Value};
 
@@ -24,6 +27,63 @@ fn fixture(name: &str) -> Value {
 
 fn cases<'a>(v: &'a Value, key: &str) -> &'a Vec<Value> {
     v[key].as_array().unwrap()
+}
+
+#[test]
+fn alert_cases() {
+    let fx = fixture("alerts.json");
+    for c in cases(&fx, "cases") {
+        let mut st = c["st"].clone();
+        let today =
+            chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
+        let out = due_alerts(&c["data"], &mut st, c["now"].as_i64().unwrap(), today);
+        let titles: Vec<&str> = out.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(json!(titles), c["expect_titles"], "{}", c["name"]);
+        let bodies: Vec<Value> = out
+            .iter()
+            .zip(c["expect_bodies"].as_array().unwrap())
+            .map(|((_, b), e)| if e.is_null() { Value::Null } else { json!(b) })
+            .collect();
+        assert_eq!(json!(bodies), c["expect_bodies"], "{}", c["name"]);
+        assert_eq!(st, c["expect_st"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn usage_day_cases() {
+    let fx = fixture("usage_days.json");
+    for c in cases(&fx, "cases") {
+        let mut a = c["account"].clone();
+        let today =
+            chrono::NaiveDate::parse_from_str(c["today"].as_str().unwrap(), "%Y-%m-%d").unwrap();
+        note_usage_day(&mut a, today);
+        assert_eq!(
+            a.get("usage_days").cloned().unwrap_or(Value::Null),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+}
+
+#[test]
+fn windows_parsing_cases() {
+    let fx = fixture("windows_env.json");
+    for c in cases(&fx, "env") {
+        assert_eq!(
+            parse_windows_env(c["output"].as_str().unwrap()),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "processes") {
+        let got: Vec<Value> = parse_windows_processes(c["output"].as_str().unwrap())
+            .into_iter()
+            .map(|(pid, exe, name, cmd)| json!([pid, exe, name, cmd]))
+            .collect();
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
+    }
 }
 
 #[test]

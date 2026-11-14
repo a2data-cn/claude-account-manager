@@ -222,7 +222,10 @@ struct SystemRuntime;
 
 impl DesktopRuntime for SystemRuntime {
     fn processes(&self, app: Option<&Path>) -> R<Vec<DesktopProcess>> {
-        Ok(scan(app)?.into_iter().map(|(p, _)| p).collect())
+        Ok(scan(app, Duration::ZERO)?
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect())
     }
 
     fn quit(&self, app: &Path) -> R<()> {
@@ -280,57 +283,17 @@ impl DesktopRuntime for SystemRuntime {
 }
 
 /// 桌面版主进程和它的命令行（Windows 上是程序路径加参数）。查不到进程列表时报错，不能当作已退出。
-fn scan(app: Option<&Path>) -> R<Vec<(DesktopProcess, String)>> {
+/// max_age：Windows 上可以用这么久以内查过的进程表（只有显示状态时这样用；切换、退出、移除都传零，现查）。
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))] // max_age 只有 Windows 用得上
+fn scan(app: Option<&Path>, max_age: Duration) -> R<Vec<(DesktopProcess, String)>> {
     let candidates = executable_candidates(app);
     let mut found = Vec::new();
     #[cfg(target_os = "windows")]
     {
-        let script = "$ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process | Select-Object ProcessId,Name,ExecutablePath,CommandLine) | ConvertTo-Json -Compress";
-        let out = Command::new("powershell")
-            .args(["-NoProfile", "-Command", script])
-            .output()
-            .map_err(|e| format!("无法检查 Claude 桌面版进程：{e}"))?;
-        if !out.status.success() {
-            return Err("无法检查 Claude 桌面版进程（PowerShell 查询失败）".into());
-        }
-        let rows: Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| format!("无法解析桌面版进程列表：{e}"))?;
-        let rows = rows.as_array().cloned().unwrap_or_else(|| vec![rows]);
-        for row in rows {
-            let Some(exe) = s(&row, "ExecutablePath") else {
-                if s(&row, "Name").is_some_and(|n| n.eq_ignore_ascii_case("claude.exe")) {
-                    return Err("无法读取 Claude 进程路径，不能安全区分桌面版和 Claude Code；请先手动退出后再操作".into());
-                }
-                continue;
-            };
-            let norm = exe.replace('\\', "/").to_lowercase();
-            let known = (norm.contains("/anthropicclaude/")
-                || (norm.contains("/windowsapps/anthropic.claude")
-                    || norm.contains("/windowsapps/anthropicpbc.claude")))
-                && norm.ends_with("/claude.exe");
-            if !known && !candidates.iter().any(|p| same_path(p, Path::new(exe))) {
-                continue;
-            }
-            let cmd = s(&row, "CommandLine").unwrap_or("");
-            if cmd
-                .split_whitespace()
-                .any(|a| a == "--type" || a.starts_with("--type="))
-            {
-                continue;
-            }
-            if let Some(pid) = row["ProcessId"]
-                .as_u64()
-                .and_then(|p| u32::try_from(p).ok())
-            {
-                found.push((
-                    DesktopProcess {
-                        pid,
-                        profile: command_profile(cmd),
-                    },
-                    format!("{exe} {cmd}"),
-                ));
-            }
-        }
+        // 和 Claude Code 会话共用一次进程表（health::win_processes），max_age 为零时现查
+        let rows = super::health::win_processes(max_age)
+            .ok_or_else(|| "无法检查 Claude 桌面版进程（PowerShell 查询失败）".to_string())?;
+        found.extend(windows_desktop_rows(&rows, &candidates)?);
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -358,24 +321,91 @@ fn scan(app: Option<&Path>) -> R<Vec<(DesktopProcess, String)>> {
             #[cfg(target_os = "macos")]
             let profile = match profile {
                 Some(p) => Some(p),
-                None => {
-                    // 默认从 Dock 打开的实例没有 user-data-dir 参数。以打开的登录数据库
-                    // 验证真实目录，不能把缓存 active 或“缺少参数”当成默认目录。
+                // 默认从 Dock 打开的实例没有 user-data-dir 参数。以打开的登录数据库
+                // 验证真实目录，不能把缓存 active 或“缺少参数”当成默认目录。lsof 要几百毫秒，
+                // 同一个进程用的目录不会变：查到一次就记着（cached_profile）
+                None => cached_profile(pid, args, || {
                     let out = Command::new("lsof")
                         .args(["-a", "-p", &pid.to_string(), "-Fn"])
                         .output()
                         .map_err(|e| format!("无法确认 Claude 桌面版的数据目录：{e}"))?;
                     if out.status.success() {
-                        profile_from_open_files(&String::from_utf8_lossy(&out.stdout))
+                        Ok(profile_from_open_files(&String::from_utf8_lossy(
+                            &out.stdout,
+                        )))
                     } else if out.status.code() != Some(1) {
-                        return Err("无法确认 Claude 桌面版的数据目录（lsof 查询失败）".into());
+                        Err("无法确认 Claude 桌面版的数据目录（lsof 查询失败）".into())
                     } else {
-                        None
+                        Ok(None)
                     }
-                }
+                })?,
             };
             found.push((DesktopProcess { pid, profile }, args.to_string()));
         }
+    }
+    Ok(found)
+}
+
+/// Windows 进程表（health::win_processes）里的桌面版主进程。scan 的 Windows 部分，单独拿出来在别的系统上也能编译、能测。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_desktop_rows(
+    rows: &[(u32, String, String, String)],
+    candidates: &[PathBuf],
+) -> R<Vec<(DesktopProcess, String)>> {
+    let mut found = Vec::new();
+    for (pid, exe, name, cmd) in rows {
+        if exe.is_empty() {
+            if name.eq_ignore_ascii_case("claude.exe") {
+                return Err("无法读取 Claude 进程路径，不能安全区分桌面版和 Claude Code；请先手动退出后再操作".into());
+            }
+            continue;
+        }
+        let norm = exe.replace('\\', "/").to_lowercase();
+        let known = (norm.contains("/anthropicclaude/")
+            || (norm.contains("/windowsapps/anthropic.claude")
+                || norm.contains("/windowsapps/anthropicpbc.claude")))
+            && norm.ends_with("/claude.exe");
+        if !known && !candidates.iter().any(|p| same_path(p, Path::new(exe))) {
+            continue;
+        }
+        if cmd
+            .split_whitespace()
+            .any(|a| a == "--type" || a.starts_with("--type="))
+        {
+            continue;
+        }
+        found.push((
+            DesktopProcess {
+                pid: *pid,
+                profile: command_profile(cmd),
+            },
+            format!("{exe} {cmd}"),
+        ));
+    }
+    Ok(found)
+}
+
+/// macOS 上用 lsof 认出来的数据目录，按 (进程, 命令行) 记着；没查到的不记（刚启动还没打开登录文件时下次再查）
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn cached_profile(
+    pid: u32,
+    cmd: &str,
+    lookup: impl FnOnce() -> R<Option<PathBuf>>,
+) -> R<Option<PathBuf>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<(u32, String), PathBuf>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (pid, cmd.to_string());
+    if let Some(p) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(Some(p.clone()));
+    }
+    let found = lookup()?;
+    if let Some(p) = &found {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if c.len() > 64 {
+            c.clear(); // 退出了的进程不用一直记着
+        }
+        c.insert(key, p.clone());
     }
     Ok(found)
 }
@@ -839,7 +869,7 @@ fn status_cache() -> &'static Mutex<StatusCache> {
 
 fn scan_status() -> Value {
     let app = find_app().ok();
-    let (running, rows) = match scan(app.as_deref()) {
+    let (running, rows) = match scan(app.as_deref(), Duration::from_secs(3)) {
         Ok(rows) => (Some(!rows.is_empty()), rows),
         Err(_) => (None, Vec::new()), // 查不出来
     };
@@ -1122,6 +1152,68 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::cell::RefCell;
+
+    #[test]
+    fn windows_rows_pick_the_desktop_main_process() {
+        let rows = vec![
+            (4, String::new(), "System".to_string(), String::new()),
+            (
+                10,
+                r"C:\Users\me\AppData\Local\AnthropicClaude\app-1.0.3\claude.exe".to_string(),
+                "claude.exe".to_string(),
+                r#""C:\Users\me\AppData\Local\AnthropicClaude\app-1.0.3\claude.exe" --user-data-dir=C:\p"#.to_string(),
+            ),
+            (
+                11,
+                r"C:\Users\me\AppData\Local\AnthropicClaude\app-1.0.3\claude.exe".to_string(),
+                "claude.exe".to_string(),
+                "claude.exe --type=renderer".to_string(),
+            ),
+            (
+                12,
+                r"C:\Users\me\.local\bin\claude.exe".to_string(),
+                "claude.exe".to_string(),
+                "claude --resume".to_string(),
+            ),
+        ];
+        let found = windows_desktop_rows(&rows, &[]).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0.pid, 10);
+        assert_eq!(found[0].0.profile, Some(PathBuf::from(r"C:\p")));
+        assert!(
+            found[0].1.ends_with("--user-data-dir=C:\\p"),
+            "{}",
+            found[0].1
+        );
+        // claude.exe 看不到路径：分不清是桌面版还是 Claude Code，不能当作没有
+        let blind = vec![(20, String::new(), "claude.exe".to_string(), String::new())];
+        assert!(windows_desktop_rows(&blind, &[]).is_err());
+    }
+
+    #[test]
+    fn lsof_profiles_are_remembered_per_process() {
+        let calls = std::cell::Cell::new(0);
+        let hit = || {
+            calls.set(calls.get() + 1);
+            Ok(Some(PathBuf::from("/profiles/a")))
+        };
+        assert_eq!(
+            cached_profile(77_001, "Claude", hit).unwrap(),
+            Some(PathBuf::from("/profiles/a"))
+        );
+        let again = || -> R<Option<PathBuf>> { panic!("记过的不该再查") };
+        assert_eq!(
+            cached_profile(77_001, "Claude", again).unwrap(),
+            Some(PathBuf::from("/profiles/a"))
+        );
+        let miss = || {
+            calls.set(calls.get() + 1);
+            Ok(None)
+        };
+        assert_eq!(cached_profile(77_002, "Claude", miss).unwrap(), None);
+        assert_eq!(cached_profile(77_002, "Claude", miss).unwrap(), None); // 没查到的不记，下次再查
+        assert_eq!(calls.get(), 3);
+    }
 
     struct Fixture {
         store: Store,

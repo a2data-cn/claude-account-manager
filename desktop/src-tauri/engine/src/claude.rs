@@ -1283,28 +1283,18 @@ pub fn list_claude_processes() -> Option<Vec<(u32, String)>> {
     let mut found = Vec::new();
     if cfg!(target_os = "windows") {
         // 用完整路径而不是 Name：桌面 App 的判断看的是路径，只给文件名的话
-        // Claude 桌面 App（AnthropicClaude\…\claude.exe）会被当成 Claude Code
-        let ps = "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$(if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name })`t$($_.CommandLine)\" }";
-        let mut c = Command::new("powershell");
-        c.args(["-NoProfile", "-Command", ps]);
-        #[cfg(windows)]
-        {
-            // 桌面版是 GUI 程序（windows_subsystem = "windows"），不加这个会闪一下控制台窗口
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
+        // Claude 桌面 App（AnthropicClaude\…\claude.exe）会被当成 Claude Code。
+        // 和桌面版共用一次进程表（一秒内查过的直接用：PowerShell 查一次本身就要半秒多）；
         // PowerShell 没起来、超时、自己出错了：不是“没有进程”
-        let (Some(true), out) = super::health::run_command(c, PROCESS_LIST_TIMEOUT) else {
-            return None;
-        };
-        for line in out.lines() {
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if let [pid, name, cmd] = parts[..] {
-                if let Ok(pid) = pid.trim().parse::<u32>() {
-                    if pid != me && is_claude_cmd(name, cmd) {
-                        found.push((pid, if cmd.is_empty() { name } else { cmd }.to_string()));
-                    }
-                }
+        let rows = super::health::win_processes(Duration::from_secs(1))?;
+        for (pid, exe, name, cmd) in rows {
+            let lname = name.to_lowercase();
+            if pid == me || !matches!(lname.as_str(), "claude.exe" | "node.exe" | "bun.exe") {
+                continue;
+            }
+            let path = if exe.is_empty() { name } else { exe };
+            if is_claude_cmd(&path, &cmd) {
+                found.push((pid, if cmd.is_empty() { path } else { cmd }));
             }
         }
     } else if std::path::Path::new("/proc/self").exists() {

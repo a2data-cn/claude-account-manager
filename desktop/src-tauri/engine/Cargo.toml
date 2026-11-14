@@ -26,6 +26,7 @@ base64 = "0.22"
 url = "2"
 imap = "2.4"
 native-tls = "0.2"
+flate2 = "1"
 mailparse = "0.16"
 
 [dev-dependencies]

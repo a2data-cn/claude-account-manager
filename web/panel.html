@@ -361,6 +361,7 @@ details.src[open] summary::before { content: "▾"; }
 .ecard h3 .chip { font-weight: 600; }
 .eico { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); flex: none; }
 .eico svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.daybars { display: block; max-width: 100%; height: auto; }
 .ecard.sub .eico { background: var(--surface); }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .ecard > .hint { margin: 12px 0 0; font-size: 12px; line-height: 1.55; }
@@ -974,6 +975,23 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   // 桌面号：客户端开着没有、本机记录里有没有登录（cam 只读本机文件看出来的；服务端那边作废的登录看不出）
   const DESK_LOGIN_CHIP = { expired: ["st-warn", "登录过期"], no: ["st-warn", "没有登录"], never: ["", "还没登录"] };
+  // 每天的最高用量（后台刷新时记下的，最近 30 天）：一天一根小柱子，没记到的那天是一条细线。idx 0 是 5 小时，1 是 7 天
+  function dayBars(a, idx) {
+    const days = a.usage_days || {}, n = 30, w = 5, gap = 2, h = 22, now = new Date();
+    let bars = "";
+    for (let i = 0; i < n; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (n - 1 - i));
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const v = (days[key] || [])[idx], x = i * (w + gap);
+      if (typeof v !== "number") { bars += `<rect x="${x}" y="${h - 2}" width="${w}" height="2" rx="1" fill="var(--line)"/>`; continue; }
+      const bh = Math.max(2, Math.round(Math.min(100, v) / 100 * h));
+      const fill = v >= 90 ? "var(--hot)" : v >= 70 ? "var(--warn)" : "var(--live)";
+      bars += `<rect x="${x}" y="${h - bh}" width="${w}" height="${bh}" rx="1" fill="${fill}"><title>${d.getMonth() + 1}月${d.getDate()}日 最高 ${Math.round(v)}%</title></rect>`;
+    }
+    const W = n * (w + gap) - gap;
+    return `<svg class="daybars" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}" role="img" aria-label="最近 30 天每天的最高用量">${bars}</svg>`;
+  }
+  const hasDays = (a) => Object.keys(a.usage_days || {}).length >= 2;
   function deskLoginText(a) {
     const d = a.desktop || {}, e = d.login_expires ? new Date(d.login_expires) : null;
     const day = e ? `${e.getMonth() + 1}月${e.getDate()}日` : "";
@@ -1075,6 +1093,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       a.last_incident ? ["上次出问题", `${ago(a.last_incident.at)} ${esc(a.last_incident.text)} · 出口 ${flag(a.last_incident.loc)}${esc(a.last_incident.loc || "未知")}${a.last_incident.ip ? " " + esc(a.last_incident.ip) : ""}${a.last_incident.org ? `（${esc(a.last_incident.org)}${a.last_incident.ip_type ? "，" + esc(a.last_incident.ip_type) : ""}）` : ""}${a.last_incident.proxy ? " · 有代理" : ""}${a.last_incident.tunnel ? " · 有 VPN" : ""} · ${Number(a.last_incident.sessions) || 0} 个会话在跑`] : null,
       a.exits && a.exits.length ? ["用过的出口", a.exits.map((e) => `${flag(e.loc)}${esc(e.loc)}${e.ip ? " " + esc(e.ip) : ""}${e.org ? `（${esc(e.org)}）` : ""} ${Number(e.times) || 1} 次`).join(" · ")] : null,
       a.kind === "claude_desktop" ? ["最近读取", ago(u.checked_at)] : null,
+      hasDays(a) ? ["5 小时 · 30 天", dayBars(a, 0)] : null,
+      hasDays(a) ? ["7 天 · 30 天", dayBars(a, 1)] : null,
       m.note ? ["备注", esc(m.note)] : null,
     ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd><span class="v">${v}</span></dd>`).join("");
     const issues = (h.issues || []).map((i) => `<li class="issue ${esc(i.level)}"><b>${esc(i.text)}</b><span class="advice">${esc(i.advice)}</span>${i.detail ? `<span class="raw">${esc(i.detail)}</span>` : ""}</li>`).join("");

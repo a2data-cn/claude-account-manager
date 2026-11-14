@@ -8,7 +8,6 @@ use crate::engine::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::image::Image;
@@ -434,37 +433,15 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
-/// 当前账号 5 小时额度超过阈值时提醒一次（每个额度窗口只提醒一次）。
-fn check_alert(app: &AppHandle, warned: &mut HashSet<String>) {
+/// 额度快满（5 小时、7 天）、用满后恢复、快到期：engine::alerts::due_alerts，和 cam serve、菜单栏插件同一套规则。
+/// st 记着提醒过的，每个额度窗口、每个到期日只提醒一次。
+fn check_alert(app: &AppHandle, st: &mut Value) {
     let Ok(data) = Store::new().load() else {
         return;
     };
-    let Some(act) = active_code_id(&data) else {
-        return;
-    };
-    let Some(acc) = accounts(&data)
-        .iter()
-        .find(|a| s(a, "id") == Some(act.as_str()))
-    else {
-        return;
-    };
-    let Some(w) = acc.get("usage").and_then(|u| u.get("five_hour")) else {
-        return;
-    };
-    let Some(pct) = w.get("utilization").and_then(|v| v.as_f64()) else {
-        return;
-    };
-    let resets = w.get("resets_at").and_then(|v| v.as_str()).unwrap_or("");
-    let key = format!("{}|{}", act, resets);
-    if pct < rules::alert_threshold(&data) as f64 || !warned.insert(key) {
-        return;
+    for (title, body) in engine::alerts::due_alerts_now(&data, st) {
+        notify(app, &title, &body);
     }
-    let name = s(acc, "label").or(s(acc, "email")).unwrap_or("当前账号");
-    notify(
-        app,
-        &format!("{} 的 5 小时额度已用 {:.0}%", name, pct),
-        &usage::fmt_reset(resets),
-    );
 }
 
 fn background(app: AppHandle) {
@@ -475,7 +452,7 @@ fn background(app: AppHandle) {
         let mut last_refresh: Option<Instant> = None;
         let mut last_fp = String::new();
         let mut last_kc = Instant::now();
-        let mut warned: HashSet<String> = HashSet::new();
+        let mut alert_st = json!({});
         let mut recheck = health::RegionRecheck::default();
         let mut first = true;
         loop {
@@ -569,7 +546,7 @@ fn background(app: AppHandle) {
                 // 定时刷新不替不常用的账号续登录，见 usage::refresh_usage
                 let _ = health::check_region(&store, 300); // 界面常显的出口地区，随用量刷新一起更新
                 if usage::refresh_usage(&store, None, false).is_ok() {
-                    check_alert(&app, &mut warned);
+                    check_alert(&app, &mut alert_st);
                 }
             } else if every > 0
                 && store

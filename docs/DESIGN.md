@@ -2,7 +2,7 @@
 
 脚本版（`scripts/cam.py`）和桌面版（`desktop/`）读写**同一份数据目录**、实现**同一套 HTTP API**，所以两者可以混用：在桌面版里添加的账号，脚本里能直接切换，反过来也一样。Web 面板（`web/panel.html`）只认这套 API，不关心后端是 Python 还是 Rust。
 
-桌面版的核心逻辑在独立的 crate `cam-engine`（`desktop/src-tauri/engine/`），不依赖 Tauri，可以单独 `cargo test -p cam-engine`。身份识别、账号查找、切号规则、自动续期、编辑账号和到期日、环境检测没连上时怎么算、官方状态页、服务检测、桌面版状态这几处容易两边写得不一样，判断规则写成数据放在 `tests/shared/`，`scripts/test_cam.py` 和 `engine/tests/shared.rs` 跑的是同一份。
+桌面版的核心逻辑在独立的 crate `cam-engine`（`desktop/src-tauri/engine/`），不依赖 Tauri，可以单独 `cargo test -p cam-engine`。身份识别、账号查找、切号规则、自动续期、编辑账号和到期日、环境检测没连上时怎么算、官方状态页、服务检测、桌面版状态、提醒、每天最高用量、Windows 查询的解析这几处容易两边写得不一样，判断规则写成数据放在 `tests/shared/`，`scripts/test_cam.py` 和 `engine/tests/shared.rs` 跑的是同一份。
 
 `cam` 启动器（`scripts/cam`、`scripts/cam.cmd`）除了 `serve` 都从 `scripts/cam_run.py` 进：它把 `cam` 当模块运行（`runpy.run_module`），用得上 `__pycache__` 里编译好的字节码，不用每条命令都把 `cam.py` 重新编译一遍；`cam.py` 里只有少数命令用得上的标准库模块（`ssl`、`http.client`、`urllib.request`、`http.server`、`concurrent.futures`）到用的时候才导入。旁边没有 `cam_run.py` 时启动器直接运行 `cam.py`。`cam serve` 一直直接运行 `cam.py`：别的地方靠命令行里的 `cam.py serve` 认出后台在跑的面板服务。
 
@@ -105,7 +105,8 @@ React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同�
 
 - 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。进入时有 `claude` 会话在跑就登记成 `pending_switch`（见“切换流程”），会话退出后再切；时间段过了还没切成就作废。
 - 目录规则：`cam claude` 启动时按当前目录做最长前缀匹配，切换后再执行 `claude`。
-- 额度提醒：当前账号 5 小时额度 ≥ 阈值时提醒一次（同一个额度窗口只提醒一次），附上多久后重置。**不会自动切换，也不推荐换哪个号。**
+- 提醒（`due_alerts(data, st)`，Rust：`alerts::due_alerts`，规则两边按 `tests/shared/alerts.json` 跑）：当前 Claude Code 号和有额度的网页号，5 小时、7 天额度 ≥ 阈值各提醒一次（`st.warned` 记 `id|resets_at` / `id|7d|resets_at`，同一个额度窗口只提醒一次），附上多久后重置；有额度的号（Claude Code、网页、桌面版）某个窗口 ≥ 99.5% 记进 `st.exhausted`，过了它的 `resets_at` 提醒一次“恢复了”；手动填了到期日、没勾自动续期的号，还剩 3 天以内提醒一次、过了到期日再提醒一次（`id|exp|日期|soon/over`）。`st` 是后台的状态（菜单栏插件存在 `.menubar-state.json`，`cam serve` 和桌面版在内存里）。**不会自动切换，也不推荐换哪个号。**
+- 每天的最高用量：刷新用量写回时 `note_usage_day`（Rust：`usage::note_usage_day`，`tests/shared/usage_days.json`）把这次取到的 5 小时 / 7 天百分比记进账号的 `usage_days`（`{"2026-11-14": [64.0, 30.5]}`，本地日期，当天取最高，保留一位小数四舍五入，只留最近 30 天）；这次有错误（数字是上一次的）或者数字不是今天取到的不记。`/api/state` 原样带出，面板详情画成 30 根小柱子。
 - 启动前风险提醒（只在 `cam claude`）：缓存不能直接用时（`region_trusted`：超过一小时、最近一次检测没连上、或者本机换了网络），`spawn_background_check` 另起 `cam.py _check-region` 后台进程做完整检测（同一时间只跑一个），前台只用 `quick_trace` 花最多 3 秒问一次 claude.ai，套到数据副本上算提醒（`with_quick_region`，出口 IP 变了时丢掉旧运营商信息）。`launch_tier(score, region_status, prefs)` 给出 ok / remind / confirm / strong 四档——≥90 一行带过；< 90 打印提醒；< `risk_confirm_below`（默认 60）问 y/N；< `risk_strong_below`（默认 30）或出口不在支持名单内要输入"继续"。非交互环境只打印。`risk_prompt: false` 或 `CAM_NO_RISK_PROMPT=1` 关掉。**不是拦截**：每一档都是用户自己选择继续或取消。
 - 自动发现：后台检测凭据文件变化（macOS 每 30 秒查一次钥匙串），发现没见过的账号就自动导入。
 
@@ -124,7 +125,8 @@ Desktop 登录与 Claude Code 凭据分开管理。`desktop_profile: "default"` 
 
 显示用的状态（只读，切换和移除前的判断不走这里，那里现查进程）：`desktop_view(store, data)`（Rust：`desktop_app::desktop_view`，计算部分 `view_with`）给出 `/api/state` 的 `desktop_app`（`installed`、`version`、`running`——查不出进程列表时为 null、`account`——开着的实例用的是哪个桌面号、`known`——开着的实例都看得出用的哪个目录）和每个桌面号的 `desktop`（`running`、`login`、`login_expires`）；没有桌面号时 `desktop_app` 为 null，也不去查进程。
 - 版本：`_desktop_installed`——macOS 读 `Claude.app/Contents/Info.plist` 的 `CFBundleShortVersionString`，否则 `desktop_version_from_path` 从路径里取（`app-0.14.10`、商店版 `AnthropicPBC.Claude_1.0.734.0_…`；装在系统目录的商店版从正在运行的程序路径取），Linux 再问 `dpkg-query`
-- 开着没有：`desktop_app_status` 复用 `_desktop_scan`（和切换同一套认进程的规则），缓存 `DESKTOP_STATUS_SECS` = 20 秒，过期了先给旧的、后台重查（和 `session_count` 一样）；Windows / Linux 上没带 `--user-data-dir` 的实例就是 Electron 的默认目录，macOS 靠 lsof
+- 开着没有：`desktop_app_status` 复用 `_desktop_scan`（和切换同一套认进程的规则），缓存 `DESKTOP_STATUS_SECS` = 20 秒，过期了先给旧的、后台重查（和 `session_count` 一样）；Windows / Linux 上没带 `--user-data-dir` 的实例就是 Electron 的默认目录，macOS 靠 lsof（几百毫秒，所以按 (进程, 命令行) 记着查到的目录：`_LSOF_PROFILES` / Rust `cached_profile`，没查到的不记，进程退出就忘）
+- Windows 上查进程、查系统设置都要起 PowerShell（每次大约半秒 CPU），合并成两种查询、几秒内共用：`windows_processes(max_age)`（Rust `health::win_processes`）一次 `Win32_Process` 列出全部进程（pid、程序路径、名字、命令行，Tab 分开），Claude Code 会话（1 秒内的直接用）、桌面版状态（3 秒）、面板服务认进程共用，切换、退出、移除桌面版仍然现查（`max_age=0`）；`windows_env()`（Rust 同名）一次查出 DNS 服务器、系统语言、默认路由的网卡（ConvertTo-Json），5 秒内共用。两个输出的解析规则两边按 `tests/shared/windows_env.json` 跑
 - 本机登录：`desktop_login` 只读数据目录里 Chromium Cookie 库（`Cookies`、`Network/Cookies`、`Partitions/*/…`）中 `claude.ai` 的 `sessionKey` 的到期时间（不读值；`?mode=ro&immutable=1` 打开，不加锁、不写日志），加上 `config.json` 里有没有 `oauth:tokenCache*` / `lastKnownAccountUuid`，`desktop_login_state` 算出 `yes` / `expired` / `no` / `never` / `unknown`，缓存 20 秒。两条规则两边按 `tests/shared/desktop_status.json` 跑。服务端作废的登录这里看不出
 
 生命周期操作串行执行：定位客户端并检查进程 → 正常退出并等待 → 备份已关闭配置的登录文件 → 以目标 `--user-data-dir` 启动 → 确认启动结果后记录。即使目标与上次记录一致，也重新执行退出和启动，避免用户从 Dock 或快捷方式打开了其它配置后，缓存记录导致打开错误账号。进程枚举失败与“没有进程”区分处理；退出超时停止操作。启动失败时尝试重新打开原配置，恢复结果如实报告。备份只包含登录相关文件，对话、Claude Code 会话和 Cowork 虚拟机仍留在原目录。
@@ -231,7 +233,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 
 ## HTTP API
 
-所有请求需要 `Authorization: Bearer <server-token>`（或首次访问 `?t=<token>`）。
+所有请求需要 `Authorization: Bearer <server-token>`（或首次访问 `?t=<token>`）。超过 1 KB 的回复（页面、`/api/state` 等）在请求头 `Accept-Encoding` 有 gzip（q 不是 0）时用 gzip 压缩，带 `Content-Encoding: gzip`、`Vary: Accept-Encoding`（`accepts_gzip`；桌面版的服务用 engine 的 `web::accepts_gzip` / `web::gzip`）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

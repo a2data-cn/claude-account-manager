@@ -830,6 +830,12 @@ fn refresh_uses_parked_login_not_the_superseded_one() {
     let acc = acc_of(&e, &b);
     assert_eq!(acc["usage"]["error"], Value::Null);
     assert_eq!(acc["usage"]["five_hour"]["utilization"], 12.0);
+    // 每天的最高用量记下了（面板的 30 天小柱子）
+    let today = chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    assert_eq!(acc["usage_days"][&today][0], 12.0, "{}", acc["usage_days"]);
     assert_eq!(health_of(&acc).0, "ok");
     assert_eq!(incident_count(&acc), 0);
     assert_eq!(e.secret_rt(&b), "rt-B3");

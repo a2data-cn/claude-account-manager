@@ -11,17 +11,20 @@
   cam switch <账号>                切换 Claude Code 账号（id / 序号 / 名字 / 邮箱）
   cam usage                        刷新并显示用量
   cam set <账号> --expires 2026-11-03 --auto-renew
+  cam add-desktop --label 名字 [--current]   添加 Claude 桌面版账号（--current：绑定本机已经登录的那个）
   cam add-web --label 名字         添加网页版账号（独立浏览器 Profile）
-  cam open <账号>                  打开网页版账号窗口
+  cam open <账号>                  切换 Claude 桌面版账号，或打开网页版账号窗口
   cam add-api --label 名字 --key sk-ant-... [--admin-key sk-ant-admin...]
   cam serve [--lan] [--port 8787]  启动 Web 面板（手机也能看）
   cam panel                        在浏览器打开 Web 面板（没在运行就在后台启动，只限本机）
-  cam local [--days 30]          本地 Claude Code token 消耗统计
+  cam local [--days 30]            本地 Claude Code token 消耗统计
   cam env install                  用官方安装器安装 Claude Code
   cam env clean [--logout|--purge] 清理 Claude Code 环境（默认只预演，加 --apply 执行）
   cam update [--check]             手动更新（git 快进；更新后自检不过就退回原来的版本）
   cam verify                       按 SHA256SUMS 校验代码文件是否完整
   cam doctor [--json] [--offline]  全面体检：账号登录、Claude 服务、本机 Claude Code、cam 自己、聊天机器人
+
+第一次用：docs/QUICKSTART.md（快速开始）
 """
 from __future__ import annotations
 
@@ -1109,6 +1112,80 @@ class ProcsUnknown(list):
     """
 
 
+# ---- Windows 上查进程、查系统设置都要起一次 PowerShell（每次大约半秒 CPU）：几处要用的合并成一次，结果几秒内共用
+
+WIN_PROCS_SECS = 3  # 只是显示的地方（桌面版开着没有、体检）几秒内共用一次进程表
+WIN_PROCS_REUSE = 1  # 数 Claude Code 会话（切换前也要看）只用一秒内查过的：PowerShell 查一次本身就要半秒多
+WIN_PROCS_PS = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { "
+                "\"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$($_.CommandLine)\" }")
+_WIN_PROCS = {"t": 0.0, "rows": None}
+_WIN_PROCS_LOCK = threading.Lock()
+
+
+def parse_windows_processes(text):
+    """WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行)]。规则和 Rust 版 health::parse_windows_processes 一致
+    （tests/shared/windows_env.json）。"""
+    rows = []
+    for line in str(text or "").splitlines():
+        parts = line.rstrip("\r").split("\t", 3)
+        if len(parts) == 4 and parts[0].strip().isdigit():
+            rows.append((int(parts[0].strip()), parts[1].strip(), parts[2].strip(), parts[3].strip()))
+    return rows
+
+
+def windows_processes(max_age=0):
+    """Windows 上的全部进程 [(pid, 程序路径, 名字, 命令行)]：Claude Code 会话、桌面版、cam 自己的面板服务共用一次 PowerShell 查询，
+    max_age 秒内查过的直接用（0 是现查：切换、退出桌面版这些要据此做决定的地方）。查不出来抛 OSError。"""
+    with _WIN_PROCS_LOCK:
+        if max_age > 0 and _WIN_PROCS["rows"] is not None and time.monotonic() - _WIN_PROCS["t"] < max_age:
+            return _WIN_PROCS["rows"]
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", WIN_PROCS_PS], capture_output=True, timeout=20)
+        except subprocess.SubprocessError as e:
+            raise OSError(f"PowerShell 查进程超时：{e}") from e
+        if r.returncode != 0:  # PowerShell 自己出错了：不是“没有进程”
+            raise OSError("PowerShell 查进程出错")
+        rows = parse_windows_processes(decode_output(r.stdout))
+        _WIN_PROCS.update(t=time.monotonic(), rows=rows)
+        return rows
+
+
+WIN_ENV_SECS = 5  # 一次环境检测里 DNS、系统语言、默认路由三处共用一次 PowerShell
+WIN_ENV_PS = ("$ErrorActionPreference='SilentlyContinue'; "
+              "$dns = @(Get-DnsClientServerAddress | ForEach-Object { $_.ServerAddresses }); "
+              "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric "
+              "| Select-Object -First 1; $a = $null; if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex }; "
+              "[pscustomobject]@{ dns = $dns; culture = (Get-Culture).Name; route = \"$($r.InterfaceAlias)\"; "
+              "route_desc = \"$($a.InterfaceDescription)\" } | ConvertTo-Json -Compress")
+_WIN_ENV = {"t": 0.0, "v": None}
+
+
+def parse_windows_env(text):
+    """WIN_ENV_PS 的输出（ConvertTo-Json）→ {"dns": [...], "culture", "route", "route_desc"}；前后有别的输出也认，解析不了的项是空的。
+    规则和 Rust 版 health::parse_windows_env 一致（tests/shared/windows_env.json）。"""
+    t = str(text or "")
+    i, j = t.find("{"), t.rfind("}")
+    try:
+        v = json.loads(t[i:j + 1]) if 0 <= i < j else None
+    except ValueError:
+        v = None
+    v = v if isinstance(v, dict) else {}
+    dns = v.get("dns")
+    dns = [dns] if isinstance(dns, str) else dns if isinstance(dns, list) else []
+    text_of = lambda k: v.get(k).strip() if isinstance(v.get(k), str) else ""  # noqa: E731
+    return {"dns": [d.strip() for d in dns if isinstance(d, str) and d.strip()],
+            "culture": text_of("culture"), "route": text_of("route"), "route_desc": text_of("route_desc")}
+
+
+def windows_env(max_age=WIN_ENV_SECS):
+    """Windows 上的 DNS 服务器、系统语言、默认路由用的网卡：一次 PowerShell 查出来，max_age 秒内共用。"""
+    if _WIN_ENV["v"] is not None and time.monotonic() - _WIN_ENV["t"] < max_age:
+        return _WIN_ENV["v"]
+    v = parse_windows_env(_run_text(["powershell", "-NoProfile", "-Command", WIN_ENV_PS], timeout=20))
+    _WIN_ENV.update(t=time.monotonic(), v=v)
+    return v
+
+
 def claude_may_be_running(procs=None):
     """有 claude 进程在跑，或者这次没查出来。自动替用户做事之前用这个问，不用 bool(running_claude_processes())。"""
     if procs is None:
@@ -1120,6 +1197,7 @@ def running_claude_processes():
     """正在运行的 Claude Code 进程 [(pid, 命令行)]，不含本进程。查不到时返回空的 ProcsUnknown。
 
     切换账号后，这些进程内存里还是旧账号的 token，刷新后还可能把旧账号写回凭据文件。
+    Windows 上和桌面版、面板服务共用一次进程表（WIN_PROCS_REUSE 秒内查过的直接用：PowerShell 本身就要查半秒多）。
     """
     me = os.getpid()
     found = []
@@ -1127,17 +1205,9 @@ def running_claude_processes():
         if IS_WIN:
             # 用完整路径而不是 Name：桌面 App 的判断看的是路径，只给文件名的话
             # Claude 桌面 App（AnthropicClaude\…\claude.exe）会被当成 Claude Code
-            ps = ("Get-CimInstance Win32_Process -Filter \"Name='claude.exe' or Name='node.exe' or Name='bun.exe'\" | "
-                  "ForEach-Object { \"$($_.ProcessId)`t$(if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name })"
-                  "`t$($_.CommandLine)\" }")
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=15)
-            if r.returncode != 0:  # PowerShell 自己出错了：不是“没有进程”
-                return ProcsUnknown()
-            r.stdout = decode_output(r.stdout)
-            for line in r.stdout.splitlines():
-                parts = line.split("\t", 2)
-                if len(parts) == 3 and parts[0].isdigit() and _is_claude_cmd(parts[1], parts[2]):
-                    found.append((int(parts[0]), parts[2] or parts[1]))
+            for pid, exe, name, cmd in windows_processes(WIN_PROCS_REUSE):
+                if pid != me and name.lower() in ("claude.exe", "node.exe", "bun.exe") and _is_claude_cmd(exe or name, cmd):
+                    found.append((pid, cmd or exe or name))
         elif os.path.isdir("/proc/self"):
             for pid in os.listdir("/proc"):
                 if not pid.isdigit() or int(pid) == me:
@@ -2150,9 +2220,37 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
                 note_incident(fresh, a, u)
                 a["usage"] = u
                 a.update(meta)
+                note_usage_day(a)
         roll_renewals(fresh)
         store.save(fresh)
         return fresh
+
+
+USAGE_DAYS_KEEP = 30  # 每个号记最近几天的每天最高用量
+
+
+def note_usage_day(acc, today=None):
+    """把这个号刚取到的 5 小时 / 7 天已用百分比记进 usage_days[那天]（当天的最高值），只留最近 USAGE_DAYS_KEEP 天。
+    这次没取到（有错误，数字还是上一次的）、或者数字不是今天取到的（桌面版的本地记录可能是几天前的）就不记。
+    规则和 Rust 版 usage::note_usage_day 一致（tests/shared/usage_days.json）。"""
+    u = acc.get("usage") or {}
+    when = parse_iso(u.get("fetched_at"))
+    day = (today or dt.date.today())
+    if u.get("error") or not when or when.astimezone().date() != day:
+        return
+    vals = []
+    for key in ("five_hour", "seven_day"):
+        p = (u.get(key) or {}).get("utilization")
+        # 保留一位小数，四舍五入（不用 round：它是“四舍六入五成双”，和 Rust 版对不上）
+        vals.append(math.floor(float(p) * 10 + 0.5) / 10 if isinstance(p, (int, float)) and not isinstance(p, bool) else None)
+    if vals == [None, None]:
+        return
+    days = dict(acc.get("usage_days") or {})
+    old = days.get(day.isoformat())
+    old = old if isinstance(old, list) and len(old) == 2 else [None, None]
+    days[day.isoformat()] = [float(max(x for x in (o, v) if isinstance(x, (int, float)))) if any(
+        isinstance(x, (int, float)) for x in (o, v)) else None for o, v in zip(old, vals)]
+    acc["usage_days"] = {k: days[k] for k in sorted(days)[-USAGE_DAYS_KEEP:]}
 
 
 def keep_login_invalid(acc, new_usage):
@@ -3037,26 +3135,24 @@ def _desktop_processes():
     return [(pid, profile) for pid, _, profile in _desktop_scan()]
 
 
-def _desktop_scan():
-    """返回 [(pid, 命令行, profile 或 None)]。查不到进程列表时报错（CamError）。"""
+def _desktop_scan(max_age=0):
+    """返回 [(pid, 命令行, profile 或 None)]。查不到进程列表时报错（CamError）。
+    max_age：Windows 上可以用几秒内查过的进程表（只有显示状态时这样用；切换、退出、移除都现查）。"""
     if os.environ.get("CAM_DESKTOP_DRY_RUN") == "1":
         return []
     found = []
     try:
         if IS_WIN:
-            ps = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process "
-                  "| ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath) $($_.CommandLine)\" }")
-            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=15)
-            lines = decode_output(out.stdout).splitlines()  # 命令行里有系统编码外的字符时 text=True 会抛 UnicodeDecodeError
+            rows = [(str(pid), f"{exe} {cmd}") for pid, exe, _, cmd in windows_processes(max_age)]
         else:
             out = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True, timeout=10)
-            lines = out.stdout.splitlines()
+            if out.returncode != 0:
+                raise CamError("无法检测 Claude 桌面版进程，未执行切换或删除；请先确认进程查询权限")
+            rows = [tuple(line.strip().split(None, 1)) for line in out.stdout.splitlines()]
     except (OSError, subprocess.TimeoutExpired) as e:
         raise CamError(f"无法检测 Claude 桌面版进程，未执行切换或删除：{e}") from e
-    if out.returncode != 0:
-        raise CamError("无法检测 Claude 桌面版进程，未执行切换或删除；请先确认进程查询权限")
-    for line in lines:
-        parts = line.strip().split("\t", 1) if IS_WIN else line.strip().split(None, 1)
+    seen = set()
+    for parts in rows:
         if len(parts) != 2:
             continue
         pid, cmd = parts
@@ -3067,9 +3163,26 @@ def _desktop_scan():
                 continue
             profile = _desktop_profile_from_command(cmd)
             if profile is None and IS_MAC:
-                profile = _desktop_profile_from_files(pid)
+                profile = _desktop_profile_cached(pid, cmd)
+            seen.add(pid)
             found.append((pid, cmd, profile))
+    for key in [k for k in _LSOF_PROFILES if k[0] not in seen]:  # 退出了的进程不再记着
+        _LSOF_PROFILES.pop(key, None)
     return found
+
+
+_LSOF_PROFILES = {}  # (pid, 命令行) -> 数据目录：macOS 上 lsof 要几百毫秒，同一个进程用的目录不会变，查到一次就记着
+
+
+def _desktop_profile_cached(pid, cmd):
+    """_desktop_profile_from_files 的结果按进程记着；没查到的不记（刚启动还没打开登录文件时下次再查）。"""
+    key = (pid, cmd)
+    if key not in _LSOF_PROFILES:
+        profile = _desktop_profile_from_files(pid)
+        if profile is None:
+            return None
+        _LSOF_PROFILES[key] = profile
+    return _LSOF_PROFILES[key]
 
 
 def _desktop_pids():
@@ -3115,7 +3228,7 @@ _DESKTOP_STATUS_LOCK = threading.Lock()
 def _scan_desktop_status():
     app, version = _desktop_installed()
     try:
-        rows = _desktop_scan()
+        rows = _desktop_scan(max_age=WIN_PROCS_SECS)
         running = bool(rows)
     except CamError:
         rows, running = [], None  # 查不出来
@@ -3452,7 +3565,7 @@ def _open_desktop_account_locked(store, acc):
 # --------------------------------------------------------------------------- 对外视图
 
 PUBLIC_FIELDS = ("id", "kind", "label", "email", "plan", "org_name", "rate_limit_tier", "manual", "usage",
-                 "created_at", "last_switched_at", "auto", "desktop_profile")
+                 "created_at", "last_switched_at", "auto", "desktop_profile", "usage_days")
 
 
 def days_left(acc, today=None):
@@ -4334,8 +4447,15 @@ def make_handler(store, token):
 
         def _send(self, code, obj=None, ctype="application/json; charset=utf-8", raw=None):
             body = raw if raw is not None else json.dumps(obj, ensure_ascii=False).encode()
+            gz = len(body) > GZIP_MIN_BYTES and accepts_gzip(self.headers.get("Accept-Encoding"))
+            if gz:  # 面板页面 180 多 KB，压缩后 60 多 KB：手机、隔着 Tailscale 打开快不少
+                import gzip  # noqa: PLC0415
+                body = gzip.compress(body, 5)
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -4568,6 +4688,74 @@ def notify(title, body):
         pass
 
 
+ALERT_SOON_DAYS = 3  # 到期日前几天提醒
+EXHAUSTED_AT = 99.5  # 某个额度窗口用到这么多算用满了，过了重置时间提醒一声“恢复了”
+ALERT_WINDOWS = (("five_hour", "5 小时"), ("seven_day", "7 天"))
+
+
+def due_alerts(data, st, now=None, today=None):
+    """后台每轮刷新用量之后要弹的通知 [(标题, 正文)]。st 记着提醒过的（warned）和用满了等恢复的（exhausted），调用方负责保存。
+
+    - 当前 Claude Code 号和有额度的网页号：5 小时、7 天额度超过阈值（cam rule alert，默认 90%）各提醒一次，每个额度窗口一次
+    - 有额度的号（Claude Code、网页、桌面版）某个窗口用满了先记下来，过了它的重置时间提醒一次“恢复了”
+    - 手动填了到期日、没勾自动续期的号：还剩 ALERT_SOON_DAYS 天以内提醒一次，过了到期日再提醒一次
+    规则和 Rust 版 alerts::due_alerts 一致（tests/shared/alerts.json）。"""
+    now = time.time() if now is None else now
+    today = today or dt.date.today()
+    limit = rules_view(data)["alert_threshold"]
+    act = (data.get("active") or {}).get("claude_code")
+    accs = data.get("accounts") or []
+    warned = list(st.get("warned") or [])
+    exhausted = dict(st.get("exhausted") or {})
+    out = []
+    name_of = lambda a: a.get("label") or a.get("email") or a["id"]  # noqa: E731
+    for a in accs:
+        u = a.get("usage") or {}
+        for key, wname in ALERT_WINDOWS:
+            w = u.get(key) or {}
+            pct = w.get("utilization")
+            if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+                continue
+            resets = w.get("resets_at")
+            if (a["id"] == act or a.get("kind") == "claude_web") and pct >= limit:
+                k = f"{a['id']}|{resets}" if key == "five_hour" else f"{a['id']}|7d|{resets}"
+                if k not in warned:
+                    warned.append(k)
+                    out.append((f"{name_of(a)} 的 {wname}额度已用 {pct:.0f}%", fmt_reset(resets)))
+            t = parse_iso(resets)
+            if pct >= EXHAUSTED_AT and t and t.timestamp() > now and a.get("kind") in ("claude_code", "claude_web", "claude_desktop"):
+                exhausted.setdefault(f"{a['id']}|{key}|{resets}", {"id": a["id"], "window": key, "resets_at": resets})
+    for k, e in list(exhausted.items()):
+        t = parse_iso(e.get("resets_at"))
+        if t and t.timestamp() > now:
+            continue
+        del exhausted[k]
+        acc = next((a for a in accs if a["id"] == e.get("id")), None)
+        if acc and t:
+            wname = dict(ALERT_WINDOWS).get(e.get("window"), "")
+            out.append((f"{name_of(acc)} 的 {wname}额度恢复了", f"{wname}额度已经重置，这个号可以接着用了"))
+    for a in accs:
+        m = a.get("manual") or {}
+        if not m.get("expires_at") or m.get("auto_renew"):
+            continue
+        n = days_left(a, today)
+        stage = None if n is None else "over" if n < 0 else "soon" if n <= ALERT_SOON_DAYS else None
+        if not stage:
+            continue
+        k = f"{a['id']}|exp|{m['expires_at']}|{stage}"
+        if k in warned:
+            continue
+        warned.append(k)
+        if stage == "over":
+            out.append((f"{name_of(a)} 已经过了到期日（{m['expires_at']}）", "续费了的话，在“编辑”里把到期日改一下"))
+        else:
+            out.append((f"{name_of(a)} 今天到期" if n == 0 else f"{name_of(a)} 还有 {n} 天到期（{m['expires_at']}）",
+                        "要接着用就记得续费；续了在“编辑”里改到期日，或者勾上“自动续期”"))
+    st["warned"] = warned[-80:]
+    st["exhausted"] = dict(list(exhausted.items())[-50:])
+    return out
+
+
 def errtext(e):
     """错误的一句话；CamError 带的“怎么办”也接在后面。"""
     advice = getattr(e, "advice", "")
@@ -4645,24 +4833,31 @@ def background_round(store, st, refresh_min, tell, import_live=True):
                 fail("环境检测", env_err[0])
             if not failed:  # 这一轮前面有哪步出过错就留着，体检里的“后台上一轮出错”才看得到
                 st.pop("last_error", None)
-            limit = rules_view(data)["alert_threshold"]
-            act = data["active"].get("claude_code")
-            warned = set(st.get("warned") or [])
-            # 当前 Claude Code 账号 + 所有有额度的网页账号，超过阈值都提醒一次（每个额度窗口一次）
-            for a in data["accounts"]:
-                if a["id"] != act and a["kind"] != "claude_web":
-                    continue
-                w = (a.get("usage") or {}).get("five_hour") or {}
-                if w.get("utilization") is None:
-                    continue
-                key = f"{a['id']}|{w.get('resets_at')}"
-                if w["utilization"] >= limit and key not in warned:
-                    warned.add(key)
-                    tell(f"{a['label']} 的 5 小时额度已用 {w['utilization']:.0f}%", fmt_reset(w.get("resets_at")))
-            st["warned"] = sorted(warned)[-50:]
+            # 额度快满、用满后恢复、快到期：见 due_alerts
+            for title, body in due_alerts(data, st):
+                tell(title, body)
         except Exception as e:  # noqa: BLE001
             fail("刷新用量", e)
     return st
+
+
+GZIP_MIN_BYTES = 1024  # 比这小的回复不压缩
+
+
+def accepts_gzip(header):
+    """请求头 Accept-Encoding 里有没有 gzip（q=0 表示不要）。规则和 Rust 版 web::accepts_gzip 一致。"""
+    for part in str(header or "").split(","):
+        name, _, params = part.strip().partition(";")
+        if name.strip().lower() in ("gzip", "*"):
+            q = params.strip().lower()
+            if q.startswith("q="):
+                try:
+                    if float(q[2:]) == 0:
+                        continue
+                except ValueError:
+                    continue
+            return True
+    return False
 
 
 def save_serve_state(store, st, refresh_min):
@@ -6079,9 +6274,7 @@ def system_dns_servers():
     if t is not None:
         ips = [x.strip() for x in t.split(",") if x.strip()]
     elif IS_WIN:
-        out = _run_text(["powershell", "-NoProfile", "-Command",
-                         "Get-DnsClientServerAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.ServerAddresses }"], timeout=15)
-        ips = [l.strip() for l in out.splitlines() if l.strip()]
+        ips = list(windows_env()["dns"])
     elif IS_MAC:
         for line in _run_text(["scutil", "--dns"]).splitlines():
             line = line.strip()
@@ -6178,7 +6371,7 @@ def system_locale():
     elif IS_MAC:
         name = _run_text(["defaults", "read", "-g", "AppleLocale"]).strip()
     elif IS_WIN:
-        name = _run_text(["powershell", "-NoProfile", "-Command", "(Get-Culture).Name"], timeout=15).strip()
+        name = windows_env()["culture"]
     else:
         name = os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG") or ""
     name = name.split(".", 1)[0].split("@", 1)[0].strip()
@@ -6335,13 +6528,8 @@ def default_route_tunnel():
         return (t, k) if t and k else None
     name, desc = "", ""
     if IS_WIN:
-        ps = ("$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | "
-              "Sort-Object RouteMetric, InterfaceMetric | Select-Object -First 1; "
-              "if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue; "
-              "\"$($r.InterfaceAlias)`t$($a.InterfaceDescription)\" }")
-        line = _run_text(["powershell", "-NoProfile", "-Command", ps], timeout=15).strip().splitlines()
-        if line:
-            name, _, desc = line[0].partition("\t")
+        w = windows_env()
+        name, desc = w["route"], w["route_desc"]
     elif IS_MAC:
         for line in _run_text(["route", "-n", "get", "default"]).splitlines():
             if line.strip().startswith("interface:"):
@@ -7341,9 +7529,8 @@ def process_table():
                 out.append((int(pid), " ".join(argv)))
         return out
     try:
-        if IS_WIN:
-            ps = "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
-            txt = decode_output(subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20).stdout)
+        if IS_WIN:  # 和会话数、桌面版共用一次进程表
+            txt = "\n".join(f"{pid}\t{cmd}" for pid, _, _, cmd in windows_processes(WIN_PROCS_SECS))
         else:
             txt = subprocess.run(["ps", "-A", "-o", "pid=,args="], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
@@ -8300,6 +8487,77 @@ def verify_sums(root=None):
     return n, bad
 
 
+# 后面跟账号名的子命令：Tab 补全时补账号名
+ACCOUNT_ARG_CMDS = ("switch", "use", "open", "set", "rm", "remove", "diag", "identify")
+
+
+def print_account_names():
+    """每行一个账号名（没起名的用邮箱），给 Tab 补全用。只读，不导入、不联网；读不了就什么都不输出。"""
+    try:
+        data = read_json(os.path.join(cam_home(), "accounts.json"), {}) or {}
+    except Exception:  # noqa: BLE001
+        return 0
+    for a in data.get("accounts") or []:
+        name = a.get("label") or a.get("email")
+        if name and "\n" not in name:
+            print(name)
+    return 0
+
+
+def completion_script(shell, cmds):
+    """Tab 补全脚本：第一个词补子命令，switch / open / set 这些后面补账号名（来自 cam _names）。"""
+    words = " ".join(cmds)
+    acc = " ".join(ACCOUNT_ARG_CMDS)
+    if shell == "bash":
+        return f"""# cam 的 Tab 补全：在 ~/.bashrc 里加一行  eval "$(cam completion bash)"
+_cam_complete() {{
+  local cur="${{COMP_WORDS[COMP_CWORD]}}"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "{words}" -- "$cur") )
+    return
+  fi
+  case " {acc} " in
+    *" ${{COMP_WORDS[1]}} "*)
+      if [ "$COMP_CWORD" -eq 2 ]; then
+        local IFS=$'\\n'
+        COMPREPLY=( $(compgen -W "$(cam _names 2>/dev/null)" -- "$cur") )
+      fi ;;
+  esac
+}}
+complete -o default -F _cam_complete cam"""
+    if shell == "zsh":
+        return f"""# cam 的 Tab 补全：在 ~/.zshrc 里加一行  source <(cam completion zsh)
+_cam_complete() {{
+  if (( CURRENT == 2 )); then
+    compadd -- {words}
+  elif (( CURRENT == 3 )) && [[ " {acc} " == *" ${{words[2]}} "* ]]; then
+    compadd -- ${{(f)"$(cam _names 2>/dev/null)"}}
+  else
+    _files
+  fi
+}}
+autoload -Uz compinit 2>/dev/null
+(( $+functions[compdef] )) || compinit
+compdef _cam_complete cam"""
+    return f"""# cam 的 Tab 补全：在 PowerShell 的 $PROFILE 里加一行  cam completion powershell | Out-String | Invoke-Expression
+Register-ArgumentCompleter -Native -CommandName cam -ScriptBlock {{
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $words = @($commandAst.CommandElements | ForEach-Object {{ $_.ToString() }})
+  $n = $words.Count
+  if ($wordToComplete -ne '') {{ $n = $n - 1 }}
+  if ($n -le 1) {{
+    $list = '{words}' -split ' '
+  }} elseif ($n -eq 2 -and (' {acc} ' -like "* $($words[1]) *")) {{
+    $list = @(cam _names 2>$null)
+  }} else {{
+    return
+  }}
+  $list | Where-Object {{ $_ -like "$wordToComplete*" }} | ForEach-Object {{
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }}
+}}"""
+
+
 def cmd_verify():
     n, bad = verify_sums()
     if bad:
@@ -8741,6 +8999,8 @@ def main(argv=None):
     s.add_argument("--check", action="store_true", help="只检查有没有新版本，列出新改动，不更新")
     s.add_argument("--json", action="store_true", help="输出 JSON（给菜单栏、脚本用）")
     sub.add_parser("verify", help="按 SHA256SUMS 校验代码文件是否完整（安装和更新时会自动做）")
+    s = sub.add_parser("completion", help="输出 Tab 补全脚本（子命令和账号名），见 README“命令行补全”")
+    s.add_argument("shell", choices=["bash", "zsh", "powershell"])
     s = sub.add_parser("hooks", help="Claude Code 钩子：装了之后弹权限确认（yes / no）时红绿灯三盏灯一起闪（status / install / remove）")
     s.add_argument("action", nargs="?", choices=["status", "install", "remove"], default="status")
     sub.add_parser("hook", help="（Claude Code 的钩子调用的，不用手动运行）从 stdin 读事件")
@@ -8796,9 +9056,14 @@ def main(argv=None):
         except CamError as e:
             print(color("错误：", "r") + str(e), file=sys.stderr)
             return 1
+    if argv[:1] == ["_names"]:  # Tab 补全要的账号名：只读账号库，什么都不改
+        return print_account_names()
     args = p.parse_args(argv)
     if args.cmd == "hook":  # Claude Code 的钩子：每个事件都跑一次，不碰账号库，不能出错
         return cmd_hook()
+    if args.cmd == "completion":
+        print(completion_script(args.shell, sorted(n for n in sub.choices if n != "hook")))
+        return 0
     if args.cmd in ("verify", "hooks"):  # 只读代码目录 / 只改 Claude Code 的 settings.json，不建数据目录
         try:
             return cmd_verify() if args.cmd == "verify" else cmd_hooks(args)

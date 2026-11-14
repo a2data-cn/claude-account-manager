@@ -348,6 +348,7 @@ details.src[open] summary::before { content: "▾"; }
 .ecard h3 .chip { font-weight: 600; }
 .eico { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); flex: none; }
 .eico svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.daybars { display: block; max-width: 100%; height: auto; }
 .ecard.sub .eico { background: var(--surface); }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .ecard > .hint { margin: 12px 0 0; font-size: 12px; line-height: 1.55; }
