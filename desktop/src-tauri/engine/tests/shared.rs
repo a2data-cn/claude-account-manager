@@ -10,7 +10,13 @@ use cam_engine::health::{
     risk_score, status_relevant, status_risk, tls_issuer_item,
 };
 use cam_engine::health::{parse_windows_env, parse_windows_processes};
+use cam_engine::local_report::{report_event, usage_report};
+use cam_engine::pace::{note_usage_samples, pace_series, usage_pace};
 use cam_engine::rules::{match_time_rule, validate};
+use cam_engine::sessions::{
+    context_health, context_window, project_dir_name, session_phrase, session_state,
+    transcript_composition, transcript_meta,
+};
 use cam_engine::store::{accounts, find_index, parse_day, s};
 use cam_engine::usage::note_usage_day;
 use cam_engine::usage::{message_cost, parse_usage_body, roll_renewals_at};
@@ -64,6 +70,70 @@ fn usage_day_cases() {
             c["name"]
         );
     }
+}
+
+#[test]
+fn pace_cases() {
+    let fx = fixture("pace.json");
+    for c in cases(&fx, "samples") {
+        let accs = c["accounts"].as_array().unwrap();
+        let got = note_usage_samples(&c["samples"], accs, c["now"].as_i64().unwrap());
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "pace") {
+        let got = usage_pace(Some(&c["points"]), &c["usage"], c["now"].as_i64().unwrap());
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "series") {
+        let g = &c["gen"];
+        let (t0, dt, n) = (
+            g["t0"].as_i64().unwrap(),
+            g["dt"].as_i64().unwrap(),
+            g["count"].as_i64().unwrap(),
+        );
+        let pts: Vec<Value> = (0..n)
+            .map(|i| {
+                let p7 = if i == g["p7_null_at"].as_i64().unwrap() {
+                    Value::Null
+                } else {
+                    json!(i as f64)
+                };
+                json!([t0 + i * dt, 1.0, p7, null, null])
+            })
+            .collect();
+        let got = pace_series(Some(&json!(pts)), &c["pace"], c["now"].as_i64().unwrap());
+        let got = got.as_array().unwrap();
+        let summary = json!({"len": got.len(), "first": got.first(), "last": got.last()});
+        assert_eq!(summary, c["expect"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn local_usage_report_cases() {
+    let fx = fixture("local_usage.json");
+    let at = |v: &Value| {
+        chrono::NaiveDateTime::parse_from_str(v.as_str().unwrap(), "%Y-%m-%dT%H:%M:%S").unwrap()
+    };
+    let now = at(&fx["now"]);
+    for c in cases(&fx, "cases") {
+        let events: Vec<_> = fx["events"][c["events"].as_str().unwrap()]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                report_event(
+                    at(&e["at"]),
+                    e["model"].as_str().unwrap(),
+                    &e["usage"],
+                    e["session"].as_str().unwrap(),
+                    e["owner"].as_str(),
+                )
+            })
+            .collect();
+        let got = usage_report(&events, c["range"].as_str().unwrap(), now).unwrap();
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+    assert!(usage_report(&[], "90", now).is_none());
 }
 
 #[test]
@@ -481,4 +551,91 @@ fn environment_risk_cases() {
             }
         }
     }
+}
+
+#[test]
+fn session_cases() {
+    // 会话页的规则：模型的上下文窗口、上下文健不健康、记录目录名、会话状态、红绿灯的说法、记录的摘要和组成（估的）
+    let fx = fixture("sessions.json");
+    for c in cases(&fx, "windows") {
+        let (w, exact) = context_window(c["model"].as_str());
+        assert_eq!(json!([w, exact]), c["expect"], "{}", c["model"]);
+    }
+    for c in cases(&fx, "health") {
+        let got = context_health(c["used"].as_u64(), c["window"].as_u64().unwrap());
+        assert_eq!(json!(got), c["expect"], "{c}");
+    }
+    for c in cases(&fx, "project_dir") {
+        assert_eq!(
+            json!(project_dir_name(c["cwd"].as_str().unwrap())),
+            c["expect"],
+            "{}",
+            c["cwd"]
+        );
+    }
+    for c in cases(&fx, "states") {
+        let rec = if c["rec"].is_null() {
+            None
+        } else {
+            Some(&c["rec"])
+        };
+        let got = session_state(
+            rec,
+            c["waiting"].as_bool().unwrap(),
+            c["written_ago"].as_f64(),
+            c["cpu"].as_f64(),
+            c["now"].as_f64().unwrap(),
+        );
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "phrases") {
+        let got = session_phrase(
+            c["n"].as_u64().unwrap() as usize,
+            c["busy"].as_bool().unwrap(),
+            c["answering"].as_u64().map(|x| x as usize),
+            c["waiting"].as_u64().unwrap() as usize,
+        );
+        assert_eq!(json!(got), c["expect"], "{c}");
+    }
+    let dir = std::env::temp_dir().join(format!("cam-sessions-fixture-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for c in cases(&fx, "transcripts") {
+        let name = c["name"].as_str().unwrap();
+        let path = dir.join(format!("{}.jsonl", name.replace(' ', "_")));
+        let text: String = c["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| match l {
+                Value::String(raw) => raw.clone() + "\n",
+                other => other.to_string() + "\n",
+            })
+            .collect();
+        std::fs::write(&path, text).unwrap();
+        let m = transcript_meta(&path).unwrap();
+        let got = json!({"turns": m.turns, "first_ts": m.first_ts, "cwd": m.cwd, "model": m.model,
+            "context_used": m.context_used, "cache_hit": m.cache_hit, "turns_at_boundary": m.turns_at_boundary,
+            "compacted": m.boundary.is_some()});
+        assert_eq!(got, c["meta"], "{name}");
+        let comp = transcript_composition(&path, &m, c["top"].as_u64().unwrap() as usize).unwrap();
+        let items: Vec<Value> = comp["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                json!([
+                    i["cat"],
+                    i["key"],
+                    i["name"],
+                    i["detail"],
+                    i["count"],
+                    i["tokens"]
+                ])
+            })
+            .collect();
+        let got = json!({"total": comp["total"], "exact": comp["exact"], "scaled": comp["scaled"],
+            "categories": comp["categories"], "item_count": comp["item_count"], "items": items});
+        assert_eq!(got, c["composition"], "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

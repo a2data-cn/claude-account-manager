@@ -44,6 +44,13 @@ ATTENTION_MAX_AGE = 2 * 3600  # 秒：等了这么久还没动静就不算了（
 HOOK_SET_EVENTS = ("PermissionRequest",)
 HOOK_CLEAR_EVENTS = ("PostToolUse", "PostToolUseFailure", "PermissionDenied", "UserPromptSubmit", "Stop", "SessionEnd")
 HOOK_EVENTS = HOOK_SET_EVENTS + HOOK_CLEAR_EVENTS
+# 每个会话现在在干什么（会话页、红绿灯的“几个在回答”用）：同一批钩子顺便记在 CAM_HOME/session-state.json。
+# 只在状态变的时候写：你发消息 → 在回答，答完 → 空闲，弹权限确认 → 等你确认，确认后工具跑完 → 又在回答，会话结束 → 删掉。
+# 每次工具跑完来的事件，只有这个会话正在等你确认时才写；其余的读一下就走（没有这个文件时连读都不读）。
+SESSION_STATE_FILE = "session-state.json"
+SESSION_STATE_KEEP = 3 * 86400  # 秒：这么久没事件的记录（会话被强关、SessionEnd 没来）写的时候顺手删掉
+HOOK_STATE = {"UserPromptSubmit": "busy", "Stop": "idle", "PermissionRequest": "waiting", "SessionEnd": None}
+HOOK_RESUME_EVENTS = ("PostToolUse", "PostToolUseFailure", "PermissionDenied")  # 等你确认 → 答过了，接着跑
 
 
 def home() -> str:
@@ -114,13 +121,96 @@ def _unlock_attention(fd):
     os.close(fd)  # Unix 上关闭文件即释放 flock
 
 
+def session_state_path():
+    return os.path.join(cam_home(), SESSION_STATE_FILE)
+
+
+def _load_session_state():
+    try:
+        with open(session_state_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) and isinstance(data.get("sessions"), dict) else {"sessions": {}}
+    except (OSError, ValueError):
+        return {"sessions": {}}
+
+
+def _hook_pids():
+    """钩子是 claude 起的（中间一般隔一层 shell）：记下父进程和祖父进程的 pid，会话页拿它对上正在跑的 claude。
+    Linux 读 /proc 拿祖父进程（几十微秒）；别的系统只记父进程，对不上时按工作目录对。"""
+    pids = []
+    try:
+        ppid = os.getppid()
+        pids.append(ppid)
+        if os.path.isdir("/proc/self"):
+            with open(f"/proc/{ppid}/stat", "rb") as f:
+                stat = f.read()
+            pids.append(int(stat[stat.rfind(b")") + 2:].split()[1]))  # 进程名后面依次是 state ppid …
+    except (OSError, ValueError, IndexError):
+        pass
+    return [p for p in pids if p > 1]
+
+
+def _note_session_state(event, name, sid, now):
+    """把这个会话现在在干什么记进 session-state.json（见 SESSION_STATE_FILE 处的说明）。只在状态变的时候写。"""
+    if name in HOOK_STATE:
+        new = HOOK_STATE[name]
+        if new is None and not os.path.exists(session_state_path()):
+            return
+    elif name in HOOK_RESUME_EVENTS:
+        if not os.path.exists(session_state_path()):
+            return
+        rec = _load_session_state()["sessions"].get(sid)
+        if not isinstance(rec, dict) or rec.get("state") != "waiting":
+            return  # 绝大多数工具事件到这里就结束：不拿锁、不写文件
+        new = "busy"
+    else:
+        return
+    lock = _lock_attention()  # 和 attention.json 共用一把锁：几个会话同时有动静时读—改—写不互相盖掉
+    try:
+        data = _load_session_state()
+        sessions = data["sessions"]
+        for k in list(sessions):
+            if not isinstance(sessions[k], dict) or now - float(sessions[k].get("last_ts") or 0) > SESSION_STATE_KEEP:
+                del sessions[k]
+        if new is None:
+            sessions.pop(sid, None)
+        else:
+            rec = sessions.get(sid) or {}
+            if rec.get("state") != new:
+                rec["since_ts"] = now
+            rec.setdefault("first_ts", now)
+            rec.update(state=new, last_ts=now, pids=_hook_pids() or rec.get("pids") or [],
+                       cwd=str(event.get("cwd") or rec.get("cwd") or ""),
+                       transcript=str(event.get("transcript_path") or rec.get("transcript") or ""))
+            sessions[sid] = rec
+        path = session_state_path()
+        if not sessions:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return
+        os.makedirs(cam_home(), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    finally:
+        _unlock_attention(lock)
+
+
 def hook_event(event):
-    """Claude Code 的钩子来了一个事件（stdin 的 JSON 已解析）：要问权限 → 记下这个会话在等你确认；答过了、会话结束 → 清掉。"""
+    """Claude Code 的钩子来了一个事件（stdin 的 JSON 已解析）：要问权限 → 记下这个会话在等你确认；答过了、会话结束 → 清掉。
+    顺便记下这个会话现在是在回答、空闲还是等你确认（_note_session_state）。"""
     if not isinstance(event, dict):
         return
     name, sid = event.get("hook_event_name"), str(event.get("session_id") or "")
     if not sid or name not in HOOK_EVENTS:
         return
+    try:
+        _note_session_state(event, name, sid, time.time())
+    except (OSError, ValueError, TypeError):
+        pass
     if name not in HOOK_SET_EVENTS and not os.path.exists(attention_path()):
         return  # 没有会话在等：绝大多数事件（每次工具调用跑完都来一个）到这里就结束，不拿锁、不写文件
     lock = _lock_attention()
@@ -341,15 +431,19 @@ def unreadable_message(path):
     return f"没有权限读 {path}（权限 {mode}，当前用户 {me}）", f"chmod u+rw {path}"
 
 
-def write_json_atomic(path, data, private=False):
-    # 目标是符号链接（比如 dotfiles 管理的 ~/.claude.json）时写到链接指向的文件，保留链接本身
+def write_json_atomic(path, data, private=False, compact=False):
+    # 目标是符号链接（比如 dotfiles 管理的 ~/.claude.json）时写到链接指向的文件，保留链接本身。
+    # compact：一行写完、不缩进（usage-samples.json 是一大串数字，缩进的话每个数字占一行）
     path = os.path.realpath(path)
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            if compact:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            else:
+                json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         if private and not IS_WIN:
@@ -1208,12 +1302,13 @@ def running_claude_processes():
             for pid, exe, name, cmd in windows_processes(WIN_PROCS_REUSE):
                 if pid != me and name.lower() in ("claude.exe", "node.exe", "bun.exe") and _is_claude_cmd(exe or name, cmd):
                     found.append((pid, cmd or exe or name))
-        elif os.path.isdir("/proc/self"):
-            for pid in os.listdir("/proc"):
+        elif proc_root():  # Linux 的 /proc（测试里 CAM_TEST_PROC_ROOT 指向一个假的）
+            root = proc_root()
+            for pid in os.listdir(root):
                 if not pid.isdigit() or int(pid) == me:
                     continue
                 try:
-                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    with open(os.path.join(root, pid, "cmdline"), "rb") as f:
                         argv = f.read().split(b"\0")
                 except OSError:
                     continue
@@ -2223,7 +2318,171 @@ def refresh_usage(store, only_id=None, allow_token_refresh=True):
                 note_usage_day(a)
         roll_renewals(fresh)
         store.save(fresh)
+        try:  # 7 天额度的节奏线要用的采样点；记不下来不影响用量本身
+            save_usage_samples(store, note_usage_samples(load_usage_samples(store), fresh["accounts"], time.time()))
+        except Exception:  # noqa: BLE001
+            pass
         return fresh
+
+
+SAMPLES_FILE = "usage-samples.json"  # 每次刷新记下的用量点，画 7 天额度的节奏线、算“按现在的速度什么时候用完”
+SAMPLES_KEEP_SECS = 8 * 86400  # 只留最近 8 天（比一个 7 天窗口多一天）
+SAMPLES_MAX = 1200  # 每个号最多这么多个点
+SAMPLE_KINDS = ("claude_code", "claude_web", "claude_desktop")  # 有 5 小时 / 7 天额度的号
+WEEK_SECS = 7 * 86400
+PACE_RECENT_SECS = 24 * 3600  # 按最近一天的速度往后推
+PACE_MIN_SPAN = 3 * 3600  # 最近一天的点不到 3 小时：不够算速度，改按窗口开始以来的平均速度
+PACE_MIN_ELAPSED = 6 * 3600  # 窗口开始还不到 6 小时：平均速度也不准，不推算
+PACE_SERIES_POINTS = 240  # 给界面画线的点最多这么多
+
+
+def _pct1(v):
+    """百分比保留一位小数，四舍五入（和 Rust 版一样用 floor(x*10+0.5)/10）；不是数字时 None。"""
+    return math.floor(float(v) * 10 + 0.5) / 10 if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _epoch(v):
+    t = parse_iso(v)
+    return math.floor(t.timestamp()) if t else None
+
+
+def _sample_ok(p):
+    return isinstance(p, list) and len(p) == 5 and isinstance(p[0], int) and not isinstance(p[0], bool)
+
+
+def usage_sample(acc):
+    """这个号刚取到的用量变成一个点 [取到的时间, 5 小时 %, 7 天 %, 5 小时重置, 7 天重置]（时间都是 Unix 秒，没有的是 None）。
+    不是有额度的号、这次有错误（数字是上一次的）、两项都没有数字时返回 None。"""
+    if acc.get("kind") not in SAMPLE_KINDS:
+        return None
+    u = acc.get("usage")
+    if not isinstance(u, dict) or u.get("error"):
+        return None
+    t = _epoch(u.get("fetched_at"))
+    w5 = u.get("five_hour") if isinstance(u.get("five_hour"), dict) else {}
+    w7 = u.get("seven_day") if isinstance(u.get("seven_day"), dict) else {}
+    p5, p7 = _pct1(w5.get("utilization")), _pct1(w7.get("utilization"))
+    if t is None or (p5 is None and p7 is None):
+        return None
+    return [t, p5, p7, _epoch(w5.get("resets_at")), _epoch(w7.get("resets_at"))]
+
+
+def _same_sample(a, b):
+    return all((x is None and y is None) or (x is not None and y is not None and float(x) == float(y)) for x, y in zip(a[1:], b[1:]))
+
+
+def note_usage_samples(samples, accounts, now):
+    """把各个号刚取到的用量记进采样点，返回新的 {"version": 1, "accounts": {账号 id: [点, …]}}（不改传进来的）。
+
+    - 点的时间是用量取到的时间（fetched_at），不比上一个点新的不记（桌面版的本地记录可能还是上次那份）
+    - 和上一个点一样的：上一个点也和再前一个一样时只把它的时间往后挪（一段没变化只留头尾两个点），否则照记
+    - 只留最近 SAMPLES_KEEP_SECS、每个号最多 SAMPLES_MAX 个点；已经删掉的号不留
+    规则和 Rust 版 pace::note_usage_samples 一致（tests/shared/pace.json）。"""
+    now = math.floor(now)
+    old = (samples or {}).get("accounts") if isinstance(samples, dict) else None
+    old = old if isinstance(old, dict) else {}
+    out = {}
+    for a in accounts or []:
+        aid = a.get("id")
+        if not isinstance(aid, str):
+            continue
+        pts = [list(p) for p in (old.get(aid) or []) if _sample_ok(p)] if isinstance(old.get(aid), list) else []
+        p = usage_sample(a)
+        if p and p[0] <= now + 300 and (not pts or p[0] > pts[-1][0]):
+            if pts and _same_sample(pts[-1], p) and len(pts) >= 2 and _same_sample(pts[-2], p):
+                pts[-1] = p
+            else:
+                pts.append(p)
+        pts = [q for q in pts if q[0] >= now - SAMPLES_KEEP_SECS][-SAMPLES_MAX:]
+        if pts:
+            out[aid] = pts
+    return {"version": 1, "accounts": out}
+
+
+def load_usage_samples(store):
+    """读采样点；没有这个文件或者读不出来时是空的（不建文件）。"""
+    try:
+        d = read_json(os.path.join(store.root, SAMPLES_FILE), None)
+    except CamError:
+        d = None
+    if not isinstance(d, dict) or not isinstance(d.get("accounts"), dict):
+        return {"version": 1, "accounts": {}}
+    return d
+
+
+def save_usage_samples(store, samples):
+    """有变化才写（一个点都没有、文件也不在时不建文件）。调用方持有数据锁。"""
+    path = os.path.join(store.root, SAMPLES_FILE)
+    if samples == load_usage_samples(store) and (samples["accounts"] or not os.path.exists(path)):
+        return
+    write_json_atomic(path, samples, compact=True)
+
+
+def usage_pace(points, usage, now):
+    """7 天额度的节奏：窗口（重置时间往前 7 天）过去了多少、照匀速应该用到多少、比匀速快没有，
+    以及按速度往后推：重置前就用完（state "out"，out_at 几点、early_secs 比重置早多久），还是用不完（"ok"，left 重置时大约还剩百分之几）。
+    速度先按最近一天的采样点算（basis "recent"）；最近一天的点不到 PACE_MIN_SPAN 就按窗口开始以来的平均（"window"）；
+    窗口开始还不到 PACE_MIN_ELAPSED 就不推（state None）。已经用满了是 "full"。没有 7 天额度或重置时间时返回 None。
+    时间都是 Unix 秒。只用来显示，不会因此做任何操作。规则和 Rust 版 pace::usage_pace 一致（tests/shared/pace.json）。"""
+    u = usage if isinstance(usage, dict) else {}
+    w = u.get("seven_day") if isinstance(u.get("seven_day"), dict) else {}
+    used, reset, now = _pct1(w.get("utilization")), _epoch(w.get("resets_at")), math.floor(now)
+    if used is None or reset is None:
+        return None
+    start = reset - WEEK_SECS
+    if not start <= now < reset:
+        return None
+    used = min(100.0, max(0.0, used))
+    at = _epoch(u.get("fetched_at"))  # 这个数字是什么时候取到的：速度按它算
+    at = now if at is None or at > now or at < start else at
+    even = _pct1((now - start) / WEEK_SECS * 100)
+    out = {"start": start, "resets_at": reset, "used": used, "even": even, "ahead": used > even,
+           "basis": None, "per_day": None, "state": None, "out_at": None, "early_secs": None, "left": None}
+    if used >= EXHAUSTED_AT:
+        out["state"] = "full"
+        return out
+    pts = [(p[0], float(p[2])) for p in points or [] if _sample_ok(p) and isinstance(p[2], (int, float))
+           and not isinstance(p[2], bool) and start <= p[0] <= at]
+    base = next((p for p in pts if p[0] >= at - PACE_RECENT_SECS), None)
+    if base and at - base[0] >= PACE_MIN_SPAN and used >= base[1]:
+        rate, out["basis"] = (used - base[1]) / (at - base[0]), "recent"
+    elif at - start >= PACE_MIN_ELAPSED:
+        rate, out["basis"] = used / (at - start), "window"
+    else:
+        return out
+    out["per_day"] = _pct1(rate * 86400)
+    if rate > 0:
+        hit = math.floor(at + (100 - used) / rate)
+        if hit < reset:
+            out.update(state="out", out_at=hit, early_secs=reset - hit)
+            return out
+    out.update(state="ok", left=max(0, math.floor(100 - used - rate * (reset - at) + 0.5)))
+    return out
+
+
+def pace_series(points, pace, now):
+    """界面画节奏线用的点 [[时间, 7 天 %], …]：只要这个 7 天窗口里的，最多 PACE_SERIES_POINTS 个（均匀抽，留最后一个）。"""
+    if not pace:
+        return []
+    pts = [[p[0], p[2]] for p in points or [] if _sample_ok(p) and p[2] is not None and pace["start"] <= p[0] <= math.floor(now)]
+    if len(pts) > PACE_SERIES_POINTS:
+        step = -(-len(pts) // PACE_SERIES_POINTS)
+        pts = [q for i, q in enumerate(pts) if i % step == 0] + ([pts[-1]] if (len(pts) - 1) % step else [])
+    return pts
+
+
+def usage_samples_view(store, data, only=None, now=None):
+    """GET /api/usage-samples：每个有 7 天额度的号 {"pace": …, "points": [[时间, 7 天 %], …]}，给界面画节奏线。只读。"""
+    now = time.time() if now is None else now
+    samples = load_usage_samples(store)["accounts"]
+    out = {}
+    for a in data["accounts"]:
+        if a.get("kind") not in SAMPLE_KINDS or only not in (None, a["id"]):
+            continue
+        pace = usage_pace(samples.get(a["id"]), _shown_usage(a), now)
+        if pace:
+            out[a["id"]] = {"pace": pace, "points": pace_series(samples.get(a["id"]), pace, now)}
+    return {"now": math.floor(now), "accounts": out}
 
 
 USAGE_DAYS_KEEP = 30  # 每个号记最近几天的每天最高用量
@@ -2805,7 +3064,7 @@ def run_claude(store, args):
 
 # --------------------------------------------------------------------------- 本地用量统计
 
-_LOCAL_CACHE = {}  # 日志文件 -> [读到的字节位置, 文件大小, mtime, [(时间, 模型, usage, 去重键)]]
+_LOCAL_CACHE = {}  # 日志文件 -> [读到的字节位置, 文件大小, mtime, [(时间, 模型, usage, 去重键, 会话)]]
 _LOCAL_CACHE_LOCK = threading.Lock()
 
 
@@ -2821,6 +3080,7 @@ def _scan_jsonl(path, entry):
         return entry
     stale = time.time() - st.st_mtime > 60
     pos = entry[0]
+    file_session = os.path.splitext(os.path.basename(path))[0]  # 记录里没写会话 id 时用文件名（Claude Code 一个会话一个文件）
     with open(path, "rb") as f:
         f.seek(pos)
         for raw in f:
@@ -2839,13 +3099,14 @@ def _scan_jsonl(path, entry):
             ts = parse_iso(ev.get("timestamp"))
             if not ts:
                 continue
-            entry[3].append((ts, msg.get("model") or "", msg["usage"], (msg.get("id"), ev.get("requestId"))))
+            entry[3].append((ts, msg.get("model") or "", msg["usage"], (msg.get("id"), ev.get("requestId")),
+                             str(ev.get("sessionId") or file_session)))
     entry[0], entry[1], entry[2] = pos, st.st_size, st.st_mtime
     return entry
 
 
-def local_events(since):
-    """本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)。同一条消息只算一次。
+def local_events(since, sessions=False):
+    """本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)，sessions=True 时后面再加会话 id。同一条消息只算一次。
 
     按文件缓存在进程里：没变的文件不重读，只追加了的只读新加的部分。cam serve 常驻，卡片小面板每两分钟要一次今天的
     消耗，一天的记录几百 MB，每次从头读要一两秒，会把整个服务拖住。
@@ -2865,14 +3126,14 @@ def local_events(since):
                 events = list(entry[3])
         except OSError:
             continue
-        for ts, model, u, key in events:
+        for ts, model, u, key, sess in events:
             if ts < since:
                 continue
             if key != (None, None):
                 if key in seen:
                     continue
                 seen.add(key)
-            yield ts, model, u
+            yield (ts, model, u, sess) if sessions else (ts, model, u)
 
 
 def owner_finder(data):
@@ -2893,29 +3154,140 @@ def owner_finder(data):
     return owner
 
 
+def _usage_rec():
+    return {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "messages": 0, "cost_usd": 0.0}
+
+
+def _usage_add(rec, u, cost):
+    rec["input"] += int(u.get("input_tokens") or 0)
+    rec["output"] += int(u.get("output_tokens") or 0)
+    rec["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
+    rec["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+    rec["messages"] += 1
+    rec["cost_usd"] += cost
+
+
 def local_usage(data, days=30):
-    """本机 Claude Code 记录按天汇总：rows 按 (日期, 账号)，models 按 (日期, 模型)——面板用前者画每天的柱子、后者画按模型的分布。"""
+    """本机 Claude Code 记录按天汇总：rows 按 (日期, 账号)，models 按 (日期, 模型)。卡片小面板的“本机今天”、cam local 用；
+    管理面板的“本机 Claude Code 消耗”用 local_report。"""
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
     owner_of = owner_finder(data)
     daily, by_model = {}, {}  # (date, acc_id) -> dict；(date, model) -> dict
-
-    def add(table, key, u, cost):
-        rec = table.setdefault(key, {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0, "messages": 0, "cost_usd": 0.0})
-        rec["input"] += int(u.get("input_tokens") or 0)
-        rec["output"] += int(u.get("output_tokens") or 0)
-        rec["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
-        rec["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
-        rec["messages"] += 1
-        rec["cost_usd"] += cost
-
     for ts, model, u in local_events(since):
         day = ts.astimezone().date().isoformat()
         cost = message_cost(model, u) or 0.0
-        add(daily, (day, owner_of(ts) or "unattributed"), u, cost)
-        add(by_model, (day, model or "unknown"), u, cost)
+        _usage_add(daily.setdefault((day, owner_of(ts) or "unattributed"), _usage_rec()), u, cost)
+        _usage_add(by_model.setdefault((day, model or "unknown"), _usage_rec()), u, cost)
     rows = [{"date": d, "account_id": a, **v, "cost_usd": round(v["cost_usd"], 4)} for (d, a), v in sorted(daily.items())]
     models = [{"date": d, "model": m, **v, "cost_usd": round(v["cost_usd"], 4)} for (d, m), v in sorted(by_model.items())]
     return {"days": days, "rows": rows, "models": models}
+
+
+LOCAL_RANGES = ("today", "7", "30", "all")  # 管理面板“本机 Claude Code 消耗”的时间范围
+LOCAL_HEAT_DAYS = 28  # 热力图看最近几天：4 周，每个星期几正好 4 天
+LOCAL_MAX_BARS = 60   # “全部”最多画多少根柱子：按天超过了就按周，按周还超过就按月
+
+
+def _report_buckets(rng, today, first_day):
+    """柱子怎么分：(单位, 第一根柱子的起点, 所有柱子的键, 本地时间 -> 键)。今天按小时，7 天 / 30 天按天；
+    全部从最早一条记录那天起，按天不超过 LOCAL_MAX_BARS 根就按天，否则按周（周一起），再多就按月。"""
+    if rng == "today":
+        return "hour", today, [f"{today.isoformat()}T{h:02d}" for h in range(24)], lambda t: t.strftime("%Y-%m-%dT%H")
+    monday = lambda d: d - dt.timedelta(days=d.weekday())  # noqa: E731
+    if rng in ("7", "30"):
+        start, unit = today - dt.timedelta(days=int(rng) - 1), "day"
+    else:
+        start = min(first_day or today, today)
+        if (today - start).days + 1 <= LOCAL_MAX_BARS:
+            unit = "day"
+        elif (monday(today) - monday(start)).days // 7 + 1 <= LOCAL_MAX_BARS:
+            unit = "week"
+        else:
+            unit = "month"
+    if unit == "day":
+        return unit, start, [(start + dt.timedelta(days=i)).isoformat() for i in range((today - start).days + 1)], \
+            lambda t: t.date().isoformat()
+    if unit == "week":
+        start = monday(start)
+        n = (monday(today) - start).days // 7 + 1
+        return unit, start, [(start + dt.timedelta(days=7 * i)).isoformat() for i in range(n)], \
+            lambda t: monday(t.date()).isoformat()
+    start = start.replace(day=1)
+    keys, y, m = [], start.year, start.month
+    while (y, m) <= (today.year, today.month):
+        keys.append(f"{y:04d}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return unit, start, keys, lambda t: t.strftime("%Y-%m")
+
+
+def _most(counts):
+    """次数最多的那个；一样多时取名字排在前面的。"""
+    best = None
+    for k in sorted(counts):
+        if best is None or counts[k] > counts[best]:
+            best = k
+    return best
+
+
+def usage_report(events, rng, now_local):
+    """管理面板“本机 Claude Code 消耗”要的汇总，纯计算（tests/shared/local_usage.json，与 Rust 版 local_report::usage_report 一致）。
+
+    events：[(本地时间（不带时区）, 模型, usage, 会话 id, 账号 id 或 None)]，同一条消息已经去过重；now_local：现在的本地时间。
+    series / model_series：每根柱子里按账号、按模型的用量；totals：整个范围的合计、会话数、缓存命中率（缓存读取 ÷ 全部输入）；
+    accounts / model_totals：明细；heatmap：最近 LOCAL_HEAT_DAYS 天按 星期几（周一是 0）× 钟点 的消息条数，和所选范围无关。"""
+    if rng not in LOCAL_RANGES:
+        raise CamError("时间范围只能是 today、7、30 或 all")
+    today = now_local.date()
+    first = min((e[0].date() for e in events), default=None) if rng == "all" else None
+    unit, start, keys, key_of = _report_buckets(rng, today, first)
+    want = set(keys)
+    heat_start = today - dt.timedelta(days=LOCAL_HEAT_DAYS - 1)
+    heat = [[0] * 24 for _ in range(7)]
+    series, mseries, accs, models, total = {}, {}, {}, {}, _usage_rec()
+    sessions, acc_sess, model_sess, acc_models, model_accs = set(), {}, {}, {}, {}
+    for t, model, u, sess, owner in events:
+        if heat_start <= t.date() <= today:
+            heat[t.weekday()][t.hour] += 1
+        k = key_of(t)
+        if k not in want:
+            continue
+        cost = message_cost(model, u) or 0.0
+        aid, m = owner or "unattributed", model or "unknown"
+        for rec in (series.setdefault((k, aid), _usage_rec()), mseries.setdefault((k, m), _usage_rec()),
+                    accs.setdefault(aid, _usage_rec()), models.setdefault(m, _usage_rec()), total):
+            _usage_add(rec, u, cost)
+        sessions.add(sess)
+        acc_sess.setdefault(aid, set()).add(sess)
+        model_sess.setdefault(m, set()).add(sess)
+        acc_models.setdefault(aid, {})[m] = acc_models.get(aid, {}).get(m, 0) + 1
+        model_accs.setdefault(m, {})[aid] = model_accs.get(m, {}).get(aid, 0) + 1
+
+    def out(rec):
+        return {**rec, "cost_usd": round(rec["cost_usd"], 4)}
+    read = total["input"] + total["cache_write"] + total["cache_read"]
+    return {
+        "range": rng, "unit": unit, "start": start.isoformat(), "buckets": keys,
+        "series": [{"bucket": k, "account_id": a, **out(v)} for (k, a), v in sorted(series.items())],
+        "model_series": [{"bucket": k, "model": m, **out(v)} for (k, m), v in sorted(mseries.items())],
+        "totals": {**out(total), "sessions": len(sessions), "cache_hit": round(total["cache_read"] / read, 4) if read else None},
+        "accounts": [{"account_id": a, **out(v), "sessions": len(acc_sess[a]), "top_model": _most(acc_models[a])}
+                     for a, v in sorted(accs.items())],
+        "model_totals": [{"model": m, **out(v), "sessions": len(model_sess[m]), "top_account": _most(model_accs[m])}
+                         for m, v in sorted(models.items())],
+        "heatmap": {"metric": "messages", "days": LOCAL_HEAT_DAYS, "start": heat_start.isoformat(), "cells": heat},
+    }
+
+
+def local_report(data, rng, now=None):
+    """读本机记录、按切换记录归到账号，交给 usage_report。“全部”读能找到的所有记录（Claude Code 默认只留 30 天）。"""
+    if rng not in LOCAL_RANGES:
+        raise CamError("时间范围只能是 today、7、30 或 all")
+    now = now or dt.datetime.now(dt.timezone.utc)
+    since = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) if rng == "all" else now - dt.timedelta(days=max(LOCAL_HEAT_DAYS, 30) + 2)
+    owner_of = owner_finder(data)
+    events = [(ts.astimezone().replace(tzinfo=None), model, u, sess, owner_of(ts))
+              for ts, model, u, sess in local_events(since, sessions=True)]
+    return usage_report(events, rng, now.astimezone().replace(tzinfo=None))
 
 
 WINDOW_SECS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
@@ -3648,9 +4020,20 @@ def account_health(acc, has_creds, days):
     return {"level": level, "label": HEALTH_LABEL[level], "issues": issues}
 
 
+def _shown_usage(a):
+    """界面上显示的用量：桌面号过了重置时间的窗口不显示（_desktop_usage_view），旧版本误写的不显示。"""
+    if a.get("kind") != "claude_desktop":
+        return a.get("usage")
+    if (a.get("usage") or {}).get("source") not in ("desktop_cache", "desktop_history"):
+        return None
+    return _desktop_usage_view(a["usage"])
+
+
 def public_state(store, data):
     risks = risk_items(data)
     accs = []
+    samples = load_usage_samples(store)["accounts"]
+    now = time.time()
     active = data["active"].get("claude_code")
     active_desktop = data["active"].get("claude_desktop")
     try:
@@ -3668,6 +4051,8 @@ def public_state(store, data):
         if a.get("kind") == "claude_desktop":
             p["desktop"] = desk.get(a["id"])
         p["is_active"] = a["id"] == (active_desktop if a.get("kind") == "claude_desktop" else active)
+        # 7 天额度的节奏（按采样点推算什么时候用完）；节奏线的点在 /api/usage-samples
+        p["pace"] = usage_pace(samples.get(a["id"]), p["usage"], now) if a.get("kind") in SAMPLE_KINDS else None
         p["days_left"] = days_left(a)
         p["plan_display"] = a.get("plan") or (a.get("manual") or {}).get("plan")
         has_creds = False
@@ -3693,7 +4078,7 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "sessions": {"count": session_count(), "busy": session_busy()},
+            "risk_score": risk_score(risks), "sessions": sessions_brief(),
             "desktop_app": desk_app, "attention": attention_view(), "generated_at": now_iso()}
 
 
@@ -3708,6 +4093,12 @@ def _count_sessions(now):
             _SESSION_CACHE[0] = now
             return
         _SESSION_BUSY[0] = claude_activity([p for p, _ in procs], max_age=0)
+        try:  # 各会话分开看：几个在回答、几个在等你确认（钩子记的 + 每个会话自己的记录文件和 CPU）
+            rows = _session_rows(procs)
+            _SESSION_STATES.update(answering=sum(r["state"] == "busy" for r in rows),
+                                   waiting=sum(r["state"] == "waiting" for r in rows))
+        except Exception:  # noqa: BLE001  分不开就只说“正在回答”
+            _SESSION_STATES.update(answering=None, waiting=0)
         _SESSION_CACHE[:] = [now, len(procs)]
     except Exception:  # noqa: BLE001  数不出来就沿用上次的
         _SESSION_CACHE[0] = now
@@ -3742,14 +4133,31 @@ def session_count(max_age=20):
 
 def session_busy():
     """session_count 数到的会话里有没有真的在执行任务的（和 session_count 一起更新，先调它）。"""
-    return _SESSION_BUSY[0]
+    return _SESSION_BUSY[0] or bool(_SESSION_STATES.get("answering"))
+
+
+def session_counts():
+    """session_count 数到的会话里几个在回答、几个在等你确认（和 session_count 一起更新，先调它）：{"answering", "waiting"}。
+    answering 是 None 时看不出是哪个在回答（只知道有在执行的）。"""
+    answering = _SESSION_STATES.get("answering")
+    if not answering and _SESSION_BUSY[0]:
+        answering = None
+    return {"answering": answering, "waiting": _SESSION_STATES.get("waiting") or 0}
+
+
+def sessions_brief():
+    """/api/state 里的 sessions：{"count", "busy", "answering", "waiting", "text"}。"""
+    n = session_count()
+    busy, c = session_busy(), session_counts()
+    return {"count": n, "busy": busy, **c, "text": session_phrase(n, busy, c["answering"], c["waiting"]) if n else ""}
 
 
 # ---- 本机 Claude Code 是不是真的在执行任务（不只是开着窗口等你输入）：红绿灯只在真执行时闪黄
 ACTIVE_WINDOW = 20  # 秒：会话记录文件这么久内写过就算在执行（跑着的时候每条消息、每个工具结果都往里追加；等你输入时不写）
 CPU_BUSY = 0.02  # claude 进程和它的子进程这段时间平均占 CPU 超过 2% 就算在执行（算 token、画界面、跑工具）；闲着等输入时接近 0
 _SESSION_BUSY = [False]
-_ACTIVITY = {"t": 0.0, "cpu": None, "busy": False}  # 上次采样：时间、每个 claude 进程（含子进程）的累计 CPU 秒、结论
+_SESSION_STATES = {"answering": 0, "waiting": 0}  # 和 _SESSION_CACHE 一起更新：几个在回答、几个在等你确认
+_ACTIVITY = {"t": 0.0, "cpu": None, "busy": False, "rates": {}}  # 上次采样：时间、每个 claude 进程（含子进程）的累计 CPU 秒、结论
 _ACTIVITY_LOCK = threading.Lock()
 
 
@@ -3840,15 +4248,16 @@ def claude_activity(pids, max_age=5):
         if _ACTIVITY["t"] and now - _ACTIVITY["t"] < max_age:
             return _ACTIVITY["busy"]
         if not pids:
-            _ACTIVITY.update(t=now, cpu=None, busy=False)
+            _ACTIVITY.update(t=now, cpu=None, busy=False, rates={})
             return False
         written = transcript_written_ago()
         cpu, last, dt = claude_cpu_seconds(pids), _ACTIVITY["cpu"], now - _ACTIVITY["t"]
-        rate = None
+        rate, rates = None, {}
         if cpu is not None and last is not None and dt >= 1:
-            rate = sum(max(0.0, cpu[p] - last[p]) for p in cpu if p in last) / dt
+            rates = {p: max(0.0, cpu[p] - last[p]) / dt for p in cpu if p in last}  # 每个会话各自的（会话页分开看）
+            rate = sum(rates.values())
         busy = (written is not None and written < ACTIVE_WINDOW) or (rate is not None and rate > CPU_BUSY)
-        _ACTIVITY.update(t=now, cpu=cpu, busy=busy)
+        _ACTIVITY.update(t=now, cpu=cpu, busy=busy, rates=rates)
         return busy
 
 
@@ -4027,6 +4436,626 @@ def attention_view():
     else:
         text = f"Claude Code 在等你确认 · {what}" if what else "Claude Code 在等你确认"
     return {"count": len(live), "text": text, "since": first.get("since")}
+
+
+# --------------------------------------------------------------------------- 会话页：这台电脑上正在跑的 Claude Code
+# 进程表找出在跑的 claude，对上它的会话记录（钩子记的 pid → 同一个工作目录 → 那个目录里最新的记录文件），再从记录里读出
+# 用的模型、聊了几轮、上下文用了多少、按内容估的组成。只读本机文件；只看用量、元数据、工具名和文件路径，消息内容不读出来、
+# 不返回、不记日志。规则和 Rust 版 sessions.rs 一致（tests/shared/sessions.json）。
+
+SESSION_BUSY_QUIET = 600  # 秒：钩子说在回答、但这么久记录没写、进程也没吃 CPU（按 Esc 打断时 Stop 不来）就当空闲了
+CONTEXT_HIGH, CONTEXT_FULL = 0.70, 0.90  # 上下文用到窗口的这么多：快满了 / 很满
+CONTEXT_DEFAULT = 200000  # 认不出的模型按这个算，界面写“约”
+# 模型的上下文窗口，按前缀找、前面的先比（具体的写在前面）。来源：Claude API 文档的模型表（2026-11）：
+# Fable / Mythos / Opus 5.x / Sonnet 5.x / Haiku 5.5 / Opus 4.6–4.8 / Sonnet 4.6 是 1M，Haiku 4.5、Opus 4.5 及更早、Sonnet 4.5 及更早是 200K
+CONTEXT_WINDOWS = (
+    ("claude-haiku-4-5", 200000), ("claude-opus-4-5", 200000), ("claude-opus-4-1", 200000), ("claude-sonnet-4-5", 200000),
+    ("claude-opus-4-6", 1000000), ("claude-opus-4-7", 1000000), ("claude-opus-4-8", 1000000), ("claude-sonnet-4-6", 1000000),
+    ("claude-opus-4", 200000), ("claude-sonnet-4", 200000), ("claude-3", 200000),
+    ("claude-fable", 1000000), ("claude-mythos", 1000000), ("claude-opus-5", 1000000), ("claude-sonnet-5", 1000000),
+    ("claude-haiku-5", 1000000),
+)
+IMAGE_TOKENS = 1600  # 一张图按这么多 token 估（文档：1092×1092 的图约 1590）
+COMPOSITION_TOP = 60  # 组成里列出占得最多的这么多项
+# 你发的消息里这些开头的不算一轮：斜杠命令、命令的输出、打断、! 跑的命令
+NOT_PROMPT_PREFIXES = ("<command-", "<local-command-", "[Request interrupted", "<bash-input>", "<bash-stdout>", "<bash-stderr>")
+SESSION_STATE_NAMES = {"busy": "在回答", "waiting": "等你确认", "idle": "空闲"}
+CONTEXT_HEALTH_NAMES = {"ok": "健康", "high": "快满了", "full": "很满"}
+
+
+def context_window(model):
+    """(上下文窗口大小, 准不准)。带 [1m] 的是 1M；认不出来的按 CONTEXT_DEFAULT 算，准不准为 False（界面写“约”）。"""
+    m = (model or "").strip().lower()
+    if m.endswith("[1m]"):
+        return 1000000, True
+    i = m.find("claude-")
+    m = m[i:] if i >= 0 else m
+    for prefix, size in CONTEXT_WINDOWS:
+        if m.startswith(prefix):
+            return size, True
+    return CONTEXT_DEFAULT, False
+
+
+def context_health(used, window):
+    """上下文用了多少：ok（健康）/ high（快满了）/ full（很满）；算不出来是 None。"""
+    if used is None or not window:
+        return None
+    r = used / window
+    return "full" if r >= CONTEXT_FULL else "high" if r >= CONTEXT_HIGH else "ok"
+
+
+def project_dir_name(cwd):
+    """Claude Code 存会话记录的目录名：工作目录里不是英文字母、数字的字符都换成 -。"""
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd or "")
+
+
+def session_state(rec, waiting, written_ago, cpu, now):
+    """一个会话现在是 busy（在回答）/ waiting（等你确认）/ idle（空闲）。
+
+    rec 是钩子记的（session-state.json 里这个会话的那条，没有是 None），waiting 是它弹着权限确认，written_ago 是记录文件
+    几秒前写过，cpu 是这个 claude 进程连同子进程最近平均占几个核（算不出来是 None）。
+    有钩子的记录：在回答 / 空闲以它为准；它说在回答但 SESSION_BUSY_QUIET 秒都没动静、也没吃 CPU，当空闲（被打断了）；
+    它说空闲但之后记录又写了，当在回答。没有钩子的：最近 ACTIVE_WINDOW 秒写过记录或在吃 CPU 就算在回答。
+    """
+    if waiting:
+        return "waiting"
+    recent = written_ago is not None and written_ago < ACTIVE_WINDOW
+    eating = cpu is not None and cpu > CPU_BUSY
+    st = rec.get("state") if isinstance(rec, dict) else None
+    last = float((rec or {}).get("last_ts") or 0) if st else 0.0
+    if st in ("busy", "waiting"):
+        quiet = now - last
+        if written_ago is not None:
+            quiet = min(quiet, written_ago)
+        return "busy" if quiet < SESSION_BUSY_QUIET or eating else "idle"
+    if st == "idle":
+        return "busy" if recent and now - written_ago > last + 5 else "idle"
+    return "busy" if recent or eating else "idle"
+
+
+def _est_tokens(nbytes):
+    """估 token：UTF-8 字节数除以 4（向上取整）。英文大致一个词一个多 token，中文一个字不到一个 token，只用来比大小。"""
+    return (nbytes + 3) // 4
+
+
+def _text_bytes(s):
+    return len(s.encode("utf-8")) if isinstance(s, str) else 0
+
+
+def _leaf_bytes(v):
+    """工具参数里所有字符串值加起来多少字节（键名不算，数字和真假不算）。"""
+    if isinstance(v, str):
+        return len(v.encode("utf-8"))
+    if isinstance(v, dict):
+        return sum(_leaf_bytes(x) for x in v.values())
+    if isinstance(v, list):
+        return sum(_leaf_bytes(x) for x in v)
+    return 0
+
+
+def _is_prompt(ev):
+    """记录里的这一行是不是你发的一条消息（算一轮）：不是工具结果、不是系统塞进来的、不是压缩后的摘要、不是斜杠命令和打断。"""
+    msg = ev.get("message")
+    if ev.get("type") != "user" or ev.get("isMeta") or ev.get("isCompactSummary") or ev.get("isSidechain") \
+            or not isinstance(msg, dict):
+        return False
+    c = msg.get("content")
+    if isinstance(c, str):
+        texts, other = [c], False
+    elif isinstance(c, list):
+        blocks = [b for b in c if isinstance(b, dict)]
+        if any(b.get("type") == "tool_result" for b in blocks):
+            return False
+        texts = [b["text"] for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str)]
+        other = any(b.get("type") == "image" for b in blocks)
+    else:
+        return False
+    if not texts:
+        return other
+    return not texts[0].lstrip().startswith(NOT_PROMPT_PREFIXES)
+
+
+def _json_line(raw):
+    try:
+        ev = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None
+    return ev if isinstance(ev, dict) else None
+
+
+_TS_RE = re.compile(rb'"timestamp": ?"([^"]+)"')
+_CWD_RE = re.compile(rb'"cwd": ?"((?:[^"\\]|\\.)*)"')
+
+
+def _has_kv(raw, key, val):
+    """这一行里有没有 "key":val（Claude Code 写的是紧凑的 JSON，冒号后面也认一个空格）。按字节找，不解析。"""
+    return (b'"' + key + b'":' + val) in raw or (b'"' + key + b'": ' + val) in raw
+_SESSION_META = {}  # 记录文件 -> 读到哪了和读出来的东西（见 _scan_session_meta）
+_SESSION_COMP = {}  # 记录文件 -> 从最后一次压缩往后累计的组成（见 _scan_composition）
+_SESSION_SCAN_LOCK = threading.Lock()
+
+
+def _scan_session_meta(path, entry):
+    """接着上次读到的地方往下读：几轮、第一条的时间、工作目录、最后几条带用量的回复在哪、最后一次压缩在哪。
+
+    几百 MB 的记录也只在第一次从头扫一遍（每行先按字节找关键字，大多数行不解析），之后只读新追加的。
+    """
+    st = os.stat(path)
+    if entry is None or st.st_size < entry["pos"]:
+        entry = {"pos": 0, "size": -1, "mtime": 0.0, "turns": 0, "first_ts": None, "cwd": None, "assist": [],
+                 "boundary": None, "turns_at_boundary": 0, "last": None}
+    if st.st_size == entry["size"] and st.st_mtime == entry["mtime"]:
+        return entry
+    stale = time.time() - st.st_mtime > 60
+    pos = entry["pos"]
+    with open(path, "rb") as f:
+        f.seek(pos)
+        for raw in f:
+            if not raw.endswith(b"\n") and not stale:
+                break
+            start, pos = pos, pos + len(raw)
+            if _has_kv(raw, b"isSidechain", b"true"):
+                continue
+            if entry["first_ts"] is None:
+                m = _TS_RE.search(raw)
+                if m:
+                    entry["first_ts"] = m.group(1).decode("utf-8", "replace")
+            if entry["cwd"] is None:
+                m = _CWD_RE.search(raw)
+                if m:
+                    try:
+                        entry["cwd"] = json.loads(b'"' + m.group(1) + b'"')
+                    except ValueError:
+                        pass
+            if b'"compact_boundary"' in raw:
+                ev = _json_line(raw)
+                if ev and ev.get("type") == "system" and ev.get("subtype") == "compact_boundary":
+                    entry["boundary"], entry["turns_at_boundary"] = start, entry["turns"]
+                continue
+            if _has_kv(raw, b"type", b'"assistant"') and b'"usage"' in raw:
+                entry["assist"] = (entry["assist"] + [(start, len(raw))])[-6:]
+                continue
+            if _has_kv(raw, b"type", b'"user"') and b'"tool_result"' not in raw:
+                ev = _json_line(raw)
+                if ev and _is_prompt(ev):
+                    entry["turns"] += 1
+    entry["pos"], entry["size"], entry["mtime"] = pos, st.st_size, st.st_mtime
+    entry["last"] = None
+    with open(path, "rb") as f:  # 最后一条真回复（出错时 Claude Code 写的 <synthetic> 不算）的模型和用量
+        for start, n in reversed(entry["assist"]):
+            f.seek(start)
+            ev = _json_line(f.read(n))
+            msg = (ev or {}).get("message")
+            if isinstance(msg, dict) and isinstance(msg.get("usage"), dict) and msg.get("model") != "<synthetic>":
+                entry["last"] = {"model": msg.get("model") or "", "usage": msg["usage"]}
+                break
+    return entry
+
+
+def transcript_meta(path):
+    """一个会话记录的摘要：{"turns", "first_ts", "cwd", "model", "context_used", "cache_hit", "boundary", "turns_at_boundary"}。
+
+    context_used：最后一条回复的 输入 + 缓存读取 + 缓存写入 + 输出（这条回复本身也已经在上下文里了）；cache_hit：那一次请求的
+    输入里有多少是从缓存读的。读不了时返回 None。"""
+    try:
+        with _SESSION_SCAN_LOCK:
+            e = _SESSION_META[path] = _scan_session_meta(path, _SESSION_META.get(path))
+            e["used_at"] = time.time()
+            e = dict(e)
+    except OSError:
+        return None
+    last = e.get("last") or {}
+    u = last.get("usage") or {}
+    n = lambda k: int(u.get(k) or 0)  # noqa: E731
+    used = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") + n("output_tokens") if u else None
+    inp = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")
+    return {"turns": e["turns"], "first_ts": e["first_ts"], "cwd": e["cwd"], "model": last.get("model") or None,
+            "context_used": used, "cache_hit": round(n("cache_read_input_tokens") / inp, 4) if inp else None,
+            "boundary": e["boundary"], "turns_at_boundary": e["turns_at_boundary"]}
+
+
+def _comp_add(acc, key, cat, name, detail, tokens, count=0):
+    it = acc.get(key)
+    if it is None:
+        it = acc[key] = {"cat": cat, "key": key, "name": name, "detail": detail, "count": 0, "tokens": 0}
+    it["tokens"] += tokens
+    it["count"] += count
+
+
+def _short_dir(path, cwd):
+    """读过的文件显示成 文件名 + 短目录：在工作目录里的写相对目录，在家目录里的写 ~/…"""
+    d = os.path.dirname(path.replace("\\", "/"))
+    base = (cwd or "").replace("\\", "/").rstrip("/")
+    if base and (d == base or d.startswith(base + "/")):
+        rel = d[len(base):].strip("/")
+        return rel + "/" if rel else ""
+    h = home().replace("\\", "/").rstrip("/")
+    if h and (d == h or d.startswith(h + "/")):
+        d = "~" + d[len(h):]
+    return d + "/" if d else ""
+
+
+def _comp_line(c, ev, cwd):
+    """把记录里的一行算进组成（c 是 _scan_composition 的累计）。"""
+    typ, msg = ev.get("type"), ev.get("message")
+    if ev.get("isSidechain") or typ not in ("user", "assistant") or not isinstance(msg, dict):
+        return
+    acc = c["acc"]
+    content = msg.get("content")
+    if typ == "user" and _is_prompt(ev):
+        c["turn"] += 1
+
+    def chat(nbytes):
+        if ev.get("isCompactSummary"):
+            _comp_add(acc, "summary", "chat", "压缩后的摘要", "", _est_tokens(nbytes))
+        elif c["turn"] > 0:
+            _comp_add(acc, f"turn:{c['turn']}", "chat", f"第 {c['turn']} 轮", "", _est_tokens(nbytes))
+        else:
+            _comp_add(acc, "start", "chat", "开头", "", _est_tokens(nbytes))
+
+    if isinstance(content, str):
+        chat(_text_bytes(content))
+        return
+    if not isinstance(content, list):
+        return
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if bt == "text":
+            chat(_text_bytes(b.get("text")))
+        elif bt == "thinking":
+            chat(_text_bytes(b.get("thinking")))
+        elif bt == "image" and typ == "user":
+            _comp_add(acc, "img:you", "images", "你发的图片", "", IMAGE_TOKENS, 1)
+        elif bt == "tool_use" and typ == "assistant":
+            name = str(b.get("name") or "?")
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            fp = inp.get("file_path") if name == "Read" and isinstance(inp.get("file_path"), str) else None
+            c["tools"][str(b.get("id") or "")] = [name, fp]
+            if fp:
+                _comp_add(acc, f"file:{fp}", "files", os.path.basename(fp.replace("\\", "/")) or fp, _short_dir(fp, cwd),
+                          _est_tokens(_leaf_bytes(inp)), 1)
+            else:
+                _comp_add(acc, f"tool:{name}", "tools", name, "", _est_tokens(_leaf_bytes(inp)), 1)
+        elif bt == "tool_result" and typ == "user":
+            name, fp = c["tools"].get(str(b.get("tool_use_id") or ""), ["?", None])
+            res = b.get("content")
+            nbytes = 0
+            if isinstance(res, str):
+                nbytes = _text_bytes(res)
+            elif isinstance(res, list):
+                for r in res:
+                    if not isinstance(r, dict):
+                        continue
+                    if r.get("type") == "text":
+                        nbytes += _text_bytes(r.get("text"))
+                    elif r.get("type") == "image":
+                        _comp_add(acc, f"img:{name}", "images", f"{name} 返回的图片", "", IMAGE_TOKENS, 1)
+            if fp:
+                _comp_add(acc, f"file:{fp}", "files", os.path.basename(fp.replace("\\", "/")) or fp, _short_dir(fp, cwd),
+                          _est_tokens(nbytes))
+            else:
+                _comp_add(acc, f"tool:{name}", "tools", name, "", _est_tokens(nbytes))
+
+
+def _scan_composition(path, entry, start, turns_before, cwd):
+    """从最后一次压缩（start；没压缩过是 0）往后，接着上次读到的地方把组成累计下去；压缩的位置变了就从新位置重来。"""
+    st = os.stat(path)
+    if entry is None or entry["start"] != start or st.st_size < entry["pos"]:
+        entry = {"start": start, "pos": start, "size": -1, "mtime": 0.0, "turn": turns_before, "acc": {}, "tools": {}}
+    if st.st_size == entry["size"] and st.st_mtime == entry["mtime"]:
+        return entry
+    stale = time.time() - st.st_mtime > 60
+    pos = entry["pos"]
+    with open(path, "rb") as f:
+        f.seek(pos)
+        for raw in f:
+            if not raw.endswith(b"\n") and not stale:
+                break
+            pos += len(raw)
+            if _has_kv(raw, b"isSidechain", b"true") or not (_has_kv(raw, b"type", b'"user"') or _has_kv(raw, b"type", b'"assistant"')):
+                continue
+            ev = _json_line(raw)
+            if ev:
+                _comp_line(entry, ev, cwd)
+    entry["pos"], entry["size"], entry["mtime"] = pos, st.st_size, st.st_mtime
+    return entry
+
+
+def composition_view(acc, total, top=COMPOSITION_TOP):
+    """把累计的条目整理成界面要的：分类合计、占得最多的 top 项。total 是上下文实际用了多少（最后一条回复的用量）；
+    估出来的加起来比它多时按比例缩到它，剩下的是“其他”（系统提示词、工具定义、记忆文件这些记录里没有的）。"""
+    items = [dict(it) for it in acc.values() if it["tokens"] > 0 or it["count"] > 0]
+    counted = sum(it["tokens"] for it in items)
+    exact = total is not None
+    if total is None:
+        total = counted
+    scaled = counted > total > 0 or (counted > 0 and total == 0)
+    if scaled:
+        for it in items:
+            it["tokens"] = it["tokens"] * total // counted
+        counted = sum(it["tokens"] for it in items)
+    cats = {k: 0 for k in ("chat", "files", "tools", "images")}
+    for it in items:
+        cats[it["cat"]] += it["tokens"]
+    cats["other"] = max(0, total - counted)
+    items.sort(key=lambda it: (-it["tokens"], it["key"]))
+    return {"total": total, "exact": exact, "scaled": scaled, "categories": cats, "items": items[:top], "item_count": len(items)}
+
+
+def transcript_composition(path, meta=None, top=COMPOSITION_TOP):
+    """一个会话记录现在的上下文按内容估的组成（只看最后一次压缩之后）。读不了时返回 None。"""
+    meta = meta or transcript_meta(path)
+    if meta is None:
+        return None
+    try:
+        with _SESSION_SCAN_LOCK:
+            e = _SESSION_COMP[path] = _scan_composition(path, _SESSION_COMP.get(path), meta["boundary"] or 0,
+                                                        meta["turns_at_boundary"] if meta["boundary"] is not None else 0,
+                                                        meta.get("cwd"))
+            e["used_at"] = time.time()
+            acc = {k: dict(v) for k, v in e["acc"].items()}
+    except OSError:
+        return None
+    out = composition_view(acc, meta["context_used"], top)
+    out["since_compact"] = meta["boundary"] is not None
+    return out
+
+
+def _prune_session_caches(keep):
+    """不在跑的会话的缓存：十分钟没用到就扔掉（缓存里只有数字和文件路径，但几百个会话攒着也占内存）。"""
+    now = time.time()
+    with _SESSION_SCAN_LOCK:
+        for cache in (_SESSION_META, _SESSION_COMP):
+            for p in [p for p, e in cache.items() if p not in keep and now - e.get("used_at", 0) > 600]:
+                del cache[p]
+
+
+_MAC_CWDS = {}  # (pid, 命令行) -> 工作目录：macOS 上 lsof 要几十到几百毫秒，同一个进程的工作目录不会变，查到就记着
+
+
+def claude_proc_info(procs):
+    """正在跑的 claude 进程各自的 {"cwd", "secs"（已经跑了几秒）, "bot", "login"}，看不出来的不填。
+    Linux 读 /proc（都看得出）；macOS 用 ps 看运行时长、lsof 看工作目录；Windows 都看不出来。"""
+    out = {pid: {} for pid, _ in procs}
+    if not procs:
+        return out
+    if proc_root():
+        for s in claude_sessions() or []:
+            if s["pid"] in out:
+                out[s["pid"]] = {"cwd": s["cwd"], "secs": s["secs"], "bot": s["bot"], "login": s["login"]}
+        return out
+    if IS_WIN:
+        return out
+    for pid, et in _ps_etimes(list(out)).items():
+        if pid in out:
+            out[pid]["secs"] = _etime_secs(et)
+    cmds = dict(procs)
+    need = [pid for pid in out if (pid, cmds[pid]) not in _MAC_CWDS]
+    if need:
+        try:
+            txt = subprocess.run(["lsof", "-a", "-d", "cwd", "-p", ",".join(str(p) for p in need), "-Fn"],
+                                 capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            txt = ""
+        pid = None
+        for line in txt.splitlines():
+            if line.startswith("p") and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line.startswith("n") and pid in out:
+                _MAC_CWDS[(pid, cmds[pid])] = line[1:]
+    for k in [k for k in _MAC_CWDS if k[0] not in out]:
+        del _MAC_CWDS[k]
+    for pid in out:
+        if (pid, cmds[pid]) in _MAC_CWDS:
+            out[pid]["cwd"] = _MAC_CWDS[(pid, cmds[pid])]
+    return out
+
+
+def _waiting_sessions(running):
+    """弹着权限确认、还没答的会话 id（规则和 attention_view 一样）。"""
+    if not running:
+        return set()
+    now, out = time.time(), set()
+    for sid, s in _load_attention()["sessions"].items():
+        if not isinstance(s, dict):
+            continue
+        since = float(s.get("since_ts") or 0)
+        if now - since > ATTENTION_MAX_AGE:
+            continue
+        try:
+            if os.path.getmtime(s.get("transcript") or "") > since + 2:
+                continue
+        except OSError:
+            pass
+        out.add(sid)
+    return out
+
+
+def _project_transcripts(cwd):
+    """工作目录对应的会话记录 [(修改时间, 路径)]，新的在前。只看那个目录这一层（子目录里是子 agent 的记录）。"""
+    if not cwd:
+        return []
+    d = os.path.join(claude_config_dir(), "projects", project_dir_name(cwd))
+    out = []
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                if e.name.endswith(".jsonl"):
+                    try:
+                        out.append((e.stat().st_mtime, e.path))
+                    except OSError:
+                        pass
+    except OSError:
+        return []
+    return sorted(out, reverse=True)
+
+
+def match_sessions(procs, info, recs):
+    """把正在跑的 claude 进程对上会话：[(pid, 会话 id, 钩子记录, 记录文件, 怎么对上的)]。
+
+    先按钩子记的 pid（Linux 记得到父进程和祖父进程），再按工作目录对钩子记录，最后用那个工作目录里最新的、还没被
+    别的进程占走的记录文件。Windows 看不出工作目录：剩下的钩子记录按最近有动静的先后分给还没对上的进程。"""
+    rec_items = sorted(((sid, r) for sid, r in recs.items() if isinstance(r, dict)),
+                       key=lambda x: -float(x[1].get("last_ts") or 0))
+    by_pid = {}
+    for sid, r in rec_items:
+        for p in r.get("pids") or []:
+            by_pid.setdefault(p, []).append(sid)
+    used_sids, used_files, out = set(), set(), {}
+    for pid, _ in procs:  # 1. pid
+        sid = next((s for s in by_pid.get(pid, []) if s not in used_sids), None)
+        if sid:
+            used_sids.add(sid)
+            out[pid] = [sid, "hook"]
+    for pid, _ in procs:  # 2. 工作目录 → 钩子记录
+        cwd = (info.get(pid) or {}).get("cwd")
+        if pid in out or not cwd:
+            continue
+        sid = next((s for s, r in rec_items if s not in used_sids and r.get("cwd") == cwd), None)
+        if sid:
+            used_sids.add(sid)
+            out[pid] = [sid, "cwd"]
+    rows = []
+    for pid, _ in procs:
+        sid, how = out.get(pid, [None, None])
+        rec = recs.get(sid) if sid else None
+        path = (rec or {}).get("transcript") or None
+        if sid and not path:
+            cwd = (info.get(pid) or {}).get("cwd") or (rec or {}).get("cwd")
+            cand = os.path.join(claude_config_dir(), "projects", project_dir_name(cwd), sid + ".jsonl") if cwd else None
+            path = cand if cand and os.path.exists(cand) else None
+        if path:
+            used_files.add(os.path.normcase(os.path.abspath(path)))
+        rows.append([pid, sid, rec, path, how])
+    for row in rows:  # 3. 工作目录里最新的记录文件
+        if row[1]:
+            continue
+        cwd = (info.get(row[0]) or {}).get("cwd")
+        for _, p in _project_transcripts(cwd):
+            key = os.path.normcase(os.path.abspath(p))
+            if key in used_files:
+                continue
+            used_files.add(key)
+            sid = os.path.splitext(os.path.basename(p))[0]
+            row[1:] = [sid, recs.get(sid) if sid not in used_sids else None, p, "newest"]
+            used_sids.add(sid)
+            break
+    if IS_WIN:  # 4. 看不出工作目录：剩下的钩子记录按先后分
+        left = [(s, r) for s, r in rec_items if s not in used_sids]
+        for row in rows:
+            if row[1] or not left:
+                continue
+            sid, rec = left.pop(0)
+            used_sids.add(sid)
+            row[1:] = [sid, rec, rec.get("transcript") or None, "guess"]
+    return [tuple(r) for r in rows]
+
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path) if path else None
+    except OSError:
+        return None
+
+
+def _session_rows(procs, data=None, detail=False):
+    """正在跑的会话一行一个（见 sessions_view）。detail=False 时只算状态（红绿灯数“几个在回答”用，不读记录内容）。"""
+    pids = [p for p, _ in procs]
+    info = claude_proc_info(procs)
+    recs = _load_session_state()["sessions"]
+    waiting = _waiting_sessions(bool(procs))
+    act_t = _ACTIVITY.get("t") or 0
+    rates = (_ACTIVITY.get("rates") or {}) if act_t and time.monotonic() - act_t < 30 else {}
+    now = time.time()
+    owner_of = owner_finder(data) if data else None
+    names = {a["id"]: a.get("label") or a.get("email") or a["id"] for a in (data or {}).get("accounts", [])}
+    out = []
+    matched = match_sessions(procs, info, recs)
+    for pid, sid, rec, path, how in matched:
+        inf = info.get(pid) or {}
+        mt = _mtime(path)
+        state = session_state(rec, bool(sid) and sid in waiting, (now - mt) if mt else None, rates.get(pid), now)
+        row = {"id": sid or f"pid-{pid}", "pid": pid, "state": state, "matched": how}
+        if detail:
+            meta = transcript_meta(path) if path else None
+            cwd = inf.get("cwd") or (rec or {}).get("cwd") or (meta or {}).get("cwd") or ""
+            secs = inf.get("secs")
+            started = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=secs)) if secs is not None \
+                else parse_iso((meta or {}).get("first_ts")) \
+                or (dt.datetime.fromtimestamp(float(rec["first_ts"]), dt.timezone.utc) if (rec or {}).get("first_ts") else None)
+            model = (meta or {}).get("model")
+            win, exact = context_window(model)
+            used = (meta or {}).get("context_used")
+            login = inf.get("login")
+            acc_id = None
+            if login in (None, "machine", "unknown") and owner_of and started:
+                acc_id = owner_of(started)
+            bot = inf.get("bot")
+            h = home().replace("\\", "/").rstrip("/")
+            shown = cwd.replace("\\", "/")
+            if h and (shown == h or shown.startswith(h + "/")):
+                shown = "~" + shown[len(h):]
+            row.update({
+                "project": bot_label(*bot) if bot else (os.path.basename(cwd.replace("\\", "/").rstrip("/")) or shown or "看不出是哪个项目"),
+                "cwd": shown or None, "login": login, "login_text": LOGIN_TEXT.get(login) if login and login != "machine" else None,
+                "account_id": acc_id, "account": names.get(acc_id) if acc_id else None,
+                "model": model, "started_at": started.replace(microsecond=0).isoformat() if started else None,
+                "last_active": dt.datetime.fromtimestamp(mt, dt.timezone.utc).replace(microsecond=0).isoformat() if mt else None,
+                "turns": (meta or {}).get("turns"), "context_used": used, "context_window": win, "window_exact": exact,
+                "cache_hit": (meta or {}).get("cache_hit"), "health": context_health(used, win),
+                "has_transcript": meta is not None, "_path": path})
+        out.append(row)
+    if detail:
+        _prune_session_caches({p for *_, p, _ in matched if p})
+    order = {"waiting": 0, "busy": 1, "idle": 2}
+    out.sort(key=lambda r: (order[r["state"]], -(parse_iso(r.get("last_active")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)).timestamp()))
+    return out
+
+
+def sessions_view(data):
+    """GET /api/sessions：这台电脑上正在跑的 Claude Code，一个会话一行。只读本机的进程表、钩子记录和会话记录。"""
+    procs = running_claude_processes()
+    if isinstance(procs, ProcsUnknown):
+        return {"known": False, "sessions": [], "count": 0, "answering": 0, "waiting": 0}
+    claude_activity([p for p, _ in procs])  # 顺便采一次 CPU（缓存几秒），每个会话在不在吃 CPU 用得上
+    rows = _session_rows(procs, data, detail=True)
+    for r in rows:
+        r.pop("_path", None)
+    return {"known": True, "sessions": rows, "count": len(rows), "answering": sum(r["state"] == "busy" for r in rows),
+            "waiting": sum(r["state"] == "waiting" for r in rows),
+            "hooks": bool(hooks_status().get("installed")), "platform": platform.system(),
+            "generated_at": now_iso()}
+
+
+def session_detail(data, sid):
+    """GET /api/sessions/<id>：这个会话现在的上下文按内容估的组成（最后一次压缩之后）。会话不在跑了就报错。"""
+    procs = running_claude_processes()
+    if isinstance(procs, ProcsUnknown):
+        raise CamError("这次没查到正在运行的进程，稍后再试")
+    claude_activity([p for p, _ in procs])
+    rows = _session_rows(procs, data, detail=True)
+    row = next((r for r in rows if r["id"] == sid), None)
+    if row is None:
+        raise CamError("这个会话已经结束了")
+    path = row.pop("_path", None)
+    comp = transcript_composition(path) if path else None
+    if comp is not None:
+        comp["window"], comp["window_exact"] = row["context_window"], row["window_exact"]
+    return {"session": row, "composition": comp}
+
+
+def session_phrase(n, busy, answering=None, waiting=0):
+    """“3 个会话 · 1 个在回答 · 1 个等你确认”。answering 为 None（看不出是哪个在回答）时只写“正在回答”。"""
+    parts = [f"{n} 个会话"]
+    if answering:
+        parts.append(f"{answering} 个在回答")
+    elif busy:
+        parts.append("正在回答")
+    if waiting:
+        parts.append(f"{waiting} 个等你确认")
+    return " · ".join(parts)
 
 
 def cmd_hooks(args):
@@ -4502,8 +5531,10 @@ def make_handler(store, token):
                     return self._send(200, vault_route(store, method, parts, self._body() if method == "POST" else {}))
                 if method == "POST" and parts == ["open-external"]:
                     return self._send(200, open_external_url(self._body().get("url")))
-                if method == "POST" and parts == ["open-panel"]:  # 卡片小面板里点“打开管理面板”：在这台电脑的浏览器里打开
-                    return self._send(200, {"ok": True, "url": open_panel(store, self.server.server_address[1])})
+                if method == "POST" and parts == ["open-panel"]:  # 卡片小面板里点“管理面板”：在这台电脑的浏览器里打开，带上要看的页签
+                    body = self._body()
+                    tab = body.get("tab") if isinstance(body, dict) else None
+                    return self._send(200, {"ok": True, "url": open_panel(store, self.server.server_address[1], tab)})
                 if method == "GET" and parts == ["state"]:
                     return self._send(200, public_state(store, store.load()))
                 if method == "POST" and parts == ["refresh"]:
@@ -4511,11 +5542,20 @@ def make_handler(store, token):
                     return self._send(200, public_state(store, data))
                 if method == "GET" and parts == ["local-usage"]:
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if q.get("range"):  # 管理面板：按小时 / 天 / 周 / 月的柱子、明细、热力图
+                        return self._send(200, local_report(store.load(), q["range"][0]))
                     try:
                         days = max(1, min(365, int((q.get("days") or ["30"])[0])))
                     except ValueError:
                         raise CamError("days 要是天数")
                     return self._send(200, local_usage(store.load(), days))
+                if method == "GET" and parts == ["sessions"]:  # 会话页：这台电脑上正在跑的 Claude Code
+                    return self._send(200, sessions_view(store.load()))
+                if method == "GET" and len(parts) == 2 and parts[0] == "sessions":  # 一个会话的上下文组成（估的）
+                    return self._send(200, session_detail(store.load(), urllib.parse.unquote(parts[1])))
+                if method == "GET" and parts == ["usage-samples"]:  # 7 天额度的节奏线
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    return self._send(200, usage_samples_view(store, store.load(), (q.get("id") or [None])[0]))
                 if method == "GET" and parts == ["menubar"]:  # 卡片小面板的“设置”页
                     return self._send(200, menubar_settings(store))
                 if method == "PUT" and parts == ["menubar"]:
@@ -5048,10 +6088,13 @@ def restart_stale_serve(store, port, token):
     return False
 
 
-def open_panel(store, port=8787):
-    """在浏览器打开 Web 面板（菜单栏的“打开管理面板”）。返回打开的地址。"""
+PANEL_TABS = ("accounts", "usage", "sessions", "env", "settings")  # 管理面板的页签，地址 # 后面写哪个就打开哪页
+
+
+def open_panel(store, port=8787, tab=None):
+    """在浏览器打开 Web 面板（菜单栏的“打开管理面板”）。tab 是 PANEL_TABS 里的一个时打开到那一页，别的值不管。返回打开的地址。"""
     p, token = ensure_panel(store, port)
-    url = f"http://127.0.0.1:{p}/?t={token}"
+    url = f"http://127.0.0.1:{p}/?t={token}" + (f"#{tab}" if tab in PANEL_TABS else "")
     open_in_browser(url)
     return url
 

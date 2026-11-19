@@ -71,6 +71,31 @@ export interface Account {
   desktop?: { running: boolean; login: "yes" | "expired" | "no" | "never" | "unknown"; login_expires: string | null } | null;
   /** 每天的最高用量：日期（本地）→ [5 小时 %, 7 天 %]，最近 30 天，后台刷新时记的 */
   usage_days?: Record<string, [number | null, number | null]> | null;
+  /** 7 天额度的节奏（后端按采样点算的，见 Pace），没有 7 天额度时为 null */
+  pace?: Pace | null;
+  /** 接口给的订阅信息；subscription_expires_at 是没手动填到期日时用的到期时间 */
+  auto?: { subscription_expires_at?: string | null } | null;
+}
+
+/** 7 天额度的节奏（usage_pace）：时间都是 Unix 秒。state：out 重置前就用完 / ok 用不完 / full 用满了 / null 窗口刚开始还不好估 */
+export interface Pace {
+  start: number;
+  resets_at: number;
+  used: number;
+  even: number; // 照匀速现在应该用到的百分比
+  ahead: boolean;
+  basis: "recent" | "window" | null; // 速度按最近一天的采样点，还是按这个窗口开始以来的平均
+  per_day: number | null;
+  state: "out" | "ok" | "full" | null;
+  out_at: number | null;
+  early_secs: number | null;
+  left: number | null; // 用不完时重置那一刻大约还剩百分之几
+}
+
+/** GET /api/usage-samples：每个有 7 天额度的号的节奏和画线用的点 [[秒, 7 天 %], …] */
+export interface UsageSamples {
+  now: number;
+  accounts: Record<string, { pace: Pace; points: [number, number][] }>;
 }
 
 /** Claude 桌面版：装没装、版本、开着没有（running 为 null 是查不出来）、开着的是哪个号（account）、开着的实例都看得出用的哪个目录（known） */
@@ -96,6 +121,73 @@ export interface AccountHealth {
   issues: HealthIssue[];
 }
 
+/** /api/state 里的 sessions：几个会话开着、有没有在执行的、几个在回答（看不出是哪个时为 null）、几个等你确认、红绿灯那句话 */
+export interface SessionsBrief {
+  count: number;
+  busy?: boolean;
+  answering?: number | null;
+  waiting?: number;
+  text?: string;
+}
+
+/** 会话页的一行（/api/sessions） */
+export interface SessionRow {
+  id: string;
+  pid: number;
+  state: "busy" | "waiting" | "idle";
+  matched: "hook" | "cwd" | "newest" | "guess" | null;
+  project?: string;
+  cwd?: string | null;
+  login?: string | null;
+  login_text?: string | null;
+  account_id?: string | null;
+  account?: string | null;
+  model?: string | null;
+  started_at?: string | null;
+  last_active?: string | null;
+  turns?: number | null;
+  context_used?: number | null;
+  context_window?: number;
+  window_exact?: boolean;
+  cache_hit?: number | null;
+  health?: "ok" | "high" | "full" | null;
+  has_transcript?: boolean;
+}
+
+export interface SessionsView {
+  known: boolean;
+  count: number;
+  answering: number;
+  waiting: number;
+  hooks?: boolean;
+  sessions: SessionRow[];
+}
+
+/** 上下文组成里的一项（按记录估的） */
+export interface CompItem {
+  cat: "chat" | "files" | "tools" | "images";
+  key: string;
+  name: string;
+  detail: string;
+  count: number;
+  tokens: number;
+}
+
+export interface SessionDetail {
+  session: SessionRow;
+  composition: {
+    total: number;
+    exact: boolean;
+    scaled: boolean;
+    since_compact?: boolean;
+    window?: number;
+    window_exact?: boolean;
+    categories: Record<"chat" | "files" | "tools" | "images" | "other", number>;
+    items: CompItem[];
+    item_count: number;
+  } | null;
+}
+
 export interface State {
   version: string;
   backend: string;
@@ -108,7 +200,7 @@ export interface State {
   region?: RegionInfo | null; // 后台上次检测到的出口地区，只用于提示
   risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
-  sessions?: { count: number; busy?: boolean } | null; // 本机开着的 claude 会话数，以及有没有真的在执行任务（标题旁的红绿灯用）
+  sessions?: SessionsBrief | null; // 本机开着的 claude 会话：几个、有没有在执行、几个在回答 / 等你确认（标题旁的红绿灯用）
   attention?: { count: number; text: string; since?: string | null } | null; // Claude Code 弹着权限确认在等你（cam 的钩子记的）
   desktop_app?: DesktopApp | null; // 有桌面版的号时才有
 }
@@ -195,6 +287,31 @@ export interface LocalRow {
   cache_read: number;
   messages: number;
   cost_usd?: number; // 按 API 价折算
+}
+
+/** 本机用量里的一组数：四种 tokens、消息条数、按 API 价折算的金额 */
+export interface UsageRec {
+  input: number;
+  output: number;
+  cache_write: number;
+  cache_read: number;
+  messages: number;
+  cost_usd: number;
+}
+
+/** /api/local-usage?range=…：管理面板“本机 Claude Code 消耗”。buckets 是按顺序的柱子（含空的），series 只列有数的 */
+export interface LocalReport {
+  range: "today" | "7" | "30" | "all";
+  unit: "hour" | "day" | "week" | "month";
+  start: string;
+  buckets: string[];
+  series: (UsageRec & { bucket: string; account_id: string })[];
+  model_series: (UsageRec & { bucket: string; model: string })[];
+  totals: UsageRec & { sessions: number; cache_hit: number | null };
+  accounts: (UsageRec & { account_id: string; sessions: number; top_model: string | null })[];
+  model_totals: (UsageRec & { model: string; sessions: number; top_account: string | null })[];
+  /** 最近 days 天 星期几（周一 = 0）× 钟点 的消息条数 */
+  heatmap: { metric: "messages"; days: number; start: string; cells: number[][] };
 }
 
 export interface Settings {

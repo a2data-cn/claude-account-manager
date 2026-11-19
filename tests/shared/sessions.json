@@ -1,0 +1,1235 @@
+{
+ "_说明": "会话页的规则（cam.py 的 context_window / context_health / project_dir_name / session_state / session_phrase / transcript_meta / transcript_composition，Rust 版 sessions.rs）。transcripts 里每个 lines 按顺序写成一个 .jsonl（字符串原样写，对象写成紧凑 JSON），读出摘要和组成（top 是列出前几项）。",
+ "windows": [
+  {
+   "model": "claude-opus-5-5",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-fable-5-2",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-sonnet-5-5",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-haiku-5-5",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-opus-4-8",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-opus-4-6",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-sonnet-4-6",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "claude-haiku-4-5-20251001",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-opus-4-5-20251101",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-opus-4-1-20250805",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-sonnet-4-5-20250929",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-sonnet-4-20250514",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-opus-4-20250514",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-3-5-haiku-20241022",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "claude-sonnet-4-5[1m]",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+   "expect": [
+    200000,
+    true
+   ]
+  },
+  {
+   "model": "anthropic/claude-opus-5",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "CLAUDE-MYTHOS-5-2",
+   "expect": [
+    1000000,
+    true
+   ]
+  },
+  {
+   "model": "some-other-model",
+   "expect": [
+    200000,
+    false
+   ]
+  },
+  {
+   "model": "",
+   "expect": [
+    200000,
+    false
+   ]
+  },
+  {
+   "model": null,
+   "expect": [
+    200000,
+    false
+   ]
+  }
+ ],
+ "health": [
+  {
+   "used": 0,
+   "window": 200000,
+   "expect": "ok"
+  },
+  {
+   "used": 139999,
+   "window": 200000,
+   "expect": "ok"
+  },
+  {
+   "used": 140000,
+   "window": 200000,
+   "expect": "high"
+  },
+  {
+   "used": 179999,
+   "window": 200000,
+   "expect": "high"
+  },
+  {
+   "used": 180000,
+   "window": 200000,
+   "expect": "full"
+  },
+  {
+   "used": 250000,
+   "window": 200000,
+   "expect": "full"
+  },
+  {
+   "used": 355000,
+   "window": 1000000,
+   "expect": "ok"
+  },
+  {
+   "used": null,
+   "window": 1000000,
+   "expect": null
+  },
+  {
+   "used": 5,
+   "window": 0,
+   "expect": null
+  }
+ ],
+ "project_dir": [
+  {
+   "cwd": "/home/u/ai-project/claude-account-manager",
+   "expect": "-home-u-ai-project-claude-account-manager"
+  },
+  {
+   "cwd": "/tmp/claude-1000/-home-u/x.y_z",
+   "expect": "-tmp-claude-1000--home-u-x-y-z"
+  },
+  {
+   "cwd": "C:\\Users\\u\\code\\app",
+   "expect": "C--Users-u-code-app"
+  },
+  {
+   "cwd": "/中文/路径",
+   "expect": "------"
+  },
+  {
+   "cwd": "",
+   "expect": ""
+  }
+ ],
+ "states": [
+  {
+   "name": "钩子说在回答",
+   "rec": {
+    "state": "busy",
+    "last_ts": 1799999970.0
+   },
+   "waiting": false,
+   "written_ago": 400,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "钩子说在回答，但很久没动静（被打断）",
+   "rec": {
+    "state": "busy",
+    "last_ts": 1799999100.0
+   },
+   "waiting": false,
+   "written_ago": 700,
+   "cpu": 0.0,
+   "now": 1800000000.0,
+   "expect": "idle"
+  },
+  {
+   "name": "钩子说在回答，很久没写记录但在吃 CPU（长时间跑工具）",
+   "rec": {
+    "state": "busy",
+    "last_ts": 1799999100.0
+   },
+   "waiting": false,
+   "written_ago": 700,
+   "cpu": 0.5,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "钩子说在回答，记录刚写过",
+   "rec": {
+    "state": "busy",
+    "last_ts": 1799997000.0
+   },
+   "waiting": false,
+   "written_ago": 5,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "等你确认",
+   "rec": {
+    "state": "busy",
+    "last_ts": 1799999990.0
+   },
+   "waiting": true,
+   "written_ago": 1,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "waiting"
+  },
+  {
+   "name": "钩子记着等你确认、已经答过（attention 里没了）",
+   "rec": {
+    "state": "waiting",
+    "last_ts": 1799999940.0
+   },
+   "waiting": false,
+   "written_ago": 3,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "钩子说空闲",
+   "rec": {
+    "state": "idle",
+    "last_ts": 1799999996.0
+   },
+   "waiting": false,
+   "written_ago": 2,
+   "cpu": 0.9,
+   "now": 1800000000.0,
+   "expect": "idle"
+  },
+  {
+   "name": "钩子说空闲，之后记录又写了",
+   "rec": {
+    "state": "idle",
+    "last_ts": 1799999940.0
+   },
+   "waiting": false,
+   "written_ago": 3,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "钩子说空闲，记录在 Stop 之后 5 秒内写的不算",
+   "rec": {
+    "state": "idle",
+    "last_ts": 1799999990.0
+   },
+   "waiting": false,
+   "written_ago": 6,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "idle"
+  },
+  {
+   "name": "没有钩子，记录刚写",
+   "rec": null,
+   "waiting": false,
+   "written_ago": 10,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "没有钩子，在吃 CPU",
+   "rec": null,
+   "waiting": false,
+   "written_ago": 300,
+   "cpu": 0.05,
+   "now": 1800000000.0,
+   "expect": "busy"
+  },
+  {
+   "name": "没有钩子，闲着",
+   "rec": null,
+   "waiting": false,
+   "written_ago": 300,
+   "cpu": 0.01,
+   "now": 1800000000.0,
+   "expect": "idle"
+  },
+  {
+   "name": "没有钩子，没有记录",
+   "rec": null,
+   "waiting": false,
+   "written_ago": null,
+   "cpu": null,
+   "now": 1800000000.0,
+   "expect": "idle"
+  }
+ ],
+ "phrases": [
+  {
+   "n": 3,
+   "busy": true,
+   "answering": 1,
+   "waiting": 0,
+   "expect": "3 个会话 · 1 个在回答"
+  },
+  {
+   "n": 3,
+   "busy": true,
+   "answering": null,
+   "waiting": 0,
+   "expect": "3 个会话 · 正在回答"
+  },
+  {
+   "n": 2,
+   "busy": false,
+   "answering": 0,
+   "waiting": 0,
+   "expect": "2 个会话"
+  },
+  {
+   "n": 4,
+   "busy": true,
+   "answering": 2,
+   "waiting": 1,
+   "expect": "4 个会话 · 2 个在回答 · 1 个等你确认"
+  },
+  {
+   "n": 1,
+   "busy": false,
+   "answering": 0,
+   "waiting": 1,
+   "expect": "1 个会话 · 1 个等你确认"
+  }
+ ],
+ "transcripts": [
+  {
+   "name": "basic",
+   "lines": [
+    {
+     "type": "file-history-snapshot",
+     "snapshot": {}
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "帮我看看 panel.html"
+     },
+     "timestamp": "2026-11-18T01:00:00.000Z",
+     "cwd": "/w/proj",
+     "sessionId": "s-basic"
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "thinking",
+        "thinking": "Let me read the file first.",
+        "signature": "abc"
+       }
+      ],
+      "usage": {
+       "input_tokens": 5,
+       "cache_read_input_tokens": 0,
+       "cache_creation_input_tokens": 1000,
+       "output_tokens": 20
+      }
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "r1",
+        "name": "Read",
+        "input": {
+         "file_path": "/w/proj/web/panel.html",
+         "limit": 200
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 5,
+       "cache_read_input_tokens": 0,
+       "cache_creation_input_tokens": 1000,
+       "output_tokens": 20
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "r1",
+        "content": "<html>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "b1",
+        "name": "Bash",
+        "input": {
+         "command": "ls -la",
+         "description": "列目录"
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 5,
+       "cache_read_input_tokens": 1000,
+       "cache_creation_input_tokens": 400,
+       "output_tokens": 30
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "b1",
+        "content": [
+         {
+          "type": "text",
+          "text": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "<command-name>/model</command-name>"
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "[Request interrupted by user]"
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "系统提醒"
+     },
+     "isMeta": true
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "text",
+        "text": "再看这张截图"
+       },
+       {
+        "type": "image",
+        "source": {
+         "type": "base64",
+         "data": "AAAA"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "r2",
+        "name": "Read",
+        "input": {
+         "file_path": "/w/proj/shot.png"
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 5,
+       "cache_read_input_tokens": 1400,
+       "cache_creation_input_tokens": 1600,
+       "output_tokens": 10
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "r2",
+        "content": [
+         {
+          "type": "image",
+          "source": {
+           "type": "base64",
+           "data": "BBBB"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "r3",
+        "name": "Read",
+        "input": {
+         "file_path": "/w/proj/web/panel.html"
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 5,
+       "cache_read_input_tokens": 3000,
+       "cache_creation_input_tokens": 10,
+       "output_tokens": 10
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "r3",
+        "content": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "text",
+        "text": "看完了。"
+       }
+      ],
+      "usage": {
+       "input_tokens": 8,
+       "cache_read_input_tokens": 3000,
+       "cache_creation_input_tokens": 900,
+       "output_tokens": 120
+      }
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "text",
+        "text": "sub"
+       }
+      ],
+      "usage": {
+       "input_tokens": 1,
+       "cache_read_input_tokens": 1,
+       "cache_creation_input_tokens": 1,
+       "output_tokens": 1
+      }
+     },
+     "isSidechain": true
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "子 agent 的提问"
+     },
+     "isSidechain": true
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "<synthetic>",
+      "content": [],
+      "usage": {
+       "input_tokens": 0,
+       "cache_read_input_tokens": 0,
+       "cache_creation_input_tokens": 0,
+       "output_tokens": 0
+      }
+     }
+    }
+   ],
+   "top": 8,
+   "meta": {
+    "turns": 2,
+    "first_ts": "2026-11-18T01:00:00.000Z",
+    "cwd": "/w/proj",
+    "model": "claude-opus-5-5",
+    "context_used": 4028,
+    "cache_hit": 0.7677,
+    "compacted": false,
+    "turns_at_boundary": 0
+   },
+   "composition": {
+    "total": 4028,
+    "exact": true,
+    "scaled": true,
+    "categories": {
+     "chat": 32,
+     "files": 1230,
+     "tools": 165,
+     "images": 2598,
+     "other": 3
+    },
+    "item_count": 7,
+    "items": [
+     [
+      "images",
+      "img:Read",
+      "Read 返回的图片",
+      "",
+      1,
+      1299
+     ],
+     [
+      "images",
+      "img:you",
+      "你发的图片",
+      "",
+      1,
+      1299
+     ],
+     [
+      "files",
+      "file:/w/proj/web/panel.html",
+      "panel.html",
+      "web/",
+      2,
+      1227
+     ],
+     [
+      "tools",
+      "tool:Bash",
+      "Bash",
+      "",
+      1,
+      165
+     ],
+     [
+      "chat",
+      "turn:1",
+      "第 1 轮",
+      "",
+      0,
+      26
+     ],
+     [
+      "chat",
+      "turn:2",
+      "第 2 轮",
+      "",
+      0,
+      6
+     ],
+     [
+      "files",
+      "file:/w/proj/shot.png",
+      "shot.png",
+      "",
+      1,
+      3
+     ]
+    ]
+   }
+  },
+  {
+   "name": "compacted",
+   "lines": [
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "第一个问题"
+     },
+     "timestamp": "2026-11-17T09:30:00Z",
+     "cwd": "/w/two"
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "text",
+        "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+       }
+      ],
+      "usage": {
+       "input_tokens": 10,
+       "cache_read_input_tokens": 0,
+       "cache_creation_input_tokens": 5000,
+       "output_tokens": 1000
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "第二个问题"
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "e1",
+        "name": "Edit",
+        "input": {
+         "file_path": "/w/two/a.py",
+         "old_string": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+         "new_string": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 10,
+       "cache_read_input_tokens": 5000,
+       "cache_creation_input_tokens": 300,
+       "output_tokens": 50
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "e1",
+        "content": "ok"
+       }
+      ]
+     }
+    },
+    {
+     "type": "system",
+     "subtype": "compact_boundary",
+     "content": "Conversation compacted",
+     "compactMetadata": {
+      "trigger": "auto"
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "This session is being continued from a previous conversation. ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+     },
+     "isCompactSummary": true
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "第三个问题"
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "g1",
+        "name": "Grep",
+        "input": {
+         "pattern": "def ",
+         "path": "/w/two"
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 4,
+       "cache_read_input_tokens": 2000,
+       "cache_creation_input_tokens": 600,
+       "output_tokens": 40
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "g1",
+        "content": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "x9",
+        "name": "mcp__plugin_discord_discord__reply",
+        "input": {
+         "chat_id": "1",
+         "text": "好的"
+        }
+       }
+      ],
+      "usage": {
+       "input_tokens": 4,
+       "cache_read_input_tokens": 2600,
+       "cache_creation_input_tokens": 100,
+       "output_tokens": 40
+      }
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "x9",
+        "content": [
+         {
+          "type": "text",
+          "text": "sent"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "tool_use_id": "missing",
+        "content": "orphan result"
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "text",
+        "text": "完成"
+       }
+      ],
+      "usage": {
+       "input_tokens": 6,
+       "cache_read_input_tokens": 2700,
+       "cache_creation_input_tokens": 300,
+       "output_tokens": 60
+      }
+     }
+    }
+   ],
+   "top": 8,
+   "meta": {
+    "turns": 3,
+    "first_ts": "2026-11-17T09:30:00Z",
+    "cwd": "/w/two",
+    "model": "claude-opus-5-5",
+    "context_used": 3066,
+    "cache_hit": 0.8982,
+    "compacted": true,
+    "turns_at_boundary": 2
+   },
+   "composition": {
+    "total": 3066,
+    "exact": true,
+    "scaled": false,
+    "categories": {
+     "chat": 506,
+     "files": 0,
+     "tools": 310,
+     "images": 0,
+     "other": 2250
+    },
+    "item_count": 5,
+    "items": [
+     [
+      "chat",
+      "summary",
+      "压缩后的摘要",
+      "",
+      0,
+      500
+     ],
+     [
+      "tools",
+      "tool:Grep",
+      "Grep",
+      "",
+      1,
+      303
+     ],
+     [
+      "chat",
+      "turn:3",
+      "第 3 轮",
+      "",
+      0,
+      6
+     ],
+     [
+      "tools",
+      "tool:?",
+      "?",
+      "",
+      0,
+      4
+     ],
+     [
+      "tools",
+      "tool:mcp__plugin_discord_discord__reply",
+      "mcp__plugin_discord_discord__reply",
+      "",
+      1,
+      3
+     ]
+    ]
+   }
+  },
+  {
+   "name": "scaled",
+   "lines": [
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长长"
+     },
+     "timestamp": "2026-11-18T03:00:00Z",
+     "cwd": "/w/s"
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-opus-5-5",
+      "content": [
+       {
+        "type": "text",
+        "text": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+       }
+      ],
+      "usage": {
+       "input_tokens": 2,
+       "cache_read_input_tokens": 0,
+       "cache_creation_input_tokens": 400,
+       "output_tokens": 100
+      }
+     }
+    }
+   ],
+   "top": 8,
+   "meta": {
+    "turns": 1,
+    "first_ts": "2026-11-18T03:00:00Z",
+    "cwd": "/w/s",
+    "model": "claude-opus-5-5",
+    "context_used": 502,
+    "cache_hit": 0.0,
+    "compacted": false,
+    "turns_at_boundary": 0
+   },
+   "composition": {
+    "total": 502,
+    "exact": true,
+    "scaled": true,
+    "categories": {
+     "chat": 502,
+     "files": 0,
+     "tools": 0,
+     "images": 0,
+     "other": 0
+    },
+    "item_count": 1,
+    "items": [
+     [
+      "chat",
+      "turn:1",
+      "第 1 轮",
+      "",
+      0,
+      502
+     ]
+    ]
+   }
+  },
+  {
+   "name": "no usage",
+   "lines": [
+    {
+     "type": "user",
+     "message": {
+      "role": "user",
+      "content": "hello"
+     },
+     "timestamp": "2026-11-18T04:00:00Z",
+     "cwd": "/w/n"
+    },
+    {
+     "type": "assistant",
+     "message": {
+      "role": "assistant",
+      "model": "claude-sonnet-5-5",
+      "content": [
+       {
+        "type": "text",
+        "text": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+       }
+      ]
+     }
+    }
+   ],
+   "top": 8,
+   "meta": {
+    "turns": 1,
+    "first_ts": "2026-11-18T04:00:00Z",
+    "cwd": "/w/n",
+    "model": null,
+    "context_used": null,
+    "cache_hit": null,
+    "compacted": false,
+    "turns_at_boundary": 0
+   },
+   "composition": {
+    "total": 12,
+    "exact": false,
+    "scaled": false,
+    "categories": {
+     "chat": 12,
+     "files": 0,
+     "tools": 0,
+     "images": 0,
+     "other": 0
+    },
+    "item_count": 1,
+    "items": [
+     [
+      "chat",
+      "turn:1",
+      "第 1 轮",
+      "",
+      0,
+      12
+     ]
+    ]
+   }
+  },
+  {
+   "name": "spaced json",
+   "lines": [
+    "{\"type\": \"user\", \"message\": {\"role\": \"user\", \"content\": \"spaced json line\"}, \"timestamp\": \"2026-11-18T05:00:00Z\", \"cwd\": \"/w/sp\"}",
+    "{\"type\": \"assistant\", \"message\": {\"role\": \"assistant\", \"model\": \"claude-haiku-4-5-20251001\", \"content\": [{\"type\": \"text\", \"text\": \"ok\"}], \"usage\": {\"input_tokens\": 3, \"cache_read_input_tokens\": 0, \"cache_creation_input_tokens\": 97, \"output_tokens\": 2}}}"
+   ],
+   "top": 8,
+   "meta": {
+    "turns": 1,
+    "first_ts": "2026-11-18T05:00:00Z",
+    "cwd": "/w/sp",
+    "model": "claude-haiku-4-5-20251001",
+    "context_used": 102,
+    "cache_hit": 0.0,
+    "compacted": false,
+    "turns_at_boundary": 0
+   },
+   "composition": {
+    "total": 102,
+    "exact": true,
+    "scaled": false,
+    "categories": {
+     "chat": 5,
+     "files": 0,
+     "tools": 0,
+     "images": 0,
+     "other": 97
+    },
+    "item_count": 1,
+    "items": [
+     [
+      "chat",
+      "turn:1",
+      "第 1 轮",
+      "",
+      0,
+      5
+     ]
+    ]
+   }
+  }
+ ]
+}

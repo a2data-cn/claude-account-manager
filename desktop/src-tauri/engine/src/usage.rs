@@ -553,10 +553,10 @@ fn count(u: &Value, k: &str) -> i64 {
 /// 一条消息记账用得上的几个数。本机记录里的消息要留在内存里（见 local_events），几十万条，整个 usage 留着太占地方。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Tokens {
-    input: i64,
-    output: i64,
-    cache_write: i64,
-    cache_read: i64,
+    pub(crate) input: i64,
+    pub(crate) output: i64,
+    pub(crate) cache_write: i64,
+    pub(crate) cache_read: i64,
     /// 写缓存的部分里 5 分钟的和 1 小时的（价钱不一样）；usage 没分开给时都算 5 分钟的
     write_5m: i64,
     write_1h: i64,
@@ -591,7 +591,7 @@ pub fn message_cost(model: &str, u: &Value) -> Option<f64> {
     token_cost(model, &Tokens::of(u))
 }
 
-fn token_cost(model: &str, t: &Tokens) -> Option<f64> {
+pub(crate) fn token_cost(model: &str, t: &Tokens) -> Option<f64> {
     let m = model.to_lowercase();
     let m = m.find("claude-").map(|i| &m[i + 7..]).unwrap_or(&m);
     let &(key, mut inp, mut out, mut cr) = PRICES.iter().find(|r| m.starts_with(r.0))?;
@@ -1028,6 +1028,8 @@ pub fn refresh_usage(store: &Store, only: Option<&str>, allow_token_refresh: boo
     }
     roll_renewals(&mut fresh);
     store.save(&mut fresh)?;
+    // 7 天额度的节奏线要用的采样点；记不下来不影响用量本身
+    let _ = super::pace::record(store, &fresh);
     Ok(fresh)
 }
 
@@ -1269,7 +1271,12 @@ struct LocalEvent {
     tokens: Tokens,
     /// (消息 id, requestId)：同一条消息在几个文件里都有时只算一次
     key: (Option<Box<str>>, Option<Box<str>>),
+    /// 会话 id：记录里的 sessionId，没有就用文件名（Claude Code 一个会话一个文件）
+    session: Arc<str>,
 }
+
+/// 本机记录里的一条消息：(时间, 模型, 用量, 会话 id)
+pub(crate) type SessionEvent = (chrono::DateTime<Utc>, Arc<str>, Tokens, Arc<str>);
 
 /// 一个记录文件读到了哪、里面带用量的消息
 #[derive(Default)]
@@ -1291,7 +1298,12 @@ fn local_cache() -> &'static Mutex<LocalCache> {
 }
 
 /// 一行记录里带用量的消息；不是这种行返回 None。行里有不是 UTF-8 的字节也照样读（换成 U+FFFD）。
-fn parse_usage_line(raw: &[u8], last_model: Option<&Arc<str>>) -> Option<LocalEvent> {
+/// last 是这个文件里上一条消息：模型名、会话 id 和它一样时共用一份。file_session 是记录里没写会话 id 时用的文件名。
+fn parse_usage_line(
+    raw: &[u8],
+    last: Option<&LocalEvent>,
+    file_session: &Arc<str>,
+) -> Option<LocalEvent> {
     let line = String::from_utf8_lossy(raw);
     if !line.contains("\"usage\"") {
         return None;
@@ -1302,13 +1314,21 @@ fn parse_usage_line(raw: &[u8], last_model: Option<&Arc<str>>) -> Option<LocalEv
         .get("message")
         .filter(|m| m.get("usage").is_some_and(Value::is_object))?;
     let model = s(msg, "model").unwrap_or_default();
+    let session = match s(&ev, "sessionId").filter(|x| !x.is_empty()) {
+        None => file_session.clone(),
+        Some(id) => match last {
+            Some(l) if *l.session == *id => l.session.clone(),
+            _ => Arc::from(id),
+        },
+    };
     Some(LocalEvent {
         ts,
         // 一个会话里前后两条消息多半是同一个模型：名字共用一份
-        model: match last_model {
-            Some(m) if **m == *model => m.clone(),
+        model: match last {
+            Some(l) if *l.model == *model => l.model.clone(),
             _ => Arc::from(model),
         },
+        session,
         tokens: Tokens::of(&msg["usage"]),
         key: (
             s(msg, "id").map(Box::from),
@@ -1333,6 +1353,11 @@ fn scan_jsonl(path: &Path, meta: &fs::Metadata, entry: &mut FileEvents) -> std::
         .is_some_and(|d| d.as_secs() > 60);
     let mut fh = BufReader::new(fs::File::open(path)?);
     fh.seek(SeekFrom::Start(entry.pos))?;
+    let file_session: Arc<str> = Arc::from(
+        path.file_stem()
+            .map(|x| x.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
     let mut raw = Vec::new();
     loop {
         raw.clear();
@@ -1341,8 +1366,7 @@ fn scan_jsonl(path: &Path, meta: &fs::Metadata, entry: &mut FileEvents) -> std::
             break;
         }
         entry.pos += n as u64;
-        let last_model = entry.events.last().map(|e| &e.model);
-        if let Some(ev) = parse_usage_line(&raw, last_model) {
+        if let Some(ev) = parse_usage_line(&raw, entry.events.last(), &file_session) {
             entry.events.push(ev);
         }
     }
@@ -1352,6 +1376,14 @@ fn scan_jsonl(path: &Path, meta: &fs::Metadata, entry: &mut FileEvents) -> std::
 
 /// 本机 Claude Code 记录里每条带用量的消息：(时间, 模型, 用量)。同一条消息只算一次。与 cam.py 的 local_events 一致。
 fn local_events(since: chrono::DateTime<Utc>) -> Vec<(chrono::DateTime<Utc>, Arc<str>, Tokens)> {
+    local_events_with_sessions(since)
+        .into_iter()
+        .map(|(ts, model, tokens, _)| (ts, model, tokens))
+        .collect()
+}
+
+/// 同 local_events，后面多一个会话 id（cam.py 的 local_events(since, sessions=True)）
+pub(crate) fn local_events_with_sessions(since: chrono::DateTime<Utc>) -> Vec<SessionEvent> {
     let mut cache = local_cache().lock().unwrap_or_else(|e| e.into_inner());
     local_events_in(&claude_config_dir().join("projects"), &mut cache, since)
 }
@@ -1360,7 +1392,7 @@ fn local_events_in(
     root: &Path,
     cache: &mut LocalCache,
     since: chrono::DateTime<Utc>,
-) -> Vec<(chrono::DateTime<Utc>, Arc<str>, Tokens)> {
+) -> Vec<SessionEvent> {
     let files = walk_jsonl(root);
     {
         let live: HashSet<&PathBuf> = files.iter().collect();
@@ -1390,14 +1422,14 @@ fn local_events_in(
         if ev.ts < since || (ev.key != (None, None) && !seen.insert(&ev.key)) {
             continue;
         }
-        out.push((ev.ts, ev.model.clone(), ev.tokens));
+        out.push((ev.ts, ev.model.clone(), ev.tokens, ev.session.clone()));
     }
     out
 }
 
 /// 按切换记录找某个时刻登录的是哪个号。从没切换过时都算当前账号；最早一次切换之前的算不出来，返回 None。
 /// 与 cam.py 的 owner_finder 一致。
-fn owner_finder(data: &Value) -> impl Fn(chrono::DateTime<Utc>) -> Option<String> {
+pub(crate) fn owner_finder(data: &Value) -> impl Fn(chrono::DateTime<Utc>) -> Option<String> {
     let mut log: Vec<(chrono::DateTime<Utc>, String)> = data
         .get("switch_log")
         .and_then(|l| l.as_array())
@@ -1422,7 +1454,7 @@ fn owner_finder(data: &Value) -> impl Fn(chrono::DateTime<Utc>) -> Option<String
 }
 
 /// 保留 4 位小数，和 cam.py 的 round(x, 4) 一样按精确值取舍。
-fn round4(x: f64) -> f64 {
+pub(crate) fn round4(x: f64) -> f64 {
     format!("{:.4}", x).parse().unwrap_or(x)
 }
 
@@ -1618,7 +1650,7 @@ mod local_events_tests {
     fn outputs(root: &Path, cache: &mut LocalCache) -> Vec<i64> {
         let mut v: Vec<i64> = local_events_in(root, cache, since())
             .iter()
-            .map(|(_, _, t)| t.output)
+            .map(|(_, _, t, _)| t.output)
             .collect();
         v.sort_unstable();
         v

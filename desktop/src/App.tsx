@@ -4,6 +4,7 @@ import { api, command, inTauri, onEvent } from "./api";
 import { copyText } from "./clipboard";
 import { ago } from "./format";
 import { AccountDetail, AccountTile } from "./components/AccountCard";
+import { SummaryBar, type Points } from "./components/Pace";
 import {
   AddDialog,
   EditDialog,
@@ -14,6 +15,7 @@ import {
   type SwitchChoice,
 } from "./components/Dialogs";
 import { LocalUsage } from "./components/LocalUsage";
+import { Sessions } from "./components/Sessions";
 import { setPref, usePrefs } from "./prefs";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Privacy } from "./components/Privacy";
@@ -21,9 +23,19 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
 import { StatusLight } from "./components/StatusLight";
-import type { Account, RegionInfo, ServiceCheckItem, State, SwitchResult } from "./types";
+import type { Account, RegionInfo, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
 
-type Tab = "accounts" | "vault" | "settings";
+/** 页签：账号 / 用量 / 会话 / 环境 / 设置，和网页面板一样；“账号资料与邮箱”是标题栏右边的按钮，打开后占整页 */
+type Tab = "accounts" | "usage" | "sessions" | "env" | "settings";
+const TABS: [Tab, string][] = [["accounts", "账号"], ["usage", "用量"], ["sessions", "会话"], ["env", "环境"], ["settings", "设置"]];
+function savedTab(): Tab {
+  try {
+    const t = localStorage.getItem("cam-tab");
+    return TABS.some(([v]) => v === t) ? (t as Tab) : "accounts";
+  } catch {
+    return "accounts";
+  }
+}
 /** 这几项变了要整份换状态：等着的切换、后端的提醒、当前用的是哪些号 */
 const headOf = (s: State) => JSON.stringify([s.pending_switch ?? null, s.warning ?? null, s.accounts.filter((a) => a.is_active).map((a) => a.id)]);
 /** 红绿灯跟着走的两项：claude 会话（几个、在不在执行）、是不是弹着确认在等你 */
@@ -341,6 +353,14 @@ function ScoreCard({ state }: { state: State }) {
   );
 }
 
+function Loading() {
+  return (
+    <div className="panel empty">
+      <p className="hint">正在读取…</p>
+    </div>
+  );
+}
+
 /** 环境区块：出口 IP 一张卡、环境评分一张卡（每个信号一行），点“重新检测”在下面展开完整检测结果。只提醒，不拦 */
 function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
   const ready = !!(state.region?.status && state.risk_score);
@@ -362,6 +382,23 @@ function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
+  // 7 天额度节奏线的点（/api/usage-samples）：账号数据更新了就重新要一次，问不到就不画线（节奏的结论在 state 里）
+  const [paceSeries, setPaceSeries] = useState<Record<string, Points>>({});
+  const stamp = state?.generated_at;
+  useEffect(() => {
+    if (!stamp) return;
+    let stale = false;
+    api<UsageSamples>("GET", "/api/usage-samples")
+      .then((r) => {
+        if (!stale) setPaceSeries(Object.fromEntries(Object.entries(r.accounts || {}).map(([id, v]) => [id, v.points || []])));
+      })
+      .catch(() => {
+        if (!stale) setPaceSeries({});
+      });
+    return () => {
+      stale = true;
+    };
+  }, [stamp]);
   const stateRef = useRef<State | null>(null);
   stateRef.current = state;
   const stateSeq = useRef(0); // 每次整份换状态加一：在这之前问的 /api/state 回来了也不要
@@ -388,7 +425,27 @@ export default function App() {
       /* 存不了就只在本次会话里记住 */
     }
   };
-  const [tab, setTab] = useState<Tab>("accounts");
+  const [tab, setTabRaw] = useState<Tab>(savedTab);
+  const [vault, setVault] = useState(false); // 账号资料与邮箱：开着时占整页，页签都不选中
+  const setTab = (t: Tab) => {
+    setTabRaw(t);
+    setVault(false);
+    try {
+      localStorage.setItem("cam-tab", t);
+    } catch {
+      /* 存不了就只在本次打开时记住 */
+    }
+  };
+  const onTabKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // 方向键在页签间移动并切过去，Home / End 到头尾
+    const i = TABS.findIndex(([v]) => v === tab);
+    const j = ({ ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: TABS.length - 1 } as Record<string, number>)[e.key];
+    if (j === undefined) return;
+    e.preventDefault();
+    const next = TABS[(j + TABS.length) % TABS.length][0];
+    setTab(next);
+    e.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
+  };
   const [toastMsg, setToastMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const toastTimer = useRef<number>();
   const [, tick] = useState(0);
@@ -485,6 +542,7 @@ export default function App() {
   const badCount = sorted.filter((a) => a.health?.level === "error").length;
   // 环境卡的检测结果放在这里：卡片在顶部和底部之间移动时结果不丢
   const envSc = useServiceCheck(toast, load);
+  const lastFetch = (state?.accounts ?? []).map((a) => a.usage?.fetched_at).filter((x): x is string => !!x).sort().pop();
   // 环境有风险时把环境状态卡放到最上面，没风险时放到账号详情下面
   const risky = !!(state?.risk_score && state.region?.status && state.risk_score.grade !== "low");
   const firstRisk = (state?.risks ?? []).find((x) => x.level === "bad" || x.level === "warn")?.text;
@@ -495,7 +553,7 @@ export default function App() {
     if (!strip || !cur) return;
     const l = cur.getBoundingClientRect().left - strip.getBoundingClientRect().left + strip.scrollLeft;
     if (l < strip.scrollLeft || l + cur.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = Math.max(0, l - 3);
-  }, [selected?.id, tab, sorted.map((a) => a.id).join(",")]); // 回到账号页、列表重新排序后也要滑到选中的卡
+  }, [selected?.id, tab, vault, sorted.map((a) => a.id).join(",")]); // 回到账号页、列表重新排序后也要滑到选中的卡
 
   const run = async (key: string, fn: () => Promise<void>) => {
     if (busyRef.current) return;
@@ -615,43 +673,76 @@ export default function App() {
           </span>
         )}
         <span className="spacer" />
-          <nav className="tabs" aria-label="页面">
-            <button className={`tab${tab === "accounts" ? " on" : ""}`} onClick={() => setTab("accounts")}>
-              账号
-            </button>
-            <button className={`tab${tab === "vault" ? " on" : ""}`} onClick={() => setTab("vault")}>
-              账号资料与邮箱
-            </button>
-            {inTauri && <button className={`tab${tab === "settings" ? " on" : ""}`} onClick={() => setTab("settings")}>
-              手机与设置
-            </button>}
-          </nav>
         <ThemeToggle toast={toast} />
-        {tab === "accounts" && (
-          <button className="btn" disabled={!!busy} onClick={() => refresh()}>
-            {busy === "all" ? "刷新中…" : "刷新用量"}
-          </button>
-        )}
+        <button className="btn quiet" aria-pressed={vault} onClick={() => setVault(!vault)}>
+          {vault ? "收起账号资料" : "账号资料与邮箱"}
+        </button>
+        <button className="btn" disabled={!!busy} onClick={() => refresh()}>
+          {busy === "all" ? "刷新中…" : "刷新用量"}
+        </button>
       </header>
+      <div className="tabrow">
+        <div className="tabs" role="tablist" aria-label="页面" onKeyDown={onTabKey}>
+          {TABS.map(([v, t]) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              data-tab={v}
+              id={`tab-${v}`}
+              aria-controls={`pane-${v}`}
+              aria-selected={!vault && tab === v}
+              tabIndex={tab === v ? 0 : -1}
+              onClick={() => setTab(v)}
+            >
+              {t}
+              {v === "sessions" && !!state?.sessions?.count && <span className="n">{state.sessions.count}</span>}
+            </button>
+          ))}
+        </div>
+        {lastFetch && <span className="hint">{ago(lastFetch) === "刚刚" ? "用量刚刚更新" : `用量 ${ago(lastFetch)}更新`}</span>}
+      </div>
 
-      {tab === "vault" ? <AccountVault accounts={state?.accounts || []} onAccountsChanged={putState} toast={toast} /> : tab === "settings" ? (
-        <>
-          <PhoneAccess toast={toast} />
-          <section className="block">
-            <h2>数据</h2>
-            <div className="panel">
-              <p className="hint">
-                账号和凭据保存在 <code>~/.claude-accounts</code>，与脚本版 <code>cam</code> 共用。每次切换前的登录状态都会备份在 backups 目录，保留最近 30 份。
-              </p>
-              <button className="btn" onClick={() => command("open_data_dir").catch((e) => toast((e as Error).message, true))}>
-                打开数据目录
-              </button>
-            </div>
-          </section>
+      {vault ? (
+        <AccountVault accounts={state?.accounts || []} onAccountsChanged={putState} toast={toast} />
+      ) : tab === "usage" ? (
+        <div className="pane" role="tabpanel" id="pane-usage" aria-labelledby="tab-usage">
+          {state ? <LocalUsage accounts={state.accounts} stamp={state.generated_at} /> : <Loading />}
+        </div>
+      ) : tab === "sessions" ? (
+        <div className="pane" role="tabpanel" id="pane-sessions" aria-labelledby="tab-sessions">
+          <Sessions />
+        </div>
+      ) : tab === "env" ? (
+        <div className="pane" role="tabpanel" id="pane-env" aria-labelledby="tab-env">
+          {state ? <EnvCard state={state} sc={envSc} /> : <Loading />}
+        </div>
+      ) : tab === "settings" ? (
+        <div className="pane" role="tabpanel" id="pane-settings" aria-labelledby="tab-settings">
+          {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
+          {inTauri && <PhoneAccess toast={toast} />}
+          {inTauri && (
+            <section className="block">
+              <h2>数据</h2>
+              <div className="panel">
+                <p className="hint">
+                  账号和凭据保存在 <code>~/.claude-accounts</code>，与脚本版 <code>cam</code> 共用。每次切换前的登录状态都会备份在 backups 目录，保留最近 30 份。
+                </p>
+                <button className="btn" onClick={() => command("open_data_dir").catch((e) => toast((e as Error).message, true))}>
+                  打开数据目录
+                </button>
+              </div>
+            </section>
+          )}
           <Privacy toast={toast} onChanged={load} onCleared={envSc.reset} />
-        </>
+          {state && (
+            <p className="hint foot">
+              后端：{state.backend} {state.version}，数据更新于 {new Date(state.generated_at).toLocaleString()}
+            </p>
+          )}
+        </div>
       ) : (
-        <main aria-live="polite">
+        <main className="pane" role="tabpanel" id="pane-accounts" aria-labelledby="tab-accounts" aria-live="polite">
           {state?.warning && (
             <div className="notice" role="alert">
               ⚠ {state.warning}
@@ -677,9 +768,9 @@ export default function App() {
                 环境评分 <b>{state.risk_score.score}/100</b>：{state.risk_score.label}
                 {firstRisk ? ` · ${firstRisk}` : ""}
               </span>
-              <a className="btn quiet" href="#env">
+              <button type="button" className="btn quiet" onClick={() => setTab("env")}>
                 查看详情
-              </a>
+              </button>
             </div>
           )}
           {state && !state.accounts.length && (
@@ -701,6 +792,7 @@ export default function App() {
           )}
           {selected && (
             <>
+              <SummaryBar accounts={sorted} />
               <div className="sec-head">
                 <h2>账号 · {sorted.length} 个</h2>
                 <span className="hint">
@@ -741,7 +833,7 @@ export default function App() {
               </div>
               <div className="strip">
                 {sorted.map((a) => (
-                  <AccountTile key={a.id} a={a} selected={a.id === selected.id} onSelect={select} />
+                  <AccountTile key={a.id} a={a} selected={a.id === selected.id} onSelect={select} points={paceSeries[a.id]} sessions={state?.sessions} />
                 ))}
                 <button type="button" className="tile add" disabled={!!busy} onClick={() => setAdding(true)}>
                   <span className="plus">＋</span>添加账号
@@ -749,6 +841,7 @@ export default function App() {
               </div>
               <AccountDetail
                 a={selected}
+                points={paceSeries[selected.id]}
                 desktopApp={state?.desktop_app}
                 busy={!!busy}
                 onSwitch={switchTo}
@@ -758,14 +851,6 @@ export default function App() {
                 onRemove={setRemoving}
               />
             </>
-          )}
-          {state && <EnvCard state={state} sc={envSc} />}
-          {state && <LocalUsage accounts={state.accounts} stamp={state.generated_at} />}
-          {state && <Rules accounts={state.accounts} stamp={state.generated_at} toast={toast} />}
-          {state && (
-            <p className="hint foot">
-              后端：{state.backend} {state.version}，数据更新于 {new Date(state.generated_at).toLocaleString()}
-            </p>
           )}
         </main>
       )}

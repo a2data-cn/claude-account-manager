@@ -23,8 +23,10 @@
 ├── accounts.lock          # 数据锁，见“并发与锁”
 ├── background.lock        # 后台任务锁，见“并发与锁”
 ├── attention.json         # 哪些 Claude Code 会话弹着权限确认在等你（钩子写的，没有会话在等时没有这个文件），见“并发与锁”
-├── attention.lock         # 写 attention.json 时的锁
+├── attention.lock         # 写 attention.json、session-state.json 时的锁
+├── session-state.json     # 每个 Claude Code 会话现在在干什么（钩子写的，会话页和红绿灯“几个在回答”用），见“会话页”
 ├── update-check.json      # 上次 cam update --check 的结果（菜单栏、面板据它显示“更新（N 个新改动）”）
+├── usage-samples.json     # 每次刷新用量记的采样点，画 7 天额度的节奏线（见“7 天额度的节奏”），只在刷新用量时写
 ├── update.lock            # 同一时间只让一个 cam update 在跑
 └── server-token           # Web 面板访问令牌
 ```
@@ -107,6 +109,24 @@ React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同�
 - 目录规则：`cam claude` 启动时按当前目录做最长前缀匹配，切换后再执行 `claude`。
 - 提醒（`due_alerts(data, st)`，Rust：`alerts::due_alerts`，规则两边按 `tests/shared/alerts.json` 跑）：当前 Claude Code 号和有额度的网页号，5 小时、7 天额度 ≥ 阈值各提醒一次（`st.warned` 记 `id|resets_at` / `id|7d|resets_at`，同一个额度窗口只提醒一次），附上多久后重置；有额度的号（Claude Code、网页、桌面版）某个窗口 ≥ 99.5% 记进 `st.exhausted`，过了它的 `resets_at` 提醒一次“恢复了”；手动填了到期日、没勾自动续期的号，还剩 3 天以内提醒一次、过了到期日再提醒一次（`id|exp|日期|soon/over`）。`st` 是后台的状态（菜单栏插件存在 `.menubar-state.json`，`cam serve` 和桌面版在内存里）。**不会自动切换，也不推荐换哪个号。**
 - 每天的最高用量：刷新用量写回时 `note_usage_day`（Rust：`usage::note_usage_day`，`tests/shared/usage_days.json`）把这次取到的 5 小时 / 7 天百分比记进账号的 `usage_days`（`{"2026-11-14": [64.0, 30.5]}`，本地日期，当天取最高，保留一位小数四舍五入，只留最近 30 天）；这次有错误（数字是上一次的）或者数字不是今天取到的不记。`/api/state` 原样带出，面板详情画成 30 根小柱子。
+- 7 天额度的节奏（只提醒，不切号，也不推荐换哪个号）：
+  - 采样点存在 `usage-samples.json`（不进 accounts.json，一行写完不缩进）：`{"version": 1, "accounts": {"<账号 id>": [[时间, 5 小时 %, 7 天 %, 5 小时重置, 7 天重置], …]}}`，时间都是 Unix 秒，百分比一位小数（`floor(x*10+0.5)/10`），没有的是 null。刷新用量写回 accounts.json 之后、还持有数据锁时 `note_usage_samples`（Rust：`pace::note_usage_samples`）给每个有额度的号（Claude Code、网页、桌面版）记一个点：点的时间是这份用量取到的时间 `fetched_at`，不比上一个点新的不记（桌面版的本地记录可能还是上次那份）、这次有错误的不记、两项都没有数字的不记、比现在晚 5 分钟以上的不记；和上一个点一样、上一个点也和再前一个一样时只把它的时间往后挪（一段没变化只留头尾两个点）；只留最近 8 天（`SAMPLES_KEEP_SECS`）、每个号最多 1200 个点（`SAMPLES_MAX`），删掉的号不留。内容没变不写；读的地方（`/api/state`、`/api/usage-samples`、菜单栏）没有这个文件时当空的，不建文件。
+  - 推算 `usage_pace(points, usage, now)`（Rust：`pace::usage_pace`）：7 天窗口 = 重置时间往前 7 天。给出 `start`、`resets_at`、`used`、`even`（照匀速现在应该用到的百分比）、`ahead`（比匀速快）；速度先按最近一天（`PACE_RECENT_SECS`）里最早那个点到这份用量取到的时间算（`basis: "recent"`），最近一天的点不到 3 小时（`PACE_MIN_SPAN`）或者数字比那个点小，就按窗口开始以来的平均（`"window"`）；窗口开始还不到 6 小时（`PACE_MIN_ELAPSED`）不推（`state: null`）。重置前就用完是 `state: "out"`（`out_at`、`early_secs`），用不完是 `"ok"`（`left`：重置时大约还剩百分之几，四舍五入），已经用到 99.5% 是 `"full"`；`per_day` 是每天的速度。没有 7 天额度、重置时间或者不在窗口里时整个是 null。桌面号用的是显示用的那份（过了重置时间的窗口不算）。
+  - `/api/state` 的每个号带 `pace`；`GET /api/usage-samples`（`?id=` 只要一个号）给 `{"now", "accounts": {id: {"pace", "points": [[时间, 7 天 %], …]}}}`，`points` 只要这个 7 天窗口里的，最多 240 个（`pace_series`：均匀抽，留最后一个）。两边的规则按 `tests/shared/pace.json` 跑。
+  - 界面：管理面板、桌面版的账号卡和卡片小面板画额度环（5 小时、7 天、用得最多的按模型周额度，每个环下面是它的重置时间）、节奏小线和一句结论，详情里是带坐标轴的大图；菜单栏子菜单一行文字。到期那一行用 `days_left`：3 天内（和后台提醒的 `ALERT_SOON_DAYS` 一样）标黄，过了标红，勾了自动续期写每月几号（年付写每年几月几日）。
+- 本机 Claude Code 消耗（管理面板、桌面版的“本机 Claude Code 消耗”）：读 `~/.claude/projects/**/*.jsonl` 里带 `usage` 的消息（按文件缓存、只读新追加的部分，同一条消息按 (消息 id, requestId) 只算一次），按 `switch_log` 归到当时登录的号，第一次切换之前的、已经删掉的号算“未归属”；金额按 API 价折算（`message_cost`），订阅不按这个收费，只用来比较。`local_report(data, range)` → 纯计算 `usage_report(events, range, now_local)`（Rust：`local_report::usage_report`，规则两边按 `tests/shared/local_usage.json` 跑），events 是 (本地时间, 模型, usage, 会话 id, 账号)，会话 id 取记录里的 `sessionId`、没有就用文件名：
+  - `range`：`today` 今天按小时 24 根；`7` / `30` 往前 7 / 30 个日历天（含今天）按天；`all` 从最早一条记录那天起按天，超过 60 根（`LOCAL_MAX_BARS`）按周（周一起），还超过按月。没有记录的柱子也在 `buckets` 里。
+  - 返回 `range`、`unit`（hour / day / week / month）、`start`、`buckets`（按顺序的柱子键：`2026-11-18T09` / `2026-11-18` / 那周周一 / `2026-11`）、`series`（每根柱子里每个号的 `input`、`output`、`cache_write`、`cache_read`、`messages`、`cost_usd`）、`model_series`（同样按模型）、`totals`（再加 `sessions` 会话数、`cache_hit` = 缓存读取 ÷（输入 + 缓存写入 + 缓存读取），四位小数，没记录是 null）、`accounts` / `model_totals`（明细，加 `sessions` 和 `top_model` / `top_account`：消息最多的那个，一样多取名字排前的）、`heatmap`（最近 28 天 `LOCAL_HEAT_DAYS`，`cells[星期几，周一 = 0][钟点]` 的消息条数，和 `range` 无关）。
+  - 界面：四格汇总（Token、消息、折算金额、缓存命中率）、叠起来的柱子（Token / 金额 / 消息，按账号 / 按模型，悬停或点一下看明细）、明细（账号 / 模型）、热力图。颜色跟着账号走（账号列表的顺序，`--c1`…`--c6`），模型第一次出现时领一个空着的颜色记在浏览器里；第 7 个起是灰色的“其他”。时间范围、看什么、怎么分记在浏览器里。
+  - 卡片小面板的“用量”页签用 `?range=`（今天 / 7 天 / 30 天），和管理面板同一份；`cam local` 还用按天的 `local_usage(data, days)`（`/api/local-usage?days=N`：`rows` 按 (日期, 账号)、`models` 按 (日期, 模型)）。
+- 会话页（管理面板、桌面版的“会话”，卡片小面板的“会话”页签）：这台电脑上正在跑的 Claude Code。规则两边按 `tests/shared/sessions.json` 跑（Python 在 cam.py 的“会话页”一节，Rust 在 `sessions.rs`）。只读本机文件；只看用量、元数据、工具名和文件路径，消息内容不读出来、不返回、不记日志。
+  - 钩子记的状态 `session-state.json`：`{"sessions": {"<session_id>": {"state": busy|idle|waiting, "since_ts", "last_ts", "first_ts", "pids", "cwd", "transcript"}}}`，时间是 Unix 秒。和 `attention.json` 同一批钩子（不多装事件）、同一把锁，只在状态变的时候写：`UserPromptSubmit` → busy、`Stop` → idle、`PermissionRequest` → waiting、这个会话正在 waiting 时 `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` → busy、`SessionEnd` → 删掉。工具事件在会话不是 waiting 时只读一下就走，没有这个文件时连读都不读。`pids` 是钩子进程的父进程和祖父进程（Linux 读 `/proc` 拿祖父进程；别的系统只有父进程），会话页拿它对上正在跑的 claude。3 天（`SESSION_STATE_KEEP`）没事件的记录写的时候顺手删掉；最后一个会话删掉后文件也删掉。
+  - 进程 → 会话（`match_sessions`）：先按钩子记的 pid；再按工作目录对钩子记录；剩下的用 `CLAUDE_CONFIG_DIR/projects/<工作目录里不是字母数字的字符换成 -（project_dir_name）>/` 这一层里最新、还没被占走的 `.jsonl`（子目录里是子 agent 的，不看）。工作目录：Linux 读 `/proc/<pid>/cwd`，macOS 用 `lsof -a -d cwd -p … -Fn`（按 (pid, 命令行) 记着，进程退出就扔），Windows 看不出来，剩下的钩子记录按最近有动静的先后分给没对上的进程（`guess`）。每行带 `matched`：hook / cwd / newest / guess。
+  - 状态（`session_state(rec, waiting, written_ago, cpu, now)`）：attention 里有、还没答的是 waiting；钩子说 busy（或 waiting 但已经答过）的，除非 `SESSION_BUSY_QUIET`（600 秒）没写记录、这个进程也没在吃 CPU（按 Esc 打断时 `Stop` 不来），都算 busy；钩子说 idle 的，之后（`Stop` 之后 5 秒以外）记录又写了、而且 20 秒内写过才算 busy；没有钩子记录的，20 秒内写过记录或这个进程连同子进程在吃 CPU（每个进程各算各的，`CPU_BUSY`）算 busy。`/api/state` 的 `sessions` 是 `{"count", "busy", "answering", "waiting", "text"}`：`answering` 是 busy 的个数，0 个但整体看着在执行（只知道有在吃 CPU 的、对不上是哪个）时是 null，`text` 是“3 个会话 · 1 个在回答 · 1 个等你确认”（`session_phrase`），红绿灯和菜单栏用它。
+  - 记录摘要（`transcript_meta`，按文件缓存、只读新追加的部分，几百 MB 的记录也只在第一次扫一遍：每行先按字节找 `"type":"user"`、`"type":"assistant"`、`"compact_boundary"`、`"isSidechain":true` 这些，冒号后也认一个空格，大多数行不解析）：几轮（`_is_prompt`：你发的消息，不算工具结果、`isMeta`、`isCompactSummary`、子 agent 的、斜杠命令和它的输出、`[Request interrupted`、`!` 跑的命令）、第一条的时间、工作目录、最后一次压缩的位置（`"type":"system","subtype":"compact_boundary"`）、最后一条真回复（`<synthetic>` 不算）的模型和用量。`context_used` = 输入 + 缓存读取 + 缓存写入 + 输出（这条回复本身已经在上下文里了），`cache_hit` = 缓存读取 ÷（输入 + 缓存读取 + 缓存写入），四位小数。
+  - 上下文窗口（`context_window(model)`，按前缀找、具体的在前）：Fable / Mythos / Opus 5.x / Sonnet 5.x / Haiku 5.x / Opus 4.6–4.8 / Sonnet 4.6 是 1M；Haiku 4.5、Opus 4.5 及更早、Sonnet 4.5 及更早、Claude 3 是 200K；模型 id 带 `[1m]` 的是 1M；`us.anthropic.claude-…`、`anthropic/claude-…` 这类从 `claude-` 那里比；认不出的按 200K、`window_exact` 为 false（界面写“约”）。来源是 Claude API 文档的模型表（2026-11）。`context_health`：用到 70% 是 high（快满了），90% 是 full（很满），否则 ok（健康）。
+  - 组成（`transcript_composition`，只看最后一次压缩之后，也按文件缓存、只读新追加的；压缩位置变了从新位置重来）：每块内容按 UTF-8 字节数除以 4（向上取整）估 token，一张图按 `IMAGE_TOKENS`（1600）。对话：你发的消息、回复的文字和思考（记录里有文字的部分）按轮算，压缩后的摘要单算一项，第一轮之前的叫“开头”；读过的文件：`Read` 的参数和结果按文件路径算（×读了几次，显示文件名 + 工作目录里的相对目录 / `~/…`）；工具结果：别的工具的参数和结果按工具名算（×调了几次；对不上调用的结果算在 `?` 下）；图片：你发的、工具返回的分开算。加起来比 `context_used` 多时每项按比例缩（整数，`tokens * total // counted`），“其他（估算）”= `context_used` − 加起来的（系统提示词、工具定义、记忆文件、只留了签名的思考过程这些记录里没有的），没有用量时总数就是估的加起来、`exact` 为 false。返回 `{"total", "exact", "scaled", "since_compact", "window", "window_exact", "categories": {"chat", "files", "tools", "images", "other"}, "items": [{"cat", "key", "name", "detail", "count", "tokens"}…前 60 项], "item_count"}`，items 按 token 从多到少、一样多按 key。
+  - `GET /api/sessions`：`{"known", "count", "answering", "waiting", "hooks", "platform", "generated_at", "sessions": [{"id", "pid", "state", "matched", "project", "cwd", "login", "login_text", "account_id", "account", "model", "started_at", "last_active", "turns", "context_used", "context_window", "window_exact", "cache_hit", "health", "has_transcript"}…]}`，顺序是 waiting、busy、idle，同类按最近写记录的先后；进程没查出来时 `known` 为 false。`account` 是这个进程启动时（按 `switch_log`）登录的号；会话自带 token、用 API Key 或单独配置目录的不算账号，`login_text` 写着。`GET /api/sessions/<id>` 给 `{"session", "composition"}`，会话不在跑了返回 400。面板“会话”页开着时每 5 秒取一次，卡片小面板的“会话”页签开着时每 10 秒。
 - 启动前风险提醒（只在 `cam claude`）：缓存不能直接用时（`region_trusted`：超过一小时、最近一次检测没连上、或者本机换了网络），`spawn_background_check` 另起 `cam.py _check-region` 后台进程做完整检测（同一时间只跑一个），前台只用 `quick_trace` 花最多 3 秒问一次 claude.ai，套到数据副本上算提醒（`with_quick_region`，出口 IP 变了时丢掉旧运营商信息）。`launch_tier(score, region_status, prefs)` 给出 ok / remind / confirm / strong 四档——≥90 一行带过；< 90 打印提醒；< `risk_confirm_below`（默认 60）问 y/N；< `risk_strong_below`（默认 30）或出口不在支持名单内要输入"继续"。非交互环境只打印。`risk_prompt: false` 或 `CAM_NO_RISK_PROMPT=1` 关掉。**不是拦截**：每一档都是用户自己选择继续或取消。
 - 自动发现：后台检测凭据文件变化（macOS 每 30 秒查一次钥匙串），发现没见过的账号就自动导入。
 
@@ -204,7 +224,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 
 - **数据锁 `accounts.lock`**：读改写 `accounts.json` 和 `secrets/` 时持有。Unix 用 `flock`，Windows 用 `LockFileEx`，Python 和 Rust 用的是同一种系统锁，所以两边互斥；每次加锁单独打开文件，同一进程的不同线程之间也互斥。锁由操作系统持有，进程崩溃时自动释放，不会有残留锁。等锁最多 30 秒。旧版本用的是独占创建 `.lock` 文件、超过 60 秒当残留删掉，换了文件名就不会和旧版互相误删。
 - **后台任务锁 `background.lock`**：自动导入、时间规则、定时刷新、额度提醒只让一个进程做，不等待，谁先拿到谁做。桌面版和 `cam serve` 拿到后一直持有到退出，没拿到的每隔一会儿再试一次（接手退出的那个），期间只同步显示数据；菜单栏插件每次运行时试一下，拿不到就只画菜单。
-- **等你确认的会话 `attention.json`**：`cam hooks install` 装的钩子（`PermissionRequest` 记下会话，`PostToolUse`、`PostToolUseFailure`、`PermissionDenied`、`UserPromptSubmit`、`Stop`、`SessionEnd` 清掉）每个事件起一个进程，几个工具并行跑完时是好几个一起来，读改写时持有 `attention.lock`（一直等到拿到，Windows 上最多 5 秒）。没有会话在等时清除事件一看没有这个文件就退出，不拿锁、不写；最后一个会话清掉后文件删掉；内容没变不重写。只记工具名和说明，不记命令。钩子的命令是 `python scripts/cam_hook.py`：它把 `cam` 当模块运行，用得上 `__pycache__` 里的字节码，`cam.py` 最前面的快路径（只用 `json`、`os`、`sys`、`time`）记完就退出；旁边没有 `cam_hook.py` 时是 `python cam.py hook`，同一段代码，每次多花一百毫秒左右编译。`hooks_status` 把旧写法算作已装并标 `slow`，指向别的路径或别的 python 才算过期。体检（`hook_items`）在“cam 自己”一节加一行：装好了是正常，钩子命令里的 python 或脚本已经不在了是警告（每次工具调用白起一个跑不起来的命令、灯也不闪），只装了一部分是警告，旧写法、指向另一份还在的 cam 只是告诉一声；没装钩子不提。引擎只读这个文件
+- **等你确认的会话 `attention.json`**：`cam hooks install` 装的钩子（`PermissionRequest` 记下会话，`PostToolUse`、`PostToolUseFailure`、`PermissionDenied`、`UserPromptSubmit`、`Stop`、`SessionEnd` 清掉）每个事件起一个进程，几个工具并行跑完时是好几个一起来，读改写时持有 `attention.lock`（一直等到拿到，Windows 上最多 5 秒）。没有会话在等时清除事件一看没有这个文件就退出，不拿锁、不写；最后一个会话清掉后文件删掉；内容没变不重写。只记工具名和说明，不记命令。钩子的命令是 `python scripts/cam_hook.py`：它把 `cam` 当模块运行，用得上 `__pycache__` 里的字节码，`cam.py` 最前面的快路径（只用 `json`、`os`、`sys`、`time`）记完就退出；旁边没有 `cam_hook.py` 时是 `python cam.py hook`，同一段代码，每次多花一百毫秒左右编译。`hooks_status` 把旧写法算作已装并标 `slow`，指向别的路径或别的 python 才算过期。体检（`hook_items`）在“cam 自己”一节加一行：装好了是正常，钩子命令里的 python 或脚本已经不在了是警告（每次工具调用白起一个跑不起来的命令、灯也不闪），只装了一部分是警告，旧写法、指向另一份还在的 cam 只是告诉一声；没装钩子不提。引擎只读这个文件。同一批钩子顺便写 `session-state.json`（每个会话在干什么，见“会话页”），同一把锁，只在状态变的时候写
 - **`~/.claude.json`**：读出来改完，写之前再读一次，内容变了（Claude Code 刚写过）就基于新内容重新改；写完再读回确认 `oauthAccount` 是想要的值。最多重试 5 次，还不行就提示先退出正在运行的 claude。
 - **符号链接**：`~/.claude.json` 等文件是符号链接（比如用 dotfiles 管理）时，写到链接指向的文件，保留链接本身。
 
@@ -237,7 +257,9 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` | Web 面板 |
+| GET | `/` | Web 面板。页签记在地址 `#` 后面：`#accounts`、`#usage`、`#sessions`、`#env`、`#settings`，旧的区块锚点（`#env`、`#local-block`、`#rules-block`、`#privacy-block`、`#update-block`、`#help-block`）对到所在的页签 |
+| GET | `/mini` | 卡片小面板（菜单栏 / 托盘点开的那个），“额度 / 用量 / 会话”三个页签 |
+| POST | `/api/open-panel` | 在这台电脑的浏览器里打开管理面板，返回 `{"ok", "url"}`；body `{"tab": "usage"}` 打开到那一页（只认 `PANEL_TABS` 里的），别的值不带。只有脚本版有 |
 | GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；每个账号带 `health`（`level`: ok / info / warn / error，`label`: 正常 / 注意 / 异常，`issues`: [{`kind`, `level`, `text`, `advice`, `detail`}]，由 `account_health` 根据有没有保存凭据、用量报错和到期日算出，两边规则见 `tests/shared/health.json`）；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`；`failed_at`、`fail_count`：最近一次检测没连上的时间和连续次数，这时其它字段是上一次查到的），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
 | POST | `/api/accounts` | `{"kind":"claude_code"}` 导入当前登录；`{"kind":"claude_web"/"claude_desktop"/"api","label",…}` 新增 |
 | POST | `/api/refresh` | 刷新全部用量；body `{"id": "…"}` 只刷新一个。算用户主动刷新，会替过期的未生效账号续登录 |
@@ -253,7 +275,11 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 | GET / POST | `/api/vault`、`/api/vault/*` | 本地加密账号库、邮箱授权和验证码；完整接口见 [账号库与邮箱设计](VAULT_API.md) |
 | PATCH | `/api/accounts/{id}` | 修改 `label` 和 `manual.*` |
 | DELETE | `/api/accounts/{id}` | 删除账号（凭据移入 backups，不直接销毁） |
-| GET | `/api/local-usage?days=30` | 按天、按账号汇总本地 token 消耗 |
+| GET | `/api/local-usage?days=30` | 按天、按账号汇总本地 token 消耗（`cam local`、额度窗口对照） |
+| GET | `/api/local-usage?range=today\|7\|30\|all` | 管理面板“本机 Claude Code 消耗”：柱子、合计、明细、热力图（格式见“本机 Claude Code 消耗”）。只读 |
+| GET | `/api/sessions` | 会话页：这台电脑上正在跑的 Claude Code，一个会话一行（格式见“会话页”）。只读 |
+| GET | `/api/sessions/{id}` | 一个正在跑的会话的上下文组成（按记录估的，格式见“会话页”）；会话不在跑了返回 400。只读 |
+| GET | `/api/usage-samples` | 7 天额度的节奏：每个有 7 天额度的号 `{"pace", "points"}`（格式见“7 天额度的节奏”），`?id=` 只要一个号。只读 |
 | GET | `/api/rules` | `{"rules": [...], "alert_threshold": 90}` |
 | PUT | `/api/rules` | 整体替换规则 / 设置提醒阈值，服务端校验 |
 | GET | `/api/update` | **只有脚本版有**（桌面版返回 404，面板据此隐藏“软件更新”）。联网检查新版本（`git fetch`，最多 60 秒），返回 `checkout`（是不是 git 仓库）、`upstream`、`head`、`behind`、`ahead`、`commits`（[{`hash`, `date`, `subject`}]，最多 50 个）、`dirty`（没提交的改动）、`message`，同时存进 `update-check.json`。`?saved=1` 不联网，只返回上次的结果（代码在那之后变过就把 `behind` 当 0）；从没检查过时返回 `{"checked_at": null, "version"}` |

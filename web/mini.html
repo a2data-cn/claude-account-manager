@@ -5,162 +5,215 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude 账号卡片</title>
 <style>
-/* 菜单栏小工具点开的卡片小面板：340 宽，高度由插件按账号数算，账号多了整页上下滑。
-   照 macOS 控制中心的样子——大圆角的玻璃卡片、左边圆形图标、滑杆式的额度条；顶上一条红绿灯状态 */
+/* 菜单栏小工具 / Windows 托盘点开的卡片小面板：380 宽，高度由插件按账号数算，内容多了整页上下滑。
+   颜色、卡片、分段开关、标签、悬停说明和管理面板（web/panel.html）、桌面版是同一套；顶上一条红绿灯，下面“额度 / 用量”两个页签 */
 :root {
-  --paper: #E8E6E0; --tile: rgba(255, 255, 255, .62); --tile-line: rgba(255, 255, 255, .7); --tile-hover: rgba(255, 255, 255, .8);
-  --toast: rgba(255, 255, 255, .94);
-  --ink: #1D1C19; --muted: #6E6857; --track: rgba(0, 0, 0, .1); --fill: #1D1C19;
-  --accent: #D97757; --accent-ink: #FFF6EE; --circle: rgba(0, 0, 0, .08);
-  --warn: #C7801A; --hot: #D64B3A; --live: #2F8A55; --violet: #7656B4; --ok: #3E6EA8;
-  --g: #34C759; --y: #FF9F0A; --r: #FF3B30;
+  --paper: #F4F2EC; --surface: #FBFAF7; --line: #E7E3D9; --shadow: 0 1px 2px rgba(60, 45, 25, .05);
+  --tile: var(--surface); --tile-line: var(--line); --tile-hover: #FFFFFF;
+  --ink: #2E2C27; --muted: #6E6857; --track: #ECE8DE; --groove: #ECE8DE; --fill: #6E685A; --circle: #ECE8DE;
+  --accent: #B5532F; --accent-ink: #FFFFFF; --on-hot: #FFFFFF; --accent-soft: #F0D8CC;
+  --warn: #96600F; --hot: #B5432E; --live: #3B7A52; --violet: #7656B4; --ok: #3E6EA8;
+  --live-soft: #E2EDDF; --warn-soft: #F5E8CF; --hot-soft: #F6E3DD; --ok-soft: #E0EAF6; --violet-soft: #EAE4F6;
+  --c1: #B5532F; --c2: #3E6EA8; --c3: #2F8F4E; --c4: #7656B4; --c5: #C07A12; --c6: #1A8FB0;  /* 图表的分类色，和管理面板一样 */
   --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --paper: #1C1C1E; --tile: rgba(255, 255, 255, .09); --tile-line: rgba(255, 255, 255, .1); --tile-hover: rgba(255, 255, 255, .15);
-    --toast: rgba(44, 44, 46, .96);
-    --ink: #F2F2F0; --muted: #A5A39C; --track: rgba(255, 255, 255, .16); --fill: #F2F2F0; --circle: rgba(255, 255, 255, .14);
-    --warn: #F0A742; --hot: #F07A6A; --live: #6FD08E; --violet: #B49AEF; --ok: #7FA6E0;
-    --g: #30D158; --y: #FF9F0A; --r: #FF453A; color-scheme: dark; }
+  :root { --paper: #262624; --surface: #2F2F2C; --line: #403F3B; --shadow: none; --tile-hover: #383835;
+    --ink: #ECEAE3; --muted: #A39E91; --track: #3B3A36; --groove: #1F1F1D; --fill: #BDB7A8; --circle: #3B3A36;
+    --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --accent-soft: #4A3328;
+    --warn: #E0A548; --hot: #E8826F; --live: #6FBF8A; --violet: #B49AEF; --ok: #7FA6E0;
+    --live-soft: #2C3B30; --warn-soft: #3E3421; --hot-soft: #42302A; --ok-soft: #27334A; --violet-soft: #362D4B;
+    --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8; color-scheme: dark; }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--paper); color: var(--ink); }
 body { font: 13px/1.45 var(--sans); font-variant-numeric: tabular-nums; padding: 10px; -webkit-user-select: none; user-select: none; }
 button { font: inherit; color: inherit; }
-.grid { display: grid; gap: 8px; align-content: start; }
-.glass { background: var(--tile); border: 1px solid var(--tile-line); box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }  /* 不加 backdrop-filter：底下是纯色，模糊看不出来，却让每张卡片按下去的动画都卡 */
+/* 竖着一列；弹窗按高的那个页签定高度，矮的那页按钮和页脚贴底 */
+.grid { display: flex; flex-direction: column; gap: 8px; min-height: calc(100vh - 20px); }
+.grid > *, .slot > * { flex: none; }
+.glass { background: var(--tile); border: 1px solid var(--tile-line); box-shadow: var(--shadow); }
 .slot { display: contents; }  /* 页面分块更新用的壳，不占格子 */
-.tile { border-radius: 22px; padding: 12px 14px; }
+.tile { border-radius: 12px; padding: 12px 14px; }
 /* 红绿灯：绿 = 空闲正常，黄 = 工作中 / 要注意 / 等你确认，红 = 要处理 */
 .light { display: flex; align-items: center; gap: 9px; padding: 7px 12px 7px 11px; border-radius: 999px; font-size: 12px; }
-.light .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--g); box-shadow: 0 0 0 3px rgba(52, 199, 89, .22); }
-.light.busy .dot { background: var(--y); box-shadow: 0 0 0 3px rgba(255, 159, 10, .24); }
-.light.bad .dot { background: var(--r); box-shadow: 0 0 0 3px rgba(255, 59, 48, .22); }
+.light .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); }
+.light.busy .dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.light.bad .dot { background: var(--hot); box-shadow: 0 0 0 3px var(--hot-soft); }
 .light.pulse .dot { animation: breathe 2s ease-in-out infinite; }  /* 有会话在跑：黄点一呼一吸，和菜单栏图标一个节奏 */
 .light.ask .dot { animation: blink 1s step-end infinite; }  /* 等你确认切换：一亮一暗 */
 .light.blink .dot { animation: blink .5s step-end infinite; }  /* Claude Code 在等你点 yes / no：快闪，和菜单栏三盏灯一个节奏 */
-@keyframes breathe { 50% { box-shadow: 0 0 0 6px rgba(255, 159, 10, .32); transform: scale(1.12); } }
+@keyframes breathe { 50% { box-shadow: 0 0 0 6px var(--warn-soft); transform: scale(1.12); } }
 @keyframes blink { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .light .dot { animation: none; } }
 .light .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .light .more { flex: none; font-size: 10.5px; color: var(--muted); background: var(--circle); border-radius: 999px; padding: 1px 6px; }
-.light.ask { flex-wrap: wrap; border-radius: 18px; padding: 9px 12px; }
+.light.ask { flex-wrap: wrap; border-radius: 12px; padding: 9px 12px; }
 .light.ask .txt { white-space: normal; flex-basis: calc(100% - 19px); line-height: 1.4; }
 .light .btns { display: flex; gap: 6px; flex-basis: 100%; justify-content: flex-end; }
-.light .btns button { font-size: 11.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--tile-line); background: var(--circle); cursor: pointer; }
+.light .btns button { font-size: 11.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
 .light .btns button.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 .light .btns button:disabled { opacity: .6; cursor: progress; }
-/* 当前账号：左边圆形里是额度环 */
-.who { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 12px; align-items: center; }
-.circle { width: 56px; height: 56px; border-radius: 50%; background: var(--circle); display: grid; place-items: center; }
-.circle.on { background: var(--accent); }
+/* 页签：额度 / 用量。和管理面板的页签、分段开关一个样子：底是一条浅槽，选中的是一块白底 */
+.tabs { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--groove); }
+.tabs [role="tab"] { flex: 1; border: 0; background: transparent; color: var(--muted); font-size: 13px; line-height: 1.5; padding: 4px 0; border-radius: 8px; cursor: pointer; }
+.tabs [role="tab"]:hover { color: var(--ink); }
+.tabs [role="tab"][aria-selected="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(40, 30, 20, .14); }
+.tabs [role="tab"]:focus-visible, .seg-mini button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.seg-mini { display: inline-flex; align-items: center; gap: 2px; border-radius: 8px; padding: 2px; background: var(--groove); flex: none; align-self: flex-start; }
+.seg-mini button { border: 0; background: transparent; color: var(--muted); font-size: 12px; line-height: 1.5; padding: 2px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.seg-mini button:hover { color: var(--ink); }
+.seg-mini button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(40, 30, 20, .14); }
+.seg-mini button:disabled { cursor: progress; }
+/* 额度环 */
 .ring { display: block; }
 .ring circle { fill: none; }
-.ring .rt { stroke: rgba(0, 0, 0, .12); }
+.ring .rt { stroke: var(--track); }
 .ring .rf { stroke: var(--fill); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
-.circle.on .ring .rt { stroke: rgba(255, 246, 238, .3); }
-.circle.on .ring .rf { stroke: var(--accent-ink); }
 .ring .rf.warn { stroke: var(--warn); }
 .ring .rf.hot { stroke: var(--hot); }
-.circle.on .ring .rf.warn, .circle.on .ring .rf.hot { stroke: var(--accent-ink); }
-.ring text { fill: var(--fill); font: 650 12px var(--sans); }
-.circle.on .ring text { fill: var(--accent-ink); }
+.ring text { fill: var(--ink); font: 650 12px var(--sans); }
 .ring text tspan { font-size: 7.5px; font-weight: 600; }
-.name { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.name b { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip { font-size: 10px; font-weight: 650; padding: 1px 7px; border-radius: 999px; background: var(--circle); color: var(--muted); white-space: nowrap; flex: none; }
-.chip.live { color: var(--live); }
-.chip.p-pro { color: var(--ok); }
-.chip.p-max { color: var(--violet); }
-.chip.bad { background: var(--hot); color: #fff; }
-.sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
-/* 改名：名字旁边的小铅笔，点了原地变成输入框，下面一排昵称一键选 */
+/* 标签：套餐、状态，和管理面板一样的小方角 */
+.chip { font-size: 10px; font-weight: 600; line-height: 1.5; padding: 0 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); white-space: nowrap; flex: none; }
+.chip.p-pro { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.chip.p-max { background: var(--violet-soft); color: var(--violet); border-color: transparent; }
+.chip.p-team { background: var(--live-soft); color: var(--live); border-color: transparent; }
+.chip.bad { background: var(--hot); color: var(--on-hot); border-color: transparent; }
+/* 改名：名字旁边的小铅笔，点了上面出一块输入框，下面一排昵称一键选 */
 .pen { border: 0; background: var(--circle); color: var(--muted); border-radius: 999px; width: 20px; height: 20px; font-size: 12px; line-height: 20px; padding: 0; cursor: pointer; flex: none; }
 .pen:hover { color: var(--ink); background: var(--tile-hover); }
 .rn { display: flex; gap: 6px; align-items: center; }
-.rn input { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 9px; border: 1px solid var(--track); background: rgba(255, 255, 255, .5); color: var(--ink); }
-.rn button { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--tile-line); background: var(--circle); cursor: pointer; flex: none; }
+.rn input { flex: 1; min-width: 0; font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--paper); color: var(--ink); }
+.rn button { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; flex: none; }
 .rn button.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 .rn button:disabled { opacity: .6; cursor: progress; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
-.chips button { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--tile-line); background: var(--circle); cursor: pointer; }
-.chips button:hover { background: var(--tile-hover); }
-/* 滑杆式的额度条：左边标题、右边百分比，下面一根粗条 */
-.meter { margin-top: 10px; }
-.meter + .meter { margin-top: 8px; }
+.chips button { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; }
+.chips button:hover { border-color: var(--muted); }
+.rn-tile .t { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+/* 有额度的号的汇总：5 小时、7 天平均已用；有号照现在的速度会在重置前用完时多一行提醒 */
 .meter .lab { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
 .meter .lab b { color: var(--ink); font-size: 13px; font-weight: 650; }
-.bar { position: relative; height: 7px; background: var(--track); border-radius: 999px; margin-top: 5px; overflow: hidden; }
-.bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--fill); min-width: 7px; }
+.bar { position: relative; height: 6px; background: var(--track); border-radius: 999px; margin-top: 5px; overflow: hidden; }
+.bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: var(--fill); min-width: 6px; }
 .bar i.warn { background: var(--warn); }
 .bar i.hot { background: var(--hot); }
-/* 本机今天的消耗：三个小格 */
-.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 12px; }
-.stat { background: var(--circle); border-radius: 12px; padding: 7px 9px; min-width: 0; }
-.stat b { display: block; font-size: 15px; font-weight: 650; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.stat span { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.stat.note { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); padding: 6px 10px; }
-/* 其它 Claude Code 账号：方形小卡，两张一行。上面是额度环、名字和套餐，下面 5 小时、7 天各一根小条和它们的重置时间 */
-.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.card { display: grid; gap: 7px; align-content: start; width: 100%; text-align: left; cursor: pointer; border-radius: 18px; padding: 10px 11px 11px;
-  transition: background-color .12s, transform .12s; }
-.card:hover { background: var(--tile-hover); transform: translateY(-1px); }
-.card:disabled { cursor: progress; opacity: .6; transform: none; }
-.card .head { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 0 8px; align-items: center; }
-.card .circle { width: 34px; height: 34px; }
-.card .name { flex-wrap: wrap; row-gap: 1px; }  /* 名字优先：和套餐标签放不下一行时标签换到下一行，不把名字截成“团…” */
-.card .name b { font-size: 13px; max-width: 100%; }
-.card .chip { font-size: 9.5px; padding: 0 6px; }
-.card .m { display: block; }
-.card .m .lab { display: flex; justify-content: space-between; align-items: baseline; font-size: 11px; color: var(--muted); }
-.card .m .lab b { color: var(--ink); font-weight: 650; font-size: 12px; }
-.card .m .lab b.off { color: var(--muted); font-weight: 600; }
-.card .m .bar { height: 5px; margin-top: 3px; }
-.card .m .bar i { min-width: 5px; }
-.card .m .when { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card .none { font-size: 11px; color: var(--muted); line-height: 1.4; }
-/* 鼠标放到账号上弹出的说明：邮箱、套餐和到期、各个额度窗口和重置时间、用量什么时候取的、最近切换 */
-.tip { position: fixed; z-index: 8; width: 240px; padding: 10px 12px 9px; border-radius: 14px; background: var(--toast); color: var(--ink); border: 1px solid var(--tile-line);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, .22); font-size: 11.5px; line-height: 1.45; pointer-events: none; -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); }
-.tip .t { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 650; margin-bottom: 5px; min-width: 0; }
+.msum { padding: 10px 14px 11px; }
+.msum .t { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; font-weight: 650; }
+.msum .t span:last-child { font-size: 11px; color: var(--muted); font-weight: 600; }
+.msum .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.msum .meter { margin-top: 6px; }
+.msum .alert { margin-top: 8px; font-size: 11.5px; color: var(--warn); font-weight: 600; line-height: 1.4; }
+/* 账号卡：一行两张。名字和套餐、几个会话在跑（当前号）、额度环（5 小时、7 天、用得最多的按模型周额度）各带重置时间、
+   7 天节奏小线、一句结论、最下面到期。邮箱和更多细节在悬停说明里 */
+.mgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mc { display: flex; flex-direction: column; gap: 5px; min-width: 0; text-align: left; cursor: pointer; border-radius: 12px; padding: 10px 10px 9px;
+  transition: border-color .12s, box-shadow .12s, transform .12s; outline: none; }
+.mc:hover { border-color: var(--muted); box-shadow: 0 3px 10px rgba(40, 30, 20, .08); transform: translateY(-1px); }
+.mc:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+.mc.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.mc.sel:hover { transform: none; }
+.mc.off { opacity: .6; cursor: progress; transform: none; }
+.mc .nm { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.mc .nm b { font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mc .nm .ok { color: var(--live); font-weight: 700; flex: none; }
+.mc .nm .chip { margin-left: auto; font-size: 9.5px; padding: 0 5px; }
+.mc .nm .pen { width: 18px; height: 18px; line-height: 18px; font-size: 11px; }
+.mc .ss { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc .ss i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.mc .ss.busy { color: var(--warn); font-weight: 600; }
+.mc .rr { display: flex; justify-content: space-around; gap: 2px; margin-top: 2px; }
+.mc .rg { display: grid; justify-items: center; min-width: 0; text-align: center; line-height: 1.25; }
+.mc .rg svg { margin-bottom: 2px; }
+.mc .rg .rl { font-size: 10px; color: var(--muted); max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc .rg .rw { font-size: 10px; font-weight: 600; white-space: nowrap; letter-spacing: -.2px; }
+.mc .sp svg { display: block; width: 100%; height: auto; overflow: visible; }
+.mc .vd { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc .vd.warn, .mc .ex.warn { color: var(--warn); font-weight: 600; }
+.mc .vd.hot, .mc .ex.hot { color: var(--hot); font-weight: 600; }
+.mc .ex { margin-top: auto; padding-top: 5px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc .none { font-size: 11px; color: var(--muted); line-height: 1.4; padding: 6px 0; }
+.mc .none svg { display: block; width: 22px; height: 22px; margin-bottom: 4px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 用量页：这台电脑上 Claude Code 的记录（和管理面板“用量”页同一个接口）。四格数字、按小时 / 按天的叠起来的柱子、每个号一行 */
+.utiles { display: grid; grid-template-columns: 1fr 1fr; border-radius: 12px; overflow: hidden; }
+.utiles > div { padding: 9px 12px 10px; min-width: 0; }
+.utiles > div:nth-child(2n) { border-left: 1px solid var(--line); }
+.utiles > div:nth-child(n+3) { border-top: 1px solid var(--line); }
+.utiles .k { font-size: 11.5px; color: var(--muted); }
+.utiles .v { font-size: 19px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.utiles .s { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.utiles .s.good { color: var(--live); }
+.uchart { border-radius: 12px; padding: 10px 12px 8px; }
+.uchart .t { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; font-weight: 600; }
+.uchart .t span:last-child { font-size: 11px; font-weight: 400; color: var(--muted); }
+.ubars { display: flex; align-items: flex-end; gap: 2px; height: 84px; margin-top: 8px; border-bottom: 1px solid var(--line); }
+.ubars .col { flex: 1 1 0; min-width: 0; height: 100%; display: flex; flex-direction: column-reverse; gap: 1px; cursor: default; }
+.ubars .col i { display: block; width: 100%; flex: none; }
+.ubars .col i:last-child { border-radius: 3px 3px 0 0; }
+.ubars .col:hover { background: var(--groove); border-radius: 3px; }
+.uaxis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 3px; }
+.urows { margin-top: 6px; }
+.ur { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 6px 0 5px; border-top: 1px solid var(--line); }
+/* 会话页签：正在跑的 Claude Code 一行一个（项目、在干什么、上下文用了多少），点一下在管理面板的“会话”页看详情 */
+.slist { border-radius: 12px; padding: 4px 0; }
+.srow { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 1px 8px; align-items: center; width: 100%; text-align: left; font: inherit; color: inherit;
+  background: transparent; border: 0; border-top: 1px solid var(--line); padding: 8px 12px; cursor: pointer; }
+.srow:first-child { border-top: 0; }
+.srow:hover { background: var(--groove); }
+.srow .led { width: 8px; height: 8px; border-radius: 50%; background: var(--live); }
+.srow .led.busy { background: var(--warn); animation: breathe 2s ease-in-out infinite; }
+.srow .led.wait { background: var(--warn); animation: blink 1s step-end infinite; }
+.srow b { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .pj { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.srow .ac { flex: none; max-width: 48%; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .st { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.srow .st.busy { color: var(--warn); font-weight: 600; }
+.srow .sub { grid-column: 2 / 4; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); min-width: 0; }
+.srow .sub span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .bar { flex: 1; min-width: 40px; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; }
+.srow .bar i { display: block; height: 100%; border-radius: 2px; background: var(--live); }
+.srow .bar i.warn { background: var(--warn); }
+.srow .bar i.hot { background: var(--hot); }
+.srow .hl { font-weight: 600; }
+.srow .hl.warn { color: var(--warn); }
+.srow .hl.hot { color: var(--hot); }
+@media (prefers-reduced-motion: reduce) { .srow .led { animation: none !important; } }
+.ur .dot { width: 9px; height: 9px; border-radius: 3px; }
+.ur .nm { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ur .val { font-weight: 650; font-size: 12.5px; }
+.ur .tr { grid-column: 2 / 4; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; }
+.ur .tr i { display: block; height: 100%; border-radius: 2px; }
+.ur .sub { grid-column: 2 / 4; font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 悬停说明：账号上（邮箱、套餐和到期、各个额度窗口、用量什么时候取的、最近切换）、用量柱子上。和管理面板的提示一个样子 */
+.tip { position: fixed; z-index: 8; width: 240px; padding: 9px 12px; border-radius: 10px; background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  box-shadow: 0 6px 22px rgba(40, 30, 20, .16); font-size: 11.5px; line-height: 1.45; pointer-events: none; }
+.tip .t { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 650; padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid var(--line); min-width: 0; }
 .tip .t b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tip dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0; }
 .tip dt { color: var(--muted); white-space: nowrap; }
 .tip dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .tip dd.hot { color: var(--hot); font-weight: 600; }
 .tip dd.warn { color: var(--warn); font-weight: 600; }
-.tip .do { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--track); color: var(--muted); font-size: 11px; }
-/* 桌面版的号：药丸形的一行，左边圆圈里是小环 */
-.pills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.pills.one { grid-template-columns: 1fr; }
-.acc { display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 0 10px; align-items: center; width: 100%; text-align: left; cursor: pointer;
-  border-radius: 999px; padding: 8px 12px 8px 8px; transition: background-color .12s, transform .12s; }
-.acc:hover { background: var(--tile-hover); transform: translateY(-1px); }
-.acc:disabled { cursor: progress; opacity: .6; transform: none; }
-.acc .circle { width: 40px; height: 40px; }
-.acc .name b { font-size: 13px; }
-.acc .chip { font-size: 9.5px; padding: 0 6px; }
-.acc > span:last-child { display: grid; min-width: 0; }
-.acc .sub { font-size: 11px; }
-/* 桌面版的号：右边一个“打开”的小箭头，没有额度时圆圈里是显示器 */
-.acc.open { grid-template-columns: 40px minmax(0, 1fr) auto; }
-.acc .go { width: 15px; height: 15px; color: var(--muted); }
-.acc .go svg, .acc .circle svg.ic { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.acc .circle svg.ic { width: 18px; height: 18px; color: var(--muted); }
-.open-btn { display: block; width: 100%; margin-top: 10px; padding: 7px 12px; border-radius: 999px; border: 0; background: var(--accent); color: var(--accent-ink); font-size: 12.5px; font-weight: 600; cursor: pointer; }
-.open-btn:disabled { opacity: .6; cursor: progress; }
+.tip .do { margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.tip .tl { display: flex; align-items: center; justify-content: space-between; gap: 12px; line-height: 1.7; }
+.tip .tl span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip .tl i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.tip .tl b { font-weight: 650; white-space: nowrap; }
+.tip .tl.total { margin-top: 3px; padding-top: 4px; border-top: 1px dashed var(--line); }
+.tip .tl.total span { color: var(--ink); }
 /* 底下一排圆按钮，像控制中心的那种 */
-.acts { display: flex; justify-content: center; gap: 18px; margin: 4px 0 2px; }
+.acts { display: flex; justify-content: center; gap: 18px; margin: auto 0 2px; padding-top: 4px; }
 .act { display: grid; justify-items: center; gap: 4px; background: none; border: 0; cursor: pointer; color: var(--ink); padding: 0; }
-.act .circle { width: 48px; height: 48px; transition: background-color .12s, transform .12s; }
-.act:hover .circle { background: var(--tile-hover); transform: translateY(-1px); }
+.act .circle { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; transition: border-color .12s, transform .12s; }
+.act:hover .circle { border-color: var(--muted); transform: translateY(-1px); }
 .act:disabled { cursor: progress; opacity: .6; }
 .act svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .act span { font-size: 11px; color: var(--muted); }
 /* 设置页：真正的开关和分段选择，像系统设置 */
 .set { display: grid; gap: 2px; }
-.set .row { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid var(--track); }
+.set .row { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px solid var(--line); }
 .set .row:first-child { border-top: 0; padding-top: 2px; }
 .set .lab { flex: 1; min-width: 0; }
 .set .lab b { display: block; font-size: 13px; font-weight: 600; }
@@ -169,25 +222,22 @@ button { font: inherit; color: inherit; }
 .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
 .sw i { position: absolute; inset: 0; border-radius: 999px; background: var(--track); transition: background .15s; cursor: pointer; }
 .sw i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: transform .15s; }
-.sw input:checked + i { background: var(--g); }
+.sw input:checked + i { background: var(--live); }
 .sw input:checked + i::after { transform: translateX(18px); }
 .sw input:disabled + i { opacity: .5; cursor: progress; }
-.seg { display: inline-flex; background: var(--track); border-radius: 9px; padding: 2px; flex: none; }
-.seg button { font-size: 12px; padding: 3px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
-.seg button.on { background: var(--tile); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); font-weight: 600; }
-.seg button:disabled { cursor: progress; }
 .set .hint { font-size: 11px; color: var(--muted); padding: 6px 2px 0; }
-.sec { font-size: 11px; color: var(--muted); margin: 2px 6px -2px; font-weight: 600; }
+.set .hint a { color: var(--accent); }
 .foot { display: flex; justify-content: space-between; gap: 8px; margin: 2px 6px 0; font-size: 11px; color: var(--muted); }
 .foot .risk.medium { color: var(--warn); }
 .foot .risk.high { color: var(--hot); font-weight: 600; }
 /* 操作结果：正中间一块小提示（像系统的音量 / 亮度提示），不挡底下的按钮和页脚，几秒后自己消失 */
-.msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9; max-width: 84%; padding: 12px 18px; border-radius: 16px;
-  font-size: 13px; line-height: 1.45; text-align: center; background: rgba(50, 50, 54, .9); color: #8FDCA6; box-shadow: 0 8px 28px rgba(0, 0, 0, .24);
-  -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); pointer-events: none; }
+.msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9; max-width: 84%; padding: 12px 18px; border-radius: 12px;
+  font-size: 13px; line-height: 1.45; text-align: center; background: rgba(46, 44, 39, .92); color: #8FDCA6; box-shadow: 0 8px 28px rgba(0, 0, 0, .24);
+  pointer-events: none; }
 .msg.bad { color: #FFB4A8; }
 .msg.wait { color: #F5F5F3; }
 .empty { text-align: center; color: var(--muted); font-size: 12.5px; padding: 6px 0; }
+.tile.empty { padding: 12px 14px; }
 .empty code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; background: var(--circle); padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
@@ -223,7 +273,7 @@ button { font: inherit; color: inherit; }
       <div class="row"><div class="lab"><b>流式动画</b><span>${s.mode === "stream" ? "插件常驻，信号格 / 红绿灯顺滑地动" : "关着是经典模式：每分钟刷新，动画 5 秒一帧"}</span></div>
         <label class="sw"><input type="checkbox" data-set="mode" ${s.mode === "stream" ? "checked" : ""}><i></i></label></div>
       <div class="row"><div class="lab"><b>图标样式</b><span>菜单栏图标用哪种当红绿灯</span></div>
-        <span class="seg"><button type="button" data-icon="bars" class="${s.icon === "bars" ? "on" : ""}">信号格</button><button type="button" data-icon="lamp" class="${s.icon === "lamp" ? "on" : ""}">红绿灯</button></span></div>
+        <span class="seg-mini" role="group" aria-label="图标样式"><button type="button" data-icon="bars" aria-pressed="${s.icon === "bars"}">信号格</button><button type="button" data-icon="lamp" aria-pressed="${s.icon === "lamp"}">红绿灯</button></span></div>
       <div class="row"><div class="lab"><b>全局快捷键</b><span>⌃⌥⌘C 打开菜单，⌃⌥⌘1…9 切到第几个号</span></div></div>
       <div class="hint">切流式 / 经典会重写插件的启动脚本并重新打开 SwiftBar（几秒）。<a href="#" data-act="set-close">收起</a></div></div>`;
   }
@@ -231,7 +281,7 @@ button { font: inherit; color: inherit; }
     try { settings = await api("GET", "/api/menubar"); } catch (e) { settings = { installed: false, error: e.message }; }
     render();
   }
-  let state = null, local = null, busy = false, msg = null, ask = null;  // ask：点了别的号、有会话在跑，等用户选怎么切
+  let state = null, busy = false, msg = null, ask = null;  // ask：点了别的号、有会话在跑，等用户选怎么切
   let renaming = null;  // 正在改名的账号 id：输入框在的时候定时刷新不重画，免得把正在打的字冲掉
   const NICKS = ["工作号", "个人号", "公司号", "团队号", "备用号", "测试号", "主号", "副号"];
   function renameForm(a) {
@@ -289,8 +339,8 @@ button { font: inherit; color: inherit; }
   }
   const pct = (w) => w && w.utilization !== null && w.utilization !== undefined ? Math.max(0, Math.min(100, w.utilization)) : null;
   const lv = (p) => p >= 90 ? "hot" : p >= 70 ? "warn" : "";
-  const wan = (n) => n >= 1e8 ? `${(n / 1e8).toFixed(1)}亿` : n >= 1e4 ? `${(n / 1e4).toFixed(n < 1e5 ? 1 : 0)}万` : String(Math.round(n));
-  const usd = (v) => v >= 100 ? `$${v.toFixed(0)}` : v >= 10 ? `$${v.toFixed(1)}` : `$${v.toFixed(2)}`;
+  const wan = (n) => n >= 1e8 ? (n / 1e8).toFixed(1) + " 亿" : n >= 1e5 ? Math.round(n / 1e4) + " 万" : n >= 1e4 ? (n / 1e4).toFixed(1) + " 万" : String(Math.round(n));  // 和管理面板一样
+  const usd = (n) => "$" + (n >= 100 ? Math.round(n).toLocaleString("en-US") : n.toFixed(2));
   const pad = (n) => String(n).padStart(2, "0");
   const cpLen = (s) => [...String(s || "")].length;
   // 和菜单栏插件一个规则：名字是邮箱、没有名字或太宽（汉字算 2、字母算 1，超过 12）时显示成“1号”这样的序号（按添加顺序，和快捷键的数字一致）
@@ -299,46 +349,107 @@ button { font: inherit; color: inherit; }
   const nameOf = (a, pos) => needsNumber(a) ? `${pos[a.id]}号` : a.label;
   function ring(p, size, stroke) {
     const r = size / 2 - stroke / 2 - 1, c = 2 * Math.PI * r, v = p === null ? 0 : p;
-    // 小环（方卡、桌面号那行，34 / 32 px）里只放数字，不放 %：“100%”会贴到圈上，旁边那行本来就写着百分号；大环（44 px）照旧带 %
+    // 小环（34 px）里的字小一号，“100%”再小一号，不贴到圈上
     const small = size < 40, n = p === null ? "–" : String(Math.round(p));
-    const fs = small && n.length > 2 ? 9.5 : 10;
+    const fs = small ? (n.length > 2 ? 8 : 9.5) : 10;
     return `<svg class="ring" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
       <circle class="rt" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}"/>
       <circle class="rf ${lv(v)}" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - v / 100)).toFixed(2)}"/>
-      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central" style="font-size:${fs}px">${n}${small || p === null ? "" : "<tspan>%</tspan>"}</text></svg>`;
+      <text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central" style="font-size:${fs}px">${n}${p === null ? "" : `<tspan style="font-size:${small ? 6 : 7.5}px">%</tspan>`}</text></svg>`;
+  }
+  const ALERT_SOON_DAYS = 3, FULL_AT = 99.5, WEEKDAY = "日一二三四五六";
+  let paceSeries = {};  // 账号 id → [[秒, 7 天 %], …]（/api/usage-samples）
+  async function loadPace() {
+    if (document.hidden) return;
+    try {
+      const r = await api("GET", "/api/usage-samples", undefined, 15000);
+      paceSeries = Object.fromEntries(Object.entries(r.accounts || {}).map(([id, v]) => [id, v.points || []]));
+    } catch (_) { paceSeries = {}; }
+    render();
+  }
+  // 今天“19:00”，明天“明天 09:00”，一周内“周日 14:00”，再远“11-28 09:00”。t 是秒或 ISO 时间
+  function whenShort(t) {
+    const d = typeof t === "number" ? new Date(t * 1000) : new Date(t || "");
+    if (isNaN(d)) return "";
+    const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`, now = new Date();
+    const days = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 864e5);
+    return days === 0 ? hm : days === 1 ? `明天 ${hm}` : days > 1 && days < 7 ? `周${WEEKDAY[d.getDay()]} ${hm}` : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hm}`;
+  }
+  // 卡片上的额度环：5 小时、7 天，再加用得最多的那个按模型的周额度（如 Fable）；窗口早该重置了的不画（存着的是旧数字）
+  function quotaRings(a) {
+    const u = a.usage || {}, out = [];
+    const add = (label, w) => { const p = pct(w); if (p !== null && !passed(w)) out.push({ label, w, p }); };
+    add("5h", u.five_hour);
+    add("7d", u.seven_day);
+    const top = (u.models || []).filter((m) => pct(m) !== null).sort((x, y) => y.utilization - x.utilization)[0];
+    if (top) add(top.name, top);
+    return out;
+  }
+  const ringBox = (r) => `<span class="rg">${ring(r.p, 34, 3.5)}<span class="rl">${esc(r.label)}</span><span class="rw">${esc(r.w.resets_at ? whenShort(r.w.resets_at) : r.p === 0 ? "未开始" : "–")}</span></span>`;
+  // 一句结论：用满了几点恢复 / 按现在的速度什么时候用完 / 够用
+  function verdict(a) {
+    const u = a.usage || {}, p = a.pace, full = (w) => pct(w) !== null && w.utilization >= FULL_AT && !passed(w);
+    if (full(u.five_hour)) return { cls: "hot", text: `5 小时用满${u.five_hour.resets_at ? ` · ${whenShort(u.five_hour.resets_at)} 恢复` : ""}` };
+    const m = (u.models || []).find(full);
+    if (m) return { cls: "hot", text: `${m.name} 用满${m.resets_at ? ` · ${whenShort(m.resets_at)} 刷新` : ""}` };
+    if (!p) return null;
+    if (p.state === "full") return { cls: "hot", text: `7 天用满 · ${whenShort(p.resets_at)} 恢复` };
+    if (p.state === "out") return { cls: "warn", text: `7 天 ${whenShort(p.out_at)} 左右用完` };
+    if (p.state === "ok") return { cls: "", text: `够用 · 重置时约剩 ${p.left}%` };
+    return { cls: "", text: "7 天窗口刚开始" };
+  }
+  // 到期：3 天内标黄、过了标红、自动续期写每月几号；没记到期日不显示
+  function expiry(a) {
+    const d = a.days_left, m = a.manual || {};
+    if (d === null || d === undefined) return null;
+    const t = m.expires_at ? new Date(`${String(m.expires_at).slice(0, 10)}T00:00:00`) : new Date((a.auto || {}).subscription_expires_at || "");
+    const ok = !isNaN(t), date = ok ? `${pad(t.getMonth() + 1)}-${pad(t.getDate())}` : "";
+    if (m.auto_renew) return { cls: "", text: `自动续期${ok ? (m.cycle === "yearly" ? ` · 每年 ${date}` : ` · 每月 ${t.getDate()} 日`) : ""}` };
+    if (d < 0) return { cls: "hot", text: `已过到期日${date ? `（${date}）` : ""}` };
+    if (d <= ALERT_SOON_DAYS) return { cls: "warn", text: d === 0 ? `今天到期${date ? `（${date}）` : ""}` : `到期 ${date} · 还有 ${d} 天` };
+    return { cls: "", text: `到期 ${date}` };
+  }
+  // 7 天额度的节奏小线：虚线匀速，实线实际（采样点 + 现在），比匀速快的部分涂浅黄，点线按速度往后推
+  function paceSvg(a) {
+    const p = a.pace;
+    if (!p) return "";
+    const W = 160, H = 22, span = p.resets_at - p.start, even = (t) => ((t - p.start) / span) * 100;
+    const X = (t) => 2 + Math.max(0, Math.min(1, (t - p.start) / span)) * (W - 7), Y = (v) => 3 + (1 - Math.max(0, Math.min(100, v)) / 100) * (H - 6);
+    const xy = (t, v) => `${X(t).toFixed(1)},${Y(v).toFixed(1)}`;
+    const now = Date.now() / 1000, got = Date.parse((a.usage || {}).fetched_at || "") / 1000;
+    const at = Number.isFinite(got) && got <= now && got >= p.start ? got : now;
+    const pts = (paceSeries[a.id] || []).filter(([t, v]) => t >= p.start && t < at && typeof v === "number").concat([[at, p.used]]);
+    const ink = p.state === "out" || p.state === "full" ? "var(--warn)" : "var(--fill)";
+    let s = `<svg viewBox="0 0 ${W} ${H}" aria-hidden="true">`;
+    const runs = [];
+    let run = [];
+    pts.forEach(([t, v], i) => {
+      const dv = v - even(t);
+      if (i > 0) {
+        const [t0, v0] = pts[i - 1], d0 = v0 - even(t0);
+        if ((d0 > 0) !== (dv > 0) && d0 !== dv) {
+          const tc = t0 + (d0 / (d0 - dv)) * (t - t0), c = [tc, even(tc)];
+          if (d0 > 0) { run.push(c); runs.push(run); run = []; } else run = [c];
+        }
+      }
+      if (dv > 0) run.push([t, v]);
+    });
+    if (run.length) runs.push(run);
+    for (const r of runs.filter((r) => r.length > 1)) s += `<polygon points="${r.map(([t, v]) => xy(t, v)).concat(r.slice().reverse().map(([t]) => xy(t, even(t)))).join(" ")}" fill="var(--warn)" opacity=".18"/>`;
+    s += `<line x1="${X(p.start)}" y1="${Y(0)}" x2="${X(p.resets_at)}" y2="${Y(100)}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3" opacity=".8"/>`;
+    if (pts.length > 1) s += `<polyline points="${pts.map(([t, v]) => xy(t, v)).join(" ")}" fill="none" stroke="${ink}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const end = p.state === "out" ? [p.out_at, 100] : p.state === "ok" ? [p.resets_at, 100 - p.left] : null;
+    if (end) {
+      s += `<line x1="${X(at)}" y1="${Y(p.used)}" x2="${X(end[0])}" y2="${Y(end[1])}" stroke="${p.state === "out" ? "var(--warn)" : "var(--muted)"}" stroke-width="1.4" stroke-dasharray="1 3" stroke-linecap="round"/>`;
+      if (p.state === "out") s += `<circle cx="${X(end[0])}" cy="${Y(end[1])}" r="2.4" fill="var(--paper)" stroke="var(--warn)" stroke-width="1.3"/>`;
+    }
+    return s + `<circle cx="${X(at)}" cy="${Y(p.used)}" r="2.4" fill="${ink}"/></svg>`;
   }
   function planChip(a) {
     const p = a.plan_display;
     if (!p) return "";
     const tier = (a.rate_limit_tier || "").match(/max_(\d+)x/);
     return `<span class="chip ${PLAN_CLASS[p] || ""}">${esc(PLAN[p] || p)}${tier ? " " + tier[1] + "x" : ""}</span>`;
-  }
-  function meter(label, w, tail) {
-    const p = pct(w);
-    if (p === null) return "";
-    const t = tail || (p === 0 ? noReset(0) : "");  // 没有重置时间又是 0%：这个窗口还没开始
-    return `<div class="meter"><div class="lab"><span>${esc(label)}${t ? ` · ${esc(t)}` : ""}</span><b>${p.toFixed(0)}%</b></div><div class="bar"><i class="${lv(p)}" style="width:${p}%"></i></div></div>`;
-  }
-  // 本机今天的消耗（Claude Code 的本地记录，按 API 价折算）：tokens、缓存命中率、折算金额
-  function todayStats(cur) {
-    if (!local) return null;
-    const d = new Date(), key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const rows = (local.rows || []).filter((r) => r.date === key && r.account_id === cur.id);
-    if (!rows.length) return { none: true };
-    const s = (k) => rows.reduce((n, r) => n + (r[k] || 0), 0);
-    const inp = s("input") + s("cache_write"), rd = s("cache_read"), out = s("output");
-    return { tokens: inp + rd + out, out, rd, hit: inp + rd > 0 ? Math.round(rd / (inp + rd) * 100) : null, msgs: s("messages"), cost: s("cost_usd") };
-  }
-  function statsHtml(cur) {
-    if (cur.kind !== "claude_code") return "";
-    const st = todayStats(cur);
-    if (st === null) return `<div class="stats"><div class="stat note">正在读本机记录…</div></div>`;
-    if (st.none) return `<div class="stats"><div class="stat note">今天这台电脑还没用过这个号（本机 Claude Code 记录）</div></div>`;
-    const tip = `本机 Claude Code 今天的记录：${st.msgs} 条消息 · 输出 ${wan(st.out)} · 缓存读取 ${wan(st.rd)} tokens\n金额按 API 价折算，订阅不按这个收费`;
-    return `<div class="stats" title="${esc(tip)}">
-      <div class="stat"><b>${wan(st.tokens)}</b><span>今天 tokens</span></div>
-      <div class="stat"><b>${st.hit === null ? "–" : st.hit + "%"}</b><span>缓存命中</span></div>
-      <div class="stat"><b>${usd(st.cost)}</b><span>折算费用</span></div></div>`;
   }
   // 红绿灯：按严重程度排，只显示最要紧的一条，其余在悬停提示里
   function lightHtml(cur, pos) {
@@ -356,14 +467,14 @@ button { font: inherit; color: inherit; }
       btns: [["open-now", "打开", "go"], ["ask-no", "取消"]] });
     if (state.attention) items.push({ lv: "busy", blink: true, text: state.attention.text });  // Claude Code 弹着权限确认等你（钩子记的）
     if (pend) items.push({ lv: "busy", ask: true, text: pend.message, btns: [["pend-now", "现在就切", "go"], ["pend-cancel", "取消"]] });
-    if (n > 0 && ss.busy) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });  // 开着但在等你输入的不算
+    if (n > 0 && ss.busy) items.push({ lv: "busy", pulse: true, text: ss.text || `${n} 个会话 · 正在回答` });  // 几个在回答、几个等你确认；开着但在等你输入的不算
     if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${p5.toFixed(0)}%，快满了` });
     else if (p7 !== null && p7 >= 90) items.push({ lv: "busy", text: `7 天额度 ${p7.toFixed(0)}%，快满了` });
     if (h.level === "warn") items.push({ lv: "busy", text: `当前号：${issue.text || h.label || "要注意"}`, tip: issue.advice });
     for (const a of state.accounts) {
       if (a.id !== cur.id && (a.health || {}).level === "error") items.push({ lv: "busy", text: `${nameOf(a, pos)}：${((a.health.issues || [])[0] || {}).text || "登录有问题"}` });
     }
-    if (!items.length) items.push({ lv: "ok", text: n > 0 ? `空闲 · ${n} 个 Claude Code 会话开着` : "空闲 · 一切正常" });
+    if (!items.length) items.push({ lv: "ok", text: n > 0 ? `${n} 个会话 · 空闲` : "空闲 · 一切正常" });
     const top = items.find((i) => i.ask) || items[0];  // 等你确认的（切换、打开桌面版）要排在红色状态前面，不然按钮永远看不到
     const tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
     return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}${top.pulse ? " pulse" : ""}${top.blink ? " blink" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}">${label}</button>`).join("")}</span>` : ""}</div>`;
@@ -381,8 +492,6 @@ button { font: inherit; color: inherit; }
     return { yes: `有${day ? `，${day}到期` : ""}`, expired: `已过期${day ? `（${day}）` : ""}，下次打开要重新登录`,
              no: "没有，下次打开要在窗口里登录", never: "还没登录过，第一次打开时登录", unknown: "看不出来" }[d.login] || null;
   }
-  const liveChip = (a) => a.kind !== "claude_desktop" ? (a.is_active ? `<span class="chip live">正在用</span>` : "")
-    : (a.desktop || {}).running ? `<span class="chip live">开着</span>` : a.is_active ? `<span class="chip">上次打开</span>` : "";
   function tipHtml(a, pos) {
     const u = a.usage || {}, h = a.health || {}, m = a.manual || {}, due = dueInfo(a), desk = a.kind === "claude_desktop";
     const tier = (a.rate_limit_tier || "").match(/max_(\d+)x/);
@@ -398,13 +507,14 @@ button { font: inherit; color: inherit; }
       m.price ? ["价格", m.price] : null,
       win("5 小时", u.five_hour), win("7 天", u.seven_day), win("7 天 Opus", u.seven_day_opus), win("7 天 Sonnet", u.seven_day_sonnet),
       ...(u.models || []).map((w) => win(w.name, w)),
+      a.pace && a.pace.state && verdict(a) ? ["7 天节奏", `已用 ${Math.round(a.pace.used)}%，匀速应在 ${Math.round(a.pace.even)}% · ${verdict(a).text}`, a.pace.state === "out" ? "warn" : ""] : null,
       [desk ? "记录时间" : "用量更新", ago(u.fetched_at)],
       [desk ? "最近打开" : "最近切换", a.last_switched_at ? ago(a.last_switched_at) : desk ? "还没打开过" : "还没切换过"],
       desk && deskLoginText(a) ? ["本机登录", deskLoginText(a), ["expired", "no"].includes((a.desktop || {}).login) ? "warn" : ""] : null,
       m.note ? ["备注", m.note] : null,
       ...(h.issues || []).map((i) => [i.level === "error" ? "问题" : "注意", `${i.text}${i.advice ? "。" + i.advice : ""}`, i.level === "error" ? "hot" : "warn"]),
     ].filter(Boolean);
-    const act = desk ? "点一下：退出并用这个号重新打开 Claude 桌面版（会先问一句）" : a.is_active ? "正在用的号" : "点一下切换到这个号";
+    const act = desk ? "点一下：退出并用这个号重新打开 Claude 桌面版（会先问一句）" : a.is_active ? "正在用的号（✎ 改名）" : "点一下切换到这个号";
     return `<div class="t"><b>${esc(nameOf(a, pos))}</b>${planChip(a)}</div><dl>${rows.map(([k, v, c]) => `<dt>${esc(k)}</dt><dd class="${esc(c || "")}">${esc(v)}</dd>`).join("")}</dl><div class="do">${esc(act)}</div>`;
   }
   function hideTip() {
@@ -412,31 +522,38 @@ button { font: inherit; color: inherit; }
     tipTimer = null; tipFor = null;
     document.querySelectorAll(".tip").forEach((t) => t.remove());
   }
+  const tipKey = (el) => el.dataset.tip || `u${el.dataset.utip}`;
   function showTip(el) {
-    const accs = (state && state.accounts) || [], a = accs.find((x) => x.id === el.dataset.tip);
-    if (!a || !el.isConnected) return;
+    const accs = (state && state.accounts) || [], col = el.dataset.utip !== undefined;
+    const a = col ? null : accs.find((x) => x.id === el.dataset.tip);
+    const html = col ? uTipHtml(Number(el.dataset.utip)) : a ? tipHtml(a, Object.fromEntries(accs.map((x, i) => [x.id, i + 1]))) : "";
+    if (!html || !el.isConnected) return;
     hideTip();
-    tipFor = el.dataset.tip;
+    tipFor = tipKey(el);
     const t = document.createElement("div");
     t.className = "tip";
-    t.innerHTML = tipHtml(a, Object.fromEntries(accs.map((x, i) => [x.id, i + 1])));
+    t.innerHTML = html;
     t.style.visibility = "hidden";
     document.body.appendChild(t);
     const r = el.getBoundingClientRect(), w = t.offsetWidth, hh = t.offsetHeight;
-    let top = r.bottom + 6;  // 先试放在账号下面，放不下就放上面；左右贴着卡片，不出窗口
-    if (top + hh > window.innerHeight - 6) top = Math.max(6, r.top - 6 - hh);
+    // 账号卡：先试放在下面，放不下放上面；柱子：先放在柱子上面，但不出图表那张卡（上面是四格汇总，不能挡住），放不下就放在柱子下面。
+    // 左右贴着，不出窗口
+    const card = col && el.closest(".uchart") ? el.closest(".uchart").getBoundingClientRect() : null;
+    let top = col ? r.top - 6 - hh : r.bottom + 6;
+    if (col && top < Math.max(6, card ? card.top + 4 : 6)) top = r.bottom + 6;
+    if (!col && top + hh > window.innerHeight - 6) top = Math.max(6, r.top - 6 - hh);
     t.style.left = `${Math.max(10, Math.min(r.left, window.innerWidth - w - 10))}px`;
     t.style.top = `${top}px`;
     t.style.visibility = "";
   }
   document.addEventListener("mouseover", (ev) => {
-    const el = ev.target.closest("[data-tip]");
-    if (!el || renaming || el.dataset.tip === tipFor) return;
+    const el = ev.target.closest("[data-tip], [data-utip]");
+    if (!el || renaming || tipKey(el) === tipFor) return;
     clearTimeout(tipTimer);
-    tipTimer = setTimeout(() => showTip(el), 350);
+    tipTimer = setTimeout(() => showTip(el), el.dataset.utip !== undefined ? 120 : 350);  // 柱子扫过去要跟手
   });
   document.addEventListener("mouseout", (ev) => {
-    const el = ev.target.closest("[data-tip]");
+    const el = ev.target.closest("[data-tip], [data-utip]");
     if (!el || (ev.relatedTarget && el.contains(ev.relatedTarget))) return;
     hideTip();
   });
@@ -445,10 +562,11 @@ button { font: inherit; color: inherit; }
   document.addEventListener("click", hideTip, true);  // 点了（切换、打开）就收起
   // 页面分成几块（红绿灯、大卡、其它 Code 号、桌面号、按钮、设置、页脚），每块记着上次画的 HTML：哪块变了只换那一块，没变的不动。
   // 以前每次都整页重画：点开弹窗时 focus / pageshow / visibilitychange 连着来好几次，按着的卡片在手指下面被换掉、悬停说明被冲掉，看着就卡
-  const SLOTS = ["light", "cur", "code", "desk", "acts", "set", "foot"];
+  const SLOTS = ["light", "tabs", "rn", "sum", "cards", "usage", "acts", "set", "foot"];
   let lastParts = {};
-  function applyBusy() {  // 忙的时候把按钮都禁掉：只改属性，不重画
+  function applyBusy() {  // 忙的时候把按钮都禁掉：只改属性，不重画（账号卡不是按钮，换成样式）
     document.querySelectorAll("#main button, #main input").forEach((el) => { el.disabled = busy; });
+    document.querySelectorAll("#main .mc").forEach((el) => { el.classList.toggle("off", busy); el.setAttribute("aria-disabled", String(busy)); });
   }
   function syncMsg() {
     const old = $("#main .msg");
@@ -472,62 +590,182 @@ button { font: inherit; color: inherit; }
     syncMsg();
     applyBusy();
   }
+  // ---- 页签：额度（账号卡）/ 用量（这台电脑上 Claude Code 的记录，和管理面板“用量”页同一个接口）。记在这台电脑的浏览器里
+  const MTABS = [["quota", "额度"], ["usage", "用量"], ["sessions", "会话"]];
+  const URANGES = [["today", "今天"], ["7", "7 天"], ["30", "30 天"]];
+  const CHART = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+  const lsPut = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+  let mtab = MTABS.some(([v]) => v === lsGet("cam-mini-tab")) ? lsGet("cam-mini-tab") : "quota";
+  let urange = URANGES.some(([v]) => v === lsGet("cam-mini-range")) ? lsGet("cam-mini-range") : "today";
+  let usage = null, usageErr = false, uview = null;  // uview：画出来的柱子，悬停说明用
+  const tabsHtml = () => `<div class="tabs" role="tablist" aria-label="看什么">${MTABS.map(([v, t]) => {
+    const n = v === "sessions" ? ((state && state.sessions) || {}).count || 0 : 0;  // 会话页签上写开着几个
+    return `<button type="button" role="tab" data-mtab="${v}" aria-selected="${v === mtab}" tabindex="${v === mtab ? 0 : -1}">${t}${n ? ` ${n}` : ""}</button>`;
+  }).join("")}</div>`;
+  const utok = (r) => (r.input || 0) + (r.output || 0) + (r.cache_write || 0) + (r.cache_read || 0);
+  // 颜色跟着账号走：按账号列表的顺序固定分配（和管理面板一样），第七个号起和已经删掉的号算“其他账号”，切换记录之前的算“未归属”
+  function uEntity(id, pos) {
+    const accs = state.accounts, i = accs.findIndex((a) => a.id === id);
+    if (i < 0) return { key: "unattributed", name: "未归属", color: "var(--muted)", rank: 98 };
+    if (i >= CHART.length) return { key: "_other", name: "其他账号", color: "var(--muted)", rank: 99 };
+    return { key: id, name: nameOf(accs[i], pos), color: CHART[i], rank: i };
+  }
+  function uLabel(k, unit, long) {
+    if (unit === "hour") { const h = Number(k.slice(11, 13)); return long ? `今天 ${pad(h)}:00–${pad(h + 1)}:00` : `${pad(h)}:00`; }
+    const d = new Date(k + "T00:00:00");
+    return long ? `${d.getMonth() + 1}/${d.getDate()} 周${WEEKDAY[d.getDay()]}` : `${d.getMonth() + 1}/${d.getDate()}`;
+  }
+  function uTipHtml(i) {
+    const c = uview && uview.cols[i];
+    if (!c) return "";
+    const lines = uview.ents.filter((e) => c.by[e.key]).map((e) => `<div class="tl"><span><i style="background:${e.color}"></i>${esc(e.name)}</span><b>${wan(c.by[e.key])}</b></div>`);
+    return `<div class="t">${esc(uLabel(c.k, uview.unit, true))}</div>${lines.join("") || `<div class="tl"><span>没有记录</span></div>`}`
+      + (c.msgs ? `<div class="tl total"><span>合计 · ${c.msgs} 条消息</span><b>${wan(c.tok)} · ${usd(c.cost)}</b></div>` : "");
+  }
+  function usageHtml(pos) {
+    const seg = `<span class="seg-mini" role="group" aria-label="时间范围">${URANGES.map(([v, t]) => `<button type="button" data-urange="${v}" aria-pressed="${v === urange}">${t}</button>`).join("")}</span>`;
+    const rep = usage && usage.range === urange ? usage : null;
+    uview = null;
+    if (!rep) return seg + `<div class="tile glass empty">${usageErr ? "没读到本机记录，稍后会自动再试" : "正在读这台电脑上的 Claude Code 记录…"}</div>`;
+    const t = rep.totals || {}, tok = utok(t);
+    if (!t.messages) return seg + `<div class="tile glass empty">${urange === "today" ? "今天" : `最近 ${urange} 天`}这台电脑上还没用过 Claude Code</div>`;
+    const hit = t.cache_hit, note = hit == null ? ["", "–"] : hit >= 0.9 ? ["good", "很高：大部分输入走了缓存"] : hit >= 0.6 ? ["", "还行：一半以上走了缓存"] : ["", "偏低：大部分输入没走缓存"];
+    const tiles = `<div class="utiles glass">
+      <div><div class="k">Token</div><div class="v">${wan(tok)}</div><div class="s">${t.cache_read ? `缓存读取占 ${Math.round((t.cache_read / tok) * 100)}%` : `输出 ${wan(t.output || 0)}`}</div></div>
+      <div><div class="k">消息</div><div class="v">${t.messages}</div><div class="s">${t.sessions || 0} 个会话</div></div>
+      <div><div class="k">折算金额</div><div class="v">≈ ${usd(t.cost_usd || 0)}</div><div class="s" title="金额按 API 价折算，订阅不按这个收费，只用来比较用量大小">按 API 价折算</div></div>
+      <div><div class="k">缓存命中率</div><div class="v">${hit == null ? "–" : (hit * 100).toFixed(1) + "%"}</div><div class="s ${note[0]}">${note[1]}</div></div></div>`;
+    // 柱子：每根按账号叠起来（Token）
+    const keys = rep.buckets || [], idx = Object.fromEntries(keys.map((k, i) => [k, i])), ents = {};
+    const cols = keys.map((k) => ({ k, by: {}, tok: 0, msgs: 0, cost: 0 }));
+    (rep.series || []).forEach((r) => {
+      const c = cols[idx[r.bucket]];
+      if (!c) return;
+      const e = uEntity(r.account_id, pos);
+      ents[e.key] = e;
+      c.by[e.key] = (c.by[e.key] || 0) + utok(r);
+      c.tok += utok(r); c.msgs += r.messages || 0; c.cost += r.cost_usd || 0;
+    });
+    const list = Object.values(ents).sort((a, b) => a.rank - b.rank);
+    const max = Math.max(1, ...cols.map((c) => c.tok));
+    uview = { cols, ents: list, unit: rep.unit };
+    const bars = cols.map((c, i) => `<span class="col" data-utip="${i}">${list.filter((e) => c.by[e.key]).map((e) =>
+      `<i style="height:${Math.max(1.5, (c.by[e.key] / max) * 100).toFixed(2)}%;background:${e.color}"></i>`).join("")}</span>`).join("");
+    const mid = Math.floor((keys.length - 1) / 2), ax = keys.length ? [uLabel(keys[0], rep.unit), uLabel(keys[mid], rep.unit), rep.unit === "hour" ? uLabel(keys[keys.length - 1], rep.unit) : "今天"] : [];
+    // 每个号一行：用了多少、几条消息、折算多少钱
+    const accs = {};
+    (rep.accounts || []).forEach((a) => {
+      const e = uEntity(a.account_id, pos), x = accs[e.key] || (accs[e.key] = { e, tok: 0, msgs: 0, cost: 0 });
+      x.tok += utok(a); x.msgs += a.messages || 0; x.cost += a.cost_usd || 0;
+    });
+    const rows = Object.values(accs).sort((a, b) => a.e.rank - b.e.rank), top = Math.max(1, ...rows.map((r) => r.tok));
+    const rowsHtml = rows.map((r) => `<div class="ur"><i class="dot" style="background:${r.e.color}"></i><span class="nm">${esc(r.e.name)}</span><span class="val">${wan(r.tok)}</span>
+      <span class="tr"><i style="width:${Math.max(1, (r.tok / top) * 100).toFixed(1)}%;background:${r.e.color}"></i></span><span class="sub">${r.msgs} 条消息 · ${usd(r.cost)}</span></div>`).join("");
+    const chart = `<div class="uchart glass"><div class="t"><span>${rep.unit === "hour" ? "按小时" : "每天"} · Token</span><span>悬停看明细</span></div>
+      <div class="ubars" style="gap:${keys.length <= 10 ? 8 : 2}px" role="img" aria-label="${rep.unit === "hour" ? "今天每小时" : `最近 ${urange} 天每天`}的 Token 用量，合计 ${wan(tok)}">${bars}</div>
+      <div class="uaxis" aria-hidden="true">${ax.map((x) => `<span>${esc(x)}</span>`).join("")}</div><div class="urows">${rowsHtml}</div></div>`;
+    return seg + tiles + chart;
+  }
+  // ---- 会话页签：这台电脑上正在跑的 Claude Code（和管理面板“会话”页同一个接口），只在这个页签开着、弹窗显示时取
+  let sess = null, sessErr = false;
+  const SSTATE = { busy: ["在回答", "busy"], waiting: ["等你确认", "wait"], idle: ["空闲", ""] };
+  const SHEALTH = { ok: ["健康", ""], high: ["快满了", "warn"], full: ["很满", "hot"] };
+  const SLOGIN = { own_token: "自带的号", api_key: "API Key", config_dir: "单独的配置目录" };
+  const ktok = (n) => n == null ? "–" : n >= 1e6 ? Math.round(n / 1e5) / 10 + "M" : n >= 1e3 ? Math.round(n / 100) / 10 + "K" : String(n);
+  function sessionsHtml() {
+    if (!sess) return `<div class="tile glass empty">${sessErr ? "没读到正在运行的会话，稍后会自动再试" : "正在看这台电脑上的 Claude Code…"}</div>`;
+    const rows = sess.sessions || [];
+    if (!sess.known) return `<div class="tile glass empty">这次没查到正在运行的进程，稍后会自动再试</div>`;
+    if (!rows.length) return `<div class="tile glass empty">这台电脑上现在没有在运行的 Claude Code</div>`;
+    // 用的哪个号：认得的号写和卡片上一样的名字，自带登录、API Key 之类写说明
+    const accs = state.accounts || [], pos = Object.fromEntries(accs.map((a, i) => [a.id, i + 1]));
+    const who = (r) => { const a = r.account_id && accs.find((x) => x.id === r.account_id); return a ? nameOf(a, pos) : r.account || SLOGIN[r.login] || "看不出哪个号"; };
+    const row = (r) => {
+      const [st, led] = SSTATE[r.state] || SSTATE.idle, h = SHEALTH[r.health];
+      const pct = r.context_used == null || !r.context_window ? null : Math.min(100, (r.context_used / r.context_window) * 100);
+      return `<button type="button" class="srow" data-act="open-session" title="在管理面板里看这个会话的上下文">
+        <i class="led ${led}"></i><span class="pj"><b>${esc(r.project || "看不出是哪个项目")}</b><span class="ac">${esc(who(r))}</span></span><span class="st ${led === "busy" || led === "wait" ? "busy" : ""}">${st}</span>
+        <span class="sub"><span>${r.model ? esc(modelName(r.model)) : "还没有回复"}${r.turns != null ? ` · ${r.turns} 轮` : ""}</span>
+          <span class="bar"><i class="${h ? h[1] : ""}" style="width:${pct == null ? 0 : pct.toFixed(1)}%"></i></span>
+          <span>${ktok(r.context_used)} / ${ktok(r.context_window)}</span>${h ? `<span class="hl ${h[1]}">${h[0]}</span>` : ""}</span></button>`;
+    };
+    const t = `${rows.length} 个会话${sess.answering ? ` · ${sess.answering} 个在回答` : ""}${sess.waiting ? ` · ${sess.waiting} 个等你确认` : ""}`;
+    return `<div class="tile glass msum"><div class="t"><span>${t}</span><span>上下文</span></div></div><div class="slist glass">${rows.map(row).join("")}</div>`;
+  }
+  // claude-opus-4-1-20250805 → Opus 4.1（和管理面板一样）
+  function modelName(m) {
+    const s = String(m || "").replace(/^.*?claude-/, "").replace(/-\d{8}$/, "");
+    const parts = s.split("-"), fam = parts.filter((p) => /^[a-z]+$/i.test(p)), ver = parts.filter((p) => /^\d+$/.test(p));
+    if (!fam.length) return m || "未知模型";
+    return fam.map((f) => f[0].toUpperCase() + f.slice(1)).join(" ") + (ver.length ? " " + ver.join(".") : "");
+  }
+  async function loadSessions() {
+    if (document.hidden || mtab !== "sessions") return;
+    try { sess = await api("GET", "/api/sessions", undefined, 20000); sessErr = false; } catch (_) { sessErr = true; }
+    render();
+  }
+  async function loadUsage() {  // 要扫日志文件，比 /api/state 慢：只在“用量”页签开着、弹窗显示时要
+    if (document.hidden || mtab !== "usage") return;
+    const want = urange;
+    try {
+      const r = await api("GET", `/api/local-usage?range=${want}`, undefined, 30000);
+      if (want === urange) { usage = r; usageErr = false; }
+    } catch (_) { if (want === urange) usageErr = true; }
+    render();
+  }
+  function pickTab(v, focus) {
+    if (v === mtab || !MTABS.some(([x]) => x === v)) return;
+    mtab = v; lsPut("cam-mini-tab", v);
+    hideTip(); render();
+    if (focus) { const b = document.querySelector(`[data-mtab="${v}"]`); if (b) b.focus(); }
+    loadUsage(); loadSessions();
+  }
   function render() {
     if (!state) return;
     if (renaming && $(".rn")) { syncMsg(); applyBusy(); return; }  // 改名表单开着时不重画（会丢输入），只更新按钮状态和提示
     const accs = state.accounts || [];
-    if (!accs.length) return paint({ cur: `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>` });
+    if (!accs.length) return paint({ cards: `<div class="tile glass empty">还没有账号<br>终端运行 <code>cam import --label 工作号</code> 存下现在登录的号</div>` });
     const pos = Object.fromEntries(accs.map((a, i) => [a.id, i + 1]));
     const acts = `<div class="acts"><button class="act" data-act="refresh"><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
           <button class="act" data-act="panel"><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button>
           <button class="act" data-act="settings"><span class="circle glass">${ICON.gear}</span><span>设置</span></button></div>`;
-    // 卡片只放 Claude Code 的号和桌面版的号（网页号、API 号在管理面板里）。大卡是当前的 Claude Code 号；一个 Code 号都没有时是第一个桌面号（多一个“打开”按钮）。和插件 mini_size 算高度的规则一致
-    const cur = accs.find((a) => a.is_active && a.kind === "claude_code") || accs.find((a) => a.kind === "claude_code") || accs.find((a) => a.kind === "claude_desktop");
-    if (!cur) return paint({ cur: `<div class="tile glass empty">卡片只放 Claude Code 和 Claude 桌面版的号<br>网页号、API 号在管理面板里</div>`, acts, set: settingsHtml() });
-    const codeOthers = accs.filter((a) => a.id !== cur.id && a.kind === "claude_code");
-    const opens = accs.filter((a) => a.id !== cur.id && a.kind === "claude_desktop");  // 点一下打开，不是切换
-    const u = cur.usage || {}, h = cur.health || {};
-    const p5 = pct(u.five_hour), curName = nameOf(cur, pos);
-    const sub = cur.email && cur.email !== curName ? cur.email : (p5 === null ? "还没有用量" : "");
-    const nameBlock = renaming === cur.id ? renameForm(cur)
-      : `<div class="name"><b>${esc(curName)}</b>${planChip(cur)}${liveChip(cur)}${h.level === "error" ? `<span class="chip bad">异常</span>` : ""}<button type="button" class="pen" data-act="rename" data-id="${esc(cur.id)}" title="改名">✎</button></div>
-        <div class="sub">${esc(sub)}</div>`;
-    const curTile = `<div class="tile glass"><div class="who" data-tip="${esc(cur.id)}"><div class="circle on">${ring(p5, 44, 5)}</div>
-      <div>${nameBlock}</div></div>
-      ${meter("5 小时", u.five_hour, resetShort((u.five_hour || {}).resets_at))}${meter("7 天", u.seven_day, resetShort((u.seven_day || {}).resets_at))}
-      ${p5 === null && pct(u.seven_day) === null ? `<div class="sub" style="margin-top:8px">${cur.kind === "claude_web" && !cur.has_session_key ? "网页版不自动读取用量" : "还没有用量，点下面的刷新"}</div>` : ""}${statsHtml(cur)}${cur.kind === "claude_code" ? "" : `<button type="button" class="open-btn" data-act="open" data-id="${esc(cur.id)}" data-kind="${esc(cur.kind)}" data-name="${esc(curName)}">用这个号打开 Claude 桌面版</button>`}</div>`;
-    // 其它 Claude Code 账号：方形小卡。5 小时、7 天各一根小条，下面写几点重置；窗口早该重置了就不拿旧数字骗人，写“已重置”
-    const mini = (label, w) => {
-      const p = pct(w);
-      if (p === null) return "";
-      const old = passed(w);
-      return `<span class="m"><span class="lab"><span>${label}</span>${old ? `<b class="off">已重置</b>` : `<b>${p.toFixed(0)}%</b>`}</span>
-        <span class="bar"><i class="${old ? "" : lv(p)}" style="width:${old ? 0 : p}%"></i></span><span class="when">${old ? "点下面的刷新看最新" : esc(resetShort(w.resets_at) || noReset(p))}</span></span>`;
+    // 卡片只放 Claude Code 的号和桌面版的号（网页号、API 号在管理面板里），一行两张：当前的 Claude Code 号排第一，其余 Code 号，然后桌面号。
+    // 和插件 mini_size 算高度的规则一致
+    const code = accs.filter((a) => a.kind === "claude_code"), desks = accs.filter((a) => a.kind === "claude_desktop");
+    const list = [...code.filter((a) => a.is_active), ...code.filter((a) => !a.is_active), ...desks];
+    if (!list.length) return paint({ cards: `<div class="tile glass empty">卡片只放 Claude Code 和 Claude 桌面版的号<br>网页号、API 号在管理面板里</div>`, acts, set: settingsHtml() });
+    const cur = code.find((a) => a.is_active) || code[0] || desks[0];
+    // 汇总：有额度的号的 5 小时、7 天平均已用；有号照现在的速度会在重置前用完时多一句
+    const q = list.map((a) => [a, quotaRings(a)]).filter(([, r]) => r.length);
+    const outs = list.filter((a) => a.pace && a.pace.state === "out");
+    const avg = (lab) => { const v = q.map(([, r]) => r.find((x) => x.label === lab)).filter(Boolean).map((x) => x.p); return v.length ? v.reduce((n, x) => n + x, 0) / v.length : null; };
+    const sm = (label, v) => v === null ? "<div></div>" : `<div class="meter"><div class="lab"><span>${label}</span><b>${v.toFixed(0)}%</b></div><div class="bar"><i class="${lv(v)}" style="width:${v}%"></i></div></div>`;
+    const sum = q.length >= 2 || outs.length ? `<div class="tile glass msum"><div class="t"><span>有额度的 ${q.length} 个号</span><span>平均已用</span></div>
+      <div class="two">${sm("5 小时", avg("5h"))}${sm("7 天", avg("7d"))}</div>${outs.length ? `<div class="alert">⚠ ${esc(nameOf(outs[0], pos))} ${esc(verdict(outs[0]).text)}${outs.length > 1 ? `，另外 ${outs.length - 1} 个号也是` : ""}</div>` : ""}</div>` : "";
+    const ss = state.sessions || {};
+    const mc = (a) => {
+      const hh = a.health || {}, nm = nameOf(a, pos), desk = a.kind === "claude_desktop", on = !desk && a.is_active;
+      const rings = quotaRings(a), v = verdict(a), ex = expiry(a);
+      const what = [ss.answering ? `${ss.answering} 个在回答` : ss.busy ? "正在回答" : "", ss.waiting ? `${ss.waiting} 个等你确认` : ""].filter(Boolean).join(" · ");
+      const sess = on && ss.count > 0 ? `<span class="ss${ss.busy || ss.waiting ? " busy" : ""}"><i></i>${ss.count} 个会话${ss.busy || ss.waiting ? "在跑 · " + what : "开着 · 空闲"}</span>` : "";
+      const body = rings.length ? `<span class="rr">${rings.map(ringBox).join("")}</span>${a.pace ? `<span class="sp">${paceSvg(a)}</span>` : ""}`
+        : `<span class="none">${desk ? ICON.desktop : ""}${hh.level === "error" ? esc(((hh.issues || [])[0] || {}).text || "登录有问题") : desk ? `桌面版${deskState(a) ? " · " + esc(deskState(a)) : ""}<br>还没有本地额度` : "还没有用量，点下面的刷新"}</span>`;
+      const tail = v ? `<span class="vd ${v.cls}">${esc(v.text)}</span>` : on ? "" : `<span class="vd">${desk ? "点一下打开" : "点一下切换"}</span>`;
+      return `<div class="mc glass${on ? " sel" : ""}" role="button" tabindex="0" aria-label="${esc(nm)}${on ? "（正在用）" : desk ? "：打开桌面版" : "：切换到这个号"}"
+        data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}"${on ? ' data-on="1"' : ""}>
+        <span class="nm">${on ? '<span class="ok">✓</span>' : ""}<b>${esc(nm)}</b>${on ? `<button type="button" class="pen" data-act="rename" data-id="${esc(a.id)}" title="改名">✎</button>` : ""}${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span>
+        ${sess}${body}${tail}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : ""}</div>`;
     };
-    const card = (a) => {
-      const uu = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), f = uu.five_hour, q5 = passed(f) ? null : pct(f);
-      const body = mini("5 小时", uu.five_hour) + mini("7 天", uu.seven_day);
-      return `<button type="button" class="card glass" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}">
-        <span class="head"><span class="circle">${ring(q5, 34, 4)}</span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span></span>
-        ${body || `<span class="none">${hh.level === "error" ? esc(((hh.issues || [])[0] || {}).text || "登录有问题") : "还没有用量，点下面的刷新"}<br>点一下切换</span>`}</button>`;
-    };
-    // 桌面版的号：一行一个，名字、额度和“打开”的箭头才放得下
-    const pill = (a) => {
-      const uu = a.usage || {}, q5 = pct(uu.five_hour), hh = a.health || {}, nm = nameOf(a, pos);
-      const q = q5 === null ? null : `5 小时 ${q5.toFixed(0)}%${resetShort((uu.five_hour || {}).resets_at) ? " · " + resetShort(uu.five_hour.resets_at) : ""}`;
-      return `<button type="button" class="acc glass open" data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}">
-        <span class="circle">${q5 === null ? ICON.desktop : ring(q5, 32, 4)}</span>
-        <span><span class="name"><b>${esc(nm)}</b>${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span><span class="sub">${esc(`桌面版${deskState(a) ? " · " + deskState(a) : ""} · ${q || "点一下打开"}`)}</span></span><span class="go">${ICON.open}</span></button>`;
-    };
-    const group = (list, label, wide) => list.length ? `<div class="sec">${label}</div>${wide ? `<div class="pills one">${list.map(pill).join("")}</div>` : `<div class="cards">${list.map(card).join("")}</div>`}` : "";
+    const rn = renaming && list.some((a) => a.id === renaming) ? `<div class="tile glass rn-tile"><div class="t">给 ${esc(nameOf(list.find((a) => a.id === renaming), pos))} 改名：菜单栏、命令行、聊天机器人里都用这个名字</div>${renameForm(list.find((a) => a.id === renaming))}</div>` : "";
     const sc = state.risk_score, reg = state.region || {};
     // 最近一次环境检测没连上：留着的是上一次查到的出口，标一个问号（详情在管理面板的环境区块）
     const left = (reg.loc ? `<span${reg.failed_at ? ` title="最近一次环境检测没连上，这是${ago(reg.checked_at)}查到的"` : ""}>出口 ${esc(reg.loc)}${reg.failed_at ? " ?" : reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}</span>` : "")
       + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
     const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
-    paint({ light: lightHtml(cur, pos), cur: curTile, code: group(codeOthers, "其它 Claude Code 账号 · 点一下切换"),
-      desk: group(opens, "Claude 桌面版 · 点一下打开", true),  // 一行一个：名字、套餐、额度和箭头才放得下
-      acts, set: settingsHtml(), foot });
+    const quota = mtab === "quota";
+    paint({ light: lightHtml(cur, pos), tabs: tabsHtml(), rn, sum: quota ? sum : "", cards: quota ? `<div class="mgrid">${list.map(mc).join("")}</div>` : "",
+      usage: mtab === "usage" ? usageHtml(pos) : mtab === "sessions" ? sessionsHtml() : "", acts, set: settingsHtml(), foot });
   }
   let loading = null, loadedAt = 0, stamp = null;
   function load() {  // 点开弹窗时 focus、pageshow、visibilitychange 会连着触发：同一时间只发一个请求，刚取过的不再取
@@ -544,11 +782,6 @@ button { font: inherit; color: inherit; }
       finally { loading = null; }
     })();
     return loading;
-  }
-  async function loadLocal() {  // 本机记录要扫日志文件，比 /api/state 慢：等卡片先画出来再要，弹窗没显示时不要
-    if (document.hidden) return;
-    try { local = await api("GET", "/api/local-usage?days=1", undefined, 30000); } catch (_) { local = { rows: [] }; }
-    render();
   }
   function say(text, cls) {  // 成功的提示 2.5 秒，出错的 6 秒
     msg = text ? { text, cls: cls || "" } : null;
@@ -578,10 +811,28 @@ button { font: inherit; color: inherit; }
       say(r.message || "已打开");
     });
   }
+  document.addEventListener("keydown", (ev) => {
+    const tb = ev.target.closest && ev.target.closest("[data-mtab]");  // 页签：左右方向键换
+    if (tb && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) {
+      ev.preventDefault();
+      const i = MTABS.findIndex(([v]) => v === mtab), j = (i + (ev.key === "ArrowRight" ? 1 : -1) + MTABS.length) % MTABS.length;
+      return pickTab(MTABS[j][0], true);
+    }
+    const card = ev.target.closest && ev.target.closest(".mc");
+    if (card && ev.target === card && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); card.click(); }
+  });
   document.addEventListener("click", (ev) => {
-    const acc = ev.target.closest(".acc, .card");
+    const tb = ev.target.closest("[data-mtab]");
+    if (tb) return pickTab(tb.dataset.mtab);
+    const ur = ev.target.closest("[data-urange]");
+    if (ur) {
+      if (ur.dataset.urange !== urange) { urange = ur.dataset.urange; lsPut("cam-mini-range", urange); render(); loadUsage(); }
+      return;
+    }
+    const acc = ev.target.closest("[data-act]") ? null : ev.target.closest(".mc");
     if (acc) {
       const { id, kind, name } = acc.dataset;
+      if (busy || acc.dataset.on) return;  // 正在用的号：点了不做事（改名点 ✎）
       if (kind !== "claude_code") return openAcc(id, kind, name);
       // 设置里开了“切换前确认”：先在红绿灯那里问一句。有会话在跑时不多问一遍，switchTo 本来就会问怎么切
       if (settings && settings.confirm_switch && !(state && state.sessions && state.sessions.count > 0)) {
@@ -598,8 +849,10 @@ button { font: inherit; color: inherit; }
     const btn = ev.target.closest("[data-act]");
     if (!btn) return;
     const act = btn.dataset.act;
-    if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadLocal(); });
-    if (act === "panel") run(async () => { await api("POST", "/api/open-panel", {}); say("已打开"); });
+    if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadUsage(); loadPace(); });
+    // 管理面板打开到对应的页签：在“用量”这边点就开到“用量”页
+    if (act === "panel") run(async () => { await api("POST", "/api/open-panel", { tab: mtab === "quota" ? "accounts" : mtab }); say("已打开"); });
+    if (act === "open-session") run(async () => { await api("POST", "/api/open-panel", { tab: "sessions" }); say("已在管理面板打开"); });
     if (act === "ask-go" && ask && ask.confirm) run(() => switchTo(ask.id));  // 确认后照常切；这时发现有会话在跑，switchTo 会接着问怎么切
     if (act === "ask-wait" && ask && ask.id) run(() => switchTo(ask.id, "wait"));
     if (act === "ask-now" && ask && ask.id) run(() => switchTo(ask.id, "now"));
@@ -651,16 +904,19 @@ button { font: inherit; color: inherit; }
       say("已修改");
     });
   });
-  load().then(loadLocal);  // 先把账号和额度画出来，再要本机消耗
+  load().then(() => { loadPace(); loadUsage(); });  // 先把账号和额度画出来，再要节奏线的点和本机记录（用量页签开着时）
   loadSettings();  // “切换前确认”开关点卡片时就要用，一开始就读（设置页没打开时 render 不画它）
   setInterval(() => { if (!document.hidden) load(); }, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
-  setInterval(loadLocal, 120000);
+  setInterval(loadUsage, 120000);
+  setInterval(loadSessions, 10000);  // 会话页签开着时每 10 秒（没开着时 loadSessions 直接返回）
+  setInterval(loadPace, 300000);
   window.addEventListener("focus", () => load());
   window.addEventListener("pageshow", () => load());
   document.addEventListener("visibilitychange", () => {  // 弹窗常驻：收起时藏掉悬停说明，再点开时刷新数据
     if (document.hidden) { hideTip(); return; }
     load();
-    if (!local) loadLocal();
+    if (mtab === "usage") loadUsage();
+    if (mtab === "sessions") loadSessions();
   });
 })();
 </script>

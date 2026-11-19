@@ -560,7 +560,7 @@ fn proc_start_secs(stat: &str) -> Option<f64> {
 
 /// 这些 claude 进程各自 (已经运行了多少秒, 用的哪个登录)，看不出来的是 None。Linux 读 /proc，登录方式也看得出；
 /// macOS 用 ps 的 etime，只有运行时长；Windows 什么都看不出。与 cam.py 的 claude_sessions / _ps_etimes 对应。
-fn session_ages(pids: &[u32]) -> HashMap<u32, (Option<f64>, Option<String>)> {
+pub(crate) fn session_ages(pids: &[u32]) -> HashMap<u32, (Option<f64>, Option<String>)> {
     if let Some(fake) = fake_sessions() {
         return fake
             .unwrap_or_default()
@@ -1224,36 +1224,39 @@ pub fn is_claude_cmd(argv0: &str, cmdline: &str) -> bool {
 }
 
 /// 查进程表（PowerShell / ps）最多等这么久：卡住的命令不能把界面和后台任务一直拖着。和 cam.py 一样，超时当查不到
-const PROCESS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const PROCESS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 测试里假装的一个 claude 会话：pid、已经运行了多少秒、用的哪个登录（后两样没写就是看不出来）
-struct FakeSession {
-    pid: u32,
-    secs: Option<f64>,
-    login: Option<String>,
+/// 测试里假装的一个 claude 会话：pid、已经运行了多少秒、用的哪个登录、工作目录（后三样没写就是看不出来）
+pub(crate) struct FakeSession {
+    pub(crate) pid: u32,
+    pub(crate) secs: Option<f64>,
+    pub(crate) login: Option<String>,
+    pub(crate) cwd: Option<String>,
 }
 
 /// 测试用：跑测试的机器上可能真有 claude 在运行，由测试用 CAM_TEST_CLAUDE_PIDS 指定“有哪些”：逗号隔开，
-/// 每个是 pid[:已运行秒数[:登录方式]]（如 4242、7:7200、8:7200:own_token）；写 unknown 是假装这次没查出来（里层的 None）。
+/// 每个是 pid[:已运行秒数[:登录方式[:工作目录]]]（如 4242、7:7200、8:7200:own_token、9:60::/w/proj；工作目录里可以有冒号，
+/// 但不能有逗号）；写 unknown 是假装这次没查出来（里层的 None）。
 /// 这时进程是假的、查一次不花时间，下面的缓存和限频都不走（测试里改了要马上见效），也不采 CPU、不读 /proc。
-fn fake_sessions() -> Option<Option<Vec<FakeSession>>> {
+pub(crate) fn fake_sessions() -> Option<Option<Vec<FakeSession>>> {
     let v = std::env::var_os("CAM_TEST_CLAUDE_PIDS")?;
     let v = v.to_string_lossy();
     if v.trim() == "unknown" {
         return Some(None);
     }
     let one = |item: &str| {
-        let mut f = item.trim().split(':');
+        let mut f = item.trim().splitn(4, ':');
         Some(FakeSession {
             pid: f.next()?.parse::<u32>().ok()?,
             secs: f.next().and_then(|x| x.parse::<f64>().ok()),
             login: f.next().filter(|x| !x.is_empty()).map(String::from),
+            cwd: f.next().filter(|x| !x.is_empty()).map(String::from),
         })
     };
     Some(Some(v.split(',').filter_map(one).collect()))
 }
 
-fn faking_processes() -> bool {
+pub(crate) fn faking_processes() -> bool {
     std::env::var_os("CAM_TEST_CLAUDE_PIDS").is_some()
 }
 
@@ -1523,10 +1526,10 @@ pub fn apply_pending_switch_at(
 // ---------------------------------------------------------------- 会话在不在执行（红绿灯）
 
 /// 会话记录文件这么多秒内写过就算在执行（跑着的时候每条消息、每个工具结果都往里追加；等你输入时不写）。与 cam.py 的 ACTIVE_WINDOW 一致
-const ACTIVE_WINDOW_SECS: u64 = 20;
+pub(crate) const ACTIVE_WINDOW_SECS: u64 = 20;
 /// 有一个会话（一个 claude 进程连同它的子孙进程）这段时间平均占 CPU 超过 2% 就算在执行（算 token、画界面、跑工具）；
 /// 闲着等输入时接近 0。一个一个会话比，不加在一起：几个闲着的会话各占零点几，加起来也能过 2%。与 cam.py 的 CPU_BUSY 一致
-const CPU_BUSY: f64 = 0.02;
+pub(crate) const CPU_BUSY: f64 = 0.02;
 /// 两次采样隔得比这久，平均下来的占用说明不了现在（一小时前忙过一阵、现在闲着，平均也能过 2%）：当不知道，这次的当新基准。与 cam.py 一致
 const CPU_SAMPLE_MAX_GAP: f64 = 60.0;
 /// /proc/<pid>/stat 里 CPU 时间的单位：Linux 给用户态看的滴答固定是每秒 100 个（USER_HZ），和内核自己的 HZ 无关
@@ -1644,6 +1647,28 @@ fn cpu_rate(last: &HashMap<u32, f64>, cur: &HashMap<u32, f64>, dt: f64) -> Optio
     Some(most / dt)
 }
 
+/// 最近一次算出来的每个会话各自的 CPU 占用（会话页分开看每个会话在不在回答）：什么时候算的、pid → 占几个核
+static CPU_RATES: Mutex<Option<(Instant, HashMap<u32, f64>)>> = Mutex::new(None);
+
+fn note_cpu_rates(last: &HashMap<u32, f64>, cur: &HashMap<u32, f64>, dt: f64, now: Instant) {
+    if !(1.0..=CPU_SAMPLE_MAX_GAP).contains(&dt) {
+        return;
+    }
+    let rates = cur
+        .iter()
+        .filter_map(|(pid, secs)| last.get(pid).map(|was| (*pid, (secs - was).max(0.0) / dt)))
+        .collect();
+    *CPU_RATES.lock().unwrap_or_else(|e| e.into_inner()) = Some((now, rates));
+}
+
+/// 每个 claude 进程最近平均占几个核；30 秒内没采过样就是空的（算不出来）。与 cam.py 的 _ACTIVITY["rates"] 对应
+pub(crate) fn recent_cpu_rates() -> HashMap<u32, f64> {
+    match &*CPU_RATES.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some((at, rates)) if at.elapsed() < Duration::from_secs(30) => rates.clone(),
+        _ => HashMap::new(),
+    }
+}
+
 /// 上一次 CPU 采样：什么时候、每个 claude 进程（含子孙进程）累计的 CPU 秒
 #[derive(Default)]
 struct CpuSample {
@@ -1661,7 +1686,10 @@ fn cpu_busy(prev: &mut CpuSample, cur: Option<HashMap<u32, f64>>, now: Instant) 
         return false;
     }
     let rate = match (&prev.cpu, &cur, dt) {
-        (Some(last), Some(cur), Some(dt)) => cpu_rate(last, cur, dt),
+        (Some(last), Some(cur), Some(dt)) => {
+            note_cpu_rates(last, cur, dt, now);
+            cpu_rate(last, cur, dt)
+        }
         _ => None,
     };
     *prev = CpuSample {

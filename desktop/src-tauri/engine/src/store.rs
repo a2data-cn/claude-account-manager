@@ -110,11 +110,21 @@ pub fn read_bytes(path: &Path) -> Option<Vec<u8>> {
 /// 先写临时文件再原子替换，避免写到一半崩溃导致文件损坏。
 /// 目标是符号链接（比如 dotfiles 管理的 ~/.claude.json）时写到链接指向的文件，保留链接本身。
 pub fn write_json_atomic(path: &Path, data: &Value, private: bool) -> R<()> {
+    let text = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
+    write_text_atomic(path, &text, private)
+}
+
+/// 一行写完、不缩进（usage-samples.json 是一大串数字，缩进的话每个数字占一行）。和 cam.py 的 compact=True 一样。
+pub fn write_json_compact(path: &Path, data: &Value) -> R<()> {
+    let text = serde_json::to_string(data).map_err(|e| e.to_string())?;
+    write_text_atomic(path, &text, false)
+}
+
+fn write_text_atomic(path: &Path, text: &str, private: bool) -> R<()> {
     let path = &resolve_link(path);
     let dir = path.parent().ok_or("无效路径")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!(".tmp-{}", new_id()));
-    let text = serde_json::to_string_pretty(data).map_err(|e| e.to_string())?;
     {
         let mut f =
             fs::File::create(&tmp).map_err(|e| format!("写入 {} 失败：{}", tmp.display(), e))?;

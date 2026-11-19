@@ -533,6 +533,35 @@ class CamTest(unittest.TestCase):
         self.assertEqual(c["claudeAiOauth"]["refreshToken"], "rt-B1")
         self.assertEqual((c["mcpOAuth"], c["otherKey"]), ({"srv": {"accessToken": "mcp-new"}}, 1))
 
+    def test_pace_is_read_only_and_follows_samples(self):
+        """面板和小面板要的 7 天节奏：/api/state 带结论，/api/usage-samples 给画线的点；只读，不建采样文件。"""
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        store = self.cam.Store()
+        now = time.time()
+        iso = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat()  # noqa: E731
+        with store.lock():
+            d = store.load()
+            d["accounts"][0]["usage"] = {"five_hour": {"utilization": 30, "resets_at": iso(now + 3600)},
+                                         "seven_day": {"utilization": 50, "resets_at": iso(now + 3 * 86400)},
+                                         "fetched_at": iso(now - 60), "error": None}
+            store.save(d)
+        path = os.path.join(store.root, "usage-samples.json")
+        st = self.cam.public_state(store, store.load())
+        pace = st["accounts"][0]["pace"]
+        # 窗口过去 4 天（57%），用了 50%：没有采样点时按窗口平均（每天 12.5%），重置前用不完
+        self.assertEqual((pace["even"], pace["ahead"], pace["basis"], pace["state"]), (57.1, False, "window", "ok"))
+        self.assertFalse(os.path.exists(path))
+        # 最近一天从 30% 涨到 50%：按最近一天的速度（每天 20%），重置前就用完
+        aid = d["accounts"][0]["id"]
+        self.cam.save_usage_samples(store, {"version": 1, "accounts": {aid: [[int(now - 86400), 5.0, 30.0, None, None]]}})
+        pace = self.cam.public_state(store, store.load())["accounts"][0]["pace"]
+        self.assertEqual((pace["basis"], pace["state"]), ("recent", "out"))
+        self.assertLess(pace["out_at"], pace["resets_at"])
+        view = self.cam.usage_samples_view(store, store.load())
+        self.assertEqual(view["accounts"][aid]["points"], [[int(now - 86400), 30.0]])
+        self.assertEqual(self.cam.usage_samples_view(store, store.load(), only="nope")["accounts"], {})
+
     def test_usage_refresh_active_and_inactive(self):
         past = int((time.time() - 60) * 1000)
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com", expires_ms=past)
@@ -554,6 +583,15 @@ class CamTest(unittest.TestCase):
         today = dt.date.today().isoformat()
         self.assertEqual((a["usage_days"][today], b["usage_days"][today]), ([10.0, 20.0], [95.0, 50.0]))
         self.assertEqual(self.cam.public_state(self.cam.Store(), d)["accounts"][1]["usage_days"], {today: [95.0, 50.0]})
+        # 7 天额度的节奏：每次刷新给每个号记一个采样点，单独存在 usage-samples.json（不在 accounts.json 里）
+        samples_path = os.path.join(self.cam.Store().root, "usage-samples.json")
+        with open(samples_path) as f:
+            samples = json.load(f)
+        self.assertEqual([p[1:] for p in samples["accounts"][a["id"]]],
+                         [[10.0, 20.0, 4070908800, 4071254400]])
+        self.assertNotIn("usage-samples", json.dumps(d))
+        # 重置时间在 2099 年，现在还不在那个 7 天窗口里：不推算
+        self.assertIsNone(self.cam.public_state(self.cam.Store(), d)["accounts"][0]["pace"])
         # 非当前账号刷新后，轮换的 refresh token 被保存
         self.assertEqual(self.cam.Store().load_secret(a["id"])["claudeAiOauth"]["refreshToken"], "rt-A2")
         # 当前账号从不刷新
@@ -649,6 +687,46 @@ class CamTest(unittest.TestCase):
         for r in rep["models"]:
             by_model[r["model"]] = by_model.get(r["model"], 0) + r["output"]
         self.assertEqual(by_model, {"claude-opus-4-1-20250805": 107, "claude-sonnet-4-5": 1000})
+
+    def test_local_report_reads_sessions_and_owners(self):
+        """管理面板的本机消耗：会话按记录里的 sessionId 数，没写的按文件名；同一条消息在两个文件里只算一次；按切换记录归账号。"""
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.run_cam("import", "--label", "A")
+        d = self.data()
+        a_id = d["accounts"][0]["id"]
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+        d["switch_log"] = [{"id": a_id, "at": (now - dt.timedelta(days=3)).isoformat()}]
+        self.cam.Store().save(d)
+
+        def ev(mid, minutes_ago, out, sess=None):
+            e = {"type": "assistant", "requestId": "r" + mid,
+                 "timestamp": (now - dt.timedelta(minutes=minutes_ago)).isoformat().replace("+00:00", "Z"),
+                 "message": {"id": mid, "model": "claude-opus-5-5", "usage": {"input_tokens": 1, "output_tokens": out}}}
+            if sess:
+                e["sessionId"] = sess
+            return json.dumps(e)
+        root = os.path.join(self.tmp, ".claude", "projects")
+        os.makedirs(os.path.join(root, "p1"), exist_ok=True)
+        os.makedirs(os.path.join(root, "p2"), exist_ok=True)
+        with open(os.path.join(root, "p1", "file-one.jsonl"), "w") as f:
+            f.write("\n".join([ev("m1", 5, 10, "sess-A"), ev("m2", 4, 20, "sess-A")]) + "\n")
+        with open(os.path.join(root, "p2", "file-two.jsonl"), "w") as f:  # 没写 sessionId：按文件名算一个会话；m2 是复制过来的
+            f.write("\n".join([ev("m2", 4, 20), ev("m3", 3, 30)]) + "\n")
+        old = os.path.join(root, "p2", "old.jsonl")
+        with open(old, "w") as f:  # 五天前、第一次切换之前：未归属
+            f.write(ev("m0", 5 * 24 * 60, 7, "sess-0") + "\n")
+        rep = self.cam.local_report(self.data(), "7")
+        self.assertEqual((rep["unit"], len(rep["buckets"])), ("day", 7))
+        self.assertEqual((rep["totals"]["messages"], rep["totals"]["output"], rep["totals"]["sessions"]), (4, 67, 3))
+        by = {a["account_id"]: (a["output"], a["sessions"], a["top_model"]) for a in rep["accounts"]}
+        self.assertEqual(by, {a_id: (60, 2, "claude-opus-5-5"), "unattributed": (7, 1, "claude-opus-5-5")})
+        self.assertEqual(sum(map(sum, rep["heatmap"]["cells"])), 4)
+        today = self.cam.local_report(self.data(), "today")
+        self.assertEqual((today["unit"], len(today["buckets"])), ("hour", 24))
+        self.assertEqual(self.cam.local_report(self.data(), "all")["totals"]["messages"], 4)
+        with self.assertRaises(self.cam.CamError):
+            self.cam.local_report(self.data(), "week")
 
     def test_local_events_cache_reads_only_new_lines(self):
         """日志按文件缓存：没变不重读，追加了只读新加的行，没写完的最后一行留到下次，文件被重写就从头读。"""
@@ -1215,7 +1293,7 @@ class CamTest(unittest.TestCase):
         self.assertIn(" shortcut=", busy[0])
         self.assertNotIn(" shortcut=", busy[1])
         self.assertNotIn("dropdown=false", lines[0])
-        self.assertTrue(busy[3].startswith("● 工作中 · 2 个 claude 会话在跑 | size=12 color=" + cam_menu.YELLOW), busy[3])
+        self.assertTrue(busy[3].startswith("● 2 个会话 · 正在回答 | size=12 color=" + cam_menu.YELLOW), busy[3])  # 看不出是哪个在回答
         # 流式模式：一帧就是整份菜单，标题只有一行；工作中时相邻两帧的图标不一样（橙灯呼吸），空闲时每帧都一样
         cam_menu.STREAMING = True
         try:
@@ -1265,23 +1343,34 @@ class CamTest(unittest.TestCase):
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
             w, h = cam_menu.mini_size(store.load()["accounts"])
             self.assertIn(f" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww={w} webviewh={h} shortcut=", lines2[0])
-            # 弹窗高度按账号数算：一个号最矮，其它 Claude Code 号每多两个加一行方形小卡，到上限就整页上下滑；API 账号不在卡片里
+            # 弹窗高度按“额度”“用量”两个页签里高的那个算（换页签时弹窗变不了大小）。“额度”页：账号卡一行两张，两个号以上多一块汇总；
+            # 有 Claude Code 号多一行会话；到上限就整页上下滑；API、网页号不在卡片里。“用量”页每个 Claude Code 号一行（最多算四行）
+            M = cam_menu
             code = {"kind": "claude_code"}
+            usage = lambda n: M.MINI_USAGE + M.MINI_UROW * max(1, min(4, n))
+            size = lambda quota, n=1: M.MINI_BASE + M.MINI_TABS + max(quota, usage(n))
+            self.assertEqual(M.mini_usage_height([code] * 9), usage(4))
+            self.assertEqual(M.mini_usage_height([{"kind": "claude_desktop"}]), usage(1))
             one = cam_menu.mini_size([code])[1]
             self.assertEqual(w, cam_menu.MINI_WIDTH)
+            self.assertEqual(M.mini_quota_height([code]), M.MINI_ROW + M.MINI_SESS)
+            self.assertEqual(one, size(M.MINI_ROW + M.MINI_SESS))
             self.assertEqual(cam_menu.mini_size([code, {"kind": "api"}])[1], one)
             two = cam_menu.mini_size([code] * 2)[1]
-            self.assertEqual(two, one + cam_menu.MINI_SEC + cam_menu.MINI_CARD)
-            self.assertEqual(cam_menu.mini_size([code] * 3)[1], two)
-            self.assertEqual(cam_menu.mini_size([code] * 4)[1], two + cam_menu.MINI_CARD)
+            self.assertEqual(M.mini_quota_height([code] * 2), M.MINI_ROW + M.MINI_SESS + M.MINI_SUM)  # 两张卡同一行，多的是汇总
+            self.assertEqual(two, size(M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 2))
+            three = size(2 * M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 3)
+            self.assertEqual(cam_menu.mini_size([code] * 3)[1], three)
+            self.assertEqual(cam_menu.mini_size([code] * 4)[1], size(2 * M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 4))
+            self.assertLessEqual(cam_menu.mini_size([code] * 4)[1], M.MINI_MAX)  # 四个号两页都放得下，不用滑
             self.assertEqual(cam_menu.mini_size([code] * 40)[1], cam_menu.MINI_MAX)
             web, desk = {"kind": "claude_web"}, {"kind": "claude_desktop"}
             self.assertEqual(cam_menu.mini_size([code, web])[1], one)  # 网页号不进卡片
-            self.assertEqual(cam_menu.mini_size([code, desk])[1], one + cam_menu.MINI_SEC + cam_menu.MINI_ROW)  # 桌面号单独一组，药丸卡一行一个
-            self.assertEqual(cam_menu.mini_size([code, code, desk])[1], two + cam_menu.MINI_SEC + cam_menu.MINI_ROW)  # 两组各占一行
-            self.assertEqual(cam_menu.mini_size([desk])[1], one + cam_menu.MINI_DESK)  # 没有 Code 号：大卡是桌面号（没有本机消耗、多一个“打开”按钮）
-            self.assertEqual(cam_menu.mini_size([desk, desk])[1], one + cam_menu.MINI_DESK + cam_menu.MINI_SEC + cam_menu.MINI_ROW)
-            self.assertEqual(cam_menu.mini_size([code, desk, desk])[1], one + cam_menu.MINI_SEC + 2 * cam_menu.MINI_ROW)  # 桌面号一行一个
+            self.assertEqual(cam_menu.mini_size([code, desk])[1], size(M.MINI_ROW + M.MINI_SESS + M.MINI_SUM))  # 桌面号也是一张卡，和 Code 号排在一起
+            self.assertEqual(cam_menu.mini_size([code, code, desk])[1], size(2 * M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 2))
+            self.assertEqual(M.mini_quota_height([desk]), M.MINI_ROW)  # 没有 Code 号：没有会话那行
+            self.assertEqual(M.mini_quota_height([desk, desk]), M.MINI_ROW + M.MINI_SUM)
+            self.assertEqual(cam_menu.mini_size([desk])[1], size(M.MINI_ROW))
             # 8787 上是桌面版的服务（没有 /mini 页）：在下一个空端口另起一个 cam serve 给卡片用，不是干脆不给卡片；桌面版的服务不动
             told = []
             cam_menu.notify = lambda title, body: told.append(title)
@@ -1663,6 +1752,138 @@ class CamTest(unittest.TestCase):
         finish(start([os.path.join(HERE, "cam.py"), "hook"]), ev("Stop", "c0"))  # 旧写法的入口：同一段代码
         with open(att, encoding="utf-8") as f:
             self.assertEqual(sorted(json.load(f)["sessions"]), [f"c{i}" for i in range(1, 8)])
+
+    def test_session_scan_is_incremental(self):
+        """会话记录只追加：第二次只读新加的；最后一行还没写完不算；文件被重写（变小）从头读；压缩以后组成从压缩处重来。"""
+        cam = self.cam
+        lines = shared("sessions.json")["transcripts"][1]["lines"]  # 带压缩的那段
+        dump = lambda ls: "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in ls)  # noqa: E731
+        path = os.path.join(self.tmp, "inc.jsonl")
+        write(path, dump(lines[:3]))
+        first = cam.transcript_meta(path)
+        self.assertEqual((first["turns"], first["boundary"]), (2, None))
+        self.assertEqual(cam.transcript_composition(path)["categories"]["chat"], 4 + 1000 + 4)  # 还没压缩：第 1、2 轮都在
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(dump(lines[3:]))
+            f.write('{"type":"user","message":{"role":"user","content":"还没写完')  # 正在写的最后一行
+        m = cam.transcript_meta(path)
+        whole = os.path.join(self.tmp, "whole.jsonl")
+        write(whole, dump(lines))
+        ref = cam.transcript_meta(whole)
+        self.assertEqual({k: m[k] for k in ("turns", "model", "context_used", "turns_at_boundary")},
+                         {k: ref[k] for k in ("turns", "model", "context_used", "turns_at_boundary")})
+        self.assertEqual(cam.transcript_composition(path)["categories"], cam.transcript_composition(whole)["categories"])
+        write(path, dump(lines[:1]))  # 重写成更短的：从头读
+        self.assertEqual(cam.transcript_meta(path)["turns"], 1)
+
+    def test_session_state_hook(self):
+        """钩子顺便记下每个会话在干什么：发消息 → 在回答，弹确认 → 等你确认，确认后工具跑完 → 在回答，答完 → 空闲，结束 → 删掉。
+        没在等确认时，工具跑完的事件读一下就走，不拿锁、不写文件；没有记录文件时连读都不读。"""
+        cam = self.cam
+        ev = lambda name, sid="s1", **kw: {"hook_event_name": name, "session_id": sid, "cwd": "/w/p",  # noqa: E731
+                                           "transcript_path": "/t/s1.jsonl", **kw}
+        state = lambda: cam._load_session_state()["sessions"]  # noqa: E731
+        cam.hook_event(ev("PostToolUse"))
+        self.assertFalse(os.path.exists(cam.session_state_path()))
+        cam.hook_event(ev("UserPromptSubmit"))
+        rec = state()["s1"]
+        self.assertEqual((rec["state"], rec["cwd"], rec["transcript"]), ("busy", "/w/p", "/t/s1.jsonl"))
+        self.assertIn(os.getppid(), rec["pids"])  # 钩子的父进程（这里是跑测试的进程的父进程）
+        with mock.patch.object(cam, "_lock_attention", side_effect=AssertionError("没变化不该拿锁")):
+            cam.hook_event(ev("PostToolUse"))
+            cam.hook_event(ev("PostToolUse", "s2"))
+        cam.hook_event(ev("PermissionRequest", tool_name="Bash"))
+        self.assertEqual(state()["s1"]["state"], "waiting")
+        cam.hook_event(ev("PostToolUse"))
+        self.assertEqual(state()["s1"]["state"], "busy")
+        cam.hook_event(ev("Stop", "s2"))
+        cam.hook_event(ev("Stop"))
+        self.assertEqual({k: v["state"] for k, v in state().items()}, {"s1": "idle", "s2": "idle"})
+        data = cam._load_session_state()
+        data["sessions"]["s2"]["last_ts"] -= cam.SESSION_STATE_KEEP + 10  # 好几天没动静：下次写的时候扔掉
+        write(cam.session_state_path(), json.dumps(data))
+        cam.hook_event(ev("UserPromptSubmit"))
+        self.assertEqual(list(state()), ["s1"])
+        cam.hook_event(ev("SessionEnd"))
+        self.assertFalse(os.path.exists(cam.session_state_path()))
+
+    def test_sessions_view(self):
+        """会话页：进程对上会话（钩子记的 pid → 工作目录 → 那个目录里最新的记录），读出状态、模型、几轮、上下文；
+        组成只给还在跑的会话；红绿灯数几个在回答、几个等你确认。消息内容不出现在返回里。"""
+        import datetime as dt
+        cam = self.cam
+        now = time.time()
+        proj_a, proj_b = os.path.join(self.tmp, "work", "alpha"), os.path.join(self.tmp, "work", "beta")
+        for d in (proj_a, proj_b):
+            os.makedirs(d)
+        root = os.path.join(self.tmp, ".claude", "projects")
+        dump = lambda ls: "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in ls)  # noqa: E731
+        u = lambda cr, out: {"input_tokens": 5, "cache_read_input_tokens": cr, "cache_creation_input_tokens": 100, "output_tokens": out}  # noqa: E731
+
+        def transcript(cwd, sid, model, cr, prompts, age):
+            p = os.path.join(root, cam.project_dir_name(cwd), sid + ".jsonl")
+            lines = []
+            for i in range(prompts):
+                lines.append({"type": "user", "message": {"role": "user", "content": f"SECRET-PROMPT-{i}"}, "cwd": cwd,
+                              "timestamp": "2026-11-18T01:00:00Z"})
+                lines.append({"type": "assistant", "message": {"role": "assistant", "model": model, "usage": u(cr, 50),
+                                                               "content": [{"type": "text", "text": "SECRET-REPLY"}]}})
+            write(p, dump(lines))
+            os.utime(p, (now - age, now - age))
+            return p
+
+        ta = transcript(proj_a, "sess-a", "claude-opus-5-5", 300000, 3, 400)
+        transcript(proj_a, "sess-a2", "claude-sonnet-5-5", 150000, 1, 5)
+        transcript(proj_b, "old-b", "claude-opus-5-5", 1000, 1, 9000)
+        transcript(proj_b, "sess-b", "claude-haiku-4-5", 170000, 2, 600)
+        self._fake_proc(201, ["claude"], {}, cwd=proj_a, age=3600)
+        self._fake_proc(202, ["claude", "--resume"], {}, cwd=proj_b, age=7200)
+        self._fake_proc(203, ["claude"], {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}, cwd=proj_a, age=60)
+        self._fake_proc(209, ["python3", "x.py"], {}, cwd=proj_a, age=60)  # 不是 claude
+        write(cam.session_state_path(), json.dumps({"sessions": {
+            "sess-a": {"state": "busy", "last_ts": now - 30, "pids": [9999, 201], "cwd": proj_a, "transcript": ta},
+            "sess-a2": {"state": "busy", "last_ts": now - 20, "pids": [9998], "cwd": proj_a, "transcript": ""},
+            "gone": {"state": "busy", "last_ts": now - 10, "pids": [12345], "cwd": "/elsewhere", "transcript": ""}}}))
+        write(cam.attention_path(), json.dumps({"sessions": {"sess-a2": {"since_ts": now - 3, "since": "x", "transcript": "", "tool": "Bash"}}}))
+        iso = lambda secs: dt.datetime.fromtimestamp(now - secs, dt.timezone.utc).isoformat()  # noqa: E731
+        data = {"accounts": [{"id": "a1", "label": "个人号"}, {"id": "b1", "label": "工作号"}],
+                "active": {"claude_code": "a1"}, "switch_log": [{"at": iso(10000), "id": "b1"}, {"at": iso(5000), "id": "a1"}]}
+        cam._ACTIVITY["rates"] = {}
+        cam.running_claude_processes = self._real_procs  # 读上面那个假的 /proc（tearDown 换回去）
+        with mock.patch.object(cam, "claude_activity", return_value=False):
+            view = cam.sessions_view(data)
+            rows = {r["pid"]: r for r in view["sessions"]}
+            self.assertEqual((view["known"], view["count"], view["answering"], view["waiting"]), (True, 3, 1, 1))
+            self.assertEqual([r["pid"] for r in view["sessions"]], [203, 201, 202])  # 等你确认的在前，然后在回答的，然后空闲的
+            a, b, c = rows[201], rows[202], rows[203]
+            self.assertEqual((a["id"], a["matched"], a["state"], a["project"], a["turns"], a["model"]),
+                             ("sess-a", "hook", "busy", "alpha", 3, "claude-opus-5-5"))
+            self.assertEqual((a["account_id"], a["account"]), ("a1", "个人号"))  # 一小时前启动：那时登录的是个人号
+            self.assertEqual((a["context_used"], a["context_window"], a["window_exact"], a["health"]),
+                             (300155, 1000000, True, "ok"))
+            self.assertEqual(a["cache_hit"], round(300000 / 300105, 4))
+            self.assertTrue(a["cwd"].startswith("~/") and a["cwd"].endswith("work/alpha"), a["cwd"])
+            self.assertEqual((c["id"], c["matched"], c["state"], c["account_id"], c["login"]), ("sess-a2", "cwd", "waiting", None, "own_token"))
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", c["login_text"])
+            self.assertEqual((b["id"], b["matched"], b["state"], b["account_id"]), ("sess-b", "newest", "idle", "b1"))
+            self.assertEqual((b["context_window"], b["health"]), (200000, "high"))  # 17 万 / 20 万
+            self.assertNotIn("SECRET", json.dumps(view, ensure_ascii=False))
+            det = cam.session_detail(data, "sess-a")
+            self.assertEqual(det["session"]["id"], "sess-a")
+            comp = det["composition"]
+            self.assertEqual((comp["total"], comp["window"], comp["exact"]), (300155, 1000000, True))
+            self.assertEqual(sorted(i["name"] for i in comp["items"]), ["第 1 轮", "第 2 轮", "第 3 轮"])
+            self.assertEqual(sum(comp["categories"].values()), 300155)
+            self.assertNotIn("SECRET", json.dumps(det, ensure_ascii=False))
+            with self.assertRaises(cam.CamError):
+                cam.session_detail(data, "gone")
+            # 红绿灯：几个在回答、几个等你确认
+            cam._SESSION_CACHE[:] = [0.0, 0]
+            self.assertEqual(cam.session_count(max_age=0), 3)
+            self.assertEqual(cam.session_counts(), {"answering": 1, "waiting": 1})
+            self.assertEqual(cam.sessions_brief()["text"], "3 个会话 · 1 个在回答 · 1 个等你确认")
+        with mock.patch.object(cam, "running_claude_processes", return_value=cam.ProcsUnknown()):
+            self.assertEqual(cam.sessions_view(data)["known"], False)
 
     def test_usage_time_is_when_the_numbers_are_from(self):
         """用量没取到时（断网、限流、登录过期而后台不替它续）旧数字留着，“用量更新”的时间也还是旧数字的时间，不写成刚刚；
@@ -4440,6 +4661,10 @@ exit 2""")
             self.assertGreater(acc["days_left"], 1000)
             self.assertEqual(call("PATCH", f"/api/accounts/{a_id}", {"expires_at": "nope"})[0], 400)
             self.assertEqual(call("GET", "/api/local-usage?days=3")[0], 200)
+            st, txt = call("GET", "/api/local-usage?range=30")
+            self.assertEqual((st, json.loads(txt)["unit"], len(json.loads(txt)["buckets"])), (200, "day", 30))
+            st, txt = call("GET", "/api/usage-samples")
+            self.assertEqual((st, json.loads(txt)["accounts"]), (200, {}))  # 还没有 7 天额度：没有节奏
             self.assertEqual(call("DELETE", f"/api/accounts/{a_id}")[0], 400)  # 当前账号
             st, txt = call("PUT", "/api/rules", {"rules": [{"type": "time", "days": [1, 2], "start": "9:00",
                                                              "end": "18:30", "account": a_id}], "alert_threshold": 80})
@@ -5081,6 +5306,7 @@ exit 2""")
             except urllib.error.HTTPError as e:
                 return e.code, json.loads(e.read().decode()), e.headers
         self.assertEqual(call("GET", "/api/local-usage?days=abc")[0], 400)
+        self.assertEqual(call("GET", "/api/local-usage?range=90")[0], 400)
         self.assertEqual(call("POST", "/api/accounts", {"kind": "claude_web", "label": ["x"]})[0], 400)
         self.assertEqual(call("POST", "/api/accounts", {"kind": "claude_code", "label": {"a": 1}})[0], 400)
         st, _, hdr = call("GET", "/api/state")
@@ -5239,6 +5465,62 @@ class SharedFixtureTest(unittest.TestCase):
             a = json.loads(json.dumps(c["account"]))
             self.cam.note_usage_day(a, today=dt.date.fromisoformat(c["today"]))
             self.assertEqual(a.get("usage_days"), c["expect"], c["name"])
+
+    def test_pace_rules(self):
+        """7 天额度的节奏：采样点怎么记、按速度推算什么时候用完、给界面的点怎么抽。"""
+        fx = shared("pace.json")
+        for c in fx["samples"]:
+            before = json.dumps(c["samples"], sort_keys=True)
+            self.assertEqual(self.cam.note_usage_samples(c["samples"], c["accounts"], c["now"]), c["expect"], c["name"])
+            self.assertEqual(json.dumps(c["samples"], sort_keys=True), before, c["name"])
+        for c in fx["pace"]:
+            self.assertEqual(self.cam.usage_pace(c["points"], c["usage"], c["now"]), c["expect"], c["name"])
+        for c in fx["series"]:
+            g = c["gen"]
+            pts = [[g["t0"] + i * g["dt"], 1.0, None if i == g["p7_null_at"] else float(i), None, None] for i in range(g["count"])]
+            got = self.cam.pace_series(pts, c["pace"], c["now"])
+            self.assertEqual({"len": len(got), "first": got[0] if got else None, "last": got[-1] if got else None}, c["expect"], c["name"])
+
+    def test_local_usage_report_rules(self):
+        """管理面板“本机 Claude Code 消耗”的汇总：柱子怎么分（小时 / 天 / 周 / 月）、明细、热力图。"""
+        import datetime as dt
+        fx = shared("local_usage.json")
+        now = dt.datetime.fromisoformat(fx["now"])
+        for c in fx["cases"]:
+            evs = [(dt.datetime.fromisoformat(e["at"]), e["model"], e["usage"], e["session"], e["owner"])
+                   for e in fx["events"][c["events"]]]
+            self.assertEqual(self.cam.usage_report(evs, c["range"], now), c["expect"], c["name"])
+        with self.assertRaises(self.cam.CamError):
+            self.cam.usage_report([], "90", now)
+
+    def test_session_rules(self):
+        """会话页的规则：模型的上下文窗口、上下文健不健康、记录目录名、会话状态、红绿灯的说法、记录的摘要和组成（估的）。"""
+        cam = self.cam
+        fx = shared("sessions.json")
+        for c in fx["windows"]:
+            self.assertEqual(list(cam.context_window(c["model"])), c["expect"], c["model"])
+        for c in fx["health"]:
+            self.assertEqual(cam.context_health(c["used"], c["window"]), c["expect"], c)
+        for c in fx["project_dir"]:
+            self.assertEqual(cam.project_dir_name(c["cwd"]), c["expect"], c["cwd"])
+        for c in fx["states"]:
+            self.assertEqual(cam.session_state(c["rec"], c["waiting"], c["written_ago"], c["cpu"], c["now"]), c["expect"], c["name"])
+        for c in fx["phrases"]:
+            self.assertEqual(cam.session_phrase(c["n"], c["busy"], c["answering"], c["waiting"]), c["expect"], c)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for c in fx["transcripts"]:
+            path = os.path.join(tmp, "tr-" + c["name"].replace(" ", "_") + ".jsonl")
+            write(path, "".join((ln if isinstance(ln, str) else json.dumps(ln, ensure_ascii=False, separators=(",", ":"))) + "\n"
+                                for ln in c["lines"]))
+            m = cam.transcript_meta(path)
+            got = {k: m[k] for k in ("turns", "first_ts", "cwd", "model", "context_used", "cache_hit", "turns_at_boundary")}
+            got["compacted"] = m["boundary"] is not None
+            self.assertEqual(got, c["meta"], c["name"])
+            comp = cam.transcript_composition(path, m, top=c["top"])
+            got = {k: comp[k] for k in ("total", "exact", "scaled", "categories", "item_count")}
+            got["items"] = [[i["cat"], i["key"], i["name"], i["detail"], i["count"], i["tokens"]] for i in comp["items"]]
+            self.assertEqual(got, c["composition"], c["name"])
 
     def test_windows_parsing_rules(self):
         """Windows 上合并以后的两次 PowerShell 查询怎么解析。"""
@@ -5595,7 +5877,10 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(r.status, 200)
         self.assertIn("Claude 账号", html)
         self.assertIn("/api/open-panel", html)
-        self.assertIn("Claude 桌面版 · 点一下打开", html)  # 桌面号单独一组，点一下先问一句再开；网页号不进卡片
+        self.assertIn("点一下打开", html)  # 桌面号也是一张卡，点一下先问一句再开；网页号不进卡片
+        self.assertIn("/api/usage-samples", html)  # 7 天额度的节奏小线
+        self.assertIn('role="tablist"', html)  # 额度 / 用量两个页签；用量页用管理面板同一个接口
+        self.assertIn("/api/local-usage?range=", html)
         self.assertIn('"open-now"', html)
         self.assertIn("网页号、API 号在管理面板里", html)
         # /api/state 带正在跑的会话数（红绿灯用），数进程表的结果缓存 20 秒
@@ -5622,7 +5907,7 @@ class UpdateTest(unittest.TestCase):
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + token})
             with opener.open(req) as r:
                 st = json.load(r)
-            self.assertEqual(st["sessions"], {"count": 0, "busy": False})
+            self.assertEqual(st["sessions"], {"count": 0, "busy": False, "answering": 0, "waiting": 0, "text": ""})
             self.assertEqual(st["code_stamp"], self.cam.CODE_STAMP)  # 插件据此判断后台 cam serve 是不是旧代码
             self.assertFalse(self.cam.serve_outdated(port, token))
             self.assertFalse(self.cam.serve_outdated(1, token))  # 连不上不算旧
@@ -5639,6 +5924,14 @@ class UpdateTest(unittest.TestCase):
                 body = json.loads(r.read().decode())
         self.assertEqual(opened, [f"http://127.0.0.1:{port}/?t={token}"])  # 用的就是这个在跑的面板，不另起
         self.assertEqual(body["url"], opened[0])
+        # 在小面板“用量”页签里点：打开到管理面板的“用量”页；不认识的页签名不带
+        for sent, tail in (({"tab": "usage"}, "#usage"), ({"tab": "../x"}, ""), (["usage"], "")):
+            with mock.patch.object(self.cam, "open_in_browser", opened.append):
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/api/open-panel", method="POST", data=json.dumps(sent).encode(),
+                                             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+                with opener.open(req) as r:
+                    self.assertEqual(json.loads(r.read().decode())["url"], f"http://127.0.0.1:{port}/?t={token}{tail}")
+        self.assertEqual(opened[-1], f"http://127.0.0.1:{port}/?t={token}")
         self.assertEqual((self.cam.ensure_panel(store, port)), (port, token))
         # 旧代码的 cam serve：按进程表里“cam.py serve --port 这个端口”的命令行找到它才结束它（心跳文件里的 pid 不可靠：
         # 只有拿到后台锁的 serve 才写，流式模式的菜单栏插件拿着锁时它一次都没写过）；别的端口的 cam serve、不是 cam serve、桌面版的服务都不动

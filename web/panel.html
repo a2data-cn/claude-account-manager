@@ -20,6 +20,7 @@
   --line: #E7E3D9;
   --shadow: 0 1px 2px rgba(60, 45, 25, .05);
   --track: #ECE8DE;
+  --groove: #ECE8DE;  /* 分段开关 / 页签的底槽 */
   --accent: #B5532F;
   --accent-ink: #FFFFFF;
   --on-hot: #FFFFFF;
@@ -47,7 +48,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
-    --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
+    --track: #3B3A36; --groove: #1F1F1D; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
     --warn-soft: #3E3421; --ok-soft: #27334A; --violet-soft: #362D4B;
     --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
@@ -56,7 +57,7 @@
 }
 :root[data-theme="dark"] {
     --paper: #262624; --surface: #2F2F2C; --ink: #ECEAE3; --muted: #A39E91; --line: #403F3B; --shadow: none;
-    --track: #3B3A36; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
+    --track: #3B3A36; --groove: #1F1F1D; --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --bar: #BDB7A8; --ok: #7FA6E0; --warn: #E0A548;
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
     --warn-soft: #3E3421; --ok-soft: #27334A; --violet-soft: #362D4B;
     --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
@@ -134,9 +135,9 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .strip::-webkit-scrollbar { height: 4px; }
 .strip::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .strip::-webkit-scrollbar-track { background: transparent; }
-.tile { flex: 0 0 212px; scroll-snap-align: start; position: relative; text-align: left; cursor: pointer; color: var(--ink);
+.tile { flex: 0 0 236px; scroll-snap-align: start; position: relative; text-align: left; cursor: pointer; color: var(--ink);
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  display: grid; grid-template-rows: auto auto 1fr auto; gap: 4px; min-height: 118px; padding: 11px 12px 11px 14px; box-shadow: var(--shadow); transition: border-color .12s, box-shadow .12s, transform .12s; }
+  display: flex; flex-direction: column; gap: 4px; min-height: 118px; padding: 11px 12px 11px 14px; box-shadow: var(--shadow); transition: border-color .12s, box-shadow .12s, transform .12s; }
 .tile:hover { border-color: var(--muted); box-shadow: 0 3px 10px rgba(40, 30, 20, .08); transform: translateY(-1px); }
 .tile.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .tile.sel:hover { transform: none; }
@@ -167,9 +168,48 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .tile.add { border-style: dashed; background: transparent; color: var(--muted); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
 .tile.add:hover { color: var(--ink); }
 .tile.add .plus { font-size: 28px; line-height: 1; font-weight: 300; }
+/* 账号卡下半截：额度环（5 小时、7 天、用得最多的按模型周额度）各带重置时间，7 天节奏小线，一句结论，最下面到期 */
+.t-sess { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); }
+.t-sess i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.t-sess.busy { color: var(--warn); font-weight: 600; }
+.t-rings { display: flex; justify-content: space-around; gap: 4px; margin-top: 4px; }
+.rg { display: grid; justify-items: center; min-width: 0; text-align: center; line-height: 1.3; }
+.rg .ring { width: 40px; height: 40px; margin-bottom: 3px; }
+.rg .rl { font-size: 10.5px; color: var(--muted); max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rg .rw { font-size: 11px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.t-spark { display: block; margin-top: 4px; }
+.t-spark svg, .pace-big svg { display: block; width: 100%; height: auto; overflow: visible; }
+.t-verdict { font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
+.t-verdict.warn, .t-exp.warn { color: var(--warn); font-weight: 600; }
+.t-verdict.hot, .t-exp.hot { color: var(--hot); font-weight: 600; }
+.t-exp { margin-top: auto; padding-top: 6px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--muted); }
+/* 有额度的号的汇总：5 小时、7 天平均已用；有号照现在的速度会在重置前用完时多一行提醒 */
+.sumbar { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px 22px; align-items: center; margin-bottom: 12px; }
+.sumbar .sb-t b { display: block; font-size: 13.5px; font-weight: 650; }
+.sumbar .sb-t .hint { font-size: 11.5px; }
+.sb-m .row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.sb-m .row b { color: var(--ink); font-weight: 650; }
+.sb-m .g-bar { margin: 0; height: 6px; }
+.sb-alert { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; line-height: 1.5; background: var(--warn-soft); color: var(--warn); border-radius: var(--radius-sm); padding: 7px 11px; }
+.sb-alert svg { flex: none; width: 14px; height: 14px; margin-top: 3px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 详情里的 7 天额度节奏图：坐标轴、图例、四个数 */
+.pace-card h3 .hint { margin-left: 2px; }
+.pace-lgd { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+.pace-lgd span { display: inline-flex; align-items: center; gap: 6px; }
+.pace-lgd i { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--ink); }
+.pace-lgd i.dash { border-top: 2px dashed var(--muted); }
+.pace-lgd i.soft { width: 11px; height: 11px; border: 1px solid var(--warn); border-radius: 3px; background: var(--warn-soft); }
+.pace-lgd i.dot.out { border-top: 2px dotted var(--warn); }
+.pace-lgd i.dot.ok { border-top: 2px dotted var(--muted); }
+.pc-stats { display: flex; flex-wrap: wrap; gap: 8px 26px; margin-top: 12px; }
+.pc-stat span { display: block; font-size: 12px; color: var(--muted); }
+.pc-stat b { font-size: 18px; font-weight: 650; letter-spacing: -.01em; }
+.pc-stat b.warn { color: var(--warn); }
+.pc-stat b.hot { color: var(--hot); }
+.pc-note { margin: 10px 0 0; }
 /* 宽屏一行放不下时换行排开，不藏在横向滚动里；手机上仍是左右滑动 */
 @media (min-width: 681px) {
-  .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); overflow: visible; padding: 0; margin: 0 0 12px; }
+  .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); overflow: visible; padding: 0; margin: 0 0 12px; }
 }
 
 .detail { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 12px; box-shadow: var(--shadow); }
@@ -209,17 +249,35 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .g-pace.fast { color: var(--warn); }
 .g-est { font-size: 11px; color: var(--muted); margin-top: 1px; }
 .g-mini.g-parts { flex-wrap: wrap; gap: 2px 12px; font-size: 12px; }
-/* 小号分段开关：额度看已用 / 剩余、本机消耗的时间范围 */
-.seg-mini { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--paper); }
-.seg-mini button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; line-height: 1.5; padding: 1px 10px; border-radius: 999px; cursor: pointer; }
+/* 分段开关，全站一套（小面板、桌面版一样）：底是一条浅槽，选中的是一块白底。小号 .seg-mini 用在已用 / 剩余、时间范围、看什么；
+   大号 .tabs 是页签 */
+.seg-mini { display: inline-flex; align-items: center; gap: 2px; border-radius: 8px; padding: 2px; background: var(--groove); }
+.seg-mini button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 12px; line-height: 1.5; padding: 2px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .seg-mini button:hover { color: var(--ink); }
-.seg-mini button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
+.seg-mini button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(40, 30, 20, .14); }
+.tabrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: -4px 0 16px; }
+.tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--groove); max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs [role="tab"] { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 13.5px; line-height: 1.5; padding: 5px 18px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.tabs [role="tab"]:hover { color: var(--ink); }
+.tabs [role="tab"][aria-selected="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(40, 30, 20, .14); }
+.tabs .n { font-size: 11px; font-weight: 600; line-height: 1.5; padding: 0 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.tabrow .hint { margin-left: auto; font-size: 12px; }
+.pane > .block:first-child, #env-wrap > .block:first-child { margin-top: 0; }
+/* 设置页顶上的小目录：点了滚到那一块；还没显示的区块不列 */
+.subnav { display: flex; flex-wrap: wrap; gap: 4px; }
+.subnav a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
+.subnav a:hover { color: var(--ink); border-color: var(--muted); }
+.subnav + .block { margin-top: 16px; }
 .g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
 .g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
 .g-mini b { color: var(--ink); font-weight: 600; }
 
 @media (max-width: 680px) {
-  .tile { flex-basis: 70vw; max-width: 250px; }
+  .tile { flex-basis: 74vw; max-width: 270px; }
+  .sumbar { grid-template-columns: 1fr 1fr; }
+  .sumbar .sb-t { grid-column: 1 / -1; }
   .detail { padding: 14px; }
   .d-title .name { font-size: 17px; }
   .d-body { grid-template-columns: 1fr; margin-top: 14px; }
@@ -232,6 +290,9 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
   header.top .host { display: none; }
   header.top .light { order: 9; max-width: 100%; }
   header.top { flex-wrap: wrap; }
+  .tabs { width: 100%; }
+  .tabs [role="tab"] { flex: 1 1 auto; padding: 6px 8px; }
+  .tabrow .hint { display: none; }
 }
 
 /* 区块 */
@@ -239,10 +300,6 @@ section.block { margin-top: 26px; scroll-margin-top: 12px; }
 section.block h2 { font-size: 14.5px; font-weight: 650; margin: 0 0 10px; }
 section.block .sec-head h2 { margin: 0; }
 .hint { color: var(--muted); font-size: 12.5px; }
-/* 页面目录：一排能点的小胶囊，跳到各个区块；还没显示的区块不列 */
-.toc { display: flex; flex-wrap: wrap; gap: 4px; margin: -6px 0 14px; }
-.toc a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
-.toc a:hover { color: var(--ink); border-color: var(--muted); }
 /* 底部“状态和颜色说明”：正常的区块，图例用界面上真的标签和色块，不折叠 */
 /* 底部“状态和颜色说明”：每行左边放界面上真的标签 / 小环 / 菜单栏的样子，右边是意思 */
 .lgd { list-style: none; margin: 0; padding: 0; }
@@ -299,7 +356,6 @@ section.block .sec-head h2 { margin: 0; }
 .host .risk.medium { color: var(--warn); background: var(--warn-soft); }
 .host .risk.high { color: var(--hot); background: var(--hot-soft); }
 /* 隐私与数据源 */
-.pv-label { font-size: 12px; color: var(--muted); margin: 0 0 6px; }
 .pv-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
 .seg-opt { display: grid; gap: 2px; align-content: start; text-align: left; cursor: pointer; color: var(--ink);
   border: 1px solid var(--line); background: var(--paper); border-radius: var(--radius-sm); padding: 8px 10px 8px 28px; position: relative;
@@ -348,13 +404,13 @@ details.src[open] summary::before { content: "▾"; }
 .cards .wide { grid-column: 1 / -1; }
 .ecard.sub { background: var(--paper); border-color: transparent; box-shadow: none; }
 .ecard h3 .hint { font-weight: 400; font-size: 12px; }
-.ecard .local-sum, .ecard .rules, .ecard .keys, .ecard .pv-modes { margin-bottom: 0; }
+.ecard .rules, .ecard .keys, .ecard .pv-modes { margin-bottom: 0; }
 .ecard .legend { margin: 10px 0 0; }
 .ecard .keys:not([hidden]) { margin-top: 14px; }
 .ecard .alert-row, .ecard .pv-foot { margin: 0; padding: 0; border: 0; }
 .ecard .rules + .hint { margin-top: 12px; }
 @media (max-width: 760px) {
-  .cards, .cards.env, .cards.local { grid-template-columns: 1fr; }
+  .cards, .cards.env { grid-template-columns: 1fr; }
   .lgd.row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .ecard h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; font-weight: 650; margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
@@ -412,44 +468,127 @@ details.src[open] summary::before { content: "▾"; }
 }
 
 /* 本地消耗：顶上一排数字格，左边每天的柱子（按账号叠），右边按模型的占比 */
-.local-sum { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 10px; }
-.local-sum .st { background: var(--paper); border-radius: var(--radius-sm); padding: 8px 12px; min-width: 0; }
-.local-sum b { display: block; font-size: 20px; font-weight: 650; letter-spacing: -.02em; line-height: 1.2; white-space: nowrap; }
-.local-sum span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin-bottom: 14px; }
 .legend:empty { display: none; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .legend b { color: var(--ink); font-weight: 600; margin-left: 2px; }
-.local-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(220px, 2fr); gap: 18px 28px; }
-.local-grid.solo { grid-template-columns: 1fr; }
-@media (max-width: 720px) { .local-grid { grid-template-columns: 1fr; } }
-.chart-head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-.chart-head span:first-child { color: var(--ink); font-weight: 600; }
-.bars-wrap { position: relative; height: 150px; }
-.grid-lines { position: absolute; inset: 0; pointer-events: none; }
-.grid-lines div { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--line); font-size: 10.5px; color: var(--muted); }
-.grid-lines div span { position: absolute; right: 0; top: -15px; }
-.bars { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 3px; }
-.bars .day { flex: 1; display: flex; flex-direction: column-reverse; gap: 2px; min-width: 0; height: 100%; position: relative; border-radius: 4px 4px 0 0; }
-.bars .day:hover { background: var(--paper); }
-.bars .seg { width: 100%; flex: none; }
-.bars .seg:last-child { border-radius: 4px 4px 0 0; }
-.bars .day:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 4px;
-  background: var(--ink); color: var(--paper); font-size: 12px; line-height: 1.5; padding: 5px 9px; border-radius: 6px; white-space: pre; z-index: 2; pointer-events: none; }
-.bars .day:first-child:hover::after, .bars .day:nth-child(2):hover::after, .bars .day:nth-child(3):hover::after { left: 0; transform: none; }
-.bars .day:last-child:hover::after, .bars .day:nth-last-child(2):hover::after, .bars .day:nth-last-child(3):hover::after { left: auto; right: 0; transform: none; }
-.axis { position: relative; height: 16px; margin-top: 6px; font-size: 11px; color: var(--muted); }
-.axis span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
-.axis span:first-child { transform: none; }
-.axis span:last-child { transform: translateX(-100%); }
-.models { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; align-content: start; }
-.models li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; font-size: 12.5px; align-items: baseline; }
-.models li b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.models li .v { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.models li .bar { grid-column: 1 / -1; height: 6px; background: var(--track); border-radius: 999px; overflow: hidden; }
-.models li .bar i { display: block; height: 100%; background: var(--bar); border-radius: 999px; min-width: 3px; }
-.models li .d { grid-column: 1 / -1; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.local-grid + .hint { margin: 12px 0 0; }
+/* 本机 Claude Code 消耗：四格汇总、按小时 / 天 / 周 / 月叠起来的柱子、明细、星期 × 钟点的热力图 */
+#local-block { position: relative; }
+.lu-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 0; margin-bottom: 12px; }
+.lu-tiles > div { padding: 12px 14px 13px; border-left: 1px solid var(--line); min-width: 0; }
+.lu-tiles > div:first-child { border-left: 0; }
+.lu-tiles .k { font-size: 12.5px; color: var(--muted); }
+.lu-tiles .v { font-size: 24px; font-weight: 650; letter-spacing: -.02em; line-height: 1.25; margin: 2px 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lu-tiles .s { font-size: 12px; color: var(--muted); line-height: 1.55; }
+.lu-tiles .s.good { color: var(--live); }
+@media (max-width: 720px) {
+  .lu-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lu-tiles > div:nth-child(3) { border-left: 0; }
+  .lu-tiles > div:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .lu-tiles .v { font-size: 21px; }
+}
+.ecard h3 .seg-mini { font-weight: 400; }
+.lu-plot { position: relative; height: 200px; margin-left: 46px; }
+.lu-grid { position: absolute; inset: 0; pointer-events: none; }
+.lu-grid div { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--line); }
+.lu-grid div.base { border-top: 1px solid var(--line); }
+.lu-grid span { position: absolute; right: calc(100% + 8px); top: -8px; font-size: 10.5px; line-height: 1.4; color: var(--muted); white-space: nowrap; }
+.lu-bars { position: absolute; inset: 0; display: flex; align-items: flex-end; }
+.lu-col { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column-reverse; align-items: center; gap: 2px; padding: 0 var(--lu-pad, 2px); border-radius: 5px 5px 0 0; }
+.lu-col:hover, .lu-col.on { background: var(--paper); }
+.lu-seg { width: 100%; max-width: 40px; flex: none; min-height: 1px; }
+.lu-seg:last-child { border-radius: 3px 3px 0 0; }
+.lu-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12.5px; }
+.lu-axis { position: relative; height: 16px; margin: 6px 0 0 46px; font-size: 11px; color: var(--muted); }
+.lu-axis span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.lu-legend { margin: 12px 0 0; }
+.lu-tip { position: absolute; z-index: 5; min-width: 180px; max-width: 290px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 22px rgba(40, 30, 20, .16); padding: 9px 12px; font-size: 12px; pointer-events: none; }
+.lu-tip .tt { font-weight: 650; font-size: 12.5px; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.lu-tip .tl { display: flex; align-items: center; justify-content: space-between; gap: 14px; line-height: 1.75; }
+.lu-tip .tl span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-tip .tl i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.lu-tip .tl b { font-weight: 650; white-space: nowrap; }
+.lu-tip .tl.total { margin-top: 4px; padding-top: 5px; border-top: 1px dashed var(--line); }
+.lu-tip .tl.total span { color: var(--ink); }
+.lu-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+@media (max-width: 720px) { .lu-split { grid-template-columns: 1fr; } }
+.lu-rows .r { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 3px 9px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.lu-rows .r:first-child { border-top: 0; padding-top: 0; }
+.lu-rows .r:last-child { padding-bottom: 0; }
+.lu-rows .dot { width: 10px; height: 10px; border-radius: 3px; }
+.lu-rows .nm { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-rows .val { font-weight: 650; white-space: nowrap; }
+.lu-rows .tr { grid-column: 2 / 4; height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.lu-rows .tr i { display: block; height: 100%; border-radius: 3px; min-width: 3px; }
+.lu-rows .sub { grid-column: 2 / 4; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lu-heat { display: grid; grid-template-columns: 16px repeat(24, minmax(0, 1fr)); gap: 2px; }
+.lu-heat .wd { font-size: 10.5px; line-height: 1; color: var(--muted); align-self: center; }
+.lu-heat .c, .lu-key .c { aspect-ratio: 1; border-radius: 3px; background: var(--track); position: relative; overflow: hidden; }
+.lu-heat .c i, .lu-key .c i { position: absolute; inset: 0; background: var(--accent); }
+.lu-heat .c:hover { outline: 1.5px solid var(--ink); outline-offset: 0; }
+.lu-heat .hr { grid-column: span 6; font-size: 10.5px; color: var(--muted); padding-top: 3px; }
+.lu-key { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 400; color: var(--muted); }
+.lu-key .c { width: 10px; height: 10px; display: inline-block; }
+
+/* 会话页：正在运行的 Claude Code 一行一个，选中的那个看上下文窗口（大数字、缓存命中、方块图、占得最多的几项） */
+.ss-list { padding: 4px 0; }
+.ss-row { display: grid; grid-template-columns: 16px minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.3fr) 64px; gap: 12px; align-items: center;
+  width: 100%; text-align: left; font: inherit; color: inherit; background: transparent; border: 0; border-top: 1px solid var(--line); padding: 10px 14px; cursor: pointer; }
+.ss-row:first-child { border-top: 0; }
+.ss-row:hover { background: var(--paper); }
+.ss-row[aria-pressed="true"] { background: color-mix(in srgb, var(--accent-soft) 55%, transparent); }
+.ss-row > span { min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; }
+.ss-row b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-row .hint { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-row > .chip { justify-self: start; }
+.ss-led { width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); margin-left: 3px; }
+.ss-led.busy { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); animation: led-breathe 2s ease-in-out infinite; }
+.ss-led.wait { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); animation: led-blink 1s step-end infinite; }
+@media (prefers-reduced-motion: reduce) { .ss-led { animation: none !important; } }
+.ss-bar { height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 3px; }
+.ss-bar i { display: block; height: 100%; border-radius: 3px; background: var(--live); min-width: 2px; }
+.ss-bar i.warn { background: var(--warn); }
+.ss-bar i.hot { background: var(--hot); }
+.chip.ss-ok { background: var(--live-soft); color: var(--live); border-color: transparent; }
+.chip.ss-warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.chip.ss-hot { background: var(--hot-soft); color: var(--hot); border-color: transparent; }
+.ss-empty { padding: 18px 16px; display: grid; gap: 4px; }
+.ss-note { margin: 8px 14px 6px; font-size: 12px; }
+.ss-ctx { margin-top: 12px; }
+.ss-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; margin: 2px 0 14px; }
+.ss-big { font-size: 34px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; margin: 2px 0; white-space: nowrap; }
+.ss-big small { font-size: 15px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.ss-big.cache { color: var(--muted); }
+.ss-top .hint { font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ss-tree { position: relative; height: 240px; }
+.ss-tree .tm { position: absolute; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--tc) 45%, var(--surface)); border-radius: 7px;
+  background: color-mix(in srgb, var(--tc) 13%, var(--surface)); padding: 6px 8px; overflow: hidden; font-size: 11.5px; line-height: 1.4; }
+.ss-tree .tm b { display: block; font-size: 12.5px; font-weight: 650; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ss-tree .tm span { display: block; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ss-tree .tm.free { --tc: var(--muted); background: repeating-linear-gradient(45deg, var(--paper) 0 6px, var(--track) 6px 8px); border-color: var(--line); }
+.ss-tree .tm:hover { outline: 1.5px solid var(--ink); outline-offset: -1px; }
+.ss-key { margin: 10px 0 12px; }
+.ss-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.ss-items .li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto minmax(60px, 150px) 64px; gap: 10px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.ss-items .li:first-child { border-top: 0; }
+.ss-items .dot { width: 9px; height: 9px; border-radius: 50%; }
+.ss-items .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-items .nm .path { color: var(--muted); font-size: 11.5px; margin-left: 8px; }
+.ss-items .tag { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.ss-items .v { text-align: right; font-weight: 600; white-space: nowrap; }
+.ss-items .ss-bar { margin-top: 0; }
+.ss-more { margin-top: 6px; }
+@media (max-width: 720px) {
+  .ss-row { grid-template-columns: 14px minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 12px; }
+  .ss-row > .ss-acc, .ss-row > .ss-st { grid-column: 2 / 4; flex-direction: row; gap: 8px; align-items: baseline; }
+  .ss-row > .ss-ctxc { grid-column: 2 / 3; }
+  .ss-row > .chip { grid-row: 1; grid-column: 3; justify-self: end; }
+  .ss-top { grid-template-columns: 1fr; gap: 12px; }
+  .ss-big { font-size: 28px; }
+  .ss-tree { height: 200px; }
+  .ss-items .li { grid-template-columns: 10px minmax(0, 1fr) 54px; }
+  .ss-items .tag, .ss-items .li > .ss-bar { display: none; }
+}
 
 /* 空状态 / 登录 */
 .empty { text-align: left; padding: 22px; }
@@ -577,129 +716,160 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     <button class="btn quiet" id="btn-vault" type="button">账号资料与邮箱</button>
     <button class="btn" id="btn-refresh" type="button">刷新用量</button>
   </header>
-  <nav class="toc" id="toc" aria-label="页面目录"><a href="#list">账号</a><a href="#env">环境</a><a href="#local-block" data-for="local-block" hidden>本机消耗</a><a href="#rules-block" data-for="rules-block" hidden>切号规则</a><a href="#privacy-block" data-for="privacy-block" hidden>隐私与数据源</a><a href="#update-block" data-for="update-block" hidden>软件更新</a><a href="#help-block">说明</a></nav>
-
-  <main id="list" aria-live="polite"></main>
-
-  <section class="block vault" id="vault-block" hidden aria-label="账号资料与邮箱">
-    <div class="sec-head"><h2>账号资料与邮箱</h2><span class="spacer"></span><button class="btn" type="button" id="v-reload">重新读取</button><button class="btn" type="button" id="v-close">收起</button></div>
-    <p class="hint">账号资料保存在本机 SQLite 账号库，密码和邮箱授权加密保存。首次授权后，可自动读取 Claude 登录邮件；Claude 登录、回跳和多因素验证仍由你完成。手机发起邮箱授权时，请在运行服务的电脑浏览器完成授权。</p>
-    <div id="v-error" class="notice" role="alert" hidden></div>
-    <div id="v-content"></div>
-  </section>
-
-  <section class="block" id="local-block" hidden>
-    <div class="sec-head"><h2>本机 Claude Code 消耗</h2><span class="hint">这台电脑上 claude 的用量，按天、按账号、按模型</span>
-      <span class="sec-acts"><span class="seg-mini" role="group" aria-label="时间范围" id="local-range"></span></span></div>
-    <div class="cards local">
-      <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-receipt"/></svg></span>汇总<span class="hint">金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span></h3>
-        <div class="local-sum" id="local-sum"></div>
-        <div class="legend" id="legend"></div></div>
-      <div class="panel ecard" id="local-chart"><h3><span class="eico"><svg><use href="#i-calendar"/></svg></span>每天的折算金额<span class="hint">按账号叠，悬停看明细</span></h3>
-        <div class="bars-wrap"><div class="grid-lines" id="gridlines" aria-hidden="true"></div><div class="bars" id="bars" role="img" aria-label="每日消耗柱状图"></div></div>
-        <div class="axis" id="axis" aria-hidden="true"></div></div>
-      <div class="panel ecard" id="local-models"><h3><span class="eico"><svg><use href="#i-pie"/></svg></span>按模型<span class="hint">占折算金额的比例</span></h3>
-        <ul class="models" id="models"></ul></div>
+  <div class="tabrow">
+    <div class="tabs" role="tablist" aria-label="页面" id="tabs">
+      <button type="button" role="tab" id="tab-accounts" data-tab="accounts" aria-controls="pane-accounts" aria-selected="true">账号</button>
+      <button type="button" role="tab" id="tab-usage" data-tab="usage" aria-controls="pane-usage" aria-selected="false" tabindex="-1">用量</button>
+      <button type="button" role="tab" id="tab-sessions" data-tab="sessions" aria-controls="pane-sessions" aria-selected="false" tabindex="-1">会话<span class="n" id="tab-sessions-n" hidden></span></button>
+      <button type="button" role="tab" id="tab-env" data-tab="env" aria-controls="pane-env" aria-selected="false" tabindex="-1">环境</button>
+      <button type="button" role="tab" id="tab-settings" data-tab="settings" aria-controls="pane-settings" aria-selected="false" tabindex="-1">设置</button>
     </div>
-    <p class="hint" style="margin:10px 0 0">按切换记录把每条消息归到当时登录的账号；切换前产生的记录显示为“未归属”。</p>
-  </section>
+    <span class="hint" id="tab-hint"></span>
+  </div>
 
-  <section class="block" id="rules-block" hidden>
-    <div class="sec-head"><h2>切号规则</h2><span class="hint">按时间段或项目目录自动换号，以及额度提醒的阈值</span></div>
-    <div class="cards">
-      <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-clock"/></svg></span>现在的规则</h3>
-        <p class="rules-status" id="rules-status"></p>
-        <ul class="rules" id="rules-list"></ul>
-        <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-plus"/></svg></span>添加规则</h3>
-        <form class="rule-form" id="rule-form">
-          <div class="field"><label for="r-type">规则</label>
-            <select id="r-type"><option value="time">按时间段</option><option value="dir">按项目目录</option></select></div>
-          <div class="field grow" id="rw-path" hidden><label for="r-path">目录（含子目录）</label><input id="r-path" placeholder="~/work"></div>
-          <div class="field" id="rw-days"><label for="r-days">星期</label>
-            <select id="r-days"><option value="1-5">工作日</option><option value="6,7">周末</option><option value="1-7">每天</option></select></div>
-          <div class="field" id="rw-start"><label for="r-start">从</label><input id="r-start" type="time" value="09:00"></div>
-          <div class="field" id="rw-end"><label for="r-end">到</label><input id="r-end" type="time" value="18:00"></div>
-          <div class="field"><label for="r-acc">切到</label><select id="r-acc"></select></div>
-          <button class="btn primary" type="submit">添加规则</button>
-        </form></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-bell"/></svg></span>额度提醒</h3>
-        <form class="alert-row" id="alert-form">
-          <label for="alert-pct">当前账号 5 小时额度超过</label>
-          <span class="unit"><input id="alert-pct" type="number" min="1" max="100" step="1"><span>% 时提醒，并告诉你多久后重置</span></span>
-          <button class="btn" type="submit">保存</button>
-        </form></div>
-    </div>
-  </section>
+  <div class="pane" role="tabpanel" id="pane-accounts" aria-labelledby="tab-accounts">
+    <section class="block vault" id="vault-block" hidden aria-label="账号资料与邮箱">
+      <div class="sec-head"><h2>账号资料与邮箱</h2><span class="spacer"></span><button class="btn" type="button" id="v-reload">重新读取</button><button class="btn" type="button" id="v-close">收起</button></div>
+      <p class="hint">账号资料保存在本机 SQLite 账号库，密码和邮箱授权加密保存。首次授权后，可自动读取 Claude 登录邮件；Claude 登录、回跳和多因素验证仍由你完成。手机发起邮箱授权时，请在运行服务的电脑浏览器完成授权。</p>
+      <div id="v-error" class="notice" role="alert" hidden></div>
+      <div id="v-content"></div>
+    </section>
 
+    <main id="list" aria-live="polite"></main>
+  </div>
 
-  <section class="block" id="privacy-block" hidden>
-    <div class="sec-head"><h2>隐私与数据源</h2><span class="hint">环境检测用哪些服务、要不要填 key，以及账号的使用地区记录</span></div>
-    <div class="cards">
-      <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-search"/></svg></span>外部 IP 查询<span class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据</span></h3>
-        <p class="hint" id="pv-env" hidden style="margin:0 0 8px">被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</p>
-        <div class="pv-modes" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
-        <div class="keys" id="pv-keys"></div></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-link"/></svg></span>会访问的服务</h3>
-        <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-pin"/></svg></span>地区记录</h3>
-        <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div></div>
-    </div>
-  </section>
+  <div class="pane" role="tabpanel" id="pane-usage" aria-labelledby="tab-usage" hidden>
+    <section class="block" id="local-block" hidden>
+      <div class="sec-head"><h2>本机 Claude Code 消耗</h2><span class="hint">这台电脑上 claude 的用量 · 金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span>
+        <span class="sec-acts"><span class="seg-mini" role="group" aria-label="时间范围" id="local-range"></span></span></div>
+      <div class="panel lu-tiles" id="lu-tiles"></div>
+      <div class="panel ecard" id="local-chart"><h3><span class="eico"><svg><use href="#i-bars"/></svg></span><span id="lu-title">用量</span><span class="hint">悬停或点一下柱子看明细</span><span class="spacer"></span>
+          <span class="seg-mini" role="group" aria-label="看什么" id="lu-metric"></span><span class="seg-mini" role="group" aria-label="怎么分" id="lu-group"></span></h3>
+        <div class="lu-plot" id="lu-plot" role="img"><div class="lu-grid" id="lu-grid" aria-hidden="true"></div><div class="lu-bars" id="lu-bars"></div></div>
+        <div class="lu-axis" id="lu-axis" aria-hidden="true"></div>
+        <div class="legend lu-legend" id="lu-legend"></div></div>
+      <div class="lu-split">
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>明细<span class="spacer"></span><span class="seg-mini" role="group" aria-label="明细按什么分" id="lu-rowby"></span></h3>
+          <div class="lu-rows" id="lu-rows"></div></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-clock"/></svg></span>什么时候用得多<span class="hint" id="lu-heat-hint">最近 4 周 · 按消息条数</span><span class="spacer"></span><span class="lu-key" id="lu-key" aria-hidden="true"></span></h3>
+          <div class="lu-heat" id="lu-heat" role="img" aria-label="星期几和钟点的热力图"></div></div>
+      </div>
+      <p class="hint" style="margin:10px 0 0">按切换记录把每条消息归到当时登录的账号；第一次切换之前的记录显示为“未归属”。“全部”是这台电脑上还留着的记录（Claude Code 默认只留 30 天）。</p>
+      <div class="lu-tip" id="lu-tip" hidden></div>
+    </section>
+    <div class="panel empty" id="usage-empty"><p class="hint" id="usage-empty-text">正在读取这台电脑上的 Claude Code 记录…</p></div>
+  </div>
 
-  <section class="block" id="update-block" hidden>
-    <div class="sec-head"><h2>软件更新</h2><span class="hint">看代码仓库有没有新版本，更不更新由你点</span>
-      <span class="sec-acts"><button class="btn" type="button" id="up-check">检查更新</button><button class="btn primary" type="button" id="up-apply" hidden>更新</button></span></div>
-    <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-refresh"/></svg></span>版本</h3>
-      <dl class="kv"><dt>当前</dt><dd><span class="v" id="up-when"></span></dd></dl>
-      <div id="up-result"></div>
-      <p class="hint">只在点“检查更新”时联网看一眼代码仓库，不会自动更新。更新只做快进，更新后自检没过会自动退回原来的版本；账号数据不受影响。桌面版是单独的安装包，不跟着更新。</p>
-    </div>
-  </section>
+  <div class="pane" role="tabpanel" id="pane-sessions" aria-labelledby="tab-sessions" hidden>
+    <section class="block" id="sessions-block">
+      <div class="sec-head"><h2>正在运行的 Claude Code</h2><span class="hint" id="ss-hint">这台电脑上的会话 · 只读本机的记录，不上传</span></div>
+      <div class="panel ss-list" id="ss-list" aria-live="polite"><p class="hint ss-note">正在读取…</p></div>
+      <div class="panel ecard ss-ctx" id="ss-ctx" hidden></div>
+    </section>
+  </div>
 
-  <section class="block help" id="help-block" aria-label="状态和颜色说明">
-    <div class="sec-head"><h2>状态和颜色说明</h2><span class="hint">账号卡上的标签、额度环、菜单栏图标和环境评分各是什么意思</span></div>
-    <div class="cards help">
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-tag"/></svg></span>账号状态标签</h3>
-        <ul class="lgd">
-          <li><span class="sm"><span class="chip live">正在用</span></span><span class="t">Claude Code 当前登录的号；桌面版的号客户端开着时显示“开着”，没开时显示“上次打开”；本机记录里没有登录的标“没有登录”</span></li>
-          <li><span class="sm"><span class="chip st-warn">注意</span></span><span class="t">用量暂时拿不到、订阅已过期、登录过期了后台没替它续</span></li>
-          <li><span class="sm"><span class="chip st-error">异常</span></span><span class="t">登录失效、凭据属于别的号、sessionKey 或 API Key 无效；点进详情看怎么办</span></li>
-          <li><span class="sm"><span class="chip due-soon">3 天后到期</span></span><span class="t">套餐 7 天内到期，2 天内变红；到期日在“编辑”里记</span></li>
-        </ul>
-        <div class="tagrow"><span class="lab">套餐</span><span class="chip plan p-pro">Pro</span><span class="chip plan p-max">Max</span><span class="chip plan p-team">Team</span><span class="chip plan p-enterprise">Enterprise</span><span class="chip plan p-api">API</span><span class="chip plan p-free">Free</span></div>
-        <p class="hint">套餐从用量接口自动识别，识别不了的在“编辑”里填。</p></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-bars"/></svg></span>额度环和进度条</h3>
-        <ul class="lgd">
-          <li><span class="sm"><svg class="mring" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="41.5"/></svg></span><span class="t"><b>70% 以下</b>正常</span></li>
-          <li><span class="sm"><svg class="mring warn" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="15.1"/></svg></span><span class="t"><b>70–89%</b>快满了，留意重置时间</span></li>
-          <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="3.8"/></svg></span><span class="t"><b>90% 以上</b>基本用完，等重置或换号</span></li>
-        </ul>
-        <p class="hint">画的是已用比例，切到“剩余”显示时数字反过来、颜色不变。5 小时和 7 天是 Anthropic 的两个额度窗口，到时间自动重置；按模型的周额度接口给了才显示。</p></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-signal"/></svg></span>菜单栏图标<span class="hint">macOS</span></h3>
-        <ul class="lgd">
-          <li><span class="sm"><span class="mb"><i class="g"></i>个人 12%</span></span><span class="t"><b>绿</b>空闲，一切正常</span></li>
-          <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话正在执行任务（开着但在等你输入的不算；信号格一格格涨 / 三盏灯的黄灯像黄闪一样一亮一灭）、额度快满、等你确认（切换、或 Claude Code 弹着权限提示；信号格一闪一闪 / 三盏灯一起闪）</span></li>
-          <li><span class="sm"><span class="mb"><i class="r"></i>个人 93%</span></span><span class="t"><b>红</b>要处理：登录失效、额度用完、后台出错</span></li>
-        </ul>
-        <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
-      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-shield"/></svg></span>环境评分</h3>
-        <ul class="lgd">
-          <li><span class="sm"><svg class="mring live" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="3.8"/></svg></span><span class="t"><b>90 以上</b>低风险</span></li>
-          <li><span class="sm"><svg class="mring warn" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="15.1"/></svg></span><span class="t"><b>70–89</b>有风险</span></li>
-          <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="33.9"/></svg></span><span class="t"><b>70 以下</b>高风险</span></li>
-        </ul>
-        <div class="tagrow"><span class="lab">扣分项</span><span class="tg">出口不在支持名单</span><span class="tg">机房或代理 IP</span><span class="tg">代理 / VPN</span><span class="tg">时区语言和出口不一致</span><span class="tg">切换到不支持地区的出口变化</span><span class="tg">同一账号多地区</span></div>
-        <p class="hint">100 分起扣，每项扣一些。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。只提醒，不拦任何操作。</p></div>
-      <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>检测结果里的标记<span class="hint">“全面体检”“重新检测”列出来的每一行前面</span></h3>
-        <ul class="lgd row">
-          <li><span class="sm"><span class="mark ok">正常</span></span><span class="t">这一项没问题</span></li>
-          <li><span class="sm"><span class="mark warn">注意</span></span><span class="t">有风险，看后面建议</span></li>
-          <li><span class="sm"><span class="mark bad">异常</span></span><span class="t">有问题，要处理</span></li>
-          <li><span class="sm"><span class="mark info">说明</span></span><span class="t">只是信息，不算问题</span></li>
-        </ul></div>
-    </div>
-  </section>
+  <div class="pane" role="tabpanel" id="pane-env" aria-labelledby="tab-env" hidden>
+    <div id="env-wrap"><div class="panel empty"><p class="hint">正在读取…</p></div></div>
+  </div>
+
+  <div class="pane" role="tabpanel" id="pane-settings" aria-labelledby="tab-settings" hidden>
+    <nav class="subnav" id="subnav" aria-label="设置里的区块"><a href="#rules-block" data-for="rules-block" hidden>切号规则</a><a href="#privacy-block" data-for="privacy-block" hidden>隐私与数据源</a><a href="#update-block" data-for="update-block" hidden>软件更新</a><a href="#help-block" data-for="help-block">状态和颜色说明</a></nav>
+    <section class="block" id="rules-block" hidden>
+      <div class="sec-head"><h2>切号规则</h2><span class="hint">按时间段或项目目录自动换号，以及额度提醒的阈值</span></div>
+      <div class="cards">
+        <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-clock"/></svg></span>现在的规则</h3>
+          <p class="rules-status" id="rules-status"></p>
+          <ul class="rules" id="rules-list"></ul>
+          <p class="hint">时间规则在进入时间段时自动切换，时间段内你手动换号不会被改回去。目录规则在终端里用 <code>cam claude</code> 代替 <code>claude</code> 启动时生效。</p></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-plus"/></svg></span>添加规则</h3>
+          <form class="rule-form" id="rule-form">
+            <div class="field"><label for="r-type">规则</label>
+              <select id="r-type"><option value="time">按时间段</option><option value="dir">按项目目录</option></select></div>
+            <div class="field grow" id="rw-path" hidden><label for="r-path">目录（含子目录）</label><input id="r-path" placeholder="~/work"></div>
+            <div class="field" id="rw-days"><label for="r-days">星期</label>
+              <select id="r-days"><option value="1-5">工作日</option><option value="6,7">周末</option><option value="1-7">每天</option></select></div>
+            <div class="field" id="rw-start"><label for="r-start">从</label><input id="r-start" type="time" value="09:00"></div>
+            <div class="field" id="rw-end"><label for="r-end">到</label><input id="r-end" type="time" value="18:00"></div>
+            <div class="field"><label for="r-acc">切到</label><select id="r-acc"></select></div>
+            <button class="btn primary" type="submit">添加规则</button>
+          </form></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-bell"/></svg></span>额度提醒</h3>
+          <form class="alert-row" id="alert-form">
+            <label for="alert-pct">当前账号 5 小时额度超过</label>
+            <span class="unit"><input id="alert-pct" type="number" min="1" max="100" step="1"><span>% 时提醒，并告诉你多久后重置</span></span>
+            <button class="btn" type="submit">保存</button>
+          </form></div>
+      </div>
+    </section>
+
+    <section class="block" id="privacy-block" hidden>
+      <div class="sec-head"><h2>隐私与数据源</h2><span class="hint">环境检测用哪些服务、要不要填 key，以及账号的使用地区记录</span></div>
+      <div class="cards">
+        <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-search"/></svg></span>外部 IP 查询<span class="hint">环境检测只发送电脑的出口 IP，不发送任何账号、邮箱或凭据</span></h3>
+          <p class="hint" id="pv-env" hidden style="margin:0 0 8px">被环境变量 CAM_IP_LOOKUP 覆盖，这里改不了</p>
+          <div class="pv-modes" id="pv-modes" role="radiogroup" aria-label="外部 IP 查询"></div>
+          <div class="keys" id="pv-keys"></div></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-link"/></svg></span>会访问的服务</h3>
+          <details class="src" id="pv-src"><summary id="pv-src-sum"></summary><div id="pv-groups"></div></details></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-pin"/></svg></span>地区记录</h3>
+          <div class="pv-foot"><span id="pv-hist"></span><button class="btn" type="button" id="pv-clear">清除地区记录</button></div></div>
+      </div>
+    </section>
+
+    <section class="block" id="update-block" hidden>
+      <div class="sec-head"><h2>软件更新</h2><span class="hint">看代码仓库有没有新版本，更不更新由你点</span>
+        <span class="sec-acts"><button class="btn" type="button" id="up-check">检查更新</button><button class="btn primary" type="button" id="up-apply" hidden>更新</button></span></div>
+      <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-refresh"/></svg></span>版本</h3>
+        <dl class="kv"><dt>当前</dt><dd><span class="v" id="up-when"></span></dd></dl>
+        <div id="up-result"></div>
+        <p class="hint">只在点“检查更新”时联网看一眼代码仓库，不会自动更新。更新只做快进，更新后自检没过会自动退回原来的版本；账号数据不受影响。桌面版是单独的安装包，不跟着更新。</p>
+      </div>
+    </section>
+
+    <section class="block help" id="help-block" aria-label="状态和颜色说明">
+      <div class="sec-head"><h2>状态和颜色说明</h2><span class="hint">账号卡上的标签、额度环、菜单栏图标和环境评分各是什么意思</span></div>
+      <div class="cards help">
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-tag"/></svg></span>账号状态标签</h3>
+          <ul class="lgd">
+            <li><span class="sm"><span class="chip live">正在用</span></span><span class="t">Claude Code 当前登录的号；桌面版的号客户端开着时显示“开着”，没开时显示“上次打开”；本机记录里没有登录的标“没有登录”</span></li>
+            <li><span class="sm"><span class="chip st-warn">注意</span></span><span class="t">用量暂时拿不到、订阅已过期、登录过期了后台没替它续</span></li>
+            <li><span class="sm"><span class="chip st-error">异常</span></span><span class="t">登录失效、凭据属于别的号、sessionKey 或 API Key 无效；点进详情看怎么办</span></li>
+            <li><span class="sm"><span class="chip due-soon">3 天后到期</span></span><span class="t">套餐 7 天内到期，2 天内变红；到期日在“编辑”里记</span></li>
+          </ul>
+          <div class="tagrow"><span class="lab">套餐</span><span class="chip plan p-pro">Pro</span><span class="chip plan p-max">Max</span><span class="chip plan p-team">Team</span><span class="chip plan p-enterprise">Enterprise</span><span class="chip plan p-api">API</span><span class="chip plan p-free">Free</span></div>
+          <p class="hint">套餐从用量接口自动识别，识别不了的在“编辑”里填。</p></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-bars"/></svg></span>额度环和进度条</h3>
+          <ul class="lgd">
+            <li><span class="sm"><svg class="mring" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="41.5"/></svg></span><span class="t"><b>70% 以下</b>正常</span></li>
+            <li><span class="sm"><svg class="mring warn" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="15.1"/></svg></span><span class="t"><b>70–89%</b>快满了，留意重置时间</span></li>
+            <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="3.8"/></svg></span><span class="t"><b>90% 以上</b>基本用完，等重置或换号</span></li>
+          </ul>
+          <p class="hint">画的是已用比例，切到“剩余”显示时数字反过来、颜色不变。5 小时和 7 天是 Anthropic 的两个额度窗口，到时间自动重置；按模型的周额度接口给了才显示。</p></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-signal"/></svg></span>菜单栏图标<span class="hint">macOS</span></h3>
+          <ul class="lgd">
+            <li><span class="sm"><span class="mb"><i class="g"></i>个人 12%</span></span><span class="t"><b>绿</b>空闲，一切正常</span></li>
+            <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话正在执行任务（开着但在等你输入的不算；信号格一格格涨 / 三盏灯的黄灯像黄闪一样一亮一灭）、额度快满、等你确认（切换、或 Claude Code 弹着权限提示；信号格一闪一闪 / 三盏灯一起闪）</span></li>
+            <li><span class="sm"><span class="mb"><i class="r"></i>个人 93%</span></span><span class="t"><b>红</b>要处理：登录失效、额度用完、后台出错</span></li>
+          </ul>
+          <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
+        <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-shield"/></svg></span>环境评分</h3>
+          <ul class="lgd">
+            <li><span class="sm"><svg class="mring live" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="3.8"/></svg></span><span class="t"><b>90 以上</b>低风险</span></li>
+            <li><span class="sm"><svg class="mring warn" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="15.1"/></svg></span><span class="t"><b>70–89</b>有风险</span></li>
+            <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="33.9"/></svg></span><span class="t"><b>70 以下</b>高风险</span></li>
+          </ul>
+          <div class="tagrow"><span class="lab">扣分项</span><span class="tg">出口不在支持名单</span><span class="tg">机房或代理 IP</span><span class="tg">代理 / VPN</span><span class="tg">时区语言和出口不一致</span><span class="tg">切换到不支持地区的出口变化</span><span class="tg">同一账号多地区</span></div>
+          <p class="hint">100 分起扣，每项扣一些。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。只提醒，不拦任何操作。</p></div>
+        <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>检测结果里的标记<span class="hint">“全面体检”“重新检测”列出来的每一行前面</span></h3>
+          <ul class="lgd row">
+            <li><span class="sm"><span class="mark ok">正常</span></span><span class="t">这一项没问题</span></li>
+            <li><span class="sm"><span class="mark warn">注意</span></span><span class="t">有风险，看后面建议</span></li>
+            <li><span class="sm"><span class="mark bad">异常</span></span><span class="t">有问题，要处理</span></li>
+            <li><span class="sm"><span class="mark info">说明</span></span><span class="t">只是信息，不算问题</span></li>
+          </ul></div>
+      </div>
+    </section>
+  </div>
   <p class="hint foot" id="footer"></p>
 </div>
 
@@ -912,7 +1082,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     }
     return out;
   }
-  function gauge([name, w, span, local], snapshot = false) {
+  function gauge([name, w, span, local], snapshot = false, pc = null) {
     const pct = Math.max(0, Math.min(100, w.utilization));
     const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
     // 窗口已经过去了多少时间；看剩余时进度条和竖线都换成“还剩多少”
@@ -928,8 +1098,10 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (elapsed !== null && elapsed > 3 && pct >= 1) {
       const p = Math.round(pct - elapsed);
       const head = p > 0 ? `配速 +${p}%` : p < 0 ? `配速 ${p}%` : "配速持平";
-      const tail = pct > elapsed
-        ? `照这个速度约 ${dur((100 - pct) / (pct / ((span * elapsed) / 100)))}后用完`
+      const by = pc && pc.basis === "recent" ? "按最近一天的速度" : "照这个速度";
+      const tail = pc && pc.state === "out" ? `${by} ${whenShort(pc.out_at)} 左右用完`
+        : pc && pc.state === "ok" ? `${by}到重置约还剩 ${pc.left}%`
+        : pct > elapsed ? `照这个速度约 ${dur((100 - pct) / (pct / ((span * elapsed) / 100)))}后用完`
         : `照这个速度到重置约用到 ${Math.round((pct * 100) / elapsed)}%`;
       pace = `<div class="g-pace${pct / elapsed > 1.15 ? " fast" : ""}">${head} · ${tail}</div>`;
     }
@@ -1005,7 +1177,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       : app.account === a.id ? "开着的就是这个号" : app.account ? "开着别的号" : app.known ? "开着，用的不是这里的号" : "开着，看不出用的哪个号";
     return run ? `${ver} · ${run}` : ver;
   }
-  function statusChips(a) {
+  function statusChips(a, inTile) {
     const h = a.health || {};
     const out = [];
     if (a.kind === "claude_desktop") {
@@ -1017,7 +1189,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (h.level === "error") out.push(`<span class="chip st-error">异常</span>`);
     else if (h.level === "warn") out.push(`<span class="chip st-warn">注意</span>`);
     const due = dueInfo(a);
-    if (due && due.cls && !(h.issues || []).some((i) => i.kind === "expired")) out.push(`<span class="chip ${due.cls}">${due.short}</span>`);
+    if (!inTile && due && due.cls && !(h.issues || []).some((i) => i.kind === "expired")) out.push(`<span class="chip ${due.cls}">${due.short}</span>`);
     return out.join("");
   }
   // 账号卡上的额度环：和菜单栏小工具一样，环画出已用的比例，中间是数字
@@ -1025,7 +1197,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const r = 18, c = 2 * Math.PI * r;
     return `<svg class="ring" viewBox="0 0 44 44" aria-hidden="true"><circle class="rt" cx="22" cy="22" r="${r}"/>
       <circle class="rf ${cls}" cx="22" cy="22" r="${r}" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - pct / 100)).toFixed(2)}"/>
-      <text x="22" y="22" text-anchor="middle" dominant-baseline="central">${Math.round(pct)}<tspan>%</tspan></text></svg>`;
+      <text x="22" y="22" text-anchor="middle" dominant-baseline="central"${Math.round(pct) >= 100 ? ' style="font-size:9.5px"' : ""}>${Math.round(pct)}<tspan>%</tspan></text></svg>`;
   }
   function resetShort(iso) {  // 卡片上只放“多久后重置”
     if (!iso) return "";
@@ -1052,22 +1224,198 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       ${s7 === null ? "" : `<div>7 天${suffix} <b>${s7.toFixed(0)}%</b></div><span class="g-bar"><span class="g-fill ${levelCls(p7)}" style="width:${s7}%"></span></span>`}
     </span></span>`;
   }
+  // ---- 额度环、7 天额度的节奏、一句结论、到期。节奏是后端按采样点算好的 a.pace（usage_pace），节奏线的点来自 /api/usage-samples
+  const ALERT_SOON_DAYS = 3;  // 到期日前几天标黄（和后台提醒一样）
+  const FULL_AT = 99.5;  // 用到这么多算用满了（和后台提醒一样）
+  const WEEKDAY = "日一二三四五六";
+  const pad2 = (n) => String(n).padStart(2, "0");
+  let paceSeries = {};  // 账号 id → [[秒, 7 天 %], …]
+  async function loadPace() {
+    try {
+      const r = await api("GET", "/api/usage-samples", undefined, 15000);
+      paceSeries = Object.fromEntries(Object.entries(r.accounts || {}).map(([id, v]) => [id, v.points || []]));
+    } catch (_) { paceSeries = {}; }
+    if (state && !loadFailed) render();
+  }
+  // 卡片上的时间：今天“19:00”，明天“明天 09:00”，一周内“周日 14:00”，再远“11-28 09:00”。t 是秒或 ISO 时间
+  function whenShort(t) {
+    const d = typeof t === "number" ? new Date(t * 1000) : new Date(t || "");
+    if (isNaN(d)) return "";
+    const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`, now = new Date();
+    const days = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 864e5);
+    return days === 0 ? hm : days === 1 ? `明天 ${hm}` : days > 1 && days < 7 ? `周${WEEKDAY[d.getDay()]} ${hm}` : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hm}`;
+  }
+  // 卡片上的额度环：5 小时、7 天，再加用得最多的那个按模型的周额度（如 Fable）。桌面号过了重置时间的窗口不画
+  function quotaRings(a) {
+    const u = a.usage || {}, snap = a.kind === "claude_desktop", out = [];
+    if (snap && !desktopUsage(a)) return out;
+    const add = (label, w, key) => {
+      if (!w || typeof w.utilization !== "number" || (snap && desktopWindowExpired(a, key, w))) return;
+      out.push({ label, w, pct: Math.max(0, Math.min(100, w.utilization)) });
+    };
+    add("5h", u.five_hour, "five_hour");
+    add("7d", u.seven_day, "seven_day");
+    const top = (u.models || []).filter((m) => typeof m.utilization === "number").sort((x, y) => y.utilization - x.utilization)[0];
+    if (top) add(top.name, top, "seven_day");
+    return out;
+  }
+  function ringBox(r) {  // 环 + 下面它的名字和几点重置
+    const when = r.w.resets_at ? whenShort(r.w.resets_at) : r.pct === 0 ? "未开始" : "–";
+    const tip = `${r.label} 已用 ${Math.round(r.pct)}%${r.w.resets_at ? "，" + resetText(r.w.resets_at) : ""}`;
+    return `<span class="rg" title="${esc(tip)}">${ringSvg(pref.remain ? 100 - r.pct : r.pct, levelCls(r.pct))}<span class="rl">${esc(r.label)}</span><span class="rw">${esc(when)}</span></span>`;
+  }
+  // 当前 Claude Code 号：这台电脑上几个会话开着、几个在回答、几个等你确认
+  function sessionLine(a) {
+    const ss = state.sessions || {}, n = ss.count || 0;
+    if (!a.is_active || a.kind !== "claude_code" || n <= 0) return "";
+    const busy = ss.busy || ss.waiting;
+    const what = [ss.answering ? `${ss.answering} 个在回答` : ss.busy ? "正在回答" : "", ss.waiting ? `${ss.waiting} 个等你确认` : ""].filter(Boolean).join(" · ");
+    return `<span class="t-sess${busy ? " busy" : ""}"><i></i>${n} 个会话${busy ? "在跑 · " + what : "开着 · 空闲"}</span>`;
+  }
+  // 一句结论：用满了几点恢复 / 按现在的速度什么时候用完 / 够用。long：详情和汇总里的长说法
+  function verdict(a, long) {
+    const u = a.usage || {}, p = a.pace, snap = a.kind === "claude_desktop";
+    const full = (w) => w && typeof w.utilization === "number" && w.utilization >= FULL_AT;
+    if (full(u.five_hour) && !(snap && desktopWindowExpired(a, "five_hour", u.five_hour)))
+      return { cls: "hot", text: `5 小时${long ? "额度" : ""}用满${u.five_hour.resets_at ? ` · ${whenShort(u.five_hour.resets_at)} 恢复` : ""}` };
+    const m = (u.models || []).find(full);
+    if (m) return { cls: "hot", text: `${m.name} 用满${m.resets_at ? ` · ${whenShort(m.resets_at)} 刷新` : ""}` };
+    if (!p) return snap && quotaRings(a).length ? { cls: "", text: `${desktopStale(a) ? "旧快照" : "本地额度"} · ${ago(u.fetched_at)}` } : null;
+    const by = p.basis === "recent" ? "最近一天" : "这周平均";
+    if (p.state === "full") return { cls: "hot", text: `7 天${long ? "额度" : ""}用满 · ${whenShort(p.resets_at)} 恢复` };
+    if (p.state === "out") return { cls: "warn", text: long ? `按${by}的速度，7 天额度 ${whenShort(p.out_at)} 左右用完，比重置早 ${dur(p.early_secs * 1000)}` : `7 天 ${whenShort(p.out_at)} 左右用完` };
+    if (p.state === "ok") return { cls: "", text: long ? `按${by}的速度用不完，重置时大约还剩 ${p.left}%` : `够用 · 重置时约剩 ${p.left}%` };
+    return { cls: "", text: long ? "这个 7 天窗口刚开始，用一段时间以后再估什么时候用完" : "7 天窗口刚开始" };
+  }
+  // 到期：3 天内标黄、过了标红、自动续期写每月几号；没记到期日不显示
+  function expiryLine(a) {
+    const d = a.days_left, m = a.manual || {};
+    if (d === null || d === undefined) return null;
+    const t = m.expires_at ? new Date(`${String(m.expires_at).slice(0, 10)}T00:00:00`) : new Date((a.auto || {}).subscription_expires_at || "");
+    const ok = !isNaN(t), date = ok ? `${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}` : "";
+    if (m.auto_renew) return { cls: "", text: `自动续期${ok ? (m.cycle === "yearly" ? ` · 每年 ${date}` : ` · 每月 ${t.getDate()} 日`) : ""}` };
+    if (d < 0) return { cls: "hot", text: `已过到期日${date ? `（${date}）` : ""}` };
+    if (d <= ALERT_SOON_DAYS) return { cls: "warn", text: d === 0 ? `今天到期${date ? `（${date}）` : ""}` : `到期 ${date} · 还有 ${d} 天` };
+    return { cls: "", text: `到期 ${date}` };
+  }
+  // 7 天额度的节奏线：虚线是匀速用到重置正好用完，实线是实际已用（采样点 + 现在这个数），比匀速快的部分涂浅黄，
+  // 点线按速度往后推（重置前用完的标黄、画到用完那一点；用不完的画到重置时还剩多少）。big：详情里带坐标轴的大图
+  function paceSvg(a, big) {
+    const p = a.pace;
+    if (!p) return "";
+    // 大图按页面宽度画（手机上 800 宽的图缩到三分之一，字小得看不清）：窄屏画得和屏幕一样宽、高一点，字还是 11–12 像素
+    const W = big ? paceBigWidth() : 240, H = big ? (W < 560 ? 220 : 230) : 34, pad = big ? { l: 40, r: 16, t: 16, b: 26 } : { l: 3, r: 5, t: 4, b: 4 };
+    const span = p.resets_at - p.start, even = (t) => ((t - p.start) / span) * 100;
+    const X = (t) => pad.l + Math.max(0, Math.min(1, (t - p.start) / span)) * (W - pad.l - pad.r);
+    const Y = (v) => pad.t + (1 - Math.max(0, Math.min(100, v)) / 100) * (H - pad.t - pad.b);
+    const xy = (t, v) => `${X(t).toFixed(1)},${Y(v).toFixed(1)}`;
+    const now = Date.now() / 1000, got = Date.parse((a.usage || {}).fetched_at || "") / 1000;
+    const at = Number.isFinite(got) && got <= now && got >= p.start ? got : now;
+    const pts = (paceSeries[a.id] || []).filter(([t, v]) => t >= p.start && t < at && typeof v === "number").concat([[at, p.used]]);
+    const ink = p.state === "out" || p.state === "full" ? "var(--warn)" : "var(--ink)";
+    let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="7 天额度的节奏：已用 ${Math.round(p.used)}%，按匀速应该在 ${Math.round(p.even)}%">`;
+    if (big) {
+      for (const g of [0, 25, 50, 75, 100]) s += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${Y(g)}" y2="${Y(g)}" stroke="var(--line)"${g ? ' stroke-dasharray="2 4"' : ""}/><text x="${pad.l - 7}" y="${Y(g) + 4}" font-size="11" fill="var(--muted)" text-anchor="end">${g}%</text>`;
+      for (let i = 0; i <= 7; i++) {
+        const t = p.start + i * 86400, d = new Date(t * 1000);
+        s += `<text x="${X(t)}" y="${H - 6}" font-size="11" fill="var(--muted)" text-anchor="${i === 0 ? "start" : i === 7 ? "end" : "middle"}">周${WEEKDAY[d.getDay()]}</text>`;
+      }
+    }
+    // 比匀速快的部分：实线在虚线上面的那几段，和虚线围起来（在交点处切开）
+    const runs = [];
+    let run = [];
+    pts.forEach(([t, v], i) => {
+      const dv = v - even(t);
+      if (i > 0) {
+        const [t0, v0] = pts[i - 1], d0 = v0 - even(t0);
+        if ((d0 > 0) !== (dv > 0) && d0 !== dv) {
+          const tc = t0 + (d0 / (d0 - dv)) * (t - t0), c = [tc, even(tc)];
+          if (d0 > 0) { run.push(c); runs.push(run); run = []; } else run = [c];
+        }
+      }
+      if (dv > 0) run.push([t, v]);
+    });
+    if (run.length) runs.push(run);
+    for (const r of runs.filter((r) => r.length > 1)) s += `<polygon points="${r.map(([t, v]) => xy(t, v)).concat(r.slice().reverse().map(([t]) => xy(t, even(t)))).join(" ")}" fill="var(--warn-soft)"/>`;
+    s += `<line x1="${X(p.start)}" y1="${Y(0)}" x2="${X(p.resets_at)}" y2="${Y(100)}" stroke="var(--muted)" stroke-width="${big ? 1.4 : 1}" stroke-dasharray="4 4" opacity=".75"/>`;
+    if (pts.length > 1) s += `<polyline points="${pts.map(([t, v]) => xy(t, v)).join(" ")}" fill="none" stroke="${ink}" stroke-width="${big ? 2.2 : 1.6}" stroke-linejoin="round" stroke-linecap="round"/>`;
+    const end = p.state === "out" ? [p.out_at, 100] : p.state === "ok" ? [p.resets_at, 100 - p.left] : null;
+    if (end) {
+      const c = p.state === "out" ? "var(--warn)" : "var(--muted)";
+      s += `<line x1="${X(at)}" y1="${Y(p.used)}" x2="${X(end[0])}" y2="${Y(end[1])}" stroke="${c}" stroke-width="${big ? 2 : 1.5}" stroke-dasharray="1 ${big ? 5 : 3.5}" stroke-linecap="round"/>`;
+      if (p.state === "out") s += `<circle cx="${X(end[0])}" cy="${Y(end[1])}" r="${big ? 4.5 : 2.6}" fill="var(--surface)" stroke="var(--warn)" stroke-width="${big ? 2 : 1.4}"/>`;
+    }
+    if (big) {
+      const right = X(at) > W * 0.7, anchor = right ? "end" : "start", dx = right ? -9 : 9;
+      s += `<line x1="${X(now)}" x2="${X(now)}" y1="${pad.t}" y2="${H - pad.b}" stroke="var(--muted)" opacity=".45"/>`;
+      s += `<text x="${X(at) + dx}" y="${Y(p.used) + (p.used > even(at) ? -10 : 18)}" font-size="12" font-weight="650" fill="var(--ink)" text-anchor="${anchor}">现在 ${Math.round(p.used)}%</text>`;
+      s += `<text x="${X(now) + dx}" y="${Y(even(now)) + (p.used > even(at) ? 18 : -10)}" font-size="11.5" fill="var(--muted)" text-anchor="${anchor}">匀速应在 ${Math.round(p.even)}%</text>`;
+      if (p.state === "out") s += `<text x="${X(p.out_at) - 9}" y="${Y(100) + 4}" font-size="12" font-weight="650" fill="var(--warn)" text-anchor="end">${esc(whenShort(p.out_at))} 用完</text>`;
+      if (p.state === "ok") s += `<text x="${X(p.resets_at) - 4}" y="${Y(100 - p.left) - 9}" font-size="11.5" fill="var(--muted)" text-anchor="end">重置时约剩 ${p.left}%</text>`;
+    }
+    s += `<circle cx="${X(at)}" cy="${Y(p.used)}" r="${big ? 4.5 : 2.6}" fill="${ink}" stroke="var(--surface)" stroke-width="${big ? 2 : 1.2}"/>`;
+    return s + "</svg>";
+  }
+  // 详情里大节奏图的宽：宽屏固定 800（按比例缩放），窄屏（手机）等于卡片里能放下的宽度
+  const paceBigWidth = () => (window.innerWidth > 720 ? 800 : Math.max(280, Math.round(window.innerWidth - 66)));
+  let paceW = paceBigWidth();
+  window.addEventListener("resize", () => {  // 转屏、拖窗口跨过手机宽度时重画一次
+    const w = paceBigWidth();
+    if (w !== paceW) { paceW = w; if (state && !loadFailed) render(); }
+  });
+  function paceCard(a) {
+    const p = a.pace, v = verdict(a, true), left = p.resets_at * 1000 - Date.now();
+    const stat = (k, val, cls) => `<div class="pc-stat"><span>${k}</span><b class="${cls || ""}">${esc(val)}</b></div>`;
+    const third = p.state === "out" ? stat("按现在的速度用完", `${whenShort(p.out_at)} 左右`, "warn")
+      : p.state === "ok" ? stat("重置时大约还剩", `${p.left}%`)
+      : p.state === "full" ? stat("已经用满", `${whenShort(p.resets_at)} 恢复`, "hot") : stat("什么时候用完", "还不好估");
+    const by = p.basis === "recent" ? "按最近一天的速度往后推" : "按这周平均的速度往后推";
+    return `<div class="ecard sub wide pace-card"><h3><span class="eico"><svg><use href="#i-signal"/></svg></span>7 天额度的节奏<span class="hint">${esc(whenShort(p.start))} 开始 · ${esc(whenShort(p.resets_at))} 重置</span></h3>
+      <div class="pace-big">${paceSvg(a, true)}</div>
+      <div class="pace-lgd"><span><i></i>实际已用</span><span><i class="dash"></i>匀速用到重置正好用完</span><span><i class="soft"></i>比节奏快的部分</span>${p.state === "out" || p.state === "ok" ? `<span><i class="dot ${p.state}"></i>${by}</span>` : ""}</div>
+      <div class="pc-stats">${stat("现在已用", `${Math.round(p.used)}%`)}${stat("按匀速应该在", `${Math.round(p.even)}%`)}${third}${stat("离重置还有", left > 0 ? dur(left) : "已重置")}</div>
+      ${v ? `<p class="hint pc-note">${esc(v.text)}。按记下来的用量估的，只是提醒，换不换号由你决定。</p>` : ""}</div>`;
+  }
+  // 有额度的号的汇总：5 小时、7 天平均已用（看剩余时是平均剩余）；有号照现在的速度会在重置前用完时多一行提醒
+  function summaryBar(accs) {
+    const q = accs.filter((a) => a.kind !== "api").map((a) => [a, quotaRings(a)]).filter(([, r]) => r.length);
+    const outs = accs.filter((a) => a.pace && a.pace.state === "out");
+    if (q.length < 2 && !outs.length) return "";
+    const avg = (lab) => {
+      const v = q.map(([, r]) => r.find((x) => x.label === lab)).filter(Boolean).map((x) => x.pct);
+      return v.length ? v.reduce((n, x) => n + x, 0) / v.length : null;
+    };
+    const count = {};
+    q.forEach(([a]) => { count[a.kind] = (count[a.kind] || 0) + 1; });
+    const kinds = KIND_ORDER.filter((k) => count[k]).map((k) => `${KIND[k]} ${count[k]} 个`).join(" · ");
+    const meter = (name, v) => {
+      if (v === null) return "<div></div>";
+      const shown = pref.remain ? 100 - v : v;
+      return `<div class="sb-m"><div class="row"><span>${name}</span><b>平均${pref.remain ? "剩余" : "已用"} ${Math.round(shown)}%</b></div><div class="g-bar"><div class="g-fill ${levelCls(v)}" style="width:${shown}%"></div></div></div>`;
+    };
+    const alert = outs.length ? `<div class="sb-alert" role="status"><svg viewBox="0 0 16 16"><path d="M8 1.8 15 14H1z"/><path d="M8 6.2v3.4M8 11.6v.3"/></svg><span><b>${esc(nameOf(outs[0]))}</b>：${esc(verdict(outs[0], true).text)}${outs.length > 1 ? `；另外 ${outs.length - 1} 个号也会在重置前用完` : ""}</span></div>` : "";
+    return `<div class="panel sumbar"><div class="sb-t"><b>有额度的 ${q.length} 个号</b><span class="hint">${esc(kinds)}</span></div>${meter("5 小时", avg("5h"))}${meter("7 天", avg("7d"))}${alert}</div>`;
+  }
   function tile(a, sel) {
     const h = a.health || {};
     const sub = a.email && a.email !== a.label ? mail(a.email) : KIND[a.kind];
+    const rings = quotaRings(a), v = verdict(a, false), ex = expiryLine(a);
+    const meter = rings.length ? `<span class="t-rings">${rings.map(ringBox).join("")}</span>${a.pace ? `<span class="t-spark">${paceSvg(a, false)}</span>` : ""}` : tileMeter(a);
     return `<button type="button" class="tile${sel ? " sel" : ""}${a.is_active ? " live" : ""}${h.level === "error" ? " bad" : ""}"
       data-act="select" data-id="${esc(a.id)}" aria-pressed="${sel}">
       <span class="t-top"><span class="t-name">${esc(mail(a.label || a.email) || "未命名")}</span>${planChip(a)}</span>
       <span class="t-sub">${esc(sub)}</span>
-      <span class="t-chips">${statusChips(a)}</span>
-      ${tileMeter(a)}
+      <span class="t-chips">${statusChips(a, true)}</span>
+      ${sessionLine(a)}${meter}
+      ${v ? `<span class="t-verdict ${v.cls}">${esc(v.text)}</span>` : ""}
+      ${ex ? `<span class="t-exp ${ex.cls}">${esc(ex.text)}</span>` : ""}
     </button>`;
   }
   function detailView(a) {
     const u = a.usage || {};
     const m = a.manual || {};
     const h = a.health || { issues: [] };
-    let gauges = windowsOf(a).map((g) => gauge(g, a.kind === "claude_desktop")).join("");
+    let gauges = windowsOf(a).map((g) => gauge(g, a.kind === "claude_desktop", g[1] === u.seven_day ? a.pace : null)).join("");
     if ((u.breakdown || []).length) gauges += `<div class="g-mini g-parts" title="这个号 7 天额度花在了哪里">7 天构成：${u.breakdown.map((b) => `<span>${esc(BREAKDOWN[b.key] || b.name)} <b>${Math.round(b.percent)}%</b></span>`).join("")}</div>`;
     if (a.kind !== "claude_desktop" && u.cost_month_usd !== undefined && u.cost_month_usd !== null) {
       gauges += `<div class="g"><div class="g-head"><span class="g-name">本月花费</span><span class="g-pct">$${Number(u.cost_month_usd).toFixed(2)}</span></div></div>`;
@@ -1114,7 +1462,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       </div>
       ${issues ? `<ul class="issues">${issues}</ul>` : ""}
       ${a.kind === "claude_desktop" ? `<p class="hint">${esc(u.notice || "额度来自这个配置的 Claude 本地记录；打开客户端用量页后可读取更新。")}${u.source === "desktop_history" ? " 历史记录未提供重置时间。" : ""}${u.fetched_at && desktopStale(a) ? " 这份快照已超过 30 分钟，请结合记录时间查看。" : ""} 切换或重新打开会退出并重启电脑上的 Claude 桌面版，请先处理好其中正在运行的任务。首次打开和会话过期后需要登录；Claude Code 命令行账号单独切换。</p>` : ""}
-      <div class="cards d-body"><div class="ecard sub"><h3><span class="eico"><svg><use href="#i-gauge"/></svg></span>额度</h3><div class="gauges">${gauges}</div></div>
+      <div class="cards d-body">${a.pace ? paceCard(a) : ""}<div class="ecard sub"><h3><span class="eico"><svg><use href="#i-gauge"/></svg></span>额度</h3><div class="gauges">${gauges}</div></div>
         <div class="ecard sub"><h3><span class="eico"><svg><use href="#i-user"/></svg></span>账号信息</h3><dl class="kv d-info">${info}</dl></div></div>
     </section>`;
   }
@@ -1303,6 +1651,64 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     </section>`;
   }
 
+  // ---- 页签：账号 / 用量 / 环境 / 设置，一次看一页。记在地址 # 后面（小面板的“管理面板”、书签能直接打开某一页）和这台浏览器里。
+  const TABS = ["accounts", "usage", "sessions", "env", "settings"];
+  // 地址里的 #：页签名，或者旧的区块锚点（README、旧书签、页面里的“查看详情”），对到所在的页签；设置页里的几块打开后滚到那一块
+  const ANCHOR_TAB = { accounts: "accounts", list: "accounts", "vault-block": "accounts", usage: "usage", "local-block": "usage",
+    sessions: "sessions", "sessions-block": "sessions", env: "env",
+    settings: "settings", rules: "settings", "rules-block": "settings", privacy: "settings", "privacy-block": "settings",
+    update: "settings", "update-block": "settings", help: "settings", "help-block": "settings" };
+  const ANCHOR_ALIAS = { rules: "rules-block", privacy: "privacy-block", update: "update-block", help: "help-block" };
+  let tab = "accounts", pendingScroll = null;
+  function showTab(name, opt = {}) {
+    if (!TABS.includes(name)) name = "accounts";
+    tab = name;
+    document.querySelectorAll('#tabs [role="tab"]').forEach((b) => {
+      const on = b.dataset.tab === name;
+      b.setAttribute("aria-selected", String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+    TABS.forEach((t) => { $("#pane-" + t).hidden = t !== name; });
+    if (opt.save !== false) {
+      try { localStorage.setItem("cam-tab", name); } catch (_) {}
+      if (opt.hash !== false) history.replaceState(null, "", location.pathname + location.search + "#" + name);  // 不用 location.hash：那样会跳
+    }
+    if (name !== "usage" && typeof luHideTip === "function") luHideTip();
+    sessionsPolling(name === "sessions");
+  }
+  function fromHash(scroll) {
+    const id = decodeURIComponent(location.hash.slice(1));
+    const t = ANCHOR_TAB[id];
+    if (!t) return false;
+    showTab(t, { hash: false });
+    const target = TABS.includes(id) ? null : document.getElementById(ANCHOR_ALIAS[id] || id);
+    pendingScroll = null;
+    if (target && target.hidden) pendingScroll = target.id;  // 那块的数据还没来：显示出来时再滚
+    else if (scroll) (target || document.body).scrollIntoView({ block: "start" });
+    return true;
+  }
+  $("#tabs").addEventListener("click", (e) => {
+    const b = e.target.closest('[role="tab"]');
+    if (b) showTab(b.dataset.tab);
+  });
+  $("#tabs").addEventListener("keydown", (e) => {  // 方向键在页签间移动并切过去，Home / End 到头尾
+    const btns = [...document.querySelectorAll('#tabs [role="tab"]')], i = btns.indexOf(document.activeElement);
+    if (i < 0) return;
+    const j = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: btns.length - 1 }[e.key];
+    if (j === undefined) return;
+    e.preventDefault();
+    const b = btns[(j + btns.length) % btns.length];
+    b.focus();
+    showTab(b.dataset.tab);
+  });
+  window.addEventListener("hashchange", () => fromHash(true));
+  // 页签那一行右边：账号的用量最近一次是什么时候取的
+  function renderTabHint() {
+    const at = (state ? state.accounts : []).map((a) => (a.usage || {}).fetched_at).filter(Boolean).sort().pop();
+    const when = at ? ago(at) : "";
+    $("#tab-hint").textContent = !at ? "" : when === "刚刚" ? "用量刚刚更新" : `用量 ${when}更新`;
+  }
+
   // ---- 渲染
   let state = null, accountBusy = false;
   function syncAccountBusy() {
@@ -1311,6 +1717,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   // 标题旁的红绿灯：规则和卡片小面板、菜单栏图标一致。只显示最要紧的一条，其余在悬停提示里
   function renderLight() {
+    renderSessionsBadge();
     const el = $("#light");
     const cur = state.accounts.find((a) => a.is_active && a.kind === "claude_code");
     const h = (cur && cur.health) || {}, u = (cur && cur.usage) || {}, issue = (h.issues || [])[0] || {};
@@ -1323,14 +1730,14 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (p5 !== null && p5 >= 100) items.push({ lv: "bad", text: "5 小时额度用完了" });
     if (state.attention) items.push({ lv: "busy", blink: true, text: state.attention.text });  // Claude Code 弹着权限确认等你（钩子记的）
     if (pend) items.push({ lv: "busy", blink: true, text: pend.message });
-    if (n > 0 && ss.busy) items.push({ lv: "busy", pulse: true, text: `工作中 · ${n} 个 Claude Code 会话在跑` });  // 开着但在等你输入的不算
+    if (n > 0 && ss.busy) items.push({ lv: "busy", pulse: true, text: ss.text || `${n} 个会话 · 正在回答` });  // 几个在回答、几个等你确认；开着但在等你输入的不算
     if (p5 !== null && p5 >= 90) items.push({ lv: "busy", text: `5 小时额度 ${Math.round(p5)}%，快满了` });
     else if (p7 !== null && p7 >= 90) items.push({ lv: "busy", text: `7 天额度 ${Math.round(p7)}%，快满了` });
     if (h.level === "warn") items.push({ lv: "busy", text: `当前号：${issue.text || h.label || "要注意"}`, tip: issue.advice });
     for (const a of state.accounts) {
       if ((!cur || a.id !== cur.id) && (a.health || {}).level === "error") items.push({ lv: "busy", text: `${a.label || a.email || "未命名"}：${((a.health.issues || [])[0] || {}).text || "登录有问题"}` });
     }
-    if (!items.length) items.push({ lv: "ok", text: n > 0 ? `空闲 · ${n} 个 Claude Code 会话开着` : "空闲 · 一切正常" });
+    if (!items.length) items.push({ lv: "ok", text: n > 0 ? `${n} 个会话 · 空闲` : "空闲 · 一切正常" });
     const top = items[0];
     el.className = `light ${top.lv}${top.pulse ? " pulse" : ""}${top.blink ? " blink" : ""}`;
     el.title = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
@@ -1350,7 +1757,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${fmtTime(state.generated_at)}`;
     const p = state.pending_switch;
     const risky = state.risk_score && (state.region || {}).status && state.risk_score.grade !== "low";
-    const env = envCard(state);
+    $("#env-wrap").innerHTML = envCard(state);  // 环境单独一页
+    renderTabHint();
     // 有风险时顶上只放一行提醒（分数 + 第一条），环境卡仍在账号下面，不把账号挤下去
     const firstRisk = ((state.risks || []).find((r) => r.level === "bad" || r.level === "warn") || {}).text;
     const brief = risky ? `<div class="notice env-brief ${esc(state.risk_score.grade)}" role="status"><span class="n-text">环境评分 <b>${esc(state.risk_score.score)}/100</b>：${esc(state.risk_score.label)}${firstRisk ? ` · ${esc(firstRisk)}` : ""}</span><a class="btn quiet" href="#env">查看详情</a></div>` : "";
@@ -1361,7 +1769,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
         <p class="hint"><b>用 Claude Code（命令行）</b>：终端里 <code>claude</code> 已经登录的话，点下面的按钮导入；还没登录就在终端运行 <code>cam login 工作号</code>（点一下命令就复制），浏览器里登录完自动保存。以后加号也用 <code>cam login 名字</code>，它会先把当前号存好。</p>
         <p><button class="btn primary" data-act="import">导入当前登录</button></p>
-        <p class="hint" style="margin-top:14px"><b>用 Claude 桌面版、网页版 claude.ai 或 API Key</b>：<button class="btn" data-act="add">添加账号</button> 选对应类型。网页版每个号一个独立浏览器窗口。</p></div>` + env;
+        <p class="hint" style="margin-top:14px"><b>用 Claude 桌面版、网页版 claude.ai 或 API Key</b>：<button class="btn" data-act="add">添加账号</button> 选对应类型。网页版每个号一个独立浏览器窗口。</p></div>`;
       syncAccountBusy();
       return;
     }
@@ -1376,15 +1784,14 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const sel = sorted.find((a) => a.id === selectedId) || sorted.find((a) => a.is_active) || sorted[0];
     const oldStrip = list.querySelector(".strip"), keepX = oldStrip ? oldStrip.scrollLeft : 0;
     const bad = sorted.filter((a) => (a.health || {}).level === "error").length;
-    list.innerHTML = notice
+    list.innerHTML = notice + summaryBar(sorted)
       + `<div class="sec-head"><h2>账号 · ${sorted.length} 个</h2><span class="hint">${bad ? `<span class="bad-count">${bad} 个异常</span> · ` : ""}点账号卡看详情</span>
           <span class="sec-acts"><span class="seg-mini" role="group" aria-label="额度显示"><button type="button" data-pref="remain" data-v="0" aria-pressed="${!pref.remain}">已用</button><button type="button" data-pref="remain" data-v="1" aria-pressed="${pref.remain}">剩余</button></span>
             <button type="button" class="btn quiet" data-pref="mask" aria-pressed="${pref.mask}" title="截图分享时把邮箱显示成 ch***@y***.com">${pref.mask ? "显示邮箱" : "邮箱打码"}</button>
             <button class="btn quiet" data-act="detect" title="检查 Claude Code 现在登录的是不是新账号，是就保存">检测新登录</button><button class="btn" data-act="add">＋ 添加账号</button></span></div>`
       + `<div class="strip">${sorted.map((a) => tile(a, a.id === sel.id)).join("")}
           <button type="button" class="tile add" data-act="add"><span class="plus">＋</span>添加账号</button></div>`
-      + detailView(sel)
-      + env;
+      + detailView(sel);
     const strip = list.querySelector(".strip");
     if (strip) strip.scrollLeft = keepX;
     if (sel.id !== revealedId) { revealedId = sel.id; revealSelected(list); }
@@ -1392,6 +1799,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
 
   function renderLogin(msg) {
+    showTab("accounts", { save: false });
     $("#list").innerHTML = `<div class="panel empty"><h2>需要访问令牌</h2>
       <p class="hint">${esc(msg || "请用电脑上 cam serve 打印出来的完整地址打开（带 ?t=…），或把令牌粘贴到下面。")}</p>
       <form id="tok-form" style="display:flex;gap:8px;margin-top:10px"><label class="sr" for="tok">令牌</label>
@@ -1404,17 +1812,25 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     };
   }
 
-  // 图表的六个分类色（CSS 变量 --c1…--c6，浅色 / 深色各一套，经色觉校验）：颜色跟着账号走，按账号列表的顺序固定分配，换时间范围也不重排
+  // ---- 本机 Claude Code 消耗：四格汇总、叠起来的柱子（今天按小时，7 / 30 天按天，全部按天 / 周 / 月）、明细、热力图
+  // 图表的六个分类色（CSS 变量 --c1…--c6，浅色 / 深色各一套，经色觉校验）：颜色跟着账号走，按账号列表的顺序固定分配，换时间范围也不重排；
+  // 第 7 个号起、模型第 7 个起归到灰色的“其他”，不循环用色
   const CHART = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
-  const RANGES = [["1", "今天"], ["7", "7 天"], ["30", "30 天"]];
-  let localRange = "7", localRep = null;
-  try { localRange = RANGES.some(([v]) => v === localStorage.getItem("cam-local-range")) ? localStorage.getItem("cam-local-range") : "7"; } catch (_) {}
+  const RANGES = [["today", "今天"], ["7", "7 天"], ["30", "30 天"], ["all", "全部"]];
+  const METRICS = [["tokens", "Token"], ["cost", "金额"], ["messages", "消息"]];
+  const GROUPS = [["account", "按账号"], ["model", "按模型"]];
+  const ROWBY = [["account", "账号"], ["model", "模型"]];
+  const lsPick = (k, opts, dflt) => { try { const v = localStorage.getItem(k); return opts.some(([x]) => x === v) ? v : dflt; } catch (_) { return dflt; } };
+  const lsPut = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+  let localRange = (() => { try { if (localStorage.getItem("cam-local-range") === "1") return "today"; } catch (_) {} return lsPick("cam-local-range", RANGES, "7"); })();
+  let luMetric = lsPick("cam-local-metric", METRICS, "tokens"), luGroup = lsPick("cam-local-group", GROUPS, "account"), luRowBy = lsPick("cam-local-rows", ROWBY, "account");
+  let localRep = null, luChart = null, localLoaded = false;  // luChart：画出来的柱子，悬停提示用
   async function loadLocal() {
     const want = localRange;
     let rep = null;
-    try { rep = await api("GET", `/api/local-usage?days=${want}`, undefined, 30000); } catch (_) {}
+    try { rep = await api("GET", `/api/local-usage?range=${want}`, undefined, 60000); } catch (_) {}
     if (want !== localRange) return;  // 等的时候又点了别的范围：这份是旧范围的，不画到新标签下面
-    localRep = rep;
+    localRep = rep; localLoaded = true;
     renderLocal();
   }
   // 模型 id 变成好认的名字：claude-opus-4-1-20250805 → Opus 4.1，claude-3-5-sonnet-20241022 → Sonnet 3.5
@@ -1426,69 +1842,221 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   // 参考线的间隔：1 / 2 / 5 × 10ⁿ，大约画三条
   const niceStep = (max) => { const raw = max / 3, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p; };
-  // 今天只看今天的记录（接口按“最近 N 天”取，会带上昨天的）；7 天 / 30 天画每天的柱子（按账号叠）；右边按模型的占比
-  function renderLocal() {
-    const today = new Date().toLocaleDateString("sv-SE");
-    const inRange = (r) => localRange !== "1" || r.date === today;
-    const rows = localRep ? localRep.rows.filter(inRange) : [];
-    const mrows = localRep ? (localRep.models || []).filter(inRange) : [];
-    if (!state || !localRep || (!rows.length && localRange !== "1")) { $("#local-block").hidden = true; return; }
-    $("#local-range").innerHTML = RANGES.map(([v, t]) => `<button type="button" data-range="${v}" aria-pressed="${v === localRange}">${t}</button>`).join("");
-    const names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
-    const label = (id) => names[id] || "未归属";  // 最早一次切换 / 导入之前的记录算不出是哪个号的，提示文字里有解释
-    const order = state.accounts.map((a) => a.id);
-    const rank = (id) => (order.indexOf(id) + 1 || 99);
-    const ids = [...new Set(rows.map((r) => r.account_id))].sort((a, b) => rank(a) - rank(b));
-    const color = Object.fromEntries(ids.map((id) => [id, order.includes(id) ? CHART[order.indexOf(id) % CHART.length] : "var(--muted)"]));
-    const cost = (rs) => rs.reduce((n, r) => n + (r.cost_usd || 0), 0);
-    const sum = (k, rs = rows) => rs.reduce((n, r) => n + (r[k] || 0), 0);
-    const cr = sum("cache_read"), inp = sum("input") + sum("cache_write"), hit = inp + cr > 0 ? Math.round((cr / (inp + cr)) * 100) : null;
-    $("#local-sum").innerHTML = rows.length
-      ? `<div class="st"><b>≈ ${usd(cost(rows))}</b><span>${sum("messages")} 条消息 · 按 API 价折算</span></div>
-         <div class="st"><b>${wan(sum("output"))}</b><span>输出 tokens</span></div>
-         <div class="st"><b>${wan(inp)}</b><span>输入和缓存写入 tokens</span></div>
-         <div class="st"><b>${hit === null ? "–" : hit + "%"}</b><span>缓存命中 · 读取 ${wan(cr)}</span></div>`
-      : `<div class="st"><b>≈ $0.00</b><span>今天还没有用过</span></div>`;
-    $("#legend").innerHTML = ids.length > 1 || (ids.length === 1 && ids[0] === "unattributed")
-      ? ids.map((id) => `<span><i style="background:${color[id]}"></i>${esc(label(id))} <b>${usd(cost(rows.filter((r) => r.account_id === id)))}</b></span>`).join("") : "";
-    const days = [], n = Number(localRange);
-    for (let i = n - 1; i >= 0 && n > 1; i--) days.push(new Date(Date.now() - i * 86400e3).toLocaleDateString("sv-SE"));
-    const byDay = Object.fromEntries(days.map((d) => [d, []]));
-    rows.forEach((r) => { if (byDay[r.date]) byDay[r.date].push(r); });
-    const max = Math.max(0.01, ...days.map((d) => cost(byDay[d]))), top = max * 1.12;  // 顶上留一点空，最高的柱子不顶到边
-    $("#local-chart").hidden = !days.length;
-    if (days.length) {
-      const step = niceStep(top), ticks = [];
-      for (let v = step; v <= top; v += step) ticks.push(v);
-      $("#gridlines").innerHTML = ticks.map((v) => `<div style="bottom:${(v / top) * 100}%"><span>${v >= 10 ? "$" + Math.round(v) : usd(v)}</span></div>`).join("");
-      const lab = (d) => d.slice(5).replace("-", "/");
-      $("#bars").innerHTML = days.map((d) => {
-        const rs = byDay[d].slice().sort((a, b) => rank(a.account_id) - rank(b.account_id));
-        const tip = `${lab(d)} · ${usd(cost(rs))}` + (rs.length ? "\n" + rs.map((r) => `${label(r.account_id)}：${usd(r.cost_usd || 0)} · 输出 ${wan(r.output)} · ${r.messages} 条`).join("\n") : "\n没有记录");
-        return `<div class="day" data-tip="${esc(tip)}">${rs.map((r) => `<div class="seg" style="height:${((r.cost_usd || 0) / top) * 100}%;background:${color[r.account_id]}"></div>`).join("")}</div>`;
-      }).join("");
-      const marks = (n > 7 ? [0, 7, 14, 21, n - 1] : [0, n - 1]).filter((i) => i < n);
-      $("#axis").innerHTML = marks.map((i) => `<span style="left:${i === 0 ? 0 : i === n - 1 ? 100 : ((i + .5) / n) * 100}%">${lab(days[i])}</span>`).join("");
-    }
-    const byModel = {};
-    mrows.forEach((r) => {
-      const m = byModel[r.model] || (byModel[r.model] = { cost: 0, output: 0, messages: 0, tokens: 0 });
-      m.cost += r.cost_usd || 0; m.output += r.output || 0; m.messages += r.messages || 0;
-      m.tokens += (r.input || 0) + (r.output || 0) + (r.cache_write || 0) + (r.cache_read || 0);
+  const LU_FIELDS = ["input", "output", "cache_write", "cache_read", "messages", "cost_usd"];
+  const luTokens = (r) => (r.input || 0) + (r.output || 0) + (r.cache_write || 0) + (r.cache_read || 0);
+  const luVal = (r, m = luMetric) => (m === "cost" ? r.cost_usd || 0 : m === "messages" ? r.messages || 0 : luTokens(r));
+  const luFmt = (v, m = luMetric) => (m === "cost" ? usd(v) : m === "messages" ? `${Math.round(v)} 条` : wan(v));
+  const luTick = (v) => (luMetric === "cost" ? (v >= 10 ? "$" + Math.round(v) : usd(v)) : luMetric === "messages" ? String(Math.round(v)) : wan(v));
+  const luAdd = (into, r) => { LU_FIELDS.forEach((f) => { into[f] = (into[f] || 0) + (r[f] || 0); }); return into; };
+  // 模型的颜色：第一次见到时领一个空着的，记在本机，换时间范围也不变；六个都被这次出现的模型占着时，后来的归到“其他”
+  function modelColors(models) {
+    let map = {};
+    try { map = JSON.parse(localStorage.getItem("cam-model-colors") || "{}"); } catch (_) {}
+    if (!map || typeof map !== "object" || Array.isArray(map)) map = {};
+    const present = new Set(models), slots = [0, 1, 2, 3, 4, 5];
+    let changed = false;
+    models.filter((m) => m && m !== "unknown" && !Number.isInteger(map[m])).sort().forEach((m) => {
+      const taken = new Set(Object.values(map)), busy = new Set(Object.keys(map).filter((k) => present.has(k)).map((k) => map[k]));
+      const free = slots.find((i) => !taken.has(i)) ?? slots.find((i) => !busy.has(i));
+      if (free === undefined) return;
+      Object.keys(map).forEach((k) => { if (map[k] === free) delete map[k]; });
+      map[m] = free; changed = true;
     });
-    const models = Object.entries(byModel).sort((a, b) => b[1].cost - a[1].cost);
-    const mtotal = models.reduce((t, [, m]) => t + m.cost, 0) || 1;
-    $("#local-models").hidden = !models.length;
-    $("#models").innerHTML = models.slice(0, 8).map(([m, v]) => `<li title="${esc(m)}"><b>${esc(modelName(m))}</b><span class="v">${usd(v.cost)} · ${Math.round((v.cost / mtotal) * 100)}%</span>
-      <span class="bar"><i style="width:${(v.cost / mtotal) * 100}%"></i></span><span class="d">输出 ${wan(v.output)} · 共 ${wan(v.tokens)} tokens · ${v.messages} 条</span></li>`).join("");
+    if (changed) lsPut("cam-model-colors", JSON.stringify(map));
+    return map;
+  }
+  function luEntities(rep) {
+    const order = state.accounts.map((a) => a.id), names = Object.fromEntries(state.accounts.map((a) => [a.id, nameOf(a)]));
+    const mcol = modelColors((rep.model_totals || []).map((m) => m.model));
+    return {
+      account(id) {
+        const i = order.indexOf(id);
+        if (i < 0) return { key: "unattributed", name: "未归属", color: "var(--muted)", rank: 98 };  // 最早一次切换之前的、已经删掉的号
+        return { key: i < CHART.length ? id : "_other", name: i < CHART.length ? names[id] : "其他账号", own: names[id], color: i < CHART.length ? CHART[i] : "var(--muted)", rank: i < CHART.length ? i : 99 };
+      },
+      model(m) {
+        if (!m || m === "unknown") return { key: "unknown", name: "未知模型", color: "var(--muted)", rank: 98 };
+        const i = mcol[m], ok = Number.isInteger(i) && i < CHART.length;
+        return { key: ok ? m : "_other", name: ok ? modelName(m) : "其他模型", own: modelName(m), color: ok ? CHART[i] : "var(--muted)", rank: ok ? i : 99 };
+      },
+    };
+  }
+  function bucketLabel(k, unit, long) {
+    if (unit === "hour") { const h = Number(k.slice(11, 13)); return long ? `今天 ${pad2(h)}:00–${pad2(h + 1)}:00` : `${pad2(h)}:00`; }
+    if (unit === "month") { const [y, m] = k.split("-"); return long ? `${y} 年 ${Number(m)} 月` : `${y.slice(2)}/${m}`; }
+    const d = new Date(k + "T00:00:00"), md = `${d.getMonth() + 1}/${d.getDate()}`;
+    if (unit === "week") return long ? `${md} 起的一周` : md;
+    return long ? `${md} 周${"日一二三四五六"[d.getDay()]}` : md;
+  }
+  function luTiles(rep, ent) {
+    const t = rep.totals || {}, accs = rep.accounts || [];
+    const byKey = {};
+    accs.forEach((a) => { const e = ent.account(a.account_id), k = e.key === "_other" ? a.account_id : e.key; byKey[k] = byKey[k] || { name: e.own || e.name, rank: e.rank, cost: 0 }; byKey[k].cost += a.cost_usd || 0; });
+    const split = Object.values(byKey).filter((x) => x.cost > 0).sort((a, b) => a.rank - b.rank);
+    const splitText = split.slice(0, 3).map((x) => `${esc(x.name)} ${usd(x.cost)}`).join(" · ") + (split.length > 3 ? ` 等 ${split.length} 个` : "");
+    const nAcc = accs.filter((a) => state.accounts.some((x) => x.id === a.account_id)).length;
+    const hit = t.cache_hit;
+    const note = hit == null ? ["", "还没有记录"] : hit >= 0.9 ? ["good", "很高：大部分输入是从缓存读的"] : hit >= 0.6 ? ["", "还行：一半以上的输入从缓存读"] : ["", "偏低：大部分输入没走缓存"];
+    $("#lu-tiles").innerHTML =
+      `<div><div class="k">Token</div><div class="v">${wan(luTokens(t))}</div><div class="s">输入 ${wan(t.input || 0)} · 输出 ${wan(t.output || 0)}<br>缓存写入 ${wan(t.cache_write || 0)} · 缓存读取 ${wan(t.cache_read || 0)}</div></div>` +
+      `<div><div class="k">消息</div><div class="v">${t.messages || 0}</div><div class="s">${t.sessions || 0} 个会话 · ${nAcc} 个号${accs.some((a) => ent.account(a.account_id).key === "unattributed") ? " · 有未归属的" : ""}</div></div>` +
+      `<div><div class="k">折算金额</div><div class="v">≈ ${usd(t.cost_usd || 0)}</div><div class="s">${splitText || "按 API 价折算"}</div></div>` +
+      `<div><div class="k">缓存命中率</div><div class="v">${hit == null ? "–" : (hit * 100).toFixed(1) + "%"}</div><div class="s ${note[0]}">${note[1]}</div></div>`;
+  }
+  function luChartDraw(rep, ent) {
+    const keys = rep.buckets || [], unit = rep.unit, n = keys.length;
+    const byModel = luGroup === "model", rows = (byModel ? rep.model_series : rep.series) || [];
+    const idx = Object.fromEntries(keys.map((k, i) => [k, i])), cols = keys.map(() => ({})), ents = {};
+    rows.forEach((r) => {
+      const i = idx[r.bucket];
+      if (i === undefined) return;
+      const e = byModel ? ent.model(r.model) : ent.account(r.account_id);
+      ents[e.key] = e;
+      luAdd(cols[i][e.key] || (cols[i][e.key] = {}), r);
+    });
+    const list = Object.values(ents).sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+    const totals = cols.map((c) => Object.values(c).reduce((sum, r) => sum + luVal(r), 0));
+    const max = Math.max(0, ...totals), top = max > 0 ? max * 1.12 : 1;
+    let step = niceStep(top);
+    if (luMetric === "messages") step = Math.max(1, Math.round(step));
+    const ticks = [];
+    for (let v = step; v <= top; v += step) ticks.push(v);
+    $("#lu-title").textContent = { hour: "今天每小时", day: "每天", week: "每周", month: "每月" }[unit] || "用量";
+    $("#lu-grid").innerHTML = `<div class="base" style="bottom:0"><span>0</span></div>` + (max > 0 ? ticks.map((v) => `<div style="bottom:${(v / top) * 100}%"><span>${luTick(v)}</span></div>`).join("") : "");
+    $("#lu-bars").style.setProperty("--lu-pad", n > 40 ? "1px" : n > 20 ? "1.5px" : "3px");
+    $("#lu-bars").innerHTML = max > 0
+      ? cols.map((c, i) => `<div class="lu-col" data-lt data-i="${i}">${list.filter((e) => c[e.key] && luVal(c[e.key]) > 0).map((e) => `<div class="lu-seg" style="height:${(luVal(c[e.key]) / top) * 100}%;background:${e.color}"></div>`).join("")}</div>`).join("")
+      : `<div class="lu-empty">${localRange === "today" ? "今天还没有用过" : "这段时间没有记录"}</div>`;
+    const marks = unit === "hour" ? [0, 6, 12, 18] : n <= 8 ? keys.map((_, i) => i) : [0, 1, 2, 3, 4].map((j) => Math.round((j * (n - 1)) / 4));
+    $("#lu-axis").innerHTML = [...new Set(marks)].filter((i) => i < n).map((i) => `<span style="left:${((i + 0.5) / n) * 100}%">${esc(bucketLabel(keys[i], unit, false))}</span>`).join("");
+    $("#lu-plot").setAttribute("aria-label", `${$("#lu-title").textContent}的${METRICS.find(([v]) => v === luMetric)[1]}柱状图，最高 ${luFmt(max)}`);
+    $("#lu-legend").innerHTML = list.length > 1 ? list.map((e) => `<span><i style="background:${e.color}"></i>${esc(e.name)} <b>${esc(luFmt(cols.reduce((sum, c) => sum + (c[e.key] ? luVal(c[e.key]) : 0), 0)))}</b></span>`).join("") : "";
+    luChart = { keys, unit, cols, list };
+  }
+  function luTipHtml(i) {
+    const c = luChart;
+    if (!c || !c.cols[i]) return "";
+    const rs = c.list.filter((e) => c.cols[i][e.key]).map((e) => [e, c.cols[i][e.key]]).reverse();  // 从上到下，和柱子一样
+    const sum = luAdd({}, {});
+    rs.forEach(([, r]) => luAdd(sum, r));
+    return `<div class="tt">${esc(bucketLabel(c.keys[i], c.unit, true))}</div>` + (rs.length
+      ? rs.map(([e, r]) => `<div class="tl"><span><i style="background:${e.color}"></i>${esc(e.name)}</span><b>${esc(luFmt(luVal(r)))}</b></div>`).join("") +
+        `<div class="tl total"><span>合计 · ${sum.messages} 条消息</span><b>${esc(wan(luTokens(sum)))} tokens · ${esc(usd(sum.cost_usd))}</b></div>`
+      : `<div class="tl"><span>没有记录</span></div>`);
+  }
+  function luRowsDraw(rep, ent) {
+    const byModel = luRowBy === "model", items = [];
+    if (byModel) {
+      (rep.model_totals || []).forEach((r) => { const e = ent.model(r.model); items.push({ name: e.own || e.name, color: e.color, r, sub: `主要是 ${esc(r.top_account && ent.account(r.top_account).key !== "unattributed" ? ent.account(r.top_account).own || ent.account(r.top_account).name : "未归属")}` }); });
+    } else {
+      const merged = {};
+      (rep.accounts || []).forEach((r) => {
+        const e = ent.account(r.account_id), k = e.key === "_other" ? r.account_id : e.key;
+        if (!merged[k]) merged[k] = { name: e.own || e.name, color: e.color, r: {}, sessions: 0, top: r.top_model };
+        luAdd(merged[k].r, r); merged[k].sessions += r.sessions || 0;
+      });
+      Object.values(merged).forEach((m) => items.push({ name: m.name, color: m.color, r: m.r, sub: `${m.sessions} 个会话${m.top ? " · 主要用 " + esc(modelName(m.top)) : ""}` }));
+    }
+    items.sort((a, b) => luVal(b.r) - luVal(a.r));
+    const max = Math.max(0, ...items.map((x) => luVal(x.r)));
+    $("#lu-rows").innerHTML = items.length
+      ? items.map((x) => `<div class="r"><i class="dot" style="background:${x.color}"></i><span class="nm" title="${esc(x.name)}">${esc(x.name)}</span><span class="val">${esc(luFmt(luVal(x.r)))}</span>
+          <span class="tr"><i style="width:${max > 0 ? (luVal(x.r) / max) * 100 : 0}%;background:${x.color}"></i></span>
+          <span class="sub">${x.r.messages || 0} 条消息 · ${usd(x.r.cost_usd || 0)} · ${x.sub}</span></div>`).join("")
+      : `<p class="hint" style="margin:0">这段时间没有记录</p>`;
+  }
+  function luHeatDraw(h) {
+    const cells = (h && h.cells) || [], max = Math.max(0, ...cells.flat()), weeks = Math.round(((h && h.days) || 28) / 7);
+    const OP = [0, 0.22, 0.45, 0.7, 1], lvl = (v) => (!v || !max ? 0 : v / max <= 0.25 ? 1 : v / max <= 0.5 ? 2 : v / max <= 0.75 ? 3 : 4);
+    const WD = "一二三四五六日";
+    $("#lu-heat-hint").textContent = `最近 ${weeks} 周 · 按消息条数`;
+    $("#lu-heat").innerHTML = cells.map((row, d) => `<span class="wd">${WD[d]}</span>` + row.map((v, hr) =>
+      `<span class="c" data-lt data-tip="${esc(`周${WD[d]} ${pad2(hr)}:00–${pad2(hr + 1)}:00 · ${v} 条消息（最近 ${weeks} 周合计）`)}">${lvl(v) ? `<i style="opacity:${OP[lvl(v)]}"></i>` : ""}</span>`).join("")).join("") +
+      `<span></span>` + [0, 6, 12, 18].map((x) => `<span class="hr">${x}:00</span>`).join("");
+    $("#lu-key").innerHTML = "少 " + OP.map((o) => `<span class="c">${o ? `<i style="opacity:${o}"></i>` : ""}</span>`).join("") + " 多";
+  }
+  const luSeg = (opts, cur, kind) => opts.map(([v, t]) => `<button type="button" data-lu="${kind}" data-v="${v}" aria-pressed="${v === cur}">${t}</button>`).join("");
+  function renderLocal() {
+    const rep = localRep;
+    const heatSum = rep && rep.heatmap ? rep.heatmap.cells.flat().reduce((a, b) => a + b, 0) : 0;
+    if (!state || !rep || !rep.totals || (!rep.totals.messages && !heatSum && localRange !== "today")) {
+      $("#local-block").hidden = true; luHideTip();
+      $("#usage-empty").hidden = false;
+      $("#usage-empty-text").textContent = !localLoaded ? "正在读取这台电脑上的 Claude Code 记录…"
+        : !rep ? "没读到本机记录，稍后会自动再试。" : "这台电脑上还没有 Claude Code 的使用记录。用 claude 聊过之后，这里按天、按账号、按模型汇总。";
+      return;
+    }
+    $("#usage-empty").hidden = true;
+    $("#local-range").innerHTML = RANGES.map(([v, t]) => `<button type="button" data-range="${v}" aria-pressed="${v === localRange}">${t}</button>`).join("");
+    $("#lu-metric").innerHTML = luSeg(METRICS, luMetric, "metric");
+    $("#lu-group").innerHTML = luSeg(GROUPS, luGroup, "group");
+    $("#lu-rowby").innerHTML = luSeg(ROWBY, luRowBy, "rows");
+    const ent = luEntities(rep);
+    luTiles(rep, ent);
+    luChartDraw(rep, ent);
+    luRowsDraw(rep, ent);
+    luHeatDraw(rep.heatmap);
+    luHideTip();
     $("#local-block").hidden = false;
   }
+  // 悬停提示：鼠标悬停就出来；手机上点一下出来，再点一下或点别处收起
+  let luTipFor = null, luPointer = "mouse";
+  function luShowTip(el) {
+    const block = $("#local-block"), tip = $("#lu-tip"), box = block.getBoundingClientRect(), r = el.getBoundingClientRect();
+    const isCol = el.dataset.i !== undefined;
+    tip.innerHTML = isCol ? luTipHtml(Number(el.dataset.i)) : `<div class="tl"><span style="color:var(--ink);white-space:normal">${esc(el.dataset.tip || "")}</span></div>`;
+    tip.hidden = false;
+    const tw = tip.offsetWidth, th = tip.offsetHeight, W = box.width;
+    let x, y;
+    if (isCol) {
+      x = r.right - box.left + 10;
+      if (x + tw > W - 4) x = r.left - box.left - 10 - tw;
+      y = $("#lu-plot").getBoundingClientRect().top - box.top + 4;
+    } else {
+      x = r.left - box.left + r.width / 2 - tw / 2;
+      y = r.top - box.top - th - 8;
+    }
+    tip.style.left = Math.max(4, Math.min(x, W - tw - 4)) + "px";
+    tip.style.top = y + "px";
+    document.querySelectorAll("#lu-bars .lu-col.on").forEach((c) => c.classList.remove("on"));
+    if (isCol) el.classList.add("on");
+    luTipFor = el;
+  }
+  function luHideTip() {
+    $("#lu-tip").hidden = true;
+    luTipFor = null;
+    document.querySelectorAll("#lu-bars .lu-col.on").forEach((c) => c.classList.remove("on"));
+  }
+  $("#local-block").addEventListener("pointerdown", (e) => { luPointer = e.pointerType || "mouse"; });
+  $("#local-block").addEventListener("pointerover", (e) => {
+    if (e.pointerType !== "mouse") return;
+    const t = e.target.closest("[data-lt]");
+    if (t && t !== luTipFor) luShowTip(t);
+    else if (!t && luTipFor) luHideTip();
+  });
+  $("#local-block").addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") luHideTip(); });
+  $("#local-block").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-lu]");
+    if (b) {
+      const v = b.dataset.v, kind = b.dataset.lu;
+      if (kind === "metric") { luMetric = v; lsPut("cam-local-metric", v); }
+      if (kind === "group") { luGroup = v; lsPut("cam-local-group", v); }
+      if (kind === "rows") { luRowBy = v; lsPut("cam-local-rows", v); }
+      renderLocal();
+      return;
+    }
+    if (luPointer === "mouse") return;
+    const t = e.target.closest("[data-lt]");
+    if (t && t !== luTipFor) luShowTip(t); else luHideTip();
+  });
   $("#local-range").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-range]");
     if (!b || b.dataset.range === localRange) return;
     localRange = b.dataset.range;
-    try { localStorage.setItem("cam-local-range", localRange); } catch (_) {}
-    renderLocal(); loadLocal();
+    lsPut("cam-local-range", localRange);
+    $("#local-range").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.range === localRange)));
+    luHideTip();
+    loadLocal();
   });
 
   // ---- 隐私与数据源
@@ -1601,18 +2169,174 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     } finally { btn.disabled = false; renderUpdate(); }
   };
 
+
+  // ---- 会话页：这台电脑上正在跑的 Claude Code（/api/sessions），选中一个看它的上下文窗口（/api/sessions/<id>，按记录估的组成）。
+  // 页签开着、页面在前台时每 5 秒刷新一次，切走就停
+  const SS_STATE = { busy: ["在回答", "busy"], waiting: ["等你确认", "wait"], idle: ["空闲", ""] };
+  const SS_HEALTH = { ok: ["健康", "ss-ok", ""], high: ["快满了", "ss-warn", "warn"], full: ["很满", "ss-hot", "hot"] };
+  const SS_CATS = [["chat", "对话", "var(--c2)"], ["files", "读过的文件", "var(--c3)"], ["tools", "工具结果", "var(--c1)"], ["images", "图片", "var(--c6)"], ["other", "其他（估算）", "var(--c4)"]];
+  const SS_LOGIN = { own_token: "自带的号", api_key: "API Key", config_dir: "单独的配置目录", unknown: "看不出用的哪个号" };
+  const ssWho = (r) => r.account ? mail(r.account) : SS_LOGIN[r.login] || "看不出用的哪个号";
+  const SS_FILTERS = [["all", "全部"], ["files", "读过的文件"], ["tools", "工具结果"], ["images", "图片"], ["chat", "对话"]];
+  let ssView = null, ssDetail = null, ssSel = null, ssFilter = "all", ssAll = false, ssTimer = null, ssLoading = false;
+  try { ssSel = localStorage.getItem("cam-session"); } catch (_) {}
+  const kTok = (n) => n == null ? "–" : n >= 1e6 ? Math.round(n / 1e5) / 10 + "M" : n >= 1e3 ? Math.round(n / 100) / 10 + "K" : String(n);
+  const ssPct = (r) => (r.context_used == null || !r.context_window ? null : Math.min(100, (r.context_used / r.context_window) * 100));
+  function sessionsPolling(on) {
+    clearInterval(ssTimer); ssTimer = null;
+    if (!on) return;
+    loadSessions();
+    ssTimer = setInterval(() => { if (!document.hidden && tab === "sessions") loadSessions(); }, 5000);
+  }
+  async function loadSessions() {
+    if (ssLoading) return;
+    ssLoading = true;
+    try { ssView = await api("GET", "/api/sessions", undefined, 20000); } catch (e) { ssView = { error: e.message }; } finally { ssLoading = false; }
+    const rows = (ssView && ssView.sessions) || [];
+    if (!rows.some((r) => r.id === ssSel)) ssSel = rows.length ? rows[0].id : null;
+    renderSessions();
+    if (ssSel) loadSessionDetail(); else { ssDetail = null; renderSessionDetail(); }
+  }
+  async function loadSessionDetail() {
+    const want = ssSel;
+    let d;
+    try { d = await api("GET", "/api/sessions/" + encodeURIComponent(want), undefined, 30000); } catch (e) { d = { error: e.message }; }
+    if (want !== ssSel) return;  // 等的时候点了别的会话
+    ssDetail = d; renderSessionDetail();
+  }
+  function ssRow(r) {
+    const [stText, led] = SS_STATE[r.state] || SS_STATE.idle, h = SS_HEALTH[r.health], pct = ssPct(r);
+    const ran = r.started_at ? "已运行 " + dur(Date.now() - new Date(r.started_at)) : "运行时长看不出来";
+    const who = ssWho(r);
+    const guess = r.matched === "newest" || r.matched === "guess" ? "（按这个目录里最新的记录对的）" : "";
+    return `<button type="button" class="ss-row" data-act="ss-pick" data-sid="${esc(r.id)}" aria-pressed="${r.id === ssSel}" title="${esc((r.login_text || "") + guess)}">
+      <span><i class="ss-led ${led}"></i></span>
+      <span><b>${esc(r.project || "看不出是哪个项目")}</b><span class="hint">${esc(r.cwd || "")}</span></span>
+      <span class="ss-acc"><span>${esc(who)}</span><span class="hint">${r.model ? esc(modelName(r.model)) : "还没有回复"}</span></span>
+      <span class="ss-st"><span>${stText}</span><span class="hint">${ran}${r.turns != null ? ` · ${r.turns} 轮` : ""}</span></span>
+      <span class="ss-ctxc"><span><b>${kTok(r.context_used)}</b> <span class="hint" style="display:inline">/ ${kTok(r.context_window)}${r.window_exact ? "" : "（约）"}${pct == null ? "" : ` · ${Math.round(pct)}%`}</span></span>
+        <span class="ss-bar"><i class="${h ? h[2] : ""}" style="width:${pct == null ? 0 : pct.toFixed(1)}%"></i></span></span>
+      ${h ? `<span class="chip ${h[1]}">${h[0]}</span>` : `<span></span>`}</button>`;
+  }
+  function renderSessions() {
+    const box = $("#ss-list"), v = ssView;
+    if (!v) return;
+    if (v.error) { box.innerHTML = `<p class="hint ss-note">读不到会话：${esc(v.error)}</p>`; $("#ss-ctx").hidden = true; return; }
+    if (!v.known) { box.innerHTML = `<p class="hint ss-note">这次没查到正在运行的进程，过几秒会再试。</p>`; return; }
+    const rows = v.sessions || [];
+    $("#ss-hint").textContent = rows.length ? `${rows.length} 个会话${v.answering ? ` · ${v.answering} 个在回答` : ""}${v.waiting ? ` · ${v.waiting} 个等你确认` : ""} · 只读本机的记录，不上传` : "只读本机的记录，不上传";
+    if (!rows.length) {
+      box.innerHTML = `<div class="ss-empty"><b>这台电脑上现在没有在运行的 Claude Code</b><span class="hint">在终端里运行 claude 以后，这里会列出每个会话在干什么、上下文用了多少。</span></div>`;
+      $("#ss-ctx").hidden = true;
+      return;
+    }
+    box.innerHTML = rows.map(ssRow).join("")
+      + (v.hooks ? "" : `<p class="hint ss-note">没装 cam 的钩子：“在回答 / 空闲 / 等你确认”是按记录文件和 CPU 猜的。终端运行 <code>cam hooks install</code> 后会准一些（正在跑的会话要重开一次）。</p>`);
+  }
+  // 方块图：面积按 token 分。squarify：一行一行地摆，每行挑能让方块最接近正方形的个数
+  function squarify(items, x, y, w, h) {
+    const out = [], total = items.reduce((n, i) => n + i.v, 0);
+    if (!total || w <= 0 || h <= 0) return out;
+    let rest = items.map((i) => ({ ...i, a: (i.v * w * h) / total }));
+    while (rest.length) {
+      const short = Math.min(w, h);
+      const worst = (r) => { const s = r.reduce((n, q) => n + q.a, 0), mx = Math.max(...r.map((q) => q.a)), mn = Math.min(...r.map((q) => q.a)); return Math.max((short * short * mx) / (s * s), (s * s) / (short * short * mn)); };
+      let row = [rest[0]], i = 1;
+      while (i < rest.length && worst([...row, rest[i]]) <= worst(row)) row.push(rest[i++]);
+      const s = row.reduce((n, q) => n + q.a, 0);
+      if (w >= h) { const cw = s / h; let yy = y; row.forEach((q) => { const hh = q.a / cw; out.push({ ...q, x, y: yy, w: cw, h: hh }); yy += hh; }); x += cw; w -= cw; }
+      else { const rh = s / w; let xx = x; row.forEach((q) => { const ww = q.a / rh; out.push({ ...q, x: xx, y, w: ww, h: rh }); xx += ww; }); y += rh; h -= rh; }
+      rest = rest.slice(row.length);
+    }
+    return out;
+  }
+  function ssTree(c, win) {
+    const box = { w: Math.max(240, ($("#ss-ctx").clientWidth || 900) - 32), h: window.innerWidth <= 720 ? 200 : 240 };
+    const used = c.total || 0, free = win && win > used ? win - used : 0;
+    const uw = free ? Math.max(box.w * 0.3, Math.min(box.w - 60, (box.w * used) / (used + free))) : box.w;
+    const color = Object.fromEntries(SS_CATS.map(([k, , col]) => [k, col])), cname = Object.fromEntries(SS_CATS.map(([k, n]) => [k, n]));
+    const byCat = {};
+    (c.items || []).forEach((it) => (byCat[it.cat] = byCat[it.cat] || []).push(it));
+    const groups = SS_CATS.map(([k]) => ({ k, v: (c.categories || {})[k] || 0 })).filter((g) => g.v > 0);
+    const cells = [];
+    for (const g of squarify(groups, 0, 0, uw - (free ? 4 : 0), box.h)) {
+      // 太小的格子（不到用掉部分的 1.5%）放不下字、看着像一堆碎片：并进这一类的“另外几项”
+      const all = (byCat[g.k] || []).filter((it) => it.tokens > 0), shown = all.filter((it) => it.tokens >= used * 0.015);
+      const merged = all.length - shown.length, left = g.v - shown.reduce((n, it) => n + it.tokens, 0);
+      const parts = shown.map((it) => ({ v: it.tokens, it }));
+      if (left > 0) parts.push({ v: left, it: { name: g.k === "other" ? "系统提示词、工具定义等" : merged ? `另外 ${merged} 项` : "另外的", tokens: left, cat: g.k, more: true } });
+      for (const q of squarify(parts, g.x, g.y, g.w, g.h)) cells.push({ ...q, col: color[g.k], cat: cname[g.k] });
+    }
+    const pctOf = (v, base) => ((v / base) * 100).toFixed(3) + "%";
+    const cell = (q) => {
+      const roomy = q.w > 54 && q.h > 30, two = q.w > 54 && q.h > 46;
+      const tip = `${q.it.name}${q.it.detail ? " · " + q.it.detail : ""}：约 ${kTok(q.it.tokens)} token（${q.cat}）${q.it.count ? ` · ×${q.it.count}` : ""}`;
+      return `<div class="tm" style="--tc:${q.col};left:${pctOf(q.x + 2, box.w)};top:${(q.y + 2).toFixed(1)}px;width:${pctOf(Math.max(0, q.w - 4), box.w)};height:${Math.max(0, q.h - 4).toFixed(1)}px" title="${esc(tip)}">`
+        + (roomy ? `<b>${esc(q.it.name)}${q.it.count > 1 ? ` ×${q.it.count}` : ""}</b>` : "") + (two ? `<span>${kTok(q.it.tokens)} · ${q.cat}</span>` : "") + "</div>";
+    };
+    const freeCell = free ? `<div class="tm free" style="left:${pctOf(uw, box.w)};top:2px;width:${pctOf(box.w - uw - 2, box.w)};height:${box.h - 4}px" title="还剩 ${kTok(free)} token"><b>剩余空间</b><span>${kTok(free)} · ${Math.round((free / win) * 100)}%</span></div>` : "";
+    return `<div class="ss-tree" role="img" aria-label="上下文组成：${SS_CATS.map(([k, n]) => `${n} ${kTok((c.categories || {})[k] || 0)}`).join("，")}${free ? `，剩余 ${kTok(free)}` : ""}" style="height:${box.h}px">${cells.map(cell).join("")}${freeCell}</div>`;
+  }
+  function renderSessionDetail() {
+    const el = $("#ss-ctx"), d = ssDetail, r = d && d.session;
+    if (!d || !r) { el.hidden = !(d && d.error); if (d && d.error) el.innerHTML = `<p class="hint">${esc(d.error)}</p>`; return; }
+    el.hidden = false;
+    const c = d.composition, h = SS_HEALTH[r.health], pct = ssPct(r);
+    const head = `<h3><span class="eico"><svg><use href="#i-bars"/></svg></span>上下文窗口<span class="hint">${esc(r.project || "")}</span><span class="spacer"></span>
+      <span class="hint">${esc(ssWho(r))} › ${r.model ? esc(modelName(r.model)) : "还没有回复"}</span><span class="chip c-ok">每 5 秒刷新</span></h3>`;
+    if (!c || r.context_used == null) { el.innerHTML = head + `<p class="hint">这个会话还没有回复，等它回了第一条再看。</p>`; return; }
+    const hit = r.cache_hit == null ? null : r.cache_hit * 100;
+    const top = `<div class="ss-top">
+      <div><div class="hint">已用上下文${h ? ` <span class="chip ${h[1]}">${h[0]}</span>` : ""}</div>
+        <div class="ss-big">${kTok(r.context_used)} <small>/ ${kTok(r.context_window)} token${r.window_exact ? "" : "（约）"}</small></div>
+        <div class="hint">已用 ${pct == null ? "–" : Math.round(pct) + "%"}${r.context_window > r.context_used ? ` · 还剩 ${kTok(r.context_window - r.context_used)}` : ""}${c.since_compact ? " · 压缩过，只算压缩之后的" : ""}</div></div>
+      <div><div class="hint">提示词缓存</div><div class="ss-big cache">${hit == null ? "–" : hit.toFixed(1) + "%"} <small>命中</small></div>
+        <div class="ss-bar" style="height:7px"><i style="width:${hit || 0}%;opacity:.75"></i></div><div class="hint">上一次请求的输入里有多少是从缓存读的</div></div></div>`;
+    const key = `<div class="legend ss-key">${SS_CATS.map(([k, n, col]) => `<span><i style="background:${col}"></i>${n} <b>${kTok(c.categories[k] || 0)}</b></span>`).join("")}${r.context_window > r.context_used ? `<span><i style="background:var(--track);border:1px solid var(--line)"></i>剩余空间 <b>${kTok(r.context_window - r.context_used)}</b></span>` : ""}</div>`;
+    const color = Object.fromEntries(SS_CATS.map(([k, , col]) => [k, col]));
+    const items = (c.items || []).filter((it) => ssFilter === "all" || it.cat === ssFilter);
+    const shown = ssAll ? items : items.slice(0, 8), max = Math.max(1, ...shown.map((it) => it.tokens));
+    const rows = shown.map((it) => `<div class="li"><i class="dot" style="background:${color[it.cat]}"></i><span class="nm">${esc(it.name)}${it.detail ? `<span class="path">${esc(it.detail)}</span>` : ""}</span>
+      <span class="tag">${it.count > 1 || (it.cat !== "chat" && it.count) ? "×" + it.count : ""}</span><span class="ss-bar"><i style="width:${((it.tokens / max) * 100).toFixed(1)}%;background:${color[it.cat]}"></i></span><span class="v">${kTok(it.tokens)}</span></div>`).join("");
+    const filters = `<div class="ss-filter"><span class="hint">占得最多的</span><span class="spacer"></span><span class="seg-mini" role="group" aria-label="看哪一类">${SS_FILTERS.map(([v, t]) =>
+      `<button type="button" data-act="ss-filter" data-v="${v}" aria-pressed="${v === ssFilter}">${t}</button>`).join("")}</span></div>`;
+    const more = items.length > 8 ? `<button type="button" class="btn quiet ss-more" data-act="ss-all">${ssAll ? "收起" : `显示全部 ${items.length} 项`}</button>` : "";
+    el.innerHTML = head + top + ssTree(c, r.context_window) + key + filters + `<div class="ss-items">${rows || `<p class="hint">这一类没有内容</p>`}</div>` + more
+      + `<p class="hint">按 Claude Code 的会话记录估的（文字按字节数除以 4，一张图按 1600 token），加起来按实际用量缩放。系统提示词、工具定义、记忆文件、只留了签名的思考过程不在记录里，算在“其他（估算）”里。${c.item_count > (c.items || []).length ? `只列了占得最多的 ${(c.items || []).length} 项。` : ""}只在本机读，不上传。</p>`;
+  }
+  $("#ss-list").addEventListener("click", (e) => {
+    const b = e.target.closest('[data-act="ss-pick"]');
+    if (!b || b.dataset.sid === ssSel) return;
+    ssSel = b.dataset.sid; ssAll = false;
+    try { localStorage.setItem("cam-session", ssSel); } catch (_) {}
+    document.querySelectorAll('#ss-list [data-act="ss-pick"]').forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.sid === ssSel)));
+    loadSessionDetail();
+  });
+  $("#ss-ctx").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b) return;
+    if (b.dataset.act === "ss-filter") { ssFilter = b.dataset.v; ssAll = false; renderSessionDetail(); }
+    else if (b.dataset.act === "ss-all") { ssAll = !ssAll; renderSessionDetail(); }
+  });
+  window.addEventListener("resize", () => { if (tab === "sessions" && ssDetail) renderSessionDetail(); });
+  // 页签上的数字：这台电脑上开着几个会话
+  function renderSessionsBadge() {
+    const n = ((state && state.sessions) || {}).count || 0, el = $("#tab-sessions-n");
+    el.hidden = !n; el.textContent = n ? String(n) : "";
+  }
+
   let loadFailed = "";  // 上一次没取到（"auth" 令牌不对 / "net" 连不上）：页面上是输令牌的框或“连不上后端”，定时重绘不能拿旧数据把它盖掉
   async function load() {
     try {
       state = await api("GET", "/api/state", undefined, 15000);
       loadFailed = "";
-      render(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate();
+      render(); loadPace(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate();
       if (!checkupProbed) probeCheckup();
     } catch (e) {
       loadFailed = e.status === 401 ? "auth" : "net";
       $("#light").hidden = true;  // 灯是旧数据画的，后端都连不上了不能还亮着绿灯
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
-      else $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`;
+      else { showTab("accounts", { save: false }); $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`; }
     }
   }
   // 红绿灯跟着 Claude Code 的状态走（在不在执行、是不是弹着确认等你）：页面开着时每 15 秒只取这几项，变了才重画灯；
@@ -1655,7 +2379,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     await busy(btn, async () => {
       try {
         state = await api("POST", "/api/refresh", id ? { id } : {});
-        render(); loadLocal();
+        render(); loadPace(); loadLocal();
         const errs = state.accounts.filter((a) => (!id || a.id === id) && a.usage && a.usage.error).length;
         toast(errs ? `已刷新，${errs} 个账号没拿到用量` : id && state.accounts.find((a) => a.id === id)?.kind === "claude_desktop" ? "已重新读取本地额度记录" : "用量已更新");
       } catch (e) { toast(e.message, true); }
@@ -2175,15 +2899,20 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       finally { vaultJobPolling = false; }
     }, 2000);
   }
-  // 页面目录：只列出现在显示着的区块（本机消耗、规则这些要等数据来了才显示）
+  // 设置页顶上的小目录：只列出现在显示着的区块（规则、隐私、更新要等数据来了才显示）。
+  // 从链接打开到某一块（#rules-block）时那块还没显示：等它显示出来再滚过去（pendingScroll 在页签那里记）
   (() => {
-    const links = [...document.querySelectorAll("#toc a[data-for]")];
-    const sync = () => links.forEach((a) => { a.hidden = $("#" + a.dataset.for).hidden; });
+    const links = [...document.querySelectorAll("#subnav a[data-for]")];
+    const sync = () => links.forEach((a) => {
+      const el = $("#" + a.dataset.for);
+      a.hidden = el.hidden;
+      if (!el.hidden && pendingScroll === a.dataset.for && tab === "settings") { pendingScroll = null; el.scrollIntoView({ block: "start" }); }
+    });
     const mo = new MutationObserver(sync);
     links.forEach((a) => mo.observe($("#" + a.dataset.for), { attributes: true, attributeFilter: ["hidden"] }));
     sync();
   })();
-  $("#btn-vault").onclick = async () => { $("#vault-block").hidden = false; $("#vault-block").scrollIntoView({ block: "start" }); await loadVault(); };
+  $("#btn-vault").onclick = async () => { showTab("accounts"); $("#vault-block").hidden = false; $("#vault-block").scrollIntoView({ block: "start" }); await loadVault(); };
   $("#v-reload").onclick = loadVault;
   $("#v-close").onclick = () => { $("#vault-block").hidden = true; clearVaultPrivate(); renderVault(); };
   document.addEventListener("change", (event) => {
@@ -2303,6 +3032,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   setInterval(() => state && !loadFailed && render(), 60000);
   setInterval(pollLight, 15000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+  if (!fromHash(false)) {  // 地址里没指定页签：回到上次看的那页
+    let t = null;
+    try { t = localStorage.getItem("cam-tab"); } catch (_) {}
+    showTab(TABS.includes(t) ? t : "accounts", { hash: false });
+  }
   load();
 })();
 </script>

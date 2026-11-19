@@ -276,6 +276,8 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
     // 桌面版开着没有、各桌面号本机有没有登录（只读，显示用）
     let (desk_app, desk) =
         super::desktop_app::desktop_view(store, data, super::desktop_app::STATUS_MAX_AGE);
+    let samples = super::pace::load_usage_samples(store);
+    let now = chrono::Utc::now().timestamp();
     let accs: Vec<Value> = accounts(data)
         .iter()
         .map(|a| {
@@ -307,6 +309,14 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
                 active.as_deref() == Some(id)
             };
             p.insert("is_active".into(), json!(is_active));
+            // 7 天额度的节奏（按采样点推算什么时候用完）；节奏线的点在 /api/usage-samples
+            let pace = if super::pace::SAMPLE_KINDS.contains(&s(a, "kind").unwrap_or_default()) {
+                let shown = p.get("usage").cloned().unwrap_or(Value::Null);
+                super::pace::usage_pace(samples["accounts"].get(id), &shown, now)
+            } else {
+                Value::Null
+            };
+            p.insert("pace".into(), pace);
             if s(a, "kind") == Some("claude_desktop") {
                 p.insert(
                     "desktop".into(),
@@ -403,7 +413,8 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "linux" => "Linux",
         o => o,
     };
-    let (sessions, busy) = sessions_view();
+    let brief = super::sessions::sessions_brief(); // 几个会话、几个在回答、几个等你确认
+    let sessions = brief["count"].as_u64().unwrap_or(0) as usize;
     json!({
         "version": VERSION, "backend": "desktop", "host": host, "platform": platform,
         "active": data.get("active").cloned().unwrap_or(json!({})), "accounts": accs,
@@ -413,7 +424,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "region": super::health::region_view(data),
         "risks": risks,
         "risk_score": risk_score,
-        "sessions": json!({ "count": sessions, "busy": busy }),  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算
+        "sessions": brief,  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算；几个在回答、几个等你确认
         "attention": attention_view(sessions > 0),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
         "desktop_app": desk_app,  // 有桌面版的号时才有：装没装、版本、开着没有、开着的是哪个号
         "generated_at": now_iso()
@@ -734,6 +745,25 @@ pub fn identify_account(store: &Store, key: &str) -> R<Value> {
 }
 
 /// 统一路由：返回 (HTTP 状态码, JSON)。
+/// 路径里的 %XX 还原（会话 id 一般用不上，和 cam.py 的 urllib.parse.unquote 对应）
+fn url_decode(v: &str) -> String {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && v.is_char_boundary(i + 3) {
+            if let Ok(x) = u8::from_str_radix(&v[i + 1..i + 3], 16) {
+                out.push(x);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Value) {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
     let parts: Vec<&str> = path
@@ -771,6 +801,10 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
             Ok(public_state(store, &d))
         }
         ("GET", ["local-usage"]) => {
+            // 管理面板：按小时 / 天 / 周 / 月的柱子、明细、热力图
+            if let Some(rng) = query.split('&').find_map(|kv| kv.strip_prefix("range=")) {
+                return super::local_report::local_report(&store.load()?, rng);
+            }
             let days = query
                 .split('&')
                 .find_map(|kv| kv.strip_prefix("days="))
@@ -778,6 +812,19 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
                 .unwrap_or(30)
                 .clamp(1, 365);
             Ok(local_usage(&store.load()?, days))
+        }
+        ("GET", ["sessions"]) => Ok(super::sessions::sessions_view(&store.load()?)), // 会话页
+        ("GET", ["sessions", id]) => {
+            super::sessions::session_detail(&store.load()?, &url_decode(id))
+        }
+        ("GET", ["usage-samples"]) => {
+            let only = query.split('&').find_map(|kv| kv.strip_prefix("id="));
+            Ok(super::pace::usage_samples_view(
+                store,
+                &store.load()?,
+                only,
+                chrono::Utc::now().timestamp(),
+            ))
         }
         ("GET", ["rules"]) => Ok(rules::rules_view(&store.load()?)),
         ("PUT", ["rules"]) => rules::save_rules(store, body),

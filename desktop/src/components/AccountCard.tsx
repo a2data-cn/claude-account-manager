@@ -1,7 +1,8 @@
-import type { Account, DesktopApp, LocalWindow, Window5, WindowKey } from "../types";
+import type { Account, DesktopApp, LocalWindow, SessionsBrief, Window5, WindowKey } from "../types";
 import { Ico } from "./Icon";
 import { BREAKDOWN, KIND, PLAN, WINDOW_KEYS, WINDOW_MS, WINDOW_NAME, ago, dur, noReset, planTier, resetText, usd, wan } from "../format";
 import { maskMail, usePrefs } from "../prefs";
+import { PaceCard, PaceSvg, RingBox, SessionLine, expiryLine, quotaRings, verdict, whenShort, type Points } from "./Pace";
 
 const PLAN_CLASS: Record<string, string> = {
   free: "p-free", pro: "p-pro", max: "p-max", team: "p-team", enterprise: "p-enterprise", api: "p-api",
@@ -42,7 +43,7 @@ function windowsOf(a: Account): GaugeWindow[] {
   return out;
 }
 
-function Gauge({ g: { name, w, span, local }, snapshot = false }: { g: GaugeWindow; snapshot?: boolean }) {
+function Gauge({ g: { name, w, span, local }, snapshot = false, pc = null }: { g: GaugeWindow; snapshot?: boolean; pc?: Account["pace"] }) {
   const { remain } = usePrefs();
   const pct = Math.max(0, Math.min(100, w.utilization));
   const cls = pct >= 90 ? "hot" : pct >= 70 ? "warn" : "";
@@ -59,10 +60,16 @@ function Gauge({ g: { name, w, span, local }, snapshot = false }: { g: GaugeWind
   if (elapsed !== null && elapsed > 3 && pct >= 1) {
     const p = Math.round(pct - elapsed);
     const head = p > 0 ? `配速 +${p}%` : p < 0 ? `配速 ${p}%` : "配速持平";
+    // 7 天那一条用后端按采样点算的（和账号卡、节奏图一致）
+    const by = pc?.basis === "recent" ? "按最近一天的速度" : "照这个速度";
     const tail =
-      pct > elapsed
-        ? `照这个速度约 ${dur((100 - pct) / (pct / ((span * elapsed) / 100)))}后用完`
-        : `照这个速度到重置约用到 ${Math.round((pct * 100) / elapsed)}%`;
+      pc?.state === "out" && pc.out_at !== null
+        ? `${by} ${whenShort(pc.out_at)} 左右用完`
+        : pc?.state === "ok"
+          ? `${by}到重置约还剩 ${pc.left}%`
+          : pct > elapsed
+            ? `照这个速度约 ${dur((100 - pct) / (pct / ((span * elapsed) / 100)))}后用完`
+            : `照这个速度到重置约用到 ${Math.round((pct * 100) / elapsed)}%`;
     pace = { text: `${head} · ${tail}`, fast: pct / elapsed > 1.15 };
   }
   let est = "";
@@ -177,8 +184,8 @@ export function deskAppText(a: Account, app: DesktopApp): string {
   return run ? `${ver} · ${run}` : ver;
 }
 
-/** 正在用（桌面号：开着 / 上次打开、登录问题）/ 异常 / 注意 / 快到期 */
-export function StatusChips({ a }: { a: Account }) {
+/** 正在用（桌面号：开着 / 上次打开、登录问题）/ 异常 / 注意 / 快到期（账号卡上到期写在最下面一行，inTile 时不放标签） */
+export function StatusChips({ a, inTile = false }: { a: Account; inTile?: boolean }) {
   const h = a.health;
   const due = dueInfo(a);
   const expiredIssue = h?.issues.some((i) => i.kind === "expired");
@@ -193,7 +200,7 @@ export function StatusChips({ a }: { a: Account }) {
       {login && <span className={`chip ${login[0]}`}>{login[1]}</span>}
       {h?.level === "error" && <span className="chip st-error">异常</span>}
       {h?.level === "warn" && <span className="chip st-warn">注意</span>}
-      {due && due.cls && !expiredIssue && <span className={`chip ${due.cls}`}>{due.short}</span>}
+      {!inTile && due && due.cls && !expiredIssue && <span className={`chip ${due.cls}`}>{due.short}</span>}
     </>
   );
 }
@@ -225,11 +232,27 @@ function TileMeter({ a }: { a: Account }) {
   );
 }
 
-/** 账号条里的一张卡：名称、套餐、状态、5 小时用量。点一下在下面显示详情 */
-export function AccountTile({ a, selected, onSelect }: { a: Account; selected: boolean; onSelect: (a: Account) => void }) {
+/** 账号条里的一张卡：名称、套餐、状态；当前号几个会话在跑；额度环（5 小时、7 天、用得最多的按模型周额度）各带重置时间，
+ *  7 天节奏小线，一句结论，最下面到期。点一下在下面显示详情 */
+export function AccountTile({
+  a,
+  selected,
+  onSelect,
+  points,
+  sessions,
+}: {
+  a: Account;
+  selected: boolean;
+  onSelect: (a: Account) => void;
+  points?: Points;
+  sessions?: SessionsBrief | null;
+}) {
   const { mask } = usePrefs();
   const sub = a.email && a.email !== a.label ? maskMail(a.email, mask) : KIND[a.kind];
   const cls = ["tile", selected && "sel", a.is_active && "live", a.health?.level === "error" && "bad"].filter(Boolean).join(" ");
+  const rings = quotaRings(a);
+  const v = verdict(a) || (a.kind === "claude_desktop" && rings.length ? { cls: "", text: `${desktopStale(a) ? "旧快照" : "本地额度"} · ${ago(a.usage?.fetched_at)}` } : null);
+  const ex = expiryLine(a);
   return (
     <button type="button" className={cls} aria-pressed={selected} onClick={() => onSelect(a)}>
       <span className="t-top">
@@ -238,15 +261,34 @@ export function AccountTile({ a, selected, onSelect }: { a: Account; selected: b
       </span>
       <span className="t-sub">{sub}</span>
       <span className="t-chips">
-        <StatusChips a={a} />
+        <StatusChips a={a} inTile />
       </span>
-      <TileMeter a={a} />
+      <SessionLine a={a} sessions={sessions} />
+      {rings.length ? (
+        <>
+          <span className="t-rings">
+            {rings.map((r) => (
+              <RingBox key={r.label} r={r} />
+            ))}
+          </span>
+          {a.pace && (
+            <span className="t-spark">
+              <PaceSvg a={a} points={points} />
+            </span>
+          )}
+        </>
+      ) : (
+        <TileMeter a={a} />
+      )}
+      {v && <span className={`t-verdict ${v.cls}`}>{v.text}</span>}
+      {ex && <span className={`t-exp ${ex.cls}`}>{ex.text}</span>}
     </button>
   );
 }
 
 export interface DetailProps {
   a: Account;
+  points?: Points; // 7 天额度节奏线的点
   desktopApp?: DesktopApp | null;
   busy: boolean;
   onSwitch: (a: Account) => void;
@@ -257,7 +299,7 @@ export interface DetailProps {
 }
 
 /** 选中账号的详情：问题和修复建议、额度、信息、操作 */
-export function AccountDetail({ a, desktopApp, busy, onSwitch, onOpen, onRefresh, onEdit, onRemove }: DetailProps) {
+export function AccountDetail({ a, points, desktopApp, busy, onSwitch, onOpen, onRefresh, onEdit, onRemove }: DetailProps) {
   const { mask } = usePrefs();
   const u = a.usage || {};
   const m = a.manual || {};
@@ -329,13 +371,14 @@ export function AccountDetail({ a, desktopApp, busy, onSwitch, onOpen, onRefresh
         </p>
       )}
       <div className="cards d-body">
+        {a.pace && <PaceCard a={a} points={points} />}
         <div className="ecard sub">
         <h3>
           <Ico name="gauge" />额度
         </h3>
         <div className="gauges">
           {windows.map((g) => (
-            <Gauge key={g.name} g={g} snapshot={a.kind === "claude_desktop"} />
+            <Gauge key={g.name} g={g} snapshot={a.kind === "claude_desktop"} pc={g.w === u.seven_day ? a.pace : null} />
           ))}
           {!!u.breakdown?.length && (
             <div className="g-mini g-parts" title="这个号 7 天额度花在了哪里">

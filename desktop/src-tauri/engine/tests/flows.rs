@@ -836,6 +836,15 @@ fn refresh_uses_parked_login_not_the_superseded_one() {
         .format("%Y-%m-%d")
         .to_string();
     assert_eq!(acc["usage_days"][&today][0], 12.0, "{}", acc["usage_days"]);
+    // 7 天额度节奏的采样点记在单独的 usage-samples.json，不在 accounts.json 里；面板的接口能拿到
+    let samples = cam_engine::pace::load_usage_samples(&store);
+    let pts = samples["accounts"][&b].as_array().expect("记了采样点");
+    assert_eq!(pts.len(), 1);
+    assert_eq!(pts[0][1], 12.0);
+    assert!(e.data().to_string().find("usage-samples").is_none());
+    let (code, view) = cam_engine::api::route(&store, "GET", "/api/usage-samples", &Value::Null);
+    assert_eq!(code, 200);
+    assert!(view["accounts"].is_object());
     assert_eq!(health_of(&acc).0, "ok");
     assert_eq!(incident_count(&acc), 0);
     assert_eq!(e.secret_rt(&b), "rt-B3");
@@ -3312,6 +3321,86 @@ fn local_window_usage_counts_current_windows() {
     assert!(local_window_usage(&data, &none, now).is_empty());
 }
 
+#[test]
+fn local_report_reads_sessions_and_owners() {
+    // 管理面板的本机消耗：会话按 sessionId 数，没写的按文件名；两个文件里同一条消息只算一次；按切换记录归账号。
+    // 对应 test_cam.py 的 test_local_report_reads_sessions_and_owners
+    let e = Env::new();
+    let now = chrono::Utc::now();
+    let ev = |mid: &str, minutes_ago: i64, out: i64, sess: Option<&str>| {
+        let ts = now - chrono::Duration::minutes(minutes_ago);
+        let mut v = json!({"type": "assistant", "requestId": format!("r{}", mid),
+               "timestamp": ts.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+               "message": {"id": mid, "model": "claude-opus-5-5",
+                           "usage": {"input_tokens": 1, "output_tokens": out}}});
+        if let Some(s) = sess {
+            v["sessionId"] = json!(s);
+        }
+        v.to_string() + "\n"
+    };
+    let dir = e.root.join("claude/projects/p-report");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("file-one.jsonl"),
+        ev("m1", 5, 10, Some("sess-A")) + &ev("m2", 4, 20, Some("sess-A")),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("file-two.jsonl"),
+        ev("m2", 4, 20, None) + &ev("m3", 3, 30, None),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("old.jsonl"),
+        ev("m0", 5 * 24 * 60, 7, Some("sess-0")),
+    )
+    .unwrap();
+    let store = Store::new();
+    let mut d = store.load().unwrap();
+    d["active"] = json!({"claude_code": "A"});
+    d["switch_log"] = json!([{"id": "A", "at": (now - chrono::Duration::days(3)).to_rfc3339()}]);
+    store.save(&mut d).unwrap();
+    let (code, rep) =
+        cam_engine::api::route(&store, "GET", "/api/local-usage?range=7", &Value::Null);
+    assert_eq!(code, 200, "{rep}");
+    assert_eq!(
+        (
+            rep["unit"].as_str(),
+            rep["buckets"].as_array().unwrap().len()
+        ),
+        (Some("day"), 7)
+    );
+    let t = &rep["totals"];
+    assert_eq!(
+        (
+            t["messages"].as_i64(),
+            t["output"].as_i64(),
+            t["sessions"].as_i64()
+        ),
+        (Some(4), Some(67), Some(3))
+    );
+    let accs = rep["accounts"].as_array().unwrap();
+    let by = |id: &str| accs.iter().find(|a| a["account_id"] == id).unwrap().clone();
+    assert_eq!(
+        (by("A")["output"].as_i64(), by("A")["sessions"].as_i64()),
+        (Some(60), Some(2))
+    );
+    assert_eq!(by("unattributed")["output"].as_i64(), Some(7));
+    let heat: i64 = rep["heatmap"]["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|r| r.as_array().unwrap().iter().map(|v| v.as_i64().unwrap()))
+        .sum();
+    assert_eq!(heat, 4);
+    let (_, today) =
+        cam_engine::api::route(&store, "GET", "/api/local-usage?range=today", &Value::Null);
+    assert_eq!(today["buckets"].as_array().unwrap().len(), 24);
+    let (code, _) =
+        cam_engine::api::route(&store, "GET", "/api/local-usage?range=week", &Value::Null);
+    assert_eq!(code, 400);
+}
+
 // ---------------------------------------------------------------- 文件
 
 #[cfg(unix)]
@@ -3423,16 +3512,23 @@ fn state_reports_sessions_and_whether_one_is_really_working() {
     let e = Env::new();
     let store = Store::new();
     let sessions = || public_state(&store, &e.data())["sessions"].clone();
-    assert_eq!(sessions(), json!({"count": 0, "busy": false}));
+    let none = json!({"count": 0, "busy": false, "answering": 0, "waiting": 0, "text": ""});
+    assert_eq!(sessions(), none);
     // 开着但会话记录没动过：在等你输入，不算在执行
     fake_claude(true);
-    assert_eq!(sessions(), json!({"count": 1, "busy": false}));
-    // 会话记录刚写过：在执行
+    assert_eq!(
+        sessions(),
+        json!({"count": 1, "busy": false, "answering": 0, "waiting": 0, "text": "1 个会话"})
+    );
+    // 会话记录刚写过：在执行。看不出是哪个会话（假进程没有工作目录、也没有钩子记录）：只说“正在回答”
     std::fs::write(e.root.join("claude/projects/p1/s.jsonl"), "{}\n").unwrap();
-    assert_eq!(sessions(), json!({"count": 1, "busy": true}));
+    assert_eq!(
+        sessions(),
+        json!({"count": 1, "busy": true, "answering": null, "waiting": 0, "text": "1 个会话 · 正在回答"})
+    );
     // 会话都关了：记录再新也不算
     fake_claude(false);
-    assert_eq!(sessions(), json!({"count": 0, "busy": false}));
+    assert_eq!(sessions(), none);
 }
 
 #[test]
@@ -3909,4 +4005,191 @@ fn vault_routes_encrypt_passwords_and_require_unlock_and_mail_configuration() {
     );
     assert_eq!(code, 400);
     assert!(mock().lock().unwrap().calls.is_empty());
+}
+
+#[test]
+fn sessions_page_matches_processes_and_reads_transcripts() {
+    // 会话页：进程对上会话（钩子记的 pid → 工作目录 → 那个目录里最新的记录），读出状态、模型、几轮、上下文；组成只给还在跑的
+    // 会话；/api/state 里数几个在回答、几个等你确认；消息内容不出现在返回里。对应 test_cam.py 的 test_sessions_view
+    let e = Env::new();
+    let now = chrono::Utc::now().timestamp() as f64;
+    let proj_a = e.root.join("work/alpha");
+    let proj_b = e.root.join("work/beta");
+    std::fs::create_dir_all(&proj_a).unwrap();
+    std::fs::create_dir_all(&proj_b).unwrap();
+    let (a, b) = (
+        proj_a.to_string_lossy().into_owned(),
+        proj_b.to_string_lossy().into_owned(),
+    );
+    let transcript = |cwd: &str, sid: &str, model: &str, cr: u64, prompts: usize, age: u64| {
+        let dir = e
+            .root
+            .join("claude/projects")
+            .join(cam_engine::sessions::project_dir_name(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut text = String::new();
+        for i in 0..prompts {
+            text += &(json!({"type": "user", "message": {"role": "user", "content": format!("SECRET-PROMPT-{i}")},
+                             "cwd": cwd, "timestamp": "2026-11-18T01:00:00Z"})
+            .to_string()
+                + "\n");
+            text += &(json!({"type": "assistant", "message": {"role": "assistant", "model": model,
+                "usage": {"input_tokens": 5, "cache_read_input_tokens": cr, "cache_creation_input_tokens": 100, "output_tokens": 50},
+                "content": [{"type": "text", "text": "SECRET-REPLY"}]}})
+            .to_string()
+                + "\n");
+        }
+        let p = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&p, text).unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        p
+    };
+    let ta = transcript(&a, "sess-a", "claude-opus-5-5", 300_000, 3, 400);
+    transcript(&a, "sess-a2", "claude-sonnet-5-5", 150_000, 1, 5);
+    transcript(&b, "old-b", "claude-opus-5-5", 1000, 1, 9000);
+    transcript(&b, "sess-b", "claude-haiku-4-5", 170_000, 2, 600);
+    fake_sessions(&format!("201:3600::{a},202:7200::{b},203:60:own_token:{a}"));
+    let cam = e.root.join("cam");
+    std::fs::create_dir_all(&cam).unwrap();
+    std::fs::write(
+        cam.join("session-state.json"),
+        json!({"sessions": {
+            "sess-a": {"state": "busy", "last_ts": now - 30.0, "pids": [9999, 201], "cwd": a, "transcript": ta.to_string_lossy()},
+            "sess-a2": {"state": "busy", "last_ts": now - 20.0, "pids": [9998], "cwd": a, "transcript": ""},
+            "gone": {"state": "busy", "last_ts": now - 10.0, "pids": [12345], "cwd": "/elsewhere", "transcript": ""}}})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        cam.join("attention.json"),
+        json!({"sessions": {"sess-a2": {"since_ts": now - 3.0, "since": "x", "transcript": "", "tool": "Bash"}}}).to_string(),
+    )
+    .unwrap();
+    let store = Store::new();
+    let mut d = store.load().unwrap();
+    d["accounts"] = json!([{"id": "a1", "kind": "claude_code", "label": "个人号"}, {"id": "b1", "kind": "claude_code", "label": "工作号"}]);
+    d["active"] = json!({"claude_code": "a1"});
+    d["switch_log"] = json!([{"at": ago(10000), "id": "b1"}, {"at": ago(5000), "id": "a1"}]);
+    store.save(&mut d).unwrap();
+    let (code, view) = route(&store, "GET", "/api/sessions", &Value::Null);
+    assert_eq!(code, 200, "{view}");
+    assert_eq!(
+        (
+            view["known"].as_bool(),
+            view["count"].as_u64(),
+            view["answering"].as_u64(),
+            view["waiting"].as_u64()
+        ),
+        (Some(true), Some(3), Some(1), Some(1))
+    );
+    let rows = view["sessions"].as_array().unwrap();
+    let pids: Vec<u64> = rows.iter().map(|r| r["pid"].as_u64().unwrap()).collect();
+    assert_eq!(pids, vec![203, 201, 202]); // 等你确认的在前，然后在回答的，然后空闲的
+    let by = |pid: u64| rows.iter().find(|r| r["pid"] == pid).unwrap().clone();
+    let (ra, rb, rc) = (by(201), by(202), by(203));
+    assert_eq!(
+        (
+            &ra["id"],
+            &ra["matched"],
+            &ra["state"],
+            &ra["project"],
+            &ra["turns"],
+            &ra["model"]
+        ),
+        (
+            &json!("sess-a"),
+            &json!("hook"),
+            &json!("busy"),
+            &json!("alpha"),
+            &json!(3),
+            &json!("claude-opus-5-5")
+        )
+    );
+    assert_eq!(
+        (&ra["account_id"], &ra["account"]),
+        (&json!("a1"), &json!("个人号"))
+    );
+    assert_eq!(
+        (
+            &ra["context_used"],
+            &ra["context_window"],
+            &ra["window_exact"],
+            &ra["health"]
+        ),
+        (
+            &json!(300_155),
+            &json!(1_000_000),
+            &json!(true),
+            &json!("ok")
+        )
+    );
+    assert_eq!(ra["cache_hit"].as_f64(), Some(0.9997));
+    assert_eq!(
+        (
+            &rc["id"],
+            &rc["matched"],
+            &rc["state"],
+            &rc["account_id"],
+            &rc["login"]
+        ),
+        (
+            &json!("sess-a2"),
+            &json!("cwd"),
+            &json!("waiting"),
+            &Value::Null,
+            &json!("own_token")
+        )
+    );
+    assert_eq!(
+        (
+            &rb["id"],
+            &rb["matched"],
+            &rb["state"],
+            &rb["account_id"],
+            &rb["health"]
+        ),
+        (
+            &json!("sess-b"),
+            &json!("newest"),
+            &json!("idle"),
+            &json!("b1"),
+            &json!("high")
+        )
+    );
+    assert!(!view.to_string().contains("SECRET"));
+    let (code, det) = route(&store, "GET", "/api/sessions/sess-a", &Value::Null);
+    assert_eq!(code, 200, "{det}");
+    let comp = &det["composition"];
+    assert_eq!(
+        (&comp["total"], &comp["window"]),
+        (&json!(300_155), &json!(1_000_000))
+    );
+    let sum: u64 = comp["categories"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|v| v.as_u64().unwrap())
+        .sum();
+    assert_eq!(sum, 300_155);
+    assert!(!det.to_string().contains("SECRET"));
+    assert_eq!(
+        route(&store, "GET", "/api/sessions/gone", &Value::Null).0,
+        400
+    );
+    let st = public_state(&store, &store.load().unwrap());
+    assert_eq!(
+        st["sessions"],
+        json!({"count": 3, "busy": true, "answering": 1, "waiting": 1, "text": "3 个会话 · 1 个在回答 · 1 个等你确认"})
+    );
+    fake_sessions("unknown");
+    assert_eq!(
+        route(&store, "GET", "/api/sessions", &Value::Null).1["known"],
+        json!(false)
+    );
 }

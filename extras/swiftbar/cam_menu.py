@@ -44,31 +44,44 @@ REFRESH_MIN = float(os.environ.get("CAM_MENU_REFRESH_MIN", "10"))
 HOTKEY = os.environ.get("CAM_MENU_HOTKEY", "CTRL+OPTION+CMD")
 # 点菜单栏图标弹出的卡片小面板（SwiftBar 的 webview，页面是 cam serve 的 /mini）；CAM_MENU_MINI=0 关掉，只用系统菜单
 MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
-MINI_WIDTH = 340
-# 量出来的高度：一个账号（红绿灯 + 当前号卡片 + 两个按钮 + 页脚）、“其它账号”标题、其它 Claude Code 号每行两张方形小卡（含间距；
-# 卡里是 5 小时、7 天两根条和重置时间）、桌面号每行一张药丸卡（含间距）；到上限后整页上下滑
-MINI_BASE, MINI_SEC, MINI_CARD, MINI_ROW, MINI_MAX = 428, 24, 158, 66, 780  # Mac 上苹方字体比这边量的高一截，基数多留 34、方卡多留 9；上限放得下四张方卡
-MINI_DESK = -18  # 大卡是桌面号时：没有本机消耗那三格，多一个“打开”按钮，净矮了这么多
+MINI_WIDTH = 380
+# 量出来的高度（Linux 上 Noto 字体量的，Mac 上苹方高一截，各项都多留了一点）：
+# 基数是红绿灯 + 底下三个圆按钮 + 页脚；下面是“额度 / 用量”两个页签的那一条。
+# “额度”页：账号卡一行两张（Claude Code 的号和桌面版的号，含间距；卡里是名字、几个额度环和它们的重置时间、7 天节奏小线、一句结论、到期）；
+# 两个号以上时上面有一块汇总（含一行提醒）；有 Claude Code 号时当前号的卡多一行“几个会话在跑”。
+# “用量”页：时间范围、四格数字、按小时 / 按天的柱子，下面每个 Claude Code 号一行（最多算四行）。
+# 弹窗点开后高度就定了，换页签时变不了：按两页里高的那页算，矮的那页按钮和页脚贴底，中间空着。到上限后整页上下滑
+MINI_BASE, MINI_TABS, MINI_SUM, MINI_ROW, MINI_SESS, MINI_MAX = 195, 44, 112, 209, 18, 860  # 上限放得下四个号
+MINI_USAGE, MINI_UROW = 380, 50
+MINI_SESSIONS = 370  # “会话”页签：汇总一行 + 五个会话左右（每个两行，五十多像素），比“用量”页签最矮的时候还矮一点
+
+
+def mini_quota_height(accs):
+    """“额度”页签里账号卡和汇总的高度（不含红绿灯、页签、按钮和页脚）。和 mini.html 一个规则：账号卡一行两张，当前的 Claude Code 号排第一；
+    两个号以上时上面有汇总；有 Claude Code 号时当前号的卡多一行会话。"""
+    n = sum(1 for a in accs if a.get("kind") in ("claude_code", "claude_desktop"))
+    code = any(a.get("kind") == "claude_code" for a in accs)
+    return max(1, (n + 1) // 2) * MINI_ROW + (MINI_SESS if code else 0) + (MINI_SUM if n >= 2 else 0)
+
+
+def mini_usage_height(accs):
+    """“用量”页签的高度：固定的一截，加每个 Claude Code 号一行（本机记录只有 Claude Code 的，最少一行、最多算四行）。"""
+    n = sum(1 for a in accs if a.get("kind") == "claude_code")
+    return MINI_USAGE + MINI_UROW * max(1, min(4, n))
+
+
+def mini_sessions_height():
+    """“会话”页签的高度：一行汇总加五个会话左右；会话再多时这一页自己上下滑，不为它把弹窗撑高。"""
+    return MINI_SESSIONS
 
 
 def mini_size(accs):
-    """弹窗的宽、高：按卡片里要放的账号算（只放 Claude Code 的号和桌面版的号，网页号、API 号不在卡片里），账号多了到上限后整页上下滑。
+    """弹窗的宽、高：卡片里只放 Claude Code 的号和桌面版的号（网页号、API 号不在卡片里）。
+    高度按“额度”“用量”“会话”三个页签里最高的那个算（点开后换页签时弹窗变不了大小），到上限后整页上下滑。"""
+    return MINI_WIDTH, min(MINI_MAX, MINI_BASE + MINI_TABS + max(mini_quota_height(accs), mini_usage_height(accs),
+                                                                  mini_sessions_height()))
 
-    和 mini.html 一个规则：大卡是当前的 Claude Code 号（一个都没有时是第一个桌面号，多一个“打开”按钮）；
-    其余的 Claude Code 号一组（方形小卡，两张一行），桌面版一组（药丸卡一行一个，名字、额度和箭头才放得下）。
-    """
-    code = [a for a in accs if a.get("kind") == "claude_code"]
-    opens = [a for a in accs if a.get("kind") == "claude_desktop"]
-    h = MINI_BASE
-    if code:
-        code = code[1:]
-    elif opens:
-        opens, h = opens[1:], h + MINI_DESK
-    if code:
-        h += MINI_SEC + (len(code) + 1) // 2 * MINI_CARD
-    if opens:
-        h += MINI_SEC + len(opens) * MINI_ROW
-    return MINI_WIDTH, min(MINI_MAX, h)
+
 LINE = 40  # 提醒、建议这类长句最多显示多少个字（SwiftBar 的 length 参数：截短，完整内容放鼠标悬停提示），免得把菜单撑得很宽
 PLAN = {"pro": "Pro", "max": "Max", "team": "Team", "enterprise": "Enterprise", "free": "Free", "api": "API"}
 
@@ -309,6 +322,41 @@ def image_param(draw, p, w, h):
     """SwiftBar 的 image 参数：浅色、深色两张图，以及显示成多少点。"""
     pics = ",".join(base64.b64encode(draw(p, dark)).decode() for dark in (0, 1))
     return f"image={pics} width={w} height={h}"
+
+
+WEEKDAYS = "一二三四五六日"
+
+
+def when_short(t):
+    """今天“19:00”，明天“明天 09:00”，一周内“周日 14:00”，再远“11-28 09:00”（和面板一样）。t 是 Unix 秒。"""
+    d = dt.datetime.fromtimestamp(t).astimezone()
+    days = (d.date() - dt.date.today()).days
+    hm = d.strftime("%H:%M")
+    if days == 0:
+        return hm
+    if days == 1:
+        return f"明天 {hm}"
+    if 1 < days < 7:
+        return f"周{WEEKDAYS[d.weekday()]} {hm}"
+    return d.strftime("%m-%d ") + hm
+
+
+def pace_text(samples, a, now=None):
+    """7 天额度按采样点推算的结论（cam.usage_pace）：(一句话, 颜色)。还推算不出来时 None。只是提醒，不切号。"""
+    try:
+        p = cam.usage_pace(samples.get(a["id"]), cam._shown_usage(a), time.time() if now is None else now)
+    except Exception:  # noqa: BLE001  只是显示用
+        return None
+    if not p or not p.get("state"):
+        return None
+    by = "最近一天" if p["basis"] == "recent" else "这周平均"
+    if p["state"] == "full":
+        return f"7 天额度用满了，{when_short(p['resets_at'])} 恢复", RED
+    if p["state"] == "out":
+        h = max(1, round(p["early_secs"] / 3600))
+        early = f"{h // 24} 天 {h % 24} 小时" if h >= 24 else f"{h} 小时"
+        return f"按{by}的速度，7 天额度 {when_short(p['out_at'])} 左右用完（比重置早 {early}）", YELLOW
+    return f"按{by}的速度，7 天额度用不完，重置时大约还剩 {p['left']}%", None
 
 
 def detail_line(a):
@@ -591,7 +639,8 @@ def status_light(store, data, accs, active, st):
     if pend:
         items.append(("busy", pend["message"], "blink"))
     if n and cam.session_busy():  # 开着但在等你输入的不算工作中
-        items.append(("busy", f"工作中 · {n} 个 claude 会话在跑", "pulse"))
+        c = cam.session_counts()  # 几个在回答、几个在等你确认（看不出是哪个在回答时只写“正在回答”）
+        items.append(("busy", cam.session_phrase(n, True, c["answering"], c["waiting"]), "pulse"))
     if p5 is not None and p5 >= 90:
         items.append(("busy", f"5 小时额度 {p5:.0f}%，快满了", False))
     elif p7 is not None and p7 >= 90:
@@ -615,6 +664,7 @@ def render(store, st, out=print, rich=None, phase=None):
     rich = cam.IS_MAC if rich is None else rich
     data = store.load()
     accs = data["accounts"]
+    samples = cam.load_usage_samples(store)["accounts"]  # 7 天额度的节奏（只读，没有这个文件时是空的）
     pos = {a["id"]: n for n, a in enumerate(accs, 1)}  # 和 cam 列表里的序号一致；菜单栏的“1号”、快捷键的数字都用它
     act_id = data["active"].get("claude_code")
     active = next((a for a in accs if a["id"] == act_id), None)
@@ -721,6 +771,9 @@ def render(store, st, out=print, rich=None, phase=None):
                 est = cam.window_estimate(w, local)
                 if est:
                     out(f"--   {esc(est)} | size=11 color=gray")
+            pt = pace_text(samples, a)
+            if pt:
+                out(f"--{esc(pt[0])}" + (f" | color={pt[1]}" if pt[1] else ""))
             dl = cam.days_left(a)
             if dl is not None and dl >= 0:
                 exp = (a.get("manual") or {}).get("expires_at")
@@ -759,6 +812,9 @@ def render(store, st, out=print, rich=None, phase=None):
                 w = u.get(k)
                 if w:
                     out(f"--{nm}：已用 {w['utilization']:.0f}%，{cam.fmt_reset(w.get('resets_at'))}")
+            pt = pace_text(samples, a)
+            if pt:
+                out(f"--{esc(pt[0])}" + (f" | color={pt[1]}" if pt[1] else ""))
             dl = cam.days_left(a)
             if dl is not None:
                 exp = (a.get("manual") or {}).get("expires_at")
@@ -802,6 +858,9 @@ def render(store, st, out=print, rich=None, phase=None):
                     if value is not None:
                         reset = cam.fmt_reset((usage.get(key) or {}).get("resets_at"))
                         out(f"--{label}：已用 {value:.0f}%，{reset or '未提供重置时间'}")
+                pt = pace_text(samples, a)
+                if pt:
+                    out(f"--{esc(pt[0])}" + (f" | color={pt[1]}" if pt[1] else ""))
                 sampled = cam.parse_iso(usage.get("fetched_at"))
                 if sampled:
                     stale = (dt.datetime.now(dt.timezone.utc) - sampled).total_seconds() > 1800
