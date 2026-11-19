@@ -102,8 +102,10 @@ React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同�
   { "id": "r2", "type": "dir",  "path": "~/work", "account": "a1b2c3" }
 ],
 "rule_state": { "time_rule": "r1" },   // 上一次检查时命中的时间规则
-"prefs": { "alert_threshold": 90, "risk_prompt": true, "risk_confirm_below": 60, "risk_strong_below": 30, "menu_icon": "bars", "confirm_switch": false }
+"prefs": { "alert_threshold": 90, "risk_prompt": true, "risk_confirm_below": 60, "risk_strong_below": 30, "menu_icon": "bars", "menu_text": ["name", "five"], "confirm_switch": false }
 ```
+
+- 菜单栏样式：`menu_icon` 是 bars（信号格）、lamp（红绿灯）、ring（圆环：5 小时）、rings（双环：外圈 5 小时、内圈 7 天）、twobar（两根小条：上 5 小时、下 7 天），别的值当 bars。`menu_text` 是图标旁边写什么，从 `cam.MENU_TEXT` = name（名字）、five（5 小时 %）、seven（7 天 %）、sessions（在回答的会话数）里选，按这个顺序存，空列表是只要图标；没有这一项时是默认的 `["name", "five"]`（`menu_text_items`）。菜单栏插件的 `title_text` 按它拼标题（两个百分比都要时“17% · 34%”，会话数“● 2”，只读 `session_count` 刚数过的 `session_counts`，不另查进程），`status_icon(dark, level, kind, phase, style, p5, p7)` 画图：颜色是状态，后三种的长短是额度（取整，按参数缓存），动画和红绿灯同一个节奏（工作中彩色那段每秒一亮一暗，等你确认整个图标快一倍地闪；经典模式的两帧 phase 0 / 0.375 一亮一暗）。
 
 - 时间规则：星期 1 = 周一；`end` 早于 `start` 表示跨午夜，星期按开始那天算。多条重叠时取第一条。只在命中的规则发生变化（进入或离开时间段）时切换，所以时间段内手动换号不会被改回。进入时有 `claude` 会话在跑就登记成 `pending_switch`（见“切换流程”），会话退出后再切；时间段过了还没切成就作废。
 - 目录规则：`cam claude` 启动时按当前目录做最长前缀匹配，切换后再执行 `claude`。
@@ -118,7 +120,7 @@ React 通过独立的“账号资料与邮箱”页进入；Web 面板通过同�
   - `range`：`today` 今天按小时 24 根；`7` / `30` 往前 7 / 30 个日历天（含今天）按天；`all` 从最早一条记录那天起按天，超过 60 根（`LOCAL_MAX_BARS`）按周（周一起），还超过按月。没有记录的柱子也在 `buckets` 里。
   - 返回 `range`、`unit`（hour / day / week / month）、`start`、`buckets`（按顺序的柱子键：`2026-11-18T09` / `2026-11-18` / 那周周一 / `2026-11`）、`series`（每根柱子里每个号的 `input`、`output`、`cache_write`、`cache_read`、`messages`、`cost_usd`）、`model_series`（同样按模型）、`totals`（再加 `sessions` 会话数、`cache_hit` = 缓存读取 ÷（输入 + 缓存写入 + 缓存读取），四位小数，没记录是 null）、`accounts` / `model_totals`（明细，加 `sessions` 和 `top_model` / `top_account`：消息最多的那个，一样多取名字排前的）、`heatmap`（最近 28 天 `LOCAL_HEAT_DAYS`，`cells[星期几，周一 = 0][钟点]` 的消息条数，和 `range` 无关）。
   - 界面：四格汇总（Token、消息、折算金额、缓存命中率）、叠起来的柱子（Token / 金额 / 消息，按账号 / 按模型，悬停或点一下看明细）、明细（账号 / 模型）、热力图。颜色跟着账号走（账号列表的顺序，`--c1`…`--c6`），模型第一次出现时领一个空着的颜色记在浏览器里；第 7 个起是灰色的“其他”。时间范围、看什么、怎么分记在浏览器里。
-  - 卡片小面板的“用量”页签用 `?range=`（今天 / 7 天 / 30 天），和管理面板同一份；`cam local` 还用按天的 `local_usage(data, days)`（`/api/local-usage?days=N`：`rows` 按 (日期, 账号)、`models` 按 (日期, 模型)）。
+  - 卡片小面板的“用量”页签用 `?range=`（今天 / 7 天 / 30 天），和管理面板同一份；“额度”页签的大卡（当前的 Claude Code 号）用 `?range=today` 的 `accounts` 写今天本机用了多少，只在这个页签开着时取，两分钟一次；`cam local` 还用按天的 `local_usage(data, days)`（`/api/local-usage?days=N`：`rows` 按 (日期, 账号)、`models` 按 (日期, 模型)）。
 - 会话页（管理面板、桌面版的“会话”，卡片小面板的“会话”页签）：这台电脑上正在跑的 Claude Code。规则两边按 `tests/shared/sessions.json` 跑（Python 在 cam.py 的“会话页”一节，Rust 在 `sessions.rs`）。只读本机文件；只看用量、元数据、工具名和文件路径，消息内容不读出来、不返回、不记日志。
   - 钩子记的状态 `session-state.json`：`{"sessions": {"<session_id>": {"state": busy|idle|waiting, "since_ts", "last_ts", "first_ts", "pids", "cwd", "transcript"}}}`，时间是 Unix 秒。和 `attention.json` 同一批钩子（不多装事件）、同一把锁，只在状态变的时候写：`UserPromptSubmit` → busy、`Stop` → idle、`PermissionRequest` → waiting、这个会话正在 waiting 时 `PostToolUse` / `PostToolUseFailure` / `PermissionDenied` → busy、`SessionEnd` → 删掉。工具事件在会话不是 waiting 时只读一下就走，没有这个文件时连读都不读。`pids` 是钩子进程的父进程和祖父进程（Linux 读 `/proc` 拿祖父进程；别的系统只有父进程），会话页拿它对上正在跑的 claude。3 天（`SESSION_STATE_KEEP`）没事件的记录写的时候顺手删掉；最后一个会话删掉后文件也删掉。
   - 进程 → 会话（`match_sessions`）：先按钩子记的 pid；再按工作目录对钩子记录；剩下的用 `CLAUDE_CONFIG_DIR/projects/<工作目录里不是字母数字的字符换成 -（project_dir_name）>/` 这一层里最新、还没被占走的 `.jsonl`（子目录里是子 agent 的，不看）。工作目录：Linux 读 `/proc/<pid>/cwd`，macOS 用 `lsof -a -d cwd -p … -Fn`（按 (pid, 命令行) 记着，进程退出就扔），Windows 看不出来，剩下的钩子记录按最近有动静的先后分给没对上的进程（`guess`）。每行带 `matched`：hook / cwd / newest / guess。
@@ -257,7 +259,7 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` | Web 面板。页签记在地址 `#` 后面：`#accounts`、`#usage`、`#sessions`、`#env`、`#settings`，旧的区块锚点（`#env`、`#local-block`、`#rules-block`、`#privacy-block`、`#update-block`、`#help-block`）对到所在的页签 |
+| GET | `/` | Web 面板。页签记在地址 `#` 后面：`#accounts`、`#usage`、`#sessions`、`#env`、`#settings`，旧的区块锚点（`#env`、`#local-block`、`#rules-block`、`#privacy-block`、`#update-block`、`#menubar-block`、`#help-block`）对到所在的页签 |
 | GET | `/mini` | 卡片小面板（菜单栏 / 托盘点开的那个），“额度 / 用量 / 会话”三个页签 |
 | POST | `/api/open-panel` | 在这台电脑的浏览器里打开管理面板，返回 `{"ok", "url"}`；body `{"tab": "usage"}` 打开到那一页（只认 `PANEL_TABS` 里的），别的值不带。只有脚本版有 |
 | GET | `/api/state` | 账号列表（不含密钥）、当前账号、服务器信息；每个账号带 `health`（`level`: ok / info / warn / error，`label`: 正常 / 注意 / 异常，`issues`: [{`kind`, `level`, `text`, `advice`, `detail`}]，由 `account_health` 根据有没有保存凭据、用量报错和到期日算出，两边规则见 `tests/shared/health.json`）；`warning` 是 `live_mismatch` / `live_unverified` 的说明，`pending_switch` 是登记中的等待切换（含 `message`），没有时为 `null`；`region` 是后台上次检测的出口地区（`loc`、`status`: supported / unsupported / unknown / null、`message`、`advice`、`warp`、`prev_loc`、`changed_at`、`org`、`city`；`failed_at`、`fail_count`：最近一次检测没连上的时间和连续次数，这时其它字段是上一次查到的），`risks` 是据缓存算出的风险提示列表（同 `/api/service-check` 的条目格式，含 `kind`），`risk_score` 是据它算的评分（`score`、`grade`: low / medium / high、`label`、`advice`），前端把 warn / bad 的常显在顶部、顶栏显示分数；都只用于提示 |
@@ -268,6 +270,8 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 | GET | `/api/privacy` | 外部 IP 查询设置：`ip_lookup`（auto / ip-api / off）、`modes`、`env_override`、`has_ipapi_key`、`has_ipinfo_token`（不返回 key 本身）、`meta_ttl_hours`、`sources`（当前设置下会访问的服务和各发了什么）、`history` |
 | PUT | `/api/privacy` | body 可带 `ip_lookup`、`ipapi_key`、`ipinfo_token`（空字符串删除），返回同 GET |
 | DELETE | `/api/privacy/history` | 清除缓存的出口信息和各账号的使用地区记录，返回同 GET |
+| GET | `/api/menubar` | 菜单栏小工具的设置（卡片小面板和管理面板的“设置”用；只有 Python 版有，桌面版没有菜单栏小工具）：`available`（macOS 或设了 `CAM_SWIFTBAR_DIR`）、`installed`、`mode`（classic / stream）、`icon`、`text`、`confirm_switch`、`hooks`、`plugin` |
+| PUT | `/api/menubar` | body 可带 `icon`、`text`（列表，只能是 name / five / seven / sessions，按 `MENU_TEXT` 的顺序存，可以是空列表）、`confirm_switch`、`hooks`、`mode`（重跑 `extras/swiftbar/install.sh` 并重开 SwiftBar），返回同 GET 加 `ok`、`restarting` |
 | GET | `/api/checkup` | 全面体检，同 `cam doctor --json`（格式见“全面体检”），要十几秒；`?offline=1` 不联网；`?probe=1` 只回 `{"ok": true}`，面板据此显示按钮。只有脚本版有，桌面版返回 404 |
 | GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`，带 `score`、`grade`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`（429 / 529 单独说是官方限流 / 过载）、`auth`（续登录的地址 `TOKEN_URLS` 各 GET 一次，`auth_item` 汇总：都连得上 ok，有的连不上 warn，都连不上 bad）、`tls_chain` / `tls_intercept`（`peer_issuer` 只握手看 api.anthropic.com 的证书颁发者，有 http 代理时用 CONNECT 打通道，`der_issuer` 从 DER 里读组织名和通用名，`tls_issuer_item` 对照 `PUBLIC_CA_WORDS`；不是公共证书机构就是网络里有设备在解密 HTTPS，不扣分）、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道）、`proxy_down` / `proxy_up`（`proxy_endpoints` 从代理设置里取主机和端口，最多 4 个，`port_open` 各连一下；连不上的记下 `host`、`port`，后台 `check_region` 的 `proxies_back` 再连上了就把它从 `service_status` 清掉），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。解析域名、出口地区、api.anthropic.com、claude.ai、续登录的地址、证书、代理端口同时做，各有时限（解析 `SERVICE_DNS_SECS` = 5 秒，连接 `SERVICE_PROBE_SECS` = 10 秒，证书每次连接 `TLS_PROBE_SECS` = 6 秒，代理端口 `PROXY_PROBE_SECS` = 3 秒），`proxy_endpoints`、`auth_item`、`der_issuer`、`tls_issuer_item` 和新条目的扣分两边按 `tests/shared/service.json` 跑；`api`、`web`、`dns`、`tls`、`auth`、`proxy_down`、`tls_intercept` 有问题的记进 `service_status`（`SERVICE_STATUS_KINDS`），顶部环境卡一起列；哪件卡住了都不拖着别的，到点没答的写“超过 N 秒没有回应”；出口这次没连上而以前查到过时，`region` 那行照旧给上一次的并注明“这次没连上，这是…查到的”，后面跟一条 `env_failed` 或 `region_unknown`（和 `/api/state` 的 `risks` 同一条，两边分数一致）。只检测和提示，不干预任何操作 |
 | POST | `/api/accounts/{id}/open` | 打开该网页账号的独立浏览器，或退出并重新打开目标 Claude Desktop 配置 |

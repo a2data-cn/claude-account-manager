@@ -25,6 +25,9 @@
   --violet-soft: #EAE4F6;
   --focus: #C6613F;
   --c1: #B5532F; --c2: #3E6EA8; --c3: #2F8F4E; --c4: #7656B4; --c5: #C07A12; --c6: #1A8FB0;  /* 图表的六个分类色，经色觉校验 */
+  /* 设置页的菜单栏预览：照 macOS 菜单栏和插件画图标用的系统色（extras/swiftbar/cam_menu.py 的 FILL / TRACK / GLYPH） */
+  --mb-bg: rgba(236, 236, 236, .96); --mb-fg: #1D1D1F; --mb-chip: rgba(0, 0, 0, .07); --mb-ok: rgb(52, 199, 89); --mb-warn: rgb(255, 159, 10);
+  --mb-bad: rgb(255, 59, 48); --mb-track: rgba(0, 0, 0, .13); --mb-dim: rgba(0, 0, 0, .25); --mb-glyph: rgba(0, 0, 0, .85);
   --radius-lg: 10px;
   --radius-sm: 7px;
   --control-h: 30px;
@@ -39,6 +42,8 @@
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
     --warn-soft: #3E3421; --ok-soft: #27334A; --violet-soft: #362D4B;
     --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
+    --mb-bg: #2C2C2E; --mb-fg: #F2F2F2; --mb-chip: rgba(255, 255, 255, .14); --mb-ok: rgb(48, 209, 88); --mb-warn: rgb(255, 179, 64);
+    --mb-bad: rgb(255, 105, 97); --mb-track: rgba(255, 255, 255, .24); --mb-dim: rgba(255, 255, 255, .27); --mb-glyph: rgba(255, 255, 255, .9);
     color-scheme: dark;
   }
 }
@@ -48,6 +53,8 @@
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
     --warn-soft: #3E3421; --ok-soft: #27334A; --violet-soft: #362D4B;
     --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
+    --mb-bg: #2C2C2E; --mb-fg: #F2F2F2; --mb-chip: rgba(255, 255, 255, .14); --mb-ok: rgb(48, 209, 88); --mb-warn: rgb(255, 179, 64);
+    --mb-bad: rgb(255, 105, 97); --mb-track: rgba(255, 255, 255, .24); --mb-dim: rgba(255, 255, 255, .27); --mb-glyph: rgba(255, 255, 255, .9);
     color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -257,6 +264,29 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .subnav a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
 .subnav a:hover { color: var(--ink); border-color: var(--muted); }
 .subnav + .block { margin-top: 16px; }
+/* 设置页“菜单栏”：预览一条（像 macOS 菜单栏右边那几个图标），下面选图标、选旁边写什么。卡片小面板的设置页是同一套 */
+.mbp { display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 30px; padding: 0 12px; border-radius: 8px;
+  background: var(--mb-bg); color: var(--mb-fg); font-family: var(--sans); font-size: 13px; line-height: 1; overflow: hidden; }
+.mbp-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 3px 7px; border-radius: 5px; background: var(--mb-chip); white-space: nowrap; }
+.mbp-item span { overflow: hidden; text-overflow: ellipsis; }
+.mbp-item svg, .mbp-sys svg { display: block; flex: none; }
+.mbp-sys { display: inline-flex; align-items: center; gap: 10px; flex: none; opacity: .85; }
+.mb-pulse .mb-lit { animation: mbPulse 1s step-end infinite; }  /* 在回答：彩色那段每秒闪一次（和插件一个节奏） */
+.mb-blink svg { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪 */
+@keyframes mbPulse { 50% { opacity: .35; } }
+@keyframes mbBlink { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg { animation: none; } }
+.mb-opts { display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; align-items: center; margin-top: 14px; }
+.mb-opts .k { font-size: 12px; color: var(--muted); }
+.mb-opts .seg-mini { justify-self: start; }
+.mbchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mbchips button { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
+.mbchips button:hover { border-color: var(--muted); color: var(--ink); }
+.mbchips button[aria-pressed="true"] { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }
+.mbchips button[aria-pressed="true"]::before { content: "✓ "; }
+.mbchips button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.mbchips button:disabled { cursor: progress; opacity: .7; }
+@media (max-width: 560px) { .mb-opts { grid-template-columns: 1fr; gap: 6px; } }
 .g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
 .g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
 .g-mini b { color: var(--ink); font-weight: 600; }

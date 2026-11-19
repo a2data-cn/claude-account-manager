@@ -15,6 +15,9 @@
   --warn: #96600F; --hot: #B5432E; --live: #3B7A52; --violet: #7656B4; --ok: #3E6EA8;
   --live-soft: #E2EDDF; --warn-soft: #F5E8CF; --hot-soft: #F6E3DD; --ok-soft: #E0EAF6; --violet-soft: #EAE4F6;
   --c1: #B5532F; --c2: #3E6EA8; --c3: #2F8F4E; --c4: #7656B4; --c5: #C07A12; --c6: #1A8FB0;  /* 图表的分类色，和管理面板一样 */
+  /* 设置页的菜单栏预览：照 macOS 菜单栏和插件画图标用的系统色（cam_menu.py 的 FILL / TRACK / GLYPH） */
+  --mb-bg: rgba(236, 236, 236, .96); --mb-fg: #1D1D1F; --mb-chip: rgba(0, 0, 0, .07); --mb-ok: rgb(52, 199, 89); --mb-warn: rgb(255, 159, 10);
+  --mb-bad: rgb(255, 59, 48); --mb-track: rgba(0, 0, 0, .13); --mb-dim: rgba(0, 0, 0, .25); --mb-glyph: rgba(0, 0, 0, .85);
   --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   color-scheme: light;
 }
@@ -24,7 +27,9 @@
     --accent: #D97757; --accent-ink: #1F1E1D; --on-hot: #1F1E1D; --accent-soft: #4A3328;
     --warn: #E0A548; --hot: #E8826F; --live: #6FBF8A; --violet: #B49AEF; --ok: #7FA6E0;
     --live-soft: #2C3B30; --warn-soft: #3E3421; --hot-soft: #42302A; --ok-soft: #27334A; --violet-soft: #362D4B;
-    --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8; color-scheme: dark; }
+    --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8; color-scheme: dark;
+    --mb-bg: #2C2C2E; --mb-fg: #F2F2F2; --mb-chip: rgba(255, 255, 255, .14); --mb-ok: rgb(48, 209, 88); --mb-warn: rgb(255, 179, 64);
+    --mb-bad: rgb(255, 105, 97); --mb-track: rgba(255, 255, 255, .24); --mb-dim: rgba(255, 255, 255, .27); --mb-glyph: rgba(255, 255, 255, .9); }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--paper); color: var(--ink); }
@@ -136,6 +141,26 @@ button { font: inherit; color: inherit; }
 .mc .ex { margin-top: auto; padding-top: 5px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mc .none { font-size: 11px; color: var(--muted); line-height: 1.4; padding: 6px 0; }
 .mc .none svg { display: block; width: 22px; height: 22px; margin-bottom: 4px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 当前的 Claude Code 号：占一整行的大卡，放明细（和旧版一样）：每个额度一根条带重置倒计时、节奏小线和结论、今天本机用了多少、到期 */
+.mc.big { grid-column: 1 / -1; gap: 5px; padding: 11px 14px 10px; }
+.mc.big.sel { cursor: default; }
+.mc.big .nm { gap: 6px; }
+.mc.big .nm b { font-size: 15px; }
+.mc.big .nm .chip { font-size: 10px; padding: 0 6px; }
+.mc.big .nm .chip + .chip { margin-left: 0; }
+.chip.live { background: var(--live-soft); color: var(--live); border-color: transparent; }
+.mc.big .em { margin-top: -4px; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc.big .ss { font-size: 11.5px; }
+.mc.big .meter .lab { gap: 8px; }
+.mc.big .meter .lab span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc.big .meter .bar { margin-top: 4px; }
+.mc.big .pv { display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 1px; }
+.mc.big .pv .vd { flex: 1; min-width: 0; font-size: 11.5px; }
+.mc.big .pv .sp { flex: none; width: 150px; }
+.mc.big .td { display: flex; justify-content: space-between; gap: 8px; padding: 5px 10px; border-radius: 8px; background: var(--circle);
+  font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+.mc.big .td span { overflow: hidden; text-overflow: ellipsis; }
+.mc.big .td b { color: var(--ink); font-size: 12px; font-weight: 650; }
 /* 用量页：这台电脑上 Claude Code 的记录（和管理面板“用量”页同一个接口）。四格数字、按小时 / 按天的叠起来的柱子、每个号一行 */
 .utiles { display: grid; grid-template-columns: 1fr 1fr; border-radius: 12px; overflow: hidden; }
 .utiles > div { padding: 9px 12px 10px; min-width: 0; }
@@ -226,6 +251,28 @@ button { font: inherit; color: inherit; }
 .sw input:checked + i::after { transform: translateX(18px); }
 .sw input:disabled + i { opacity: .5; cursor: progress; }
 .set .hint { font-size: 11px; color: var(--muted); padding: 6px 2px 0; }
+/* 菜单栏：预览一条（像 macOS 菜单栏右边那几个图标），下面选图标、选旁边写什么 */
+.set .row.mbrow { padding-bottom: 4px; }
+.mbp { display: flex; align-items: center; justify-content: flex-end; gap: 12px; height: 28px; padding: 0 10px; margin: 0 2px; border-radius: 8px;
+  background: var(--mb-bg); color: var(--mb-fg); font-size: 13px; line-height: 1; overflow: hidden; }
+.mbp-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 3px 7px; border-radius: 5px; background: var(--mb-chip); white-space: nowrap; }
+.mbp-item span { overflow: hidden; text-overflow: ellipsis; }
+.mbp-item svg, .mbp-sys svg { display: block; flex: none; }
+.mbp-sys { display: inline-flex; align-items: center; gap: 10px; flex: none; opacity: .85; }
+.mb-pulse .mb-lit { animation: mbPulse 1s step-end infinite; }  /* 在回答：彩色那段每秒闪一次（和插件一个节奏） */
+.mb-blink svg { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪 */
+@keyframes mbPulse { 50% { opacity: .35; } }
+@keyframes mbBlink { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg { animation: none; } }
+.mbopt { display: grid; gap: 5px; padding: 8px 2px 2px; }
+.mbopt .k { font-size: 11px; color: var(--muted); }
+.mbopt .seg-mini { align-self: start; justify-self: start; }
+.mbchips { display: flex; flex-wrap: wrap; gap: 5px; }
+.mbchips button { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
+.mbchips button:hover { border-color: var(--muted); color: var(--ink); }
+.mbchips button[aria-pressed="true"] { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }
+.mbchips button[aria-pressed="true"]::before { content: "✓ "; }
+.mbchips button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .set .hint a { color: var(--accent); }
 .foot { display: flex; justify-content: space-between; gap: 8px; margin: 2px 6px 0; font-size: 11px; color: var(--muted); }
 .foot .risk.medium { color: var(--warn); }
@@ -257,7 +304,51 @@ button { font: inherit; color: inherit; }
     desktop: '<svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>',
     gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   };
-  let settings = null, showSettings = false;  // 设置页：菜单栏小工具的动画模式、图标样式（GET / PUT /api/menubar）
+  let settings = null, showSettings = false;  // 设置页：菜单栏小工具的动画模式、图标样式和旁边写什么（GET / PUT /api/menubar）
+  // ---- 菜单栏预览：照菜单栏插件（extras/swiftbar/cam_menu.py）的画法用 SVG 画图标。颜色是状态：绿 = 空闲正常，
+  // 橙 = 在回答 / 要注意，红 = 要处理；在回答时彩色那段每秒闪一次，等你确认时整个图标快一倍地闪，和插件一个节奏
+  const MB_ICONS = [["bars", "信号格"], ["lamp", "红绿灯"], ["ring", "圆环"], ["rings", "双环"], ["twobar", "两根小条"]];
+  const MB_TEXT = [["name", "名字"], ["five", "5 小时 %"], ["seven", "7 天 %"], ["sessions", "在回答的会话数"]];
+  let lightNow = { lv: "ok", anim: "" };  // 顶上红绿灯最要紧的那条：级别和动画（lightHtml 记下，预览用）
+  function mbIcon(style, lv, p5, p7) {
+    const tone = `var(--mb-${lv === "bad" ? "bad" : lv === "busy" ? "warn" : "ok"})`, q5 = p5 == null ? 100 : Math.max(0, Math.min(100, p5));
+    const trk = (r, w) => `<circle cx="8" cy="8" r="${r}" fill="none" stroke="var(--mb-track)" stroke-width="${w}"/>`;
+    const arc = (r, w, p, c, cls) => {
+      const L = 2 * Math.PI * r;
+      return p <= 0 ? "" : `<circle class="${cls || ""}" cx="8" cy="8" r="${r}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="${p >= 100 ? "butt" : "round"}"
+        stroke-dasharray="${p >= 100 ? (L + 1).toFixed(2) : ((L * p) / 100).toFixed(2)} ${(L + 1).toFixed(2)}" transform="rotate(-90 8 8)"/>`;
+    };
+    if (style === "lamp") return `<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><rect x=".6" y=".6" width="10.8" height="18.8" rx="4.4" fill="none" stroke="var(--mb-glyph)" stroke-width="1.2"/>${
+      [["bad", 4.2], ["busy", 10], ["ok", 15.8]].map(([l, cy]) => `<circle class="${l === lv ? "mb-lit" : ""}" cx="6" cy="${cy}" r="2.5" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")}</svg>`;
+    if (style === "ring") return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${trk(6.25, 2.5)}${arc(6.25, 2.5, q5, tone, "mb-lit")}</svg>`;
+    if (style === "rings") return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${trk(6.4, 2.2)}${trk(3.3, 2)}${arc(6.4, 2.2, q5, tone, "mb-lit")}${p7 == null ? "" : arc(3.3, 2, p7, "var(--mb-glyph)")}</svg>`;
+    if (style === "twobar") {
+      const bw = (p) => Math.max(4, (21 * Math.min(100, Math.max(0, p))) / 100).toFixed(2);
+      return `<svg width="22" height="14" viewBox="0 0 22 14" aria-hidden="true"><rect x=".5" y="1.5" width="21" height="4" rx="2" fill="var(--mb-track)"/><rect x=".5" y="8.5" width="21" height="4" rx="2" fill="var(--mb-track)"/>${
+        q5 > 0 ? `<rect class="mb-lit" x=".5" y="1.5" width="${bw(q5)}" height="4" rx="2" fill="${tone}"/>` : ""}${p7 > 0 ? `<rect x=".5" y="8.5" width="${bw(p7)}" height="4" rx="2" fill="var(--mb-glyph)"/>` : ""}</svg>`;
+    }
+    return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${[4.5, 7.5, 10.5, 13.5].map((h, i) => `<rect class="mb-lit" x="${i * 4}" y="${15 - h}" width="3" height="${h}" rx="1.5" fill="${tone}"/>`).join("")}</svg>`;
+  }
+  // 菜单栏上的字（和插件的 title_text 一个规则）：名字、5 小时 %、7 天 %（都要时“17% · 34%”）、在回答的会话数（“● 2”）
+  function mbTitle(items, name, p5, p7, answering) {
+    const parts = items.includes("name") && name ? [name] : [];
+    const nums = [["five", p5], ["seven", p7]].filter(([k, p]) => items.includes(k) && p != null).map(([, p]) => Math.round(p) + "%");
+    if (nums.length) parts.push(nums.join(" · "));
+    if (items.includes("sessions") && answering) parts.push(answering === true ? "●" : "● " + answering);
+    return parts.join(" ");
+  }
+  function mbPreview(s, info) {
+    const t = mbTitle(s.text || [], info.name, info.p5, info.p7, info.answering), now = new Date();
+    const wifi = `<svg width="15" height="11" viewBox="0 0 17 12" aria-hidden="true"><path fill="currentColor" d="M8.5 11.2l2.2-2.7a3.4 3.4 0 0 0-4.4 0zM8.5 4.6a6.6 6.6 0 0 1 4.3 1.6l1.2-1.4a8.5 8.5 0 0 0-11 0l1.2 1.4a6.6 6.6 0 0 1 4.3-1.6zM8.5.6a10.7 10.7 0 0 1 7 2.6l1-1.3A12.5 12.5 0 0 0 .5 1.9l1 1.3A10.7 10.7 0 0 1 8.5.6z"/></svg>`;
+    return `<div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${info.anim ? " mb-" + info.anim : ""}">${mbIcon(s.icon, info.lv, info.p5, info.p7)}${t ? `<span>${esc(t)}</span>` : ""}</span>
+      <span class="mbp-sys">${wifi}<span>${pad(now.getHours())}:${pad(now.getMinutes())}</span></span></div>`;
+  }
+  // 预览用的数：当前的 Claude Code 号（名字按菜单栏的规则，太长或是邮箱时写“1号”）、它的 5 小时 / 7 天、在回答的会话数、红绿灯的级别
+  function menubarInfo() {
+    const accs = (state && state.accounts) || [], pos = Object.fromEntries(accs.map((a, i) => [a.id, i + 1]));
+    const cur = accs.find((a) => a.kind === "claude_code" && a.is_active), u = (cur && cur.usage) || {}, ss = (state && state.sessions) || {};
+    return { name: cur ? nameOf(cur, pos) : "Claude", p5: pct(u.five_hour), p7: pct(u.seven_day), answering: ss.answering || (ss.busy ? true : 0), lv: lightNow.lv, anim: lightNow.anim };
+  }
   function settingsHtml() {
     if (!showSettings) return "";
     if (!settings) return `<div class="tile glass set"><div class="hint">正在读设置…</div></div>`;
@@ -270,10 +361,12 @@ button { font: inherit; color: inherit; }
     if (!s.available) return `<div class="tile glass set">${confirmRow}<div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
     if (!s.installed) return `<div class="tile glass set">${confirmRow}<div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh。<a href="#" data-act="set-close">收起</a></div></div>`;
     return `<div class="tile glass set">${confirmRow}
-      <div class="row"><div class="lab"><b>流式动画</b><span>${s.mode === "stream" ? "插件常驻，信号格 / 红绿灯顺滑地动" : "关着是经典模式：每分钟刷新，动画 5 秒一帧"}</span></div>
+      <div class="row"><div class="lab"><b>流式动画</b><span>${s.mode === "stream" ? "插件常驻，菜单栏图标顺滑地动" : "关着是经典模式：每分钟刷新，动画 5 秒一帧"}</span></div>
         <label class="sw"><input type="checkbox" data-set="mode" ${s.mode === "stream" ? "checked" : ""}><i></i></label></div>
-      <div class="row"><div class="lab"><b>图标样式</b><span>菜单栏图标用哪种当红绿灯</span></div>
-        <span class="seg-mini" role="group" aria-label="图标样式"><button type="button" data-icon="bars" aria-pressed="${s.icon === "bars"}">信号格</button><button type="button" data-icon="lamp" aria-pressed="${s.icon === "lamp"}">红绿灯</button></span></div>
+      <div class="row mbrow"><div class="lab"><b>菜单栏</b><span>图标和旁边写什么，选了菜单栏马上换。图标的颜色和闪法表示状态</span></div></div>
+      ${mbPreview(s, menubarInfo())}
+      <div class="mbopt"><span class="k">图标</span><span class="seg-mini" role="group" aria-label="菜单栏图标">${MB_ICONS.map(([v, t]) => `<button type="button" data-icon="${v}" aria-pressed="${s.icon === v}">${t}</button>`).join("")}</span></div>
+      <div class="mbopt"><span class="k">旁边写什么（可以多选，都不选就只有图标）</span><span class="mbchips" role="group" aria-label="图标旁边写什么">${MB_TEXT.map(([v, t]) => `<button type="button" data-mbtext="${v}" aria-pressed="${(s.text || []).includes(v)}">${t}</button>`).join("")}</span></div>
       <div class="row"><div class="lab"><b>全局快捷键</b><span>⌃⌥⌘C 打开菜单，⌃⌥⌘1…9 切到第几个号</span></div></div>
       <div class="hint">切流式 / 经典会重写插件的启动脚本并重新打开 SwiftBar（几秒）。<a href="#" data-act="set-close">收起</a></div></div>`;
   }
@@ -476,6 +569,7 @@ button { font: inherit; color: inherit; }
     }
     if (!items.length) items.push({ lv: "ok", text: n > 0 ? `${n} 个会话 · 空闲` : "空闲 · 一切正常" });
     const top = items.find((i) => i.ask) || items[0];  // 等你确认的（切换、打开桌面版）要排在红色状态前面，不然按钮永远看不到
+    lightNow = { lv: top.lv, anim: top.blink ? "blink" : top.pulse ? "pulse" : "" };
     const tip = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
     return `<div class="light glass ${top.lv}${top.ask ? " ask" : ""}${top.pulse ? " pulse" : ""}${top.blink ? " blink" : ""}" title="${esc(tip)}"><span class="dot"></span><span class="txt">${esc(top.text)}</span>${items.length > 1 && !top.ask ? `<span class="more">+${items.length - 1}</span>` : ""}${top.btns ? `<span class="btns">${top.btns.map(([act, label, cls]) => `<button type="button" class="${cls || ""}" data-act="${act}">${label}</button>`).join("")}</span>` : ""}</div>`;
   }
@@ -705,6 +799,13 @@ button { font: inherit; color: inherit; }
     try { sess = await api("GET", "/api/sessions", undefined, 20000); sessErr = false; } catch (_) { sessErr = true; }
     render();
   }
+  // 大卡里“今天这台电脑用了多少”：本机 Claude Code 记录，要扫日志文件，只在“额度”页签开着、弹窗显示时要（两分钟一次）
+  let today = null;
+  async function loadToday() {
+    if (document.hidden || mtab !== "quota") return;
+    try { today = await api("GET", "/api/local-usage?range=today", undefined, 30000); } catch (_) { if (!today) today = { failed: true }; }
+    render();
+  }
   async function loadUsage() {  // 要扫日志文件，比 /api/state 慢：只在“用量”页签开着、弹窗显示时要
     if (document.hidden || mtab !== "usage") return;
     const want = urange;
@@ -719,7 +820,20 @@ button { font: inherit; color: inherit; }
     mtab = v; lsPut("cam-mini-tab", v);
     hideTip(); render();
     if (focus) { const b = document.querySelector(`[data-mtab="${v}"]`); if (b) b.focus(); }
-    loadUsage(); loadSessions();
+    loadUsage(); loadSessions(); loadToday();
+  }
+  const cardAttrs = (a, nm, on, desk) => `role="button" tabindex="0" aria-label="${esc(nm)}${on ? "（正在用）" : desk ? "：打开桌面版" : "：切换到这个号"}"
+        data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}"${on ? ' data-on="1"' : ""}`;
+  const penBtn = (a) => `<button type="button" class="pen" data-act="rename" data-id="${esc(a.id)}" title="改名">✎</button>`;
+  // 大卡里今天这台电脑用了多少：tokens、缓存命中率、按 API 价折算的金额（本机 Claude Code 记录，订阅不按这个收费）
+  function todayHtml(a) {
+    if (a.kind !== "claude_code" || (today && today.failed)) return "";
+    if (!today) return `<span class="td">正在读本机记录…</span>`;
+    const r = (today.accounts || []).find((x) => x.account_id === a.id);
+    if (!r || !r.messages) return `<span class="td">今天这台电脑还没用过这个号（本机 Claude Code 记录）</span>`;
+    const inp = r.input + r.cache_write, tok = inp + r.cache_read + r.output, hit = inp + r.cache_read > 0 ? Math.round((r.cache_read / (inp + r.cache_read)) * 100) : null;
+    const tip = `本机 Claude Code 今天的记录：${r.messages} 条消息 · ${r.sessions} 个会话 · 输出 ${wan(r.output)} · 缓存读取 ${wan(r.cache_read)} tokens\n金额按 API 价折算，订阅不按这个收费`;
+    return `<span class="td" title="${esc(tip)}"><span>今天本机 <b>${wan(tok)}</b> tokens</span><span>缓存命中 <b>${hit === null ? "–" : hit + "%"}</b></span><span>折算 <b>${usd(r.cost_usd || 0)}</b></span></span>`;
   }
   function render() {
     if (!state) return;
@@ -730,8 +844,8 @@ button { font: inherit; color: inherit; }
     const acts = `<div class="acts"><button class="act" data-act="refresh"><span class="circle glass">${ICON.refresh}</span><span>刷新用量</span></button>
           <button class="act" data-act="panel"><span class="circle glass">${ICON.panel}</span><span>管理面板</span></button>
           <button class="act" data-act="settings"><span class="circle glass">${ICON.gear}</span><span>设置</span></button></div>`;
-    // 卡片只放 Claude Code 的号和桌面版的号（网页号、API 号在管理面板里），一行两张：当前的 Claude Code 号排第一，其余 Code 号，然后桌面号。
-    // 和插件 mini_size 算高度的规则一致
+    // 卡片只放 Claude Code 的号和桌面版的号（网页号、API 号在管理面板里）：当前的 Claude Code 号（没有就第一个 Code 号）是占一整行的大卡，
+    // 其余 Code 号、然后桌面号一行两张。和插件 mini_size 算高度的规则一致
     const code = accs.filter((a) => a.kind === "claude_code"), desks = accs.filter((a) => a.kind === "claude_desktop");
     const list = [...code.filter((a) => a.is_active), ...code.filter((a) => !a.is_active), ...desks];
     if (!list.length) return paint({ cards: `<div class="tile glass empty">卡片只放 Claude Code 和 Claude 桌面版的号<br>网页号、API 号在管理面板里</div>`, acts, set: settingsHtml() });
@@ -752,11 +866,29 @@ button { font: inherit; color: inherit; }
       const body = rings.length ? `<span class="rr">${rings.map(ringBox).join("")}</span>${a.pace ? `<span class="sp">${paceSvg(a)}</span>` : ""}`
         : `<span class="none">${desk ? ICON.desktop : ""}${hh.level === "error" ? esc(((hh.issues || [])[0] || {}).text || "登录有问题") : desk ? `桌面版${deskState(a) ? " · " + esc(deskState(a)) : ""}<br>还没有本地额度` : "还没有用量，点下面的刷新"}</span>`;
       const tail = v ? `<span class="vd ${v.cls}">${esc(v.text)}</span>` : on ? "" : `<span class="vd">${desk ? "点一下打开" : "点一下切换"}</span>`;
-      return `<div class="mc glass${on ? " sel" : ""}" role="button" tabindex="0" aria-label="${esc(nm)}${on ? "（正在用）" : desk ? "：打开桌面版" : "：切换到这个号"}"
-        data-id="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(nm)}" data-tip="${esc(a.id)}"${on ? ' data-on="1"' : ""}>
-        <span class="nm">${on ? '<span class="ok">✓</span>' : ""}<b>${esc(nm)}</b>${on ? `<button type="button" class="pen" data-act="rename" data-id="${esc(a.id)}" title="改名">✎</button>` : ""}${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span>
+      return `<div class="mc glass${on ? " sel" : ""}" ${cardAttrs(a, nm, on, desk)}>
+        <span class="nm">${on ? '<span class="ok">✓</span>' : ""}<b>${esc(nm)}</b>${on ? penBtn(a) : ""}${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span>
         ${sess}${body}${tail}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : ""}</div>`;
     };
+    // 大卡：名字、邮箱、几个会话在跑；每个额度（5 小时、7 天、用得最多的两个按模型周额度）一根条，写几点后重置和百分比；
+    // 节奏结论和小线；今天这台电脑用了多少（本机记录）；到期。窗口早该重置了就不拿旧数字，写“已重置”
+    const big = (a) => {
+      const u = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), on = a.is_active, v = verdict(a), ex = expiry(a);
+      const models = (u.models || []).filter((m) => pct(m) !== null).sort((x, y) => y.utilization - x.utilization).slice(0, 2);
+      const meters = [["5 小时", u.five_hour], ["7 天", u.seven_day], ...models.map((m) => [m.name, m])].filter(([, w]) => pct(w) !== null).map(([label, w]) => {
+        const p = pct(w), old = passed(w), t = old ? "已重置，点刷新看最新" : resetShort(w.resets_at) || noReset(p);
+        return `<div class="meter"><div class="lab"><span>${esc(label)} · ${esc(t)}</span><b>${old ? "–" : p.toFixed(0) + "%"}</b></div><div class="bar">${old ? "" : `<i class="${lv(p)}" style="width:${p}%"></i>`}</div></div>`;
+      }).join("");
+      const what = [ss.answering ? `${ss.answering} 个在回答` : ss.busy ? "正在回答" : "", ss.waiting ? `${ss.waiting} 个等你确认` : ""].filter(Boolean).join(" · ");
+      const sess = on && ss.count > 0 ? `<span class="ss${ss.busy || ss.waiting ? " busy" : ""}"><i></i>${ss.count} 个会话${ss.busy || ss.waiting ? "在跑 · " + what : "开着 · 空闲"}</span>` : "";
+      const none = meters ? "" : `<span class="none">${hh.level === "error" ? esc(((hh.issues || [])[0] || {}).text || "登录有问题") : "还没有用量，点下面的刷新"}</span>`;
+      const pv = v || a.pace ? `<span class="pv"><span class="vd ${v ? v.cls : ""}">${v ? esc(v.text) : "7 天额度的节奏"}</span>${a.pace ? `<span class="sp">${paceSvg(a)}</span>` : ""}</span>` : "";
+      const mail = a.email && a.email !== nm ? `<span class="em">${esc(a.email)}</span>` : "";
+      return `<div class="mc big glass${on ? " sel" : ""}" ${cardAttrs(a, nm, on, false)}>
+        <span class="nm">${on ? '<span class="ok">✓</span>' : ""}<b>${esc(nm)}</b>${penBtn(a)}${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}${on ? `<span class="chip live">正在用</span>` : ""}</span>
+        ${mail}${sess}${meters}${none}${pv}${todayHtml(a)}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : on ? "" : `<span class="ex">点一下切换到这个号</span>`}</div>`;
+    };
+    const bigAcc = code.find((a) => a.is_active) || code[0], rest = list.filter((a) => a !== bigAcc);
     const rn = renaming && list.some((a) => a.id === renaming) ? `<div class="tile glass rn-tile"><div class="t">给 ${esc(nameOf(list.find((a) => a.id === renaming), pos))} 改名：菜单栏、命令行、聊天机器人里都用这个名字</div>${renameForm(list.find((a) => a.id === renaming))}</div>` : "";
     const sc = state.risk_score, reg = state.region || {};
     // 最近一次环境检测没连上：留着的是上一次查到的出口，标一个问号（详情在管理面板的环境区块）
@@ -764,7 +896,7 @@ button { font: inherit; color: inherit; }
       + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
     const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
     const quota = mtab === "quota";
-    paint({ light: lightHtml(cur, pos), tabs: tabsHtml(), rn, sum: quota ? sum : "", cards: quota ? `<div class="mgrid">${list.map(mc).join("")}</div>` : "",
+    paint({ light: lightHtml(cur, pos), tabs: tabsHtml(), rn, sum: quota ? sum : "", cards: quota ? `<div class="mgrid">${bigAcc ? big(bigAcc) : ""}${rest.map(mc).join("")}</div>` : "",
       usage: mtab === "usage" ? usageHtml(pos) : mtab === "sessions" ? sessionsHtml() : "", acts, set: settingsHtml(), foot });
   }
   let loading = null, loadedAt = 0, stamp = null;
@@ -846,10 +978,18 @@ button { font: inherit; color: inherit; }
       if (settings && !busy && ic.dataset.icon !== settings.icon) run(async () => { settings = await api("PUT", "/api/menubar", { icon: ic.dataset.icon }); say("已切换"); });
       return;
     }
+    const mt = ev.target.closest("[data-mbtext]");  // 图标旁边写什么：点一下勾上 / 去掉
+    if (mt) {
+      if (settings && !busy) {
+        const on = settings.text || [], k = mt.dataset.mbtext, next = on.includes(k) ? on.filter((x) => x !== k) : [...on, k];
+        run(async () => { settings = await api("PUT", "/api/menubar", { text: next }); say(next.length ? "已更新" : "已更新：只显示图标"); });
+      }
+      return;
+    }
     const btn = ev.target.closest("[data-act]");
     if (!btn) return;
     const act = btn.dataset.act;
-    if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadUsage(); loadPace(); });
+    if (act === "refresh") run(async () => { state = await api("POST", "/api/refresh", {}); say("用量已刷新"); loadUsage(); loadPace(); loadToday(); });
     // 管理面板打开到对应的页签：在“用量”这边点就开到“用量”页
     if (act === "panel") run(async () => { await api("POST", "/api/open-panel", { tab: mtab === "quota" ? "accounts" : mtab }); say("已打开"); });
     if (act === "open-session") run(async () => { await api("POST", "/api/open-panel", { tab: "sessions" }); say("已在管理面板打开"); });
@@ -904,10 +1044,11 @@ button { font: inherit; color: inherit; }
       say("已修改");
     });
   });
-  load().then(() => { loadPace(); loadUsage(); });  // 先把账号和额度画出来，再要节奏线的点和本机记录（用量页签开着时）
+  load().then(() => { loadPace(); loadUsage(); loadToday(); });  // 先把账号和额度画出来，再要节奏线的点和本机记录（用量、额度页签开着时）
   loadSettings();  // “切换前确认”开关点卡片时就要用，一开始就读（设置页没打开时 render 不画它）
   setInterval(() => { if (!document.hidden) load(); }, 30000);  // 弹窗可能一直留着（SwiftBar 默认复用 webview），定时刷新
   setInterval(loadUsage, 120000);
+  setInterval(loadToday, 120000);
   setInterval(loadSessions, 10000);  // 会话页签开着时每 10 秒（没开着时 loadSessions 直接返回）
   setInterval(loadPace, 300000);
   window.addEventListener("focus", () => load());
@@ -916,6 +1057,7 @@ button { font: inherit; color: inherit; }
     if (document.hidden) { hideTip(); return; }
     load();
     if (mtab === "usage") loadUsage();
+    if (mtab === "quota") loadToday();
     if (mtab === "sessions") loadSessions();
   });
 })();

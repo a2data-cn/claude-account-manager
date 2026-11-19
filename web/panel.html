@@ -38,6 +38,9 @@
   --violet-soft: #EAE4F6;
   --focus: #C6613F;
   --c1: #B5532F; --c2: #3E6EA8; --c3: #2F8F4E; --c4: #7656B4; --c5: #C07A12; --c6: #1A8FB0;  /* 图表的六个分类色，经色觉校验 */
+  /* 设置页的菜单栏预览：照 macOS 菜单栏和插件画图标用的系统色（extras/swiftbar/cam_menu.py 的 FILL / TRACK / GLYPH） */
+  --mb-bg: rgba(236, 236, 236, .96); --mb-fg: #1D1D1F; --mb-chip: rgba(0, 0, 0, .07); --mb-ok: rgb(52, 199, 89); --mb-warn: rgb(255, 159, 10);
+  --mb-bad: rgb(255, 59, 48); --mb-track: rgba(0, 0, 0, .13); --mb-dim: rgba(0, 0, 0, .25); --mb-glyph: rgba(0, 0, 0, .85);
   --radius-lg: 10px;
   --radius-sm: 7px;
   --control-h: 30px;
@@ -52,6 +55,8 @@
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
     --warn-soft: #3E3421; --ok-soft: #27334A; --violet-soft: #362D4B;
     --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
+    --mb-bg: #2C2C2E; --mb-fg: #F2F2F2; --mb-chip: rgba(255, 255, 255, .14); --mb-ok: rgb(48, 209, 88); --mb-warn: rgb(255, 179, 64);
+    --mb-bad: rgb(255, 105, 97); --mb-track: rgba(255, 255, 255, .24); --mb-dim: rgba(255, 255, 255, .27); --mb-glyph: rgba(255, 255, 255, .9);
     color-scheme: dark;
   }
 }
@@ -61,6 +66,8 @@
     --hot: #E8826F; --live: #6FBF8A; --live-soft: #2C3B30; --violet: #B49AEF; --hot-soft: #42302A; --accent-soft: #4A3328; --focus: #D97757;
     --warn-soft: #3E3421; --ok-soft: #27334A; --violet-soft: #362D4B;
     --c1: #C8653F; --c2: #5A8CDC; --c3: #45A868; --c4: #9879E0; --c5: #B98424; --c6: #2898B8;
+    --mb-bg: #2C2C2E; --mb-fg: #F2F2F2; --mb-chip: rgba(255, 255, 255, .14); --mb-ok: rgb(48, 209, 88); --mb-warn: rgb(255, 179, 64);
+    --mb-bad: rgb(255, 105, 97); --mb-track: rgba(255, 255, 255, .24); --mb-dim: rgba(255, 255, 255, .27); --mb-glyph: rgba(255, 255, 255, .9);
     color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -270,6 +277,29 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .subnav a { font-size: 12px; color: var(--muted); text-decoration: none; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); transition: color .12s, border-color .12s; }
 .subnav a:hover { color: var(--ink); border-color: var(--muted); }
 .subnav + .block { margin-top: 16px; }
+/* 设置页“菜单栏”：预览一条（像 macOS 菜单栏右边那几个图标），下面选图标、选旁边写什么。卡片小面板的设置页是同一套 */
+.mbp { display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 30px; padding: 0 12px; border-radius: 8px;
+  background: var(--mb-bg); color: var(--mb-fg); font-family: var(--sans); font-size: 13px; line-height: 1; overflow: hidden; }
+.mbp-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 3px 7px; border-radius: 5px; background: var(--mb-chip); white-space: nowrap; }
+.mbp-item span { overflow: hidden; text-overflow: ellipsis; }
+.mbp-item svg, .mbp-sys svg { display: block; flex: none; }
+.mbp-sys { display: inline-flex; align-items: center; gap: 10px; flex: none; opacity: .85; }
+.mb-pulse .mb-lit { animation: mbPulse 1s step-end infinite; }  /* 在回答：彩色那段每秒闪一次（和插件一个节奏） */
+.mb-blink svg { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪 */
+@keyframes mbPulse { 50% { opacity: .35; } }
+@keyframes mbBlink { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg { animation: none; } }
+.mb-opts { display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; align-items: center; margin-top: 14px; }
+.mb-opts .k { font-size: 12px; color: var(--muted); }
+.mb-opts .seg-mini { justify-self: start; }
+.mbchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.mbchips button { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
+.mbchips button:hover { border-color: var(--muted); color: var(--ink); }
+.mbchips button[aria-pressed="true"] { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }
+.mbchips button[aria-pressed="true"]::before { content: "✓ "; }
+.mbchips button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.mbchips button:disabled { cursor: progress; opacity: .7; }
+@media (max-width: 560px) { .mb-opts { grid-template-columns: 1fr; gap: 6px; } }
 .g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
 .g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
 .g-mini b { color: var(--ink); font-weight: 600; }
@@ -773,7 +803,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   </div>
 
   <div class="pane" role="tabpanel" id="pane-settings" aria-labelledby="tab-settings" hidden>
-    <nav class="subnav" id="subnav" aria-label="设置里的区块"><a href="#rules-block" data-for="rules-block" hidden>切号规则</a><a href="#privacy-block" data-for="privacy-block" hidden>隐私与数据源</a><a href="#update-block" data-for="update-block" hidden>软件更新</a><a href="#help-block" data-for="help-block">状态和颜色说明</a></nav>
+    <nav class="subnav" id="subnav" aria-label="设置里的区块"><a href="#rules-block" data-for="rules-block" hidden>切号规则</a><a href="#privacy-block" data-for="privacy-block" hidden>隐私与数据源</a><a href="#update-block" data-for="update-block" hidden>软件更新</a><a href="#menubar-block" data-for="menubar-block" hidden>菜单栏</a><a href="#help-block" data-for="help-block">状态和颜色说明</a></nav>
     <section class="block" id="rules-block" hidden>
       <div class="sec-head"><h2>切号规则</h2><span class="hint">按时间段或项目目录自动换号，以及额度提醒的阈值</span></div>
       <div class="cards">
@@ -826,6 +856,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       </div>
     </section>
 
+    <section class="block" id="menubar-block" hidden>
+      <div class="sec-head"><h2>菜单栏</h2><span class="hint">Mac 菜单栏上 cam 那一小块：用哪种图标、旁边写什么，选了马上换</span></div>
+      <div class="panel ecard wide" id="mb-card"></div>
+    </section>
+
     <section class="block help" id="help-block" aria-label="状态和颜色说明">
       <div class="sec-head"><h2>状态和颜色说明</h2><span class="hint">账号卡上的标签、额度环、菜单栏图标和环境评分各是什么意思</span></div>
       <div class="cards help">
@@ -848,7 +883,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         <div class="panel ecard"><h3><span class="eico"><svg><use href="#i-signal"/></svg></span>菜单栏图标<span class="hint">macOS</span></h3>
           <ul class="lgd">
             <li><span class="sm"><span class="mb"><i class="g"></i>个人 12%</span></span><span class="t"><b>绿</b>空闲，一切正常</span></li>
-            <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话正在执行任务（开着但在等你输入的不算；信号格一格格涨 / 三盏灯的黄灯像黄闪一样一亮一灭）、额度快满、等你确认（切换、或 Claude Code 弹着权限提示；信号格一闪一闪 / 三盏灯一起闪）</span></li>
+            <li><span class="sm"><span class="mb"><i class="o"></i>个人 76%</span></span><span class="t"><b>橙</b>有 claude 会话正在执行任务（开着但在等你输入的不算；信号格一格格涨 / 三盏灯的黄灯像黄闪一样一亮一灭 / 圆环、小条的彩色那段一亮一暗）、额度快满、等你确认（切换、或 Claude Code 弹着权限提示；信号格一闪一闪 / 三盏灯一起闪 / 圆环、小条整个一起快闪）</span></li>
             <li><span class="sm"><span class="mb"><i class="r"></i>个人 93%</span></span><span class="t"><b>红</b>要处理：登录失效、额度用完、后台出错</span></li>
           </ul>
           <p class="hint">文字是当前账号和 5 小时额度已用的百分比，70% 起变橙、90% 起变红；点开菜单第一行写具体情况。样式在菜单底部“图标样式”里选，颜色含义一样。</p></div>
@@ -1657,8 +1692,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   const ANCHOR_TAB = { accounts: "accounts", list: "accounts", "vault-block": "accounts", usage: "usage", "local-block": "usage",
     sessions: "sessions", "sessions-block": "sessions", env: "env",
     settings: "settings", rules: "settings", "rules-block": "settings", privacy: "settings", "privacy-block": "settings",
-    update: "settings", "update-block": "settings", help: "settings", "help-block": "settings" };
-  const ANCHOR_ALIAS = { rules: "rules-block", privacy: "privacy-block", update: "update-block", help: "help-block" };
+    update: "settings", "update-block": "settings", menubar: "settings", "menubar-block": "settings", help: "settings", "help-block": "settings" };
+  const ANCHOR_ALIAS = { rules: "rules-block", privacy: "privacy-block", update: "update-block", menubar: "menubar-block", help: "help-block" };
   let tab = "accounts", pendingScroll = null;
   function showTab(name, opt = {}) {
     if (!TABS.includes(name)) name = "accounts";
@@ -1739,11 +1774,86 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     }
     if (!items.length) items.push({ lv: "ok", text: n > 0 ? `${n} 个会话 · 空闲` : "空闲 · 一切正常" });
     const top = items[0];
+    lightNow = { lv: top.lv, anim: top.blink ? "blink" : top.pulse ? "pulse" : "" };
     el.className = `light ${top.lv}${top.pulse ? " pulse" : ""}${top.blink ? " blink" : ""}`;
     el.title = items.map((i) => i.text).join("\n") + (top.tip ? "\n" + top.tip : "");
     el.innerHTML = `<i class="led"></i><span class="txt">${esc(top.text)}</span>${items.length > 1 ? `<span class="more">+${items.length - 1}</span>` : ""}`;
     el.hidden = false;
+    renderMenubar();
   }
+  // ---- 设置页“菜单栏”（Mac 上的菜单栏小工具，GET / PUT /api/menubar；没有菜单栏小工具的电脑、桌面版不显示）：
+  // 预览照插件（extras/swiftbar/cam_menu.py）的画法用 SVG 画图标。颜色是状态：绿 = 空闲正常，橙 = 在回答 / 要注意，红 = 要处理；
+  // 在回答时彩色那段每秒闪一次，等你确认时整个图标快一倍地闪，和插件一个节奏。卡片小面板的设置页是同一套
+  const MB_ICONS = [["bars", "信号格"], ["lamp", "红绿灯"], ["ring", "圆环"], ["rings", "双环"], ["twobar", "两根小条"]];
+  const MB_TEXT = [["name", "名字"], ["five", "5 小时 %"], ["seven", "7 天 %"], ["sessions", "在回答的会话数"]];
+  let lightNow = { lv: "ok", anim: "" }, mbSet = null, mbBusy = false;
+  function mbIcon(style, lv, p5, p7) {
+    const tone = `var(--mb-${lv === "bad" ? "bad" : lv === "busy" ? "warn" : "ok"})`, q5 = p5 == null ? 100 : Math.max(0, Math.min(100, p5));
+    const trk = (r, w) => `<circle cx="8" cy="8" r="${r}" fill="none" stroke="var(--mb-track)" stroke-width="${w}"/>`;
+    const arc = (r, w, p, c, cls) => {
+      const L = 2 * Math.PI * r;
+      return p <= 0 ? "" : `<circle class="${cls || ""}" cx="8" cy="8" r="${r}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="${p >= 100 ? "butt" : "round"}"
+        stroke-dasharray="${p >= 100 ? (L + 1).toFixed(2) : ((L * p) / 100).toFixed(2)} ${(L + 1).toFixed(2)}" transform="rotate(-90 8 8)"/>`;
+    };
+    if (style === "lamp") return `<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><rect x=".6" y=".6" width="10.8" height="18.8" rx="4.4" fill="none" stroke="var(--mb-glyph)" stroke-width="1.2"/>${
+      [["bad", 4.2], ["busy", 10], ["ok", 15.8]].map(([l, cy]) => `<circle class="${l === lv ? "mb-lit" : ""}" cx="6" cy="${cy}" r="2.5" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")}</svg>`;
+    if (style === "ring") return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${trk(6.25, 2.5)}${arc(6.25, 2.5, q5, tone, "mb-lit")}</svg>`;
+    if (style === "rings") return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${trk(6.4, 2.2)}${trk(3.3, 2)}${arc(6.4, 2.2, q5, tone, "mb-lit")}${p7 == null ? "" : arc(3.3, 2, p7, "var(--mb-glyph)")}</svg>`;
+    if (style === "twobar") {
+      const bw = (p) => Math.max(4, (21 * Math.min(100, Math.max(0, p))) / 100).toFixed(2);
+      return `<svg width="22" height="14" viewBox="0 0 22 14" aria-hidden="true"><rect x=".5" y="1.5" width="21" height="4" rx="2" fill="var(--mb-track)"/><rect x=".5" y="8.5" width="21" height="4" rx="2" fill="var(--mb-track)"/>${
+        q5 > 0 ? `<rect class="mb-lit" x=".5" y="1.5" width="${bw(q5)}" height="4" rx="2" fill="${tone}"/>` : ""}${p7 > 0 ? `<rect x=".5" y="8.5" width="${bw(p7)}" height="4" rx="2" fill="var(--mb-glyph)"/>` : ""}</svg>`;
+    }
+    return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${[4.5, 7.5, 10.5, 13.5].map((h, i) => `<rect class="mb-lit" x="${i * 4}" y="${15 - h}" width="3" height="${h}" rx="1.5" fill="${tone}"/>`).join("")}</svg>`;
+  }
+  // 菜单栏上的字（和插件的 title_text 一个规则）：名字、5 小时 %、7 天 %（都要时“17% · 34%”）、在回答的会话数（“● 2”）
+  function mbTitle(items, name, p5, p7, answering) {
+    const parts = items.includes("name") && name ? [name] : [];
+    const nums = [["five", p5], ["seven", p7]].filter(([k, p]) => items.includes(k) && p != null).map(([, p]) => Math.round(p) + "%");
+    if (nums.length) parts.push(nums.join(" · "));
+    if (items.includes("sessions") && answering) parts.push(answering === true ? "●" : "● " + answering);
+    return parts.join(" ");
+  }
+  function renderMenubar() {
+    const box = $("#mb-card");
+    if (!mbSet || !mbSet.available || !state) { $("#menubar-block").hidden = true; return; }
+    $("#menubar-block").hidden = false;
+    // 预览用的数：当前的 Claude Code 号（名字按菜单栏的规则：太长或是邮箱时写“1号”）、它的 5 小时 / 7 天、在回答的会话数、红绿灯的级别
+    const accs = state.accounts || [], i = accs.findIndex((a) => a.kind === "claude_code" && a.is_active), cur = accs[i];
+    const wide = (t) => [...String(t || "")].reduce((n, c) => n + (c.codePointAt(0) > 0x2e7f ? 2 : 1), 0);
+    const name = !cur ? "Claude" : !cur.label || cur.label.includes("@") || wide(cur.label) > 12 ? `${i + 1}号` : cur.label;
+    const u = (cur && cur.usage) || {}, ss = state.sessions || {};
+    const win = (w) => (w && typeof w.utilization === "number" ? Math.max(0, Math.min(100, w.utilization)) : null);
+    const p5 = win(u.five_hour), p7 = win(u.seven_day), items = mbSet.text || [];
+    const t = mbTitle(items, name, p5, p7, ss.answering || (ss.busy ? true : 0)), now = new Date(), two = (n) => String(n).padStart(2, "0");
+    const wifi = `<svg width="15" height="11" viewBox="0 0 17 12" aria-hidden="true"><path fill="currentColor" d="M8.5 11.2l2.2-2.7a3.4 3.4 0 0 0-4.4 0zM8.5 4.6a6.6 6.6 0 0 1 4.3 1.6l1.2-1.4a8.5 8.5 0 0 0-11 0l1.2 1.4a6.6 6.6 0 0 1 4.3-1.6zM8.5.6a10.7 10.7 0 0 1 7 2.6l1-1.3A12.5 12.5 0 0 0 .5 1.9l1 1.3A10.7 10.7 0 0 1 8.5.6z"/></svg>`;
+    const dis = mbBusy ? " disabled" : "";
+    box.innerHTML = `<h3><span class="eico"><svg><use href="#i-signal"/></svg></span>样式<span class="hint">图标的颜色和闪法表示状态：绿 = 空闲正常，橙 = 在回答 / 要注意，红 = 要处理；在回答时闪，等你确认时快闪</span></h3>
+      <div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${lightNow.anim ? " mb-" + lightNow.anim : ""}">${mbIcon(mbSet.icon, lightNow.lv, p5, p7)}${t ? `<span>${esc(t)}</span>` : ""}</span>
+        <span class="mbp-sys">${wifi}<span>${two(now.getHours())}:${two(now.getMinutes())}</span></span></div>
+      <div class="mb-opts"><span class="k">图标</span><span class="seg-mini" role="group" aria-label="菜单栏图标">${MB_ICONS.map(([v, tt]) => `<button type="button" data-mbicon="${v}" aria-pressed="${mbSet.icon === v}"${dis}>${tt}</button>`).join("")}</span>
+        <span class="k">旁边写什么</span><span class="mbchips" role="group" aria-label="图标旁边写什么">${MB_TEXT.map(([v, tt]) => `<button type="button" data-mbtext="${v}" aria-pressed="${items.includes(v)}"${dis}>${tt}</button>`).join("")}</span></div>
+      <p class="hint" style="margin:10px 0 0">可以多选，都不选就只有图标。菜单栏下拉菜单的“更多”里、卡片小面板的“设置”里也能改。</p>`;
+  }
+  async function loadMenubar() {
+    try { mbSet = await api("GET", "/api/menubar"); } catch (_) { mbSet = null; }  // 桌面版、老版本的 cam serve 没有这个接口
+    renderMenubar();
+  }
+  async function saveMenubar(body, done) {
+    if (mbBusy) return;
+    mbBusy = true; renderMenubar();
+    try { mbSet = await api("PUT", "/api/menubar", body); toast(done); } catch (e) { toast(e.message, true); }
+    mbBusy = false; renderMenubar();
+  }
+  $("#mb-card").addEventListener("click", (ev) => {
+    const ic = ev.target.closest("[data-mbicon]"), tx = ev.target.closest("[data-mbtext]");
+    if (!mbSet) return;
+    if (ic && ic.dataset.mbicon !== mbSet.icon) saveMenubar({ icon: ic.dataset.mbicon }, "菜单栏图标已换");
+    if (tx) {
+      const on = mbSet.text || [], k = tx.dataset.mbtext, next = on.includes(k) ? on.filter((x) => x !== k) : [...on, k];
+      saveMenubar({ text: next }, next.length ? "菜单栏文字已更新" : "菜单栏只显示图标");
+    }
+  });
   function render() {
     const list = $("#list");
     renderLight();
@@ -2330,7 +2440,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     try {
       state = await api("GET", "/api/state", undefined, 15000);
       loadFailed = "";
-      render(); loadPace(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate();
+      render(); loadPace(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate(); loadMenubar();
       if (!checkupProbed) probeCheckup();
     } catch (e) {
       loadFailed = e.status === 401 ? "auth" : "net";

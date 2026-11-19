@@ -989,6 +989,19 @@ class CamTest(unittest.TestCase):
             self.assertEqual((r["icon"], store.load()["prefs"]["menu_icon"], r["restarting"]), ("lamp", "lamp", False))
             with self.assertRaises(self.cam.CamError):
                 self.cam.save_menubar_settings(store, {"icon": "neon"})
+            for icon in ("ring", "rings", "twobar", "bars"):  # 五种图标都能选
+                self.assertEqual(self.cam.save_menubar_settings(store, {"icon": icon})["icon"], icon)
+            # 图标旁边写什么：默认名字 + 5 小时；按固定顺序存、去掉重复；空列表是只要图标；不认识的项不收
+            self.assertEqual(st["text"], ["name", "five"])
+            r = self.cam.save_menubar_settings(store, {"text": ["sessions", "seven", "name", "name"]})
+            self.assertEqual((r["text"], store.load()["prefs"]["menu_text"]), (["name", "seven", "sessions"], ["name", "seven", "sessions"]))
+            self.assertEqual(self.cam.save_menubar_settings(store, {"text": []})["text"], [])
+            for bad in (["name", "color"], "name", None):
+                with self.assertRaises(self.cam.CamError):
+                    self.cam.save_menubar_settings(store, {"text": bad})
+            self.assertEqual(store.load()["prefs"]["menu_text"], [])
+            self.assertEqual(self.cam.menu_text_items({"menu_text": "x"}), ["name", "five"])  # 记坏了当默认
+            self.cam.save_menubar_settings(store, {"icon": "lamp", "text": ["name", "five"]})
             self.assertFalse(self.cam.save_menubar_settings(store, {"mode": "stream"})["restarting"])  # 已经是流式，不动
             ran = []
             fake = lambda cmd, **kw: (ran.append(cmd), types.SimpleNamespace(returncode=0, stdout="", stderr=""))[1]  # noqa: E731
@@ -1343,33 +1356,31 @@ class CamTest(unittest.TestCase):
                 cam_menu.render(store, {}, out=lines2.append, rich=True)
             w, h = cam_menu.mini_size(store.load()["accounts"])
             self.assertIn(f" href=http://127.0.0.1:8787/mini?t=tok webview=true webvieww={w} webviewh={h} shortcut=", lines2[0])
-            # 弹窗高度按“额度”“用量”两个页签里高的那个算（换页签时弹窗变不了大小）。“额度”页：账号卡一行两张，两个号以上多一块汇总；
-            # 有 Claude Code 号多一行会话；到上限就整页上下滑；API、网页号不在卡片里。“用量”页每个 Claude Code 号一行（最多算四行）
+            # 弹窗高度按“额度”“用量”“会话”页签里最高的那个算（换页签时弹窗变不了大小）。“额度”页：当前的 Claude Code 号一张大卡，
+            # 其余的号一行两张，两个号以上多一块汇总；到上限就整页上下滑；API、网页号不在卡片里。“用量”页每个 Claude Code 号一行（最多算四行）
             M = cam_menu
             code = {"kind": "claude_code"}
             usage = lambda n: M.MINI_USAGE + M.MINI_UROW * max(1, min(4, n))
-            size = lambda quota, n=1: M.MINI_BASE + M.MINI_TABS + max(quota, usage(n))
+            size = lambda quota, n=1: min(M.MINI_MAX, M.MINI_BASE + M.MINI_TABS + max(quota, usage(n), M.MINI_SESSIONS))
             self.assertEqual(M.mini_usage_height([code] * 9), usage(4))
             self.assertEqual(M.mini_usage_height([{"kind": "claude_desktop"}]), usage(1))
             one = cam_menu.mini_size([code])[1]
             self.assertEqual(w, cam_menu.MINI_WIDTH)
-            self.assertEqual(M.mini_quota_height([code]), M.MINI_ROW + M.MINI_SESS)
-            self.assertEqual(one, size(M.MINI_ROW + M.MINI_SESS))
+            self.assertEqual(M.mini_quota_height([code]), M.MINI_BIG)
+            self.assertEqual(one, size(M.MINI_BIG))
             self.assertEqual(cam_menu.mini_size([code, {"kind": "api"}])[1], one)
-            two = cam_menu.mini_size([code] * 2)[1]
-            self.assertEqual(M.mini_quota_height([code] * 2), M.MINI_ROW + M.MINI_SESS + M.MINI_SUM)  # 两张卡同一行，多的是汇总
-            self.assertEqual(two, size(M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 2))
-            three = size(2 * M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 3)
-            self.assertEqual(cam_menu.mini_size([code] * 3)[1], three)
-            self.assertEqual(cam_menu.mini_size([code] * 4)[1], size(2 * M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 4))
-            self.assertLessEqual(cam_menu.mini_size([code] * 4)[1], M.MINI_MAX)  # 四个号两页都放得下，不用滑
+            self.assertEqual(M.mini_quota_height([code] * 2), M.MINI_BIG + M.MINI_ROW + M.MINI_SUM)  # 大卡下面一行小卡，多的是汇总
+            self.assertEqual(M.mini_quota_height([code] * 3), M.MINI_BIG + M.MINI_ROW + M.MINI_SUM)  # 另外两个号同一行
+            self.assertEqual(M.mini_quota_height([code] * 4), M.MINI_BIG + 2 * M.MINI_ROW + M.MINI_SUM)
+            self.assertLessEqual(cam_menu.mini_size([code] * 3)[1], M.MINI_MAX)  # 大卡加一行两个小号放得下，不用滑
             self.assertEqual(cam_menu.mini_size([code] * 40)[1], cam_menu.MINI_MAX)
             web, desk = {"kind": "claude_web"}, {"kind": "claude_desktop"}
             self.assertEqual(cam_menu.mini_size([code, web])[1], one)  # 网页号不进卡片
-            self.assertEqual(cam_menu.mini_size([code, desk])[1], size(M.MINI_ROW + M.MINI_SESS + M.MINI_SUM))  # 桌面号也是一张卡，和 Code 号排在一起
-            self.assertEqual(cam_menu.mini_size([code, code, desk])[1], size(2 * M.MINI_ROW + M.MINI_SESS + M.MINI_SUM, 2))
-            self.assertEqual(M.mini_quota_height([desk]), M.MINI_ROW)  # 没有 Code 号：没有会话那行
+            self.assertEqual(M.mini_quota_height([code, desk]), M.MINI_BIG + M.MINI_ROW + M.MINI_SUM)  # 桌面号是小卡，和其余 Code 号排在一起
+            self.assertEqual(M.mini_quota_height([code, code, desk]), M.MINI_BIG + M.MINI_ROW + M.MINI_SUM)
+            self.assertEqual(M.mini_quota_height([desk]), M.MINI_ROW)  # 没有 Code 号：没有大卡，都是小卡
             self.assertEqual(M.mini_quota_height([desk, desk]), M.MINI_ROW + M.MINI_SUM)
+            self.assertEqual(M.mini_quota_height([]), M.MINI_ROW)  # 一个号都没有：放一行“还没有账号”
             self.assertEqual(cam_menu.mini_size([desk])[1], size(M.MINI_ROW))
             # 8787 上是桌面版的服务（没有 /mini 页）：在下一个空端口另起一个 cam serve 给卡片用，不是干脆不给卡片；桌面版的服务不动
             told = []
@@ -1524,6 +1535,111 @@ class CamTest(unittest.TestCase):
         self.assertIn(" width=12 height=20", lines[0])
         png = base64.b64decode(re.search(r"image=(\S+)", lines[0]).group(1).split(",")[0])
         self.assertEqual(struct.unpack(">II", png[16:24]), (12 * S, 20 * S))
+
+    def test_menubar_quota_icons_and_title_text(self):
+        """菜单栏的圆环、双环、两根小条：颜色是状态、长短是额度（5 小时用状态色，7 天用文字色），按 2 倍像素画、按参数缓存；
+        工作中彩色那段每秒一亮一暗，等你确认整个图标快一倍地闪（经典模式的两帧 0 / 0.375 一亮一暗）。
+        标题文字按 prefs.menu_text 拼；菜单“更多”里能逐项勾选。"""
+        import zlib
+        cam_menu = self._menu_plugin()
+
+        def pixels(png):
+            w, h = struct.unpack(">II", png[16:24])
+            pos, idat = 8, b""
+            while pos < len(png):
+                n, tag = struct.unpack(">I4s", png[pos:pos + 8])
+                if tag == b"IDAT":
+                    idat += png[pos + 8:pos + 8 + n]
+                pos += 12 + n
+            raw, stride = zlib.decompress(idat), 1 + w * 4
+            return w, h, lambda x, y: tuple(raw[y * stride + 1 + x * 4:y * stride + 5 + x * 4])
+
+        S, icon = cam_menu.SCALE, cam_menu.status_icon
+        orange = lambda px, lo=240: px[0] >= 200 and 100 <= px[1] <= 200 and px[2] <= 110 and px[3] >= lo  # noqa: E731
+        faint = lambda px: px[3] <= 70  # noqa: E731  底环 / 底条：淡淡的（深色栏的底是白色 24%）
+        self.assertEqual([k for k, _ in cam_menu.ICON_STYLES], ["bars", "lamp", "ring", "rings", "twobar"])
+        self.assertEqual([cam_menu.icon_size(k) for k in ("ring", "rings", "twobar")], [(16, 16), (16, 16), (22, 14)])
+        # 圆环：一半 → 3 点钟方向是彩色，9 点钟是底环，中间是空的
+        w, h, px = pixels(icon(0, "busy", "", 0.0, "ring", 50))
+        self.assertEqual((w, h), (16 * S, 16 * S))
+        right, left = (16 + 12, 16), (16 - 12, 16)
+        self.assertTrue(orange(px(*right)), px(*right))
+        self.assertTrue(faint(px(*left)) and px(*left)[3] > 0, px(*left))
+        self.assertEqual(px(16, 16)[3], 0)
+        _, _, px = pixels(icon(0, "busy", "", 0.0, "ring", 0))  # 0%：只有底环
+        self.assertTrue(faint(px(*right)), px(*right))
+        _, _, px = pixels(icon(0, "ok", "", 0.0, "ring", None))  # 还没有 5 小时的数：画满一圈，只当状态灯
+        g = px(*left)
+        self.assertTrue(g[1] >= 180 and g[0] <= 110 and g[3] >= 240, g)
+        # 工作中：彩色那段亮一拍暗一拍（暗的时候还是橙的，只是淡）；等你确认：整个图标一起暗，底环也暗
+        for style, at in (("ring", right), ("rings", right), ("twobar", (10, 7))):
+            _, _, on = pixels(icon(0, "busy", "pulse", 0.0, style, 50, 50))
+            _, _, off = pixels(icon(0, "busy", "pulse", 0.375, style, 50, 50))
+            self.assertTrue(orange(on(*at)), (style, on(*at)))
+            self.assertTrue(orange(off(*at), 0) and 60 <= off(*at)[3] <= 120, (style, off(*at)))
+            _, _, b_on = pixels(icon(0, "busy", "blink", 0.0, style, 50, 50))
+            _, _, b_off = pixels(icon(0, "busy", "blink", 0.375, style, 50, 50))
+            self.assertTrue(orange(b_on(*at)), (style, b_on(*at)))
+            self.assertLessEqual(b_off(*at)[3], 70, (style, b_off(*at)))
+            self.assertNotEqual(icon(0, "busy", "blink", 0.0, style, 50, 50), icon(0, "busy", "blink", 0.125, style, 50, 50))  # 等你确认快一倍
+            self.assertEqual(icon(0, "busy", "pulse", 0.0, style, 50, 50), icon(0, "busy", "pulse", 0.125, style, 50, 50))
+        # 双环：内圈是 7 天，用菜单栏文字的颜色（浅色栏黑、深色栏白）
+        for dark in (0, 1):
+            _, _, px = pixels(icon(dark, "ok", "", 0.0, "rings", 80, 50))
+            inner_r, inner_l = px(16 + 7, 16), px(16 - 7, 16)
+            self.assertEqual(inner_r[:3], tuple(cam_menu.GLYPH[dark][:3]), inner_r)
+            self.assertGreaterEqual(inner_r[3], 180)
+            self.assertTrue(faint(inner_l), inner_l)
+        # 两根小条：22×14 点；上面 5 小时到一半，下面 7 天到三成
+        w, h, px = pixels(icon(1, "bad", "", 0.0, "twobar", 50, 30))
+        self.assertEqual((w, h), (22 * S, 14 * S))
+        top_on, top_off, low_on, low_off = px(10, 7), px(35, 7), px(6, 21), px(30, 21)
+        self.assertTrue(top_on[0] >= 200 and top_on[1] <= 130 and top_on[3] >= 240, top_on)  # 红
+        self.assertTrue(faint(top_off) and faint(low_off), (top_off, low_off))
+        self.assertEqual(low_on[:3], tuple(cam_menu.GLYPH[1][:3]))
+        # 按参数缓存：同样的参数不重画
+        before = icon.cache_info().hits
+        icon(0, "busy", "pulse", 0.0, "ring", 50, 50)
+        self.assertEqual(icon.cache_info().hits, before + 1)
+        # 标题文字
+        tt = cam_menu.title_text
+        self.assertEqual(tt(["name", "five"], "工作号", 64.4, 30, 0), "工作号 64%")
+        self.assertEqual(tt(["name", "five", "seven", "sessions"], "工作号", 64, 30.2, 2), "工作号 64% · 30% ● 2")
+        self.assertEqual(tt(["seven"], "工作号", 64, 30, 2), "30%")
+        self.assertEqual(tt(["name", "sessions"], "工作号", None, None, True), "工作号 ●")  # 看不出几个在回答
+        self.assertEqual(tt(["five", "seven"], "工作号", None, None, 0), "")  # 没有用量：什么都不写
+        self.assertEqual(tt([], "工作号", 64, 30, 2), "")
+        # 渲染：按 prefs 写标题，图的大小跟着样式；菜单“更多”里四项可勾选
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+        self._two_accounts()
+        self.assertEqual(self.run_cam("usage"), 0)
+        store = self.cam.Store()
+
+        def title(icon_style, text):
+            self.cam.save_menubar_settings(store, {"icon": icon_style, "text": text})
+            lines = []
+            with mock.patch.object(self.cam, "session_counts", return_value={"answering": 2, "waiting": 0}):
+                cam_menu.render(store, {}, out=lines.append, rich=True)
+            return lines
+
+        lines = title("ring", ["name", "five", "seven"])
+        self.assertTrue(lines[0].startswith("B 75% · 30% | image="), lines[0][:40])
+        self.assertIn(" width=16 height=16", lines[0])
+        self.assertTrue(any(l.startswith("--名字 | ") and l.endswith(" checked=true") for l in lines), lines[-12:])
+        self.assertTrue(any(l.startswith("--在回答的会话数 | ") and 'param2="text" param3="sessions"' in l and not l.endswith("checked=true") for l in lines))
+        self.assertTrue(any(l.startswith("--圆环") and l.endswith(" checked=true") for l in lines))
+        lines = title("twobar", [])
+        self.assertTrue(lines[0].startswith("| image="), lines[0][:30])  # 只要图标
+        self.assertIn(" width=22 height=14", lines[0])
+        lines = title("rings", ["sessions"])
+        self.assertTrue(lines[0].startswith("● 2 | image="), lines[0][:30])  # 两个会话在回答
+        # 菜单里点一项：勾上的去掉、没勾的勾上，按固定顺序存
+        self.cam.save_menubar_settings(store, {"text": ["name", "five"]})
+        self.assertEqual(cam_menu.toggle_text_from_menu(store, "seven"), 0)
+        self.assertEqual(store.load()["prefs"]["menu_text"], ["name", "five", "seven"])
+        cam_menu.toggle_text_from_menu(store, "name")
+        self.assertEqual(store.load()["prefs"]["menu_text"], ["five", "seven"])
 
     def test_claude_activity(self):
         """红绿灯只在 claude 真的在执行任务时闪黄：最近 20 秒内写过会话记录，或者进程（含子进程）在吃 CPU；开着等输入不算。"""
@@ -1807,6 +1923,22 @@ class CamTest(unittest.TestCase):
         cam.hook_event(ev("SessionEnd"))
         self.assertFalse(os.path.exists(cam.session_state_path()))
 
+    def test_match_sessions_without_cwd_guesses_by_recent_activity(self):
+        """Windows 看不出进程的工作目录：先按钩子记的 pid 对，剩下的钩子记录按最近有动静的先后分给没对上的进程，标 guess；
+        别的系统不猜，对不上就空着。"""
+        cam = self.cam
+        procs = [(301, "claude"), (302, "claude"), (303, "claude")]
+        info = {301: {}, 302: {}, 303: {}}
+        recs = {"s-old": {"last_ts": 100, "pids": [], "transcript": ""},
+                "s-new": {"last_ts": 300, "pids": [], "transcript": ""},
+                "s-pid": {"last_ts": 200, "pids": [302], "transcript": ""}}
+        pick = lambda: {r[0]: (r[1], r[4]) for r in cam.match_sessions(procs, info, recs)}  # noqa: E731
+        with mock.patch.object(cam, "IS_WIN", True):
+            self.assertEqual(pick(), {301: ("s-new", "guess"), 302: ("s-pid", "hook"), 303: ("s-old", "guess")})
+        with mock.patch.object(cam, "IS_WIN", False):
+            self.assertEqual(pick(), {301: (None, None), 302: ("s-pid", "hook"), 303: (None, None)})
+
+    @unittest.skipIf(os.name == "nt", "假的 /proc 用符号链接记工作目录（Linux 的做法），Windows 上读回来的路径带 \\?\ 前缀，对不上")
     def test_sessions_view(self):
         """会话页：进程对上会话（钩子记的 pid → 工作目录 → 那个目录里最新的记录），读出状态、模型、几轮、上下文；
         组成只给还在跑的会话；红绿灯数几个在回答、几个等你确认。消息内容不出现在返回里。"""

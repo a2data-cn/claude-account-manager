@@ -47,21 +47,22 @@ MINI = os.environ.get("CAM_MENU_MINI", "1") != "0"
 MINI_WIDTH = 380
 # 量出来的高度（Linux 上 Noto 字体量的，Mac 上苹方高一截，各项都多留了一点）：
 # 基数是红绿灯 + 底下三个圆按钮 + 页脚；下面是“额度 / 用量”两个页签的那一条。
-# “额度”页：账号卡一行两张（Claude Code 的号和桌面版的号，含间距；卡里是名字、几个额度环和它们的重置时间、7 天节奏小线、一句结论、到期）；
-# 两个号以上时上面有一块汇总（含一行提醒）；有 Claude Code 号时当前号的卡多一行“几个会话在跑”。
+# “额度”页：当前的 Claude Code 号是占一整行的大卡（名字、邮箱、几个会话在跑、每个额度一根条带重置倒计时、节奏结论和小线、今天本机用了多少、到期）；
+# 其余的号一行两张小卡（含间距；卡里是名字、几个额度环和它们的重置时间、7 天节奏小线、一句结论、到期）；两个号以上时上面有一块汇总（含一行提醒）。
 # “用量”页：时间范围、四格数字、按小时 / 按天的柱子，下面每个 Claude Code 号一行（最多算四行）。
 # 弹窗点开后高度就定了，换页签时变不了：按两页里高的那页算，矮的那页按钮和页脚贴底，中间空着。到上限后整页上下滑
-MINI_BASE, MINI_TABS, MINI_SUM, MINI_ROW, MINI_SESS, MINI_MAX = 195, 44, 112, 209, 18, 860  # 上限放得下四个号
+MINI_BASE, MINI_TABS, MINI_SUM, MINI_BIG, MINI_ROW, MINI_MAX = 195, 44, 112, 300, 209, 860  # 上限放得下大卡加一行两个小号
 MINI_USAGE, MINI_UROW = 380, 50
 MINI_SESSIONS = 370  # “会话”页签：汇总一行 + 五个会话左右（每个两行，五十多像素），比“用量”页签最矮的时候还矮一点
 
 
 def mini_quota_height(accs):
-    """“额度”页签里账号卡和汇总的高度（不含红绿灯、页签、按钮和页脚）。和 mini.html 一个规则：账号卡一行两张，当前的 Claude Code 号排第一；
-    两个号以上时上面有汇总；有 Claude Code 号时当前号的卡多一行会话。"""
+    """“额度”页签里账号卡和汇总的高度（不含红绿灯、页签、按钮和页脚）。和 mini.html 一个规则：有 Claude Code 号时当前的
+    （没有当前的就第一个）是一张大卡，其余的号一行两张；两个号以上时上面有汇总。"""
     n = sum(1 for a in accs if a.get("kind") in ("claude_code", "claude_desktop"))
     code = any(a.get("kind") == "claude_code" for a in accs)
-    return max(1, (n + 1) // 2) * MINI_ROW + (MINI_SESS if code else 0) + (MINI_SUM if n >= 2 else 0)
+    rest = n - 1 if code else n
+    return (MINI_BIG if code else 0) + (rest + 1) // 2 * MINI_ROW + (MINI_SUM if n >= 2 else 0) or MINI_ROW
 
 
 def mini_usage_height(accs):
@@ -228,12 +229,29 @@ DIM = ((0, 0, 0, 0.22), (255, 255, 255, 0.3))  # 没亮的信号格
 # 都跟菜单栏文字一个颜色（浅色栏黑、深色栏白，带一点透明），只有亮着的那盏灯是彩色的。实心的灯体在半透明的菜单栏上
 # 不管画成深灰还是白都像贴上去的一块，和旁边的系统图标不搭
 GLYPH = ((0, 0, 0, 0.85), (255, 255, 255, 0.9))
-ICON_STYLES = (("bars", "信号格（像手机信号）"), ("lamp", "红绿灯（竖的三盏灯）"))
+ICON_STYLES = (("bars", "信号格（像手机信号）"), ("lamp", "红绿灯（竖的三盏灯）"), ("ring", "圆环（5 小时用了多少）"),
+               ("rings", "双环（外圈 5 小时、内圈 7 天）"), ("twobar", "两根小条（上 5 小时、下 7 天）"))
+QUOTA_STYLES = ("ring", "rings", "twobar")  # 图里画额度的样式：图跟着 5 小时 / 7 天的数变，要把数传给 status_icon
+TWOBAR_W, TWOBAR_H = 22, 14  # 两根小条：像电池那么宽，两根条各 4 点粗
+# 菜单栏图标旁边写什么（账号库 prefs.menu_text，顺序见 cam.MENU_TEXT）：菜单“更多”里一项一个开关
+MENU_TEXT_LABELS = (("name", "名字"), ("five", "5 小时 %"), ("seven", "7 天 %"), ("sessions", "在回答的会话数"))
 
 
 def icon_size(style):
     """菜单栏图标显示成多少点：(宽, 高)。"""
-    return (LAMP_W, LAMP_H) if style == "lamp" else (ICON_W, ICON_H)
+    return (LAMP_W, LAMP_H) if style == "lamp" else (TWOBAR_W, TWOBAR_H) if style == "twobar" else (ICON_W, ICON_H)
+
+
+def title_text(items, name, p5, p7, answering):
+    """菜单栏图标旁边的字，按 prefs.menu_text 拼：名字、5 小时 %、7 天 %（两个都要时写“17% · 34%”）、在回答的会话数（“● 2”；
+    看不出几个时只写“●”，没有在回答的不写）。看不出来的项不写；一项都没有就只剩图标。"""
+    parts = [name] if "name" in items and name else []
+    nums = [f"{p:.0f}%" for k, p in (("five", p5), ("seven", p7)) if k in items and p is not None]
+    if nums:
+        parts.append(" · ".join(nums))
+    if "sessions" in items and answering:
+        parts.append("●" if answering is True else f"● {answering}")
+    return " ".join(parts)
 
 
 def _mix(a, b, g):
@@ -242,9 +260,10 @@ def _mix(a, b, g):
 
 
 @functools.lru_cache(maxsize=256)
-def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
-    """菜单栏图标，两种样式：四格信号（像手机信号）或竖的小红绿灯，菜单里选。额度百分比用系统字体写在旁边的文字里，
-    菜单栏这么小，画出来的数字不如文字清楚。
+def status_icon(dark, level="ok", kind="", phase=0.0, style="bars", p5=None, p7=None):
+    """菜单栏图标，五种样式，菜单或卡片小面板的设置里选：四格信号（像手机信号）、竖的小红绿灯，以及画额度的三种——
+    圆环（5 小时用了多少）、双环（外圈 5 小时、内圈 7 天）、两根小条（上 5 小时、下 7 天）。p5 / p7 是整数百分比
+    （画额度的样式才用，别的样式传 None，缓存才命中）。百分比的数字用系统字体写在旁边的文字里，菜单栏这么小，画出来的数字不如文字清楚。
 
     颜色是状态：绿 = 空闲正常，橙 = 工作中 / 要注意 / 等你确认，红 = 要处理。kind="pulse"（工作中）时随 phase（0–1）
     信号格一格格渐亮涨上去再从头来 / 红绿灯照真红绿灯的黄闪：亮着的那盏灯一亮一灭（灭的时候还看得见镜片的颜色），红绿不动；
@@ -258,6 +277,8 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         glow = 1.0 if (phase % 0.5) < 0.25 else 0.0  # 每秒亮灭一次
     else:
         glow = 1.0
+    if style in QUOTA_STYLES:
+        return _quota_icon(dark, level, kind, phase, style, p5, p7)
     if style == "lamp":
         W, H = LAMP_W * SCALE, LAMP_H * SCALE
         stroke, br, lr, cx = 1.2 * SCALE, 4.5 * SCALE, 2.5 * SCALE, W / 2  # 线框粗细、灯体圆角、灯的半径
@@ -315,6 +336,78 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars"):
         return inside
 
     shapes = [(bar(i, h), _mix(DIM[dark], tone, lit_of(i))) for i, h in enumerate((4.5, 7.5, 10.5, 13.5))]
+    return _png(S, S, _raster(S, S, shapes))
+
+
+def _arc(c, ro, ri, p):
+    """从 12 点开始顺时针的一段环（两头是圆的）：圆心 c，外半径 ro、内半径 ri，占 p%。p 满 100 是整个环。"""
+    sweep = 2 * math.pi * min(max(p, 0), 100) / 100
+    rm, rc = (ro + ri) / 2, (ro - ri) / 2
+    ends = [(c, c - rm), (c + rm * math.sin(sweep), c - rm * math.cos(sweep))]
+
+    def inside(px, py):
+        d = (px - c) ** 2 + (py - c) ** 2
+        if ri * ri <= d <= ro * ro and (sweep >= 2 * math.pi or math.atan2(px - c, c - py) % (2 * math.pi) <= sweep):
+            return True
+        return any((px - x) ** 2 + (py - y) ** 2 <= rc * rc for x, y in ends)
+    return inside
+
+
+def _annulus(c, ro, ri):
+    return lambda px, py: ri * ri <= (px - c) ** 2 + (py - c) ** 2 <= ro * ro
+
+
+def _quota_icon(dark, level, kind, phase, style, p5, p7):
+    """画额度的三种菜单栏图标：颜色是状态（绿 = 空闲正常，橙 = 工作中 / 要注意，红 = 要处理，和红绿灯一样），长短是额度。
+    5 小时用状态色，7 天用菜单栏文字的颜色。还没有 5 小时的数时画满一圈 / 一整根，只当状态灯用。
+
+    动画和红绿灯一个节奏：工作中（pulse）彩色那段每秒闪一次（亮半秒、暗半秒，暗的时候留三成五的颜色，像红绿灯的镜片），
+    等你确认（blink）快一倍、而且整个图标一起闪（底环和 7 天那段也暗下去），一眼和工作中分得开。
+    经典模式的两帧（phase 0 和 0.375）一亮一暗。"""
+    if kind == "pulse":
+        lit = (phase % 0.5) < 0.25
+    elif kind == "blink":
+        lit = (phase % 0.25) < 0.125
+    else:
+        lit = True
+    fade = 0.25 if kind == "blink" and not lit else 1.0  # 等你确认的暗拍：整个图标只剩两成五
+
+    def a(rgba, k=1.0):
+        return (*rgba[:3], rgba[3] * k * fade)
+    tone = (*FILL[{"busy": "warn"}.get(level, level)][dark], 1.0)
+    col = a(tone, 1.0 if lit or kind == "blink" else 0.35)
+    ink = a(GLYPH[dark])
+    track = a(TRACK[dark])
+    p5v = 100 if p5 is None else p5
+    if style == "twobar":
+        W, H = TWOBAR_W * SCALE, TWOBAR_H * SCALE
+        r = 2 * SCALE
+        y5, y7 = 3.5 * SCALE, 10.5 * SCALE
+        x0, x1 = 0.5 * SCALE, W - 0.5 * SCALE
+
+        def fill(p):
+            return x0 + max(2 * r, (x1 - x0) * min(max(p, 0), 100) / 100)
+        shapes = [(_pill(x0, x1, y5, r), track), (_pill(x0, x1, y7, r), track)]
+        if p5v > 0:
+            shapes.append((_pill(x0, fill(p5v), y5, r), col))
+        if p7 is not None and p7 > 0:
+            shapes.append((_pill(x0, fill(p7), y7, r), ink))
+        return _png(W, H, _raster(W, H, shapes))
+    S = ICON_W * SCALE
+    c = S / 2
+    if style == "ring":
+        ro, ri = c - 0.5 * SCALE, c - 3.0 * SCALE
+        shapes = [(_annulus(c, ro, ri), track)]
+        if p5v > 0:
+            shapes.append((_arc(c, ro, ri, p5v), col))
+        return _png(S, S, _raster(S, S, shapes))
+    ro, ri = c - 0.5 * SCALE, c - 2.7 * SCALE  # 双环：外圈 2.2 点粗，空 1 点，内圈 2 点粗
+    ro2, ri2 = ri - 1.0 * SCALE, ri - 3.0 * SCALE
+    shapes = [(_annulus(c, ro, ri), track), (_annulus(c, ro2, ri2), track)]
+    if p5v > 0:
+        shapes.append((_arc(c, ro, ri, p5v), col))
+    if p7 is not None and p7 > 0:
+        shapes.append((_arc(c, ro2, ri2, p7), ink))
     return _png(S, S, _raster(S, S, shapes))
 
 
@@ -687,27 +780,37 @@ def render(store, st, out=print, rich=None, phase=None):
     kind = light[2] if light else ""
     phases = [phase] if phase is not None else ([0.0, 0.375] if kind else [0.0])  # 经典模式两帧：0.375 这一帧两种动画都是灭的
 
-    style = (data.get("prefs") or {}).get("menu_icon") or "bars"  # 菜单里选的图标样式
+    prefs = data.get("prefs") or {}
+    style = prefs.get("menu_icon") if prefs.get("menu_icon") in dict(ICON_STYLES) else "bars"  # 菜单里选的图标样式
+    items = cam.menu_text_items(prefs)  # 图标旁边写什么
+    answering = 0
+    if light and "sessions" in items:  # status_light 刚数过会话（session_count），这里只读它的结果，不再查一遍进程
+        c = cam.session_counts()
+        answering = c["answering"] or (True if cam.session_busy() else 0)
 
-    def bars_icon(ph):
-        return image_param(lambda _v, dark: status_icon(dark, light[0], kind, ph, style), None, *icon_size(style))
+    def bars_icon(ph, p5=None, p7=None):
+        q = style in QUOTA_STYLES  # 画额度的样式要数（取整，图按参数缓存）；信号格、红绿灯不要，免得每个百分比各存一张
+        a5, a7 = (round(p5) if q and p5 is not None else None), (round(p7) if q and p7 is not None else None)
+        return image_param(lambda _v, dark: status_icon(dark, light[0], kind, ph, style, a5, a7), None, *icon_size(style))
 
     heads = []
+    # 标题优先显示当前 Claude Code 账号；当前号没有 5 小时额度时退回到有额度的网页账号（上面的 title_acc）
+    shown = title_acc if title_acc is not None and pct(title_acc, "five_hour") is not None else active
     if not accs:
         heads.append("Claude ⚠ | sfimage=person.2.circle")
-    elif title_acc is not None and pct(title_acc, "five_hour") is not None:
-        p = pct(title_acc, "five_hour")
-        # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
-        # 不 rich 时用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
-        name = title_name(title_acc, pos[title_acc["id"]]) if rich else short(title_acc.get("label") or title_acc.get("email"))
-        text, tail = f"{esc(name)} {p:.0f}% | ", (f" color={color_for(p)}" if color_for(p) else "")
+    elif shown is not None:
+        p5, p7 = pct(shown, "five_hour"), pct(shown, "seven_day")
+        name = title_name(shown, pos[shown["id"]]) if rich else short(shown.get("label") or shown.get("email"))
+        txt = title_text(items, esc(name), p5, p7, answering)
+        head = f"{txt} | " if txt else "| "  # 一项都不写：只有图标（SwiftBar 认没有文字的标题行）
         if rich:  # 带图的行不加 color（会把图丢掉，见 heading）：额度高低由图标颜色表示
-            heads += [text + bars_icon(ph) for ph in phases]
+            heads += [head + bars_icon(ph, p5, p7) for ph in phases]
+        elif p5 is not None:
+            # 图标颜色跟着 5 小时额度走：<70% 绿、70–89% 黄、≥90% 红；文字只在快满时变色。
+            # 不 rich 时用 SF Symbol（Windows 托盘按 sfcolor 定图标底色）
+            heads.append(head + f"sfimage=person.2.circle sfcolor={color_for(p5) or GREEN}" + (f" color={color_for(p5)}" if color_for(p5) else ""))
         else:
-            heads.append(text + f"sfimage=person.2.circle sfcolor={color_for(p) or GREEN}" + tail)
-    elif active:
-        name = title_name(active, pos[active["id"]]) if rich else short(active.get("label") or active.get("email"))
-        heads += [f"{esc(name)} | " + bars_icon(ph) for ph in phases] if rich else [f"{esc(name)} | sfimage=person.2.circle"]
+            heads.append(head + "sfimage=person.2.circle")
     else:
         heads.append("Claude | sfimage=person.2.circle")
     extra = (mini_href(store, accs) if rich else "") + (" dropdown=false" if len(heads) > 1 else "")  # 多行标题不进下拉菜单
@@ -903,6 +1006,9 @@ def render(store, st, out=print, rich=None, phase=None):
         out("--图标样式 | size=12 color=gray")
         for key, label in ICON_STYLES:
             out(f"--{label} | size=12" + (" checked=true" if key == style else f" {action('icon', key, script=MENU_PY)}"))
+        out("--图标旁边写什么 | size=12 color=gray")  # 打勾的是要写的，点一下勾上 / 去掉
+        for key, label in MENU_TEXT_LABELS:
+            out(f"--{label} | size=12 {action('text', key, script=MENU_PY)}" + (" checked=true" if key in items else ""))
     if st.get("bg_owner") == "other":
         out("--自动刷新由桌面版或 cam serve 负责 | size=12 color=gray")
     elif st.get("last_refresh"):
@@ -1083,12 +1189,25 @@ def set_icon_from_menu(store, style):
     return 0
 
 
+def toggle_text_from_menu(store, key):
+    """菜单里点“图标旁边写什么”的一项：勾上的去掉、没勾的勾上，记到账号库的 prefs.menu_text（按 cam.MENU_TEXT 的顺序）。"""
+    with store.lock():
+        data = store.load()
+        prefs = data.setdefault("prefs", {})
+        on = cam.menu_text_items(prefs)
+        prefs["menu_text"] = [k for k in cam.MENU_TEXT if (k in on) != (k == key)]
+        store.save(data)
+    return 0
+
+
 def main():
     store = cam.Store()
     if sys.argv[1:2] == ["stream"]:
         return stream(store)
     if sys.argv[1:2] == ["icon"] and sys.argv[2:3] and sys.argv[2] in dict(ICON_STYLES):
         sys.exit(set_icon_from_menu(store, sys.argv[2]))
+    if sys.argv[1:2] == ["text"] and sys.argv[2:3] and sys.argv[2] in cam.MENU_TEXT:
+        sys.exit(toggle_text_from_menu(store, sys.argv[2]))
     if sys.argv[1:2] == ["mode"] and sys.argv[2:3] and sys.argv[2] in ("stream", "classic"):
         sys.exit(set_mode_from_menu(sys.argv[2]))
     if sys.argv[1:2] == ["switch"] and len(sys.argv) > 2:  # 菜单里点了切换，见 switch_action

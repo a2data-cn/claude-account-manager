@@ -9408,7 +9408,19 @@ NOT_CHECKOUT = ("这份代码不是用 git 下载的（没有 .git 目录），�
 
 
 MENUBAR_PLUGIN = "Claude 账号.1m.sh"  # SwiftBar 插件目录里的启动脚本（extras/swiftbar/install.sh 写的）
-ICON_STYLES = ("bars", "lamp")
+# 菜单栏图标：信号格、红绿灯（竖的三盏灯）、圆环（5 小时用了多少）、双环（外圈 5 小时、内圈 7 天）、两根小条（上 5 小时、下 7 天）
+ICON_STYLES = ("bars", "lamp", "ring", "rings", "twobar")
+# 菜单栏图标旁边写什么（prefs.menu_text，按这个顺序）：名字、5 小时 %、7 天 %、在回答的会话数。默认名字 + 5 小时
+MENU_TEXT = ("name", "five", "seven", "sessions")
+MENU_TEXT_DEFAULT = ("name", "five")
+
+
+def menu_text_items(prefs):
+    """prefs 里记的菜单栏文字项，按 MENU_TEXT 的顺序；没记过（或记的不是列表）就是默认的名字 + 5 小时，记了空列表就是只要图标。"""
+    t = (prefs or {}).get("menu_text")
+    if not isinstance(t, list):
+        return list(MENU_TEXT_DEFAULT)
+    return [k for k in MENU_TEXT if k in t]
 MENU_MODES = ("classic", "stream")
 
 
@@ -9421,7 +9433,8 @@ def swiftbar_plugin_dir():
 
 
 def menubar_settings(store):
-    """菜单栏小工具的设置，给卡片小面板的“设置”页：装没装、动画模式（看启动脚本里有没有 streamable）、图标样式（prefs）。"""
+    """菜单栏小工具的设置，给卡片小面板和管理面板的“设置”页：装没装、动画模式（看启动脚本里有没有 streamable）、
+    图标样式和图标旁边写什么（prefs.menu_icon、prefs.menu_text）。"""
     path = os.path.join(swiftbar_plugin_dir(), MENUBAR_PLUGIN)
     installed = os.path.isfile(path)
     mode = None
@@ -9433,13 +9446,13 @@ def menubar_settings(store):
             mode = None
     prefs = store.load().get("prefs") or {}
     return {"available": IS_MAC or bool(os.environ.get("CAM_SWIFTBAR_DIR")), "installed": installed, "mode": mode,
-            "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars",
+            "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars", "text": menu_text_items(prefs),
             "confirm_switch": bool(prefs.get("confirm_switch")), "plugin": path,  # confirm_switch：卡片里点其它号先问一句再切
             "hooks": hooks_status()["installed"]}  # hooks：Claude Code 的钩子装没装（等你确认时三盏灯一起闪）
 
 
 def save_menubar_settings(store, body):
-    """改图标样式（记到 prefs，插件下次渲染就换）、卡片的“切换前确认”开关（prefs）、改动画模式（重跑 extras/swiftbar/install.sh 改写启动脚本，再重开 SwiftBar）。"""
+    """改图标样式和旁边写什么（记到 prefs，插件下次渲染就换）、卡片的“切换前确认”开关（prefs）、改动画模式（重跑 extras/swiftbar/install.sh 改写启动脚本，再重开 SwiftBar）。"""
     if not isinstance(body, dict):
         raise CamError("请求体应为 JSON 对象")
     restarting = False
@@ -9456,10 +9469,18 @@ def save_menubar_settings(store, body):
             store.save(data)
     if "icon" in body:
         if body["icon"] not in ICON_STYLES:
-            raise CamError("图标样式只能是 bars（信号格）或 lamp（红绿灯）")
+            raise CamError("图标样式只能是 bars（信号格）、lamp（红绿灯）、ring（圆环）、rings（双环）或 twobar（两根小条）")
         with store.lock():
             data = store.load()
             data.setdefault("prefs", {})["menu_icon"] = body["icon"]
+            store.save(data)
+    if "text" in body:
+        t = body["text"]
+        if not isinstance(t, list) or any(k not in MENU_TEXT for k in t):
+            raise CamError("菜单栏文字只能从 name（名字）、five（5 小时）、seven（7 天）、sessions（在回答的会话数）里选，可以一个都不选")
+        with store.lock():
+            data = store.load()
+            data.setdefault("prefs", {})["menu_text"] = [k for k in MENU_TEXT if k in t]
             store.save(data)
     if "mode" in body:
         if body["mode"] not in MENU_MODES:
