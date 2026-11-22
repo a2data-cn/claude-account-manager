@@ -5581,6 +5581,27 @@ def make_handler(store, token):
                     if (q.get("probe") or [""])[0]:
                         return self._send(200, {"ok": True})
                     return self._send(200, full_checkup(store, offline=bool((q.get("offline") or [""])[0])))
+                if method == "GET" and parts == ["env-fix"]:  # 一键清理要改什么。只有脚本版有：桌面版返回 404，面板据此隐藏按钮
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    if (q.get("probe") or [""])[0]:
+                        return self._send(200, {"ok": True})
+                    latest = None if (q.get("offline") or [""])[0] else _quiet(latest_claude_version)[0]
+                    # 面板：服务进程的 PATH 可能和你的终端不一样，卸载、升级只提示，到终端里跑 cam env fix
+                    return self._send(200, env_plan_view(store, env_fix_plan(latest, auto_install=False)))
+                if method == "POST" and parts == ["env-fix"]:
+                    # {"apply": true, "digest", "force"?, "optional"?}：当场重新算一遍要改什么（不信请求里的），和面板上确认过的那份
+                    # （digest）不一样就不改，让人重新看；{"undo": true} 撤销上一次
+                    b = self._body()
+                    if b.get("undo"):
+                        return self._send(200, env_fix_undo(store))
+                    if b.get("apply") is not True:
+                        raise CamError("要改请带 apply: true")
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    plan = env_fix_plan(None if (q.get("offline") or [""])[0] else _quiet(latest_claude_version)[0], auto_install=False)
+                    if b.get("digest") != plan["digest"] or (b.get("optional") is True and b.get("digest_optional") != plan["digest_optional"]):
+                        raise CamError("要改的东西和你刚才看到的不一样了（比如刚查到新版本、有人改了配置），重新点一次“一键清理”看清单")
+                    res = env_fix_apply(store, plan, force=bool(b.get("force")), optional=b.get("optional") is True)
+                    return self._send(200, res)
                 if method == "GET" and parts == ["update"]:  # 只有脚本版有：桌面版的服务返回 404，面板据此隐藏“检查更新”
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     if (q.get("saved") or [""])[0]:
@@ -6617,37 +6638,6 @@ NATIVE_INSTALL_PS1 = "https://claude.ai/install.ps1"
 # 可以重新生成的缓存。按名字逐个删除，不用通配符，名单以外的东西一概不动
 CACHE_ITEMS = ("cache", "statsig", "shell-snapshots", "session-env", "debug", "ide", "telemetry", "paste-cache",
                "downloads", ".last-cleanup", ".last-update-result.json")
-# 这些环境变量会让 Claude Code 不走订阅登录，切换账号看起来就“不生效”
-OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
-
-
-def install_kind(real):
-    low = real.replace("\\", "/").lower()
-    if "/.claude/local/" in low:
-        return "npm（本地）"
-    if "node_modules" in low or "/npm/" in low:
-        return "npm"
-    if "/.local/share/claude/" in low or "/.local/bin/" in low:
-        return "原生"
-    if "homebrew" in low or "/cellar/" in low or "caskroom" in low:
-        return "Homebrew"
-    return "其它"
-
-
-def claude_installs():
-    """PATH 里所有的 claude，按真实路径去重，排在前面的是实际会运行的那个。返回 [(路径, 真实路径, 安装方式)]。"""
-    names = ("claude.exe", "claude.cmd", "claude") if IS_WIN else ("claude",)
-    seen, out = set(), []
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        for n in names:
-            p = os.path.join(d, n)
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                real = os.path.realpath(p)
-                if real not in seen:
-                    seen.add(real)
-                    out.append((p, real, install_kind(real)))
-    return out
 
 
 def claude_version(exe):
@@ -6658,27 +6648,1071 @@ def claude_version(exe):
         return None
 
 
-def override_findings():
-    """会让 Claude Code 不用订阅登录的设置（它们优先于登录凭据）。"""
-    out = [f"环境变量 {k} 已设置" for k in OVERRIDE_ENV if os.environ.get(k)]
-    for name in ("settings.json", "settings.local.json"):
-        path = os.path.join(claude_config_dir(), name)
+# ---- 本机 Claude Code 的环境：第三方中转、API Key 这类设置在哪、装了几份；一键清理（cam env fix）和撤销
+
+# 会让 Claude Code 不用订阅登录（切换账号看起来“不生效”）、或者把请求发到别处的设置。第三方中转一般就是 BASE_URL + AUTH_TOKEN。
+# 只看有没有、不打印值（BASE_URL 只说主机名，模型名照写）
+RELAY_ENV = (
+    ("ANTHROPIC_BASE_URL", "把请求发到别的地址（第三方中转常用）"),
+    ("ANTHROPIC_AUTH_TOKEN", "用这个令牌代替订阅登录（第三方中转常用）"),
+    ("ANTHROPIC_API_KEY", "用 API Key 代替订阅登录（按量计费）"),
+    ("CLAUDE_CODE_OAUTH_TOKEN", "用这个长期令牌代替本机的登录"),
+    ("ANTHROPIC_CUSTOM_HEADERS", "每个请求多带几个请求头（第三方中转常用）"),
+    ("CLAUDE_CODE_USE_BEDROCK", "改走 Amazon Bedrock"),
+    ("CLAUDE_CODE_USE_VERTEX", "改走 Google Vertex AI"),
+    ("CLAUDE_CODE_USE_FOUNDRY", "改走 Microsoft Foundry"),
+)
+# 模型名：第三方中转常改成别家的模型（glm、kimi、deepseek 这类），用订阅登录时请求会出错。是 Claude 的模型名就不管
+MODEL_ENV = ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+             "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
+OVERRIDE_ENV = tuple(k for k, _ in RELAY_ENV)
+# 不是改登录、但常跟着中转教程一起设的：关掉 HTTPS 证书校验（有被中间人窃听的风险）、关掉自动更新（版本一直停在旧的）
+EXTRA_ENV = (("NODE_TLS_REJECT_UNAUTHORIZED", "关掉了 HTTPS 证书校验：所有 HTTPS 连接都不验证证书，可能被中间人窃听（有的中转教程会让这么设）"),
+             ("DISABLE_AUTOUPDATER", "关掉了 Claude Code 的自动更新：版本会一直停在旧的"))
+SCAN_ENV = OVERRIDE_ENV + MODEL_ENV + tuple(k for k, _ in EXTRA_ENV)
+ENV_WHAT = dict(RELAY_ENV, **dict(EXTRA_ENV), **{k: "模型名不是 Claude 的（第三方中转的设置）" for k in MODEL_ENV})
+# 官方支持的用法：按量计费的 API Key、claude setup-token 的长期令牌、走云厂商。只是用了它们 cam 切号不生效，
+# 所以标成“提示”、一键清理默认不动，列成“可选”，要用订阅账号切号时再勾上（cam env fix --all）
+SUPPORTED_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                 "CLAUDE_CODE_USE_FOUNDRY", "DISABLE_AUTOUPDATER")
+SUPPORTED_ADVICE = "官方支持的用法，本来就这么用的话留着；想用订阅账号（cam 切号）就去掉它"
+ENV_ADVICE = {"CLAUDE_CODE_OAUTH_TOKEN": "官方的长期令牌（claude setup-token 生成的），用它就固定用那一个号；想用 cam 切号就去掉它",
+              "DISABLE_AUTOUPDATER": "想让它自己更新就去掉它；公司统一管版本的话留着",
+              "NODE_TLS_REJECT_UNAUTHORIZED": "去掉它。公司网络要用自己的根证书的话，改用 NODE_EXTRA_CA_CERTS 指向证书文件，不用关掉校验",
+              **{k: SUPPORTED_ADVICE for k in SUPPORTED_ENV if k not in ("CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER")}}
+# 写在 shell 配置文件里的环境变量：zsh、bash、fish 的，Windows 上 Git Bash 也读 ~/.bashrc
+SHELL_FILES = ("~/.zshenv", "~/.zprofile", "~/.zshrc", "~/.bash_profile", "~/.bash_login", "~/.bashrc", "~/.profile",
+               "~/.config/fish/config.fish")
+ENV_FIX_MARK = "# [cam env fix {date} 注释掉] "
+
+
+def short_path(p):
+    """说明里的路径写短一点：主目录写成 ~。"""
+    h = home().rstrip("/\\")
+    return "~" + p[len(h):] if h and (p == h or p.startswith(h + os.sep) or p.startswith(h + "/")) else p
+
+
+def is_claude_model(v):
+    """Claude 的模型名或别名：claude-…、Bedrock 的 anthropic.claude-…（带 us. / us-gov. / eu. 这类区域前缀）和推理配置 ARN、
+    Vertex 的 claude-…@日期、sonnet / opus / haiku / fable / opusplan / default。"""
+    v = str(v or "").strip().lower()
+    return bool(re.match(r"^([a-z]{2,6}(-gov)?\.)?(anthropic\.)?claude", v) or "anthropic.claude" in v
+                or v.startswith("arn:aws:bedrock:") or v.startswith("arn:aws-us-gov:bedrock:")
+                or re.fullmatch(r"(sonnet|opus|haiku|fable|opusplan|default|best)(\[1m\])?", v))
+
+
+def env_value_matters(name, value):
+    """这个值会不会让 Claude Code 偏离订阅登录。BASE_URL 指向官方、开关是 0、模型是 Claude 的，都不算。值看不出来（shell 里写的是 $(…)）当算。"""
+    if value is None:
+        return True
+    v = str(value).strip().strip("'\"")
+    if not v:
+        return False
+    if name == "ANTHROPIC_BASE_URL":
+        host = (urllib.parse.urlparse(v if "://" in v else "https://" + v).hostname or "").lower()
+        return not (host == "anthropic.com" or host.endswith(".anthropic.com"))
+    if name.startswith("CLAUDE_CODE_USE_") or name == "DISABLE_AUTOUPDATER":
+        return v.lower() not in ("0", "false", "no", "off")
+    if name == "NODE_TLS_REJECT_UNAUTHORIZED":
+        return v == "0"
+    if name in MODEL_ENV:
+        return "$" in v or not is_claude_model(v)
+    return True
+
+
+def env_shown(name, value):
+    """说明里怎么写这个变量：BASE_URL 写主机名，模型写名字，令牌、Key 一律不写值。"""
+    v = str(value or "").strip().strip("'\"")
+    if name == "ANTHROPIC_BASE_URL" and v and "$" not in v:
+        host = urllib.parse.urlparse(v if "://" in v else "https://" + v).hostname
+        return f"{name}（指向 {host}）" if host else name
+    if name in MODEL_ENV and v and "$" not in v:
+        return f"{name}={v}"
+    return name
+
+
+def managed_settings_paths():
+    """系统级的托管设置（企业管理员下发，优先级最高，普通用户改不了）。测试用 CAM_MANAGED_SETTINGS 指过去。"""
+    t = os.environ.get("CAM_MANAGED_SETTINGS")
+    if t is not None:
+        return [p for p in t.split(os.pathsep) if p]
+    if IS_MAC:
+        return ["/Library/Application Support/ClaudeCode/managed-settings.json"]
+    if IS_WIN:
+        return [os.path.join(os.environ.get("ProgramFiles") or r"C:\Program Files", "ClaudeCode", "managed-settings.json"),
+                os.path.join(os.environ.get("ProgramData") or r"C:\ProgramData", "ClaudeCode", "managed-settings.json")]
+    return ["/etc/claude-code/managed-settings.json"]
+
+
+def _finding(level, text, advice="", fix=None, optional=False):
+    """一条发现：level 和体检一样；fix 是一键清理怎么改（None 就是要人自己处理，advice 说怎么做）；
+    optional：官方支持的用法，一键清理默认不动（要勾上 / --all 才改）。"""
+    return {"level": level, "text": text, "advice": advice, "fix": fix, "optional": optional}
+
+
+def cloud_on():
+    """开着 Bedrock / Vertex / Foundry（当前进程、settings.json 的 env 里任一处）：这时模型名本来就是云厂商那边的写法，
+    模型变量不算第三方中转的设置，当官方支持的用法（可选，默认不动）。"""
+    envs = [os.environ]
+    for n in ("settings.json", "settings.local.json"):
         try:
-            s = read_json(path, {}) or {}
+            st = read_json(os.path.join(claude_config_dir(), n), {}) or {}
         except CamError:
+            continue
+        if isinstance(st, dict) and isinstance(st.get("env"), dict):
+            envs.append(st["env"])
+    return any(env_value_matters(k, e.get(k)) for e in envs for k in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                                                                       "CLAUDE_CODE_USE_FOUNDRY") if e.get(k))
+
+
+def _env_finding(k, text, default_advice, fix, cloud=False):
+    """一个环境变量的发现：官方支持的用法是“提示”、可选，第三方中转的是“注意”。开着云厂商时模型变量也算官方支持的用法。"""
+    sup = k in SUPPORTED_ENV or (cloud and k in MODEL_ENV)
+    return _finding("info" if sup else "warn", text, SUPPORTED_ADVICE if (cloud and k in MODEL_ENV) else ENV_ADVICE.get(k, default_advice),
+                    fix, sup)
+
+
+def settings_findings():
+    """settings.json / settings.local.json：写坏了、env 里的中转设置、apiKeyHelper、强制用 API 登录、非 Claude 的模型名；
+    系统级托管设置里的同样几项只提醒（要管理员改）。返回 (发现, {变量名: 在哪设的})。"""
+    out, where = [], {}
+    cloud = cloud_on()
+    files = [(p, False) for p in (os.path.join(claude_config_dir(), n) for n in ("settings.json", "settings.local.json"))]
+    files += [(p, True) for p in managed_settings_paths()]
+    for path, managed in files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            s = read_json(path, {})
+        except CamError as e:
+            out.append(_finding("bad", f"{short_path(path)} 不是合法的 JSON：Claude Code 会忽略整个文件，里面的设置都不生效（{str(e).split('（')[-1].rstrip('）')}）",
+                                "用编辑器打开改好（常见是多了逗号、少了引号），或者先挪走让 Claude Code 重新生成"))
             continue
         if not isinstance(s, dict):
             continue
-        if s.get("apiKeyHelper"):
-            out.append(f"{path} 里设置了 apiKeyHelper")
+        who = f"系统级托管设置 {path}" if managed else short_path(path)
+        manual = f"这是管理员下发的设置，要管理员权限才能改：{path}" if managed else ""
         env = s.get("env") if isinstance(s.get("env"), dict) else {}
-        out += [f"{path} 的 env 里设置了 {k}" for k in OVERRIDE_ENV if env.get(k)]
+        for k in SCAN_ENV:
+            if k in env and env_value_matters(k, env[k]):
+                where.setdefault(k, who)
+                f = _env_finding(k, f"{who} 的 env 里设置了 {env_shown(k, env[k])}：{ENV_WHAT[k]}", "不用第三方中转的话去掉它",
+                                 None if managed else {"type": "json_key", "path": path, "env": True, "key": k}, cloud)
+                if manual:
+                    f["advice"] = manual
+                out.append(f)
+        if s.get("apiKeyHelper"):
+            out.append(_finding("info", f"{who} 里设置了 apiKeyHelper：用脚本给出的 Key 代替订阅登录", manual or SUPPORTED_ADVICE,
+                                None if managed else {"type": "json_key", "path": path, "env": False, "key": "apiKeyHelper"}, True))
+        if s.get("forceLoginMethod") == "console":
+            out.append(_finding("info", f"{who} 里设置了 forceLoginMethod=console：只能用 API 账号登录，订阅登录不了", manual or SUPPORTED_ADVICE,
+                                None if managed else {"type": "json_key", "path": path, "env": False, "key": "forceLoginMethod"}, True))
+        if isinstance(s.get("model"), str) and s["model"] and not is_claude_model(s["model"]):
+            out.append(_finding("info" if cloud else "warn",
+                                f"{who} 里的 model={s['model']} 不是 Claude 的模型名" + ("（开着云厂商，可能是那边的写法）" if cloud else
+                                                                                   "（第三方中转的设置），用订阅登录时会出错"),
+                                manual or (SUPPORTED_ADVICE if cloud else "去掉它，或者改成 sonnet / opus"),
+                                None if managed else {"type": "json_key", "path": path, "env": False, "key": "model"}, cloud))
+    return out, where
+
+
+def shell_syntax(path):
+    low = path.lower()
+    return "fish" if low.endswith(".fish") else "ps" if low.endswith(".ps1") else "sh"
+
+
+def shell_env_lines(path, names, text=None, syntax=None):
+    """配置文件里给这些变量赋值的地方：[(行号, 变量名, 值或 None, simple)]。认 sh/zsh/bash 的 export / 赋值、fish 的 set、
+    csh 的 setenv、PowerShell 的 $env:X = 和 SetEnvironmentVariable("X"。值是 $(…) 这类算不出来的给 None，PowerShell 的 $null 当空。
+    只认“语句开头”的赋值：alias、echo 里的字、引号里的不算；heredoc 里的跳过。
+    simple 表示这一行可以放心整行注释掉：顶格写、只给这一个变量赋值（可以带行尾注释）、不在函数 / if / 循环里、上一行不是续行。
+    其它（一行里还有别的命令、只对后面那条命令生效的前缀、缩进在块里的）只提示、不替人改。"""
+    if text is None:
+        text = read_text_file(path)[0]
+        if text is None:
+            return []
+    syntax = syntax or shell_syntax(path)
+    is_fish, is_ps = syntax == "fish", syntax == "ps"
+    out, depth, heredoc, cont = [], 0, None, False
+    val = r"(\"[^\"]*\"|'[^']*'|[^\s;&|#]*)"
+    all_lines = text.splitlines()
+    closer = re.compile(r"(\}|fi|done|esac|end)\b")
+
+    def next_is_closer(i):  # 下一条有内容的行是块的结尾：这一行可能是块里唯一的一句，注释掉会让 bash 报语法错
+        for ln in all_lines[i:]:
+            t = ln.strip()
+            if t and not t.startswith("#"):
+                return bool(closer.match(t))
+        return False
+    for n, line in enumerate(all_lines, 1):
+        if n == 1:
+            line = line.lstrip("﻿")
+        s = line.strip()
+        prev_cont, cont = cont, line.rstrip().endswith("\\") or (is_ps and line.rstrip().endswith("`"))
+        if heredoc is not None:
+            if s == heredoc:
+                heredoc = None
+            continue
+        if not s or s.startswith("#"):
+            continue
+        m = re.search(r"(?<!<)<<-?(?!<)\s*['\"]?([A-Za-z_]\w*)['\"]?", s)
+        if m and not is_ps and "((" not in s:
+            heredoc = m.group(1)
+        nc = re.sub(r"\s+#.*$", "", s)  # 去掉行尾注释再认块的开头结尾（“relay() {  # 中转” 也是函数开头）
+        if is_fish:
+            net = len(re.findall(r"(?:^|;)\s*(if|for|while|function|switch|begin)\b", nc)) - len(re.findall(r"(?:^|;)\s*end\b", nc))
+        elif is_ps:
+            net = nc.count("{") - nc.count("}")
+        else:
+            net = (len(re.findall(r"(?:^|;|&&|\|\||\bthen\b|\bdo\b)\s*(if|while|until|for|case|select)\b", nc))
+                   - len(re.findall(r"(?:^|;|&&|\|\|)\s*(fi|done|esac)\b", nc))
+                   + (1 if nc.endswith("{") else 0) - (1 if nc.startswith("}") else 0))
+        top = depth == 0 and not prev_cont and line[:1] not in (" ", "\t") and not next_is_closer(n)
+        for k in names:
+            sm = smp = None
+            if is_ps:
+                sm = re.search(rf"(?:^|;)\s*\$env:{k}\s*=\s*{val}", s, re.I) or \
+                    re.search(rf"SetEnvironmentVariable\(\s*['\"]{k}['\"]\s*,\s*(\"[^\"]*\"|'[^']*'|[^,)]+)", s, re.I)
+                smp = re.fullmatch(rf"\$env:{k}\s*=\s*{val}\s*(#.*)?", s, re.I)
+            elif is_fish:
+                sm = re.search(rf"(?:^|;)\s*set\s+(?:-\w+\s+)*{k}\s+{val}", s)
+                smp = re.fullmatch(rf"set\s+(?:-\w+\s+)*{k}\s+{val}\s*(#.*)?", s)
+            else:
+                sm = (re.search(rf"(?:^|;|&&|\|\||\bthen\b|\bdo\b|\{{)\s*(?:export\s+|declare\s+-x\s+|local\s+)?"
+                                rf"(?:[A-Za-z_]\w*={val}\s+)*{k}={val}", s)
+                      or re.search(rf"(?:^|;)\s*setenv\s+{k}\s+{val}", s))
+                smp = (re.fullmatch(rf"(?:export\s+)?{k}={val}\s*(#.*)?", s)
+                       or re.fullmatch(rf"setenv\s+{k}\s+{val}\s*(#.*)?", s))
+            if not sm:
+                continue
+            v = sm.group(sm.lastindex).strip("'\"") if sm.lastindex else ""
+            if is_ps and v.lower() == "$null":
+                v = ""
+            out.append((n, k, None if ("$" in v or "`" in v) else v, bool(smp) and top))
+        depth = max(0, depth + net)
+    return out
+
+
+def powershell_profiles():
+    """Windows PowerShell 5.1 和 PowerShell 7 的个人配置文件（“文档”可能被 OneDrive 接管，两处都看）。"""
+    out = []
+    for docs in (os.path.join(home(), "Documents"), os.path.join(home(), "OneDrive", "Documents")):
+        for sub in ("WindowsPowerShell", "PowerShell"):
+            for name in ("Microsoft.PowerShell_profile.ps1", "profile.ps1"):
+                out.append(os.path.join(docs, sub, name))
+    return out
+
+
+def shell_findings():
+    """shell / PowerShell 配置文件里设的中转变量。单独一行、顶格的，一键清理把那一行注释掉（不删，加个标记，能撤销）；
+    和别的命令写在一起、在函数或 if 里的，只提示在哪，让人自己改（整行注释掉会连带别的设置，或者让 bash 报语法错）。"""
+    out, where = [], {}
+    files = [os.path.expanduser(p) for p in SHELL_FILES]
+    if IS_WIN or os.environ.get("CAM_TEST_PS_PROFILES"):
+        files += powershell_profiles()
+    names = SCAN_ENV
+    cloud, seen = cloud_on(), set()
+    for path in files:
+        real = os.path.realpath(path)
+        if not os.path.isfile(path) or real in seen:  # 两个名字指向同一个文件（链接）只查一次
+            continue
+        seen.add(real)
+        for n, k, v, simple in shell_env_lines(path, names):
+            if not env_value_matters(k, v):
+                continue
+            where.setdefault(k, f"{short_path(path)} 第 {n} 行")
+            text = f"{short_path(path)} 第 {n} 行设置了 {env_shown(k, v)}：{ENV_WHAT[k]}"
+            if simple:
+                out.append(_env_finding(k, text, "不用第三方中转的话把这一行注释掉",
+                                        {"type": "comment", "path": real, "line": n, "key": k, "syntax": shell_syntax(path)}, cloud))
+            else:
+                f = _env_finding(k, text, "", None, cloud)
+                f["advice"] = (f"这一行还有别的内容（或者在函数、if 里面），cam 不替你改：打开 {short_path(path)}，"
+                               f"把第 {n} 行里 {k} 那部分删掉" + ("（官方支持的用法，本来就这么用的话留着）" if f["optional"] else ""))
+                out.append(f)
+    return out, where
+
+
+WIN_USER_ENV = "Environment"
+WIN_SYSTEM_ENV = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+
+
+def win_env_values(system=False):
+    """Windows 注册表里的用户（或系统）环境变量：{名字: (值, 类型)}。不是 Windows、读不了时是空的。"""
     try:
-        if (read_json(claude_json_file(), {}) or {}).get("primaryApiKey"):
-            out.append(f"{claude_json_file()} 里存着 API Key（primaryApiKey）")
-    except CamError:
+        import winreg  # noqa: PLC0415
+    except ImportError:
+        return {}
+    root = winreg.HKEY_LOCAL_MACHINE if system else winreg.HKEY_CURRENT_USER
+    out = {}
+    try:
+        with winreg.OpenKey(root, WIN_SYSTEM_ENV if system else WIN_USER_ENV) as key:
+            i = 0
+            while True:
+                try:
+                    name, value, kind = winreg.EnumValue(key, i)
+                except OSError:
+                    break
+                out[name.upper()] = (value, kind)
+                i += 1
+    except OSError:
         pass
     return out
+
+
+def win_env_findings():
+    out, where = [], {}
+    cloud = cloud_on()
+    for system in (False, True):
+        vals = win_env_values(system)
+        for k in SCAN_ENV:
+            if k in vals and env_value_matters(k, vals[k][0]):
+                scope = "系统环境变量" if system else "用户环境变量"
+                where.setdefault(k, scope)
+                f = _env_finding(k, f"Windows {scope}里设置了 {env_shown(k, vals[k][0])}：{ENV_WHAT[k]}", "不用第三方中转的话删掉它",
+                                 None if system else {"type": "win_env", "key": k}, cloud)
+                if system:
+                    f["advice"] = "要管理员权限：开始菜单搜“编辑系统环境变量” → 环境变量 → 下面的“系统变量”里删掉它"
+                out.append(f)
+    return out, where
+
+
+def launchctl_value(name):
+    try:
+        r = subprocess.run(["launchctl", "getenv", name], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
+def launchctl_findings():
+    """macOS：launchctl setenv 设的变量，从 Dock、访达打开的程序都会带上。"""
+    out, where = [], {}
+    if not IS_MAC:
+        return out, where
+    for k in SCAN_ENV:
+        v = launchctl_value(k)
+        if v and env_value_matters(k, v):
+            where.setdefault(k, "launchctl")
+            out.append(_env_finding(k, f"launchctl 里设置了 {env_shown(k, v)}：{ENV_WHAT[k]}（从程序坞打开的程序都会带上）",
+                                    "不用第三方中转的话去掉它", {"type": "launchctl", "key": k}, cloud_on()))
+    return out, where
+
+
+def claude_json_findings():
+    out = []
+    try:
+        cj = read_json(claude_json_file(), {}) or {}
+    except CamError:
+        return out  # 写坏了的情况“本机 Claude Code”那几行已经报过
+    if isinstance(cj, dict) and cj.get("primaryApiKey"):
+        out.append(_finding("info", f"{short_path(claude_json_file())} 里存着 API Key（primaryApiKey）：Claude Code 会优先用它，不用订阅登录",
+                            SUPPORTED_ADVICE, {"type": "json_key", "path": claude_json_file(), "env": False, "key": "primaryApiKey"}, True))
+    return out
+
+
+def relay_tool_findings():
+    """第三方路由工具（claude-code-router）：用 ccr code 启动时请求走它，不走订阅。只提醒，不替你卸载别人的工具。"""
+    out = []
+    cfg = os.path.join(home(), ".claude-code-router", "config.json")
+    if os.path.isfile(cfg) or shutil.which("ccr"):
+        out.append(_finding("info", "装了 claude-code-router（第三方路由工具）：用 ccr code 启动时请求走它，不走订阅登录",
+                            "不用的话卸载它：npm uninstall -g @musistudio/claude-code-router"))
+    return out
+
+
+def _cmd_missing(cmd):
+    """钩子、状态栏、MCP 的命令找不到：返回找不到的那个程序 / 脚本，找得到或者看不出来（管道、$(…)、项目里的相对路径）返回 None。
+    “bash /x/y.sh”“python3 x.py”“node x.js” 这类连脚本一起看。"""
+    cmd = str(cmd or "").strip()
+    if not cmd or any(t in cmd for t in ("|", "&&", "||", ";", "$(", "`", "CLAUDE_PROJECT_DIR", "${")):
+        return None
+    try:
+        parts = shlex.split(cmd, posix=not IS_WIN)
+    except ValueError:
+        return None
+    if not parts:
+        return None
+
+    def missing(tok):
+        tok = os.path.expandvars(os.path.expanduser(tok.strip('"')))
+        if os.sep in tok or "/" in tok:
+            return tok if not os.path.exists(tok) else None
+        return tok if not shutil.which(tok) else None
+    first = missing(parts[0])
+    if first:
+        return first
+    base = os.path.basename(parts[0]).lower()
+    if re.match(r"(ba|z|da)?sh$|python[\d.]*$|node(\.exe)?$|pwsh|powershell", base) and len(parts) > 1 and not parts[1].startswith("-"):
+        p = os.path.expandvars(os.path.expanduser(parts[1]))
+        if (os.sep in p or "/" in p) and os.path.isabs(p) and not os.path.exists(p):
+            return p
+    return None
+
+
+def hook_findings():
+    """settings.json 里的钩子（hooks）、状态栏（statusLine）指向的程序不在了：Claude Code 每次跑到它都会报错。只提示，不替人删。"""
+    out = []
+    for n in ("settings.json", "settings.local.json"):
+        path = os.path.join(claude_config_dir(), n)
+        try:
+            st = read_json(path, {}) or {}
+        except CamError:
+            continue  # 写坏了的情况 settings_findings 已经报过
+        if not isinstance(st, dict):
+            continue
+        cmds = []
+        for event, groups in (st.get("hooks") or {}).items() if isinstance(st.get("hooks"), dict) else ():
+            for g in groups if isinstance(groups, list) else ():
+                for h in (g.get("hooks") or []) if isinstance(g, dict) else ():
+                    if isinstance(h, dict) and h.get("type", "command") == "command" and h.get("command"):
+                        cmds.append((f"钩子 {event}", h["command"]))
+        sl = st.get("statusLine")
+        if isinstance(sl, dict) and sl.get("type", "command") == "command" and sl.get("command"):
+            cmds.append(("状态栏 statusLine", sl["command"]))
+        for what, cmd in cmds:
+            gone = _cmd_missing(cmd)
+            if gone:
+                out.append(_finding("warn", f"{short_path(path)} 的{what}要运行的 {short_path(gone)} 找不到：Claude Code 每次跑到它都会报错",
+                                    "改对路径，或者在 /hooks（状态栏在 /statusline）里去掉它"))
+    return out
+
+
+MCP_PROJECTS_MAX = 50  # 最多看几个项目的 .mcp.json（~/.claude.json 里记着用过的项目，可能很多）
+
+
+def mcp_findings():
+    """MCP 服务器的命令找不到、项目里的 .mcp.json 写坏了：Claude Code 启动时这几个 MCP 连不上。只提示。"""
+    out = []
+    try:
+        cj = read_json(claude_json_file(), {}) or {}
+    except CamError:
+        return out
+    if not isinstance(cj, dict):
+        return out
+    where = [("用户级", short_path(claude_json_file()), cj.get("mcpServers"))]
+    projects = cj.get("projects") if isinstance(cj.get("projects"), dict) else {}
+    for proj, conf in list(projects.items())[:MCP_PROJECTS_MAX]:
+        if isinstance(conf, dict) and conf.get("mcpServers"):
+            where.append((f"项目 {short_path(proj)} 的本地", short_path(claude_json_file()), conf["mcpServers"]))
+        mj = os.path.join(proj, ".mcp.json")
+        if os.path.isfile(mj):
+            try:
+                m = read_json(mj, {}) or {}
+            except CamError:
+                out.append(_finding("warn", f"{short_path(mj)} 不是合法的 JSON：这个项目里的 MCP 服务器都不会加载", "用编辑器打开改好"))
+                continue
+            if isinstance(m, dict):
+                where.append((f"项目 {short_path(proj)}", short_path(mj), m.get("mcpServers")))
+    for scope, file, servers in where:
+        for name, conf in (servers or {}).items() if isinstance(servers, dict) else ():
+            if not isinstance(conf, dict) or not conf.get("command") or conf.get("type") in ("http", "sse"):
+                continue
+            cmd = " ".join([str(conf["command"])] + [shlex.quote(str(a)) for a in (conf.get("args") or [])[:1]])
+            gone = _cmd_missing(cmd)
+            if gone:
+                out.append(_finding("warn", f"MCP 服务器 {name}（{scope}，{file}）要运行的 {short_path(gone)} 找不到：Claude Code 里它连不上",
+                                    f"装上它，或者改对命令；不用了就 claude mcp remove {name}"))
+    return out
+
+
+def ca_findings():
+    """NODE_EXTRA_CA_CERTS 指向的证书文件不在了：Claude Code 启动时会报错。看当前进程和 settings.json 的 env。"""
+    out = []
+    srcs = [("环境变量", os.environ)]
+    for n in ("settings.json", "settings.local.json"):
+        path = os.path.join(claude_config_dir(), n)
+        try:
+            st = read_json(path, {}) or {}
+        except CamError:
+            continue
+        if isinstance(st, dict) and isinstance(st.get("env"), dict):
+            srcs.append((f"{short_path(path)} 的 env", st["env"]))
+    for who, env in srcs:
+        v = env.get("NODE_EXTRA_CA_CERTS")
+        if v and not os.path.isfile(os.path.expanduser(str(v))):
+            out.append(_finding("warn", f"{who}里的 NODE_EXTRA_CA_CERTS 指向的 {short_path(str(v))} 不存在：Claude Code 启动时会报错",
+                                "改成正确的证书文件路径；不需要了就去掉它"))
+    return out
+
+
+OWNER_SCAN_MAX = 3000  # 查归属时最多看多少个文件（会话记录很多的话不全看）
+
+
+def owner_findings():
+    """配置目录、~/.claude.json 里有不归自己的文件（用 sudo 跑过 claude 会变成 root 的）：之后登录、切号写不进去。只在 macOS / Linux 上查。"""
+    if IS_WIN or not hasattr(os, "getuid"):
+        return []
+    me, bad, seen = os.getuid(), [], 0
+    cfg = claude_config_dir()
+    paths = [cfg, claude_json_file()]
+    for root, dirs, files in os.walk(cfg):
+        dirs[:] = [d for d in dirs if d != "node_modules"]
+        for n in dirs + files:
+            paths.append(os.path.join(root, n))
+            seen += 1
+        if seen > OWNER_SCAN_MAX:
+            break
+    for p in paths:
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue
+        if st.st_uid != me:
+            bad.append(p)
+    if not bad:
+        return []
+    try:
+        import pwd  # noqa: PLC0415
+        owner = pwd.getpwuid(os.lstat(bad[0]).st_uid).pw_name
+    except (ImportError, KeyError, OSError):
+        owner = "别的用户"
+    return [_finding("warn", f"Claude Code 的配置里有 {len(bad)} 个文件归 {owner}（比如 {short_path(bad[0])}）：多半是用 sudo 跑过 claude，"
+                     "之后登录、切号可能写不进去",
+                     f"sudo chown -R {getpass.getuser()} {shlex.quote(cfg)} {shlex.quote(claude_json_file())}")]
+
+
+def override_findings():
+    """会让 Claude Code 不用订阅登录的设置，一句一条（cam doctor、cam env install 用）。"""
+    return [f["text"] for f in env_findings()[0] if f["fix"] is not None or f["level"] != "info"]
+
+
+def env_findings():
+    """本机所有会让 Claude Code 偏离订阅登录的设置，按来源查：settings.json（含托管设置）、shell / PowerShell 配置文件、
+    Windows 注册表、macOS launchctl、~/.claude.json，最后是只在当前进程里有的（这次手动 export 的，或者启动它的程序带的）。
+    返回 (发现, 当前进程里还带着的变量名)。"""
+    out, where = [], {}
+    for fn in (settings_findings, shell_findings, win_env_findings, launchctl_findings):
+        items, w = fn()
+        out += items
+        for k, v in w.items():
+            where.setdefault(k, v)
+    out += claude_json_findings()
+    live = [k for k in SCAN_ENV if os.environ.get(k) and env_value_matters(k, os.environ.get(k))]
+    for k in live:
+        if k not in where:
+            f = _env_finding(k, f"环境变量 {env_shown(k, os.environ.get(k))} 只在当前这个终端里有：{ENV_WHAT[k]}", "", None, cloud_on())
+            f["advice"] = "不是在配置文件里设的（可能是这次手动 export 的，或者打开终端的程序带的）：关掉终端重开就没了，重开还在就看看是哪个程序设的"
+            out.append(f)
+    return out + ca_findings() + hook_findings() + mcp_findings() + owner_findings() + relay_tool_findings(), live
+
+
+def install_kind(real):
+    """这份 claude 是怎么装的：原生（官方安装器：~/.local/share/claude/ 里的版本，Windows 上是 claude.exe）、
+    npm（官方的 @anthropic-ai/claude-code 包，包括装在 Homebrew 的 Node 下面的）、Homebrew（brew 的 cask）、
+    第三方（npm 里别的包，比如中转工具自带的 claude 包装）或其它（~/.local/bin 里别的脚本这类，看不出来的）。
+    Windows 上 npm 的是 claude.cmd 这类启动脚本，看脚本里指向哪个包。"""
+    low = real.replace("\\", "/").lower()
+    if "node_modules" in low:
+        return "npm" if "@anthropic-ai/claude-code" in low else "第三方"
+    if "/.local/share/claude/" in low or (low.endswith("/.local/bin/claude.exe") and IS_WIN):
+        return "原生"
+    if "homebrew" in low or "/cellar/" in low or "caskroom" in low:
+        return "Homebrew"
+    if "/.claude/local/" in low:
+        return "npm（本地）"
+    if not low.endswith(".exe"):
+        head = (read_text_file(real)[0] or "")[:4096].replace("\\", "/").lower()
+        pkg = os.path.isdir(os.path.join(os.path.dirname(real), "node_modules", "@anthropic-ai", "claude-code"))
+        if "@anthropic-ai/claude-code" in head and pkg:  # npm 的启动脚本（Windows 的 claude.cmd 这类）：旁边就是装好的包
+            return "npm"
+        if "node_modules" in head and "@anthropic-ai/claude-code" not in head:  # 指向 npm 里别的包：第三方包装
+            return "第三方"
+    return "其它"
+
+
+def claude_installs():
+    """PATH 里所有的 claude，排在前面的是实际会运行的那个。返回 [(路径, 真实路径, 安装方式)]。
+    一个目录算一份：npm 在同一个目录里放 claude、claude.cmd、claude.ps1 几个启动脚本（Windows 上以前会误报成“2 份”）；
+    nvm 这类用链接指过去的目录按真实路径去重。"""
+    names = ("claude.exe", "claude.cmd", "claude") if IS_WIN else ("claude",)
+    seen, out = set(), []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                real = os.path.realpath(p)
+                key = os.path.normcase(os.path.dirname(real)) if IS_WIN else real
+                if key not in seen:
+                    seen.add(key)
+                    out.append((p, real, install_kind(real)))
+                break  # 同一个目录里的几个启动脚本只算第一个
+    return out
+
+
+def npm_next_to(path):
+    """卸载 npm 版 claude 要用的 (npm, 前缀)：前缀按 claude 放在哪推（Unix 是 前缀/bin/claude，Windows 是 前缀\\claude.cmd），
+    卸载时用 --prefix 明确指给 npm，不按它自己配置里的前缀（不然可能卸到另一份上）。前缀下面确实有官方的包才算；npm 优先用同一个目录里的。"""
+    d = os.path.dirname(path)
+    prefix = d if IS_WIN else os.path.dirname(d)
+    pkg = os.path.join(prefix, "node_modules" if IS_WIN else os.path.join("lib", "node_modules"), "@anthropic-ai", "claude-code")
+    if not os.path.isdir(pkg):
+        return None
+    for n in (("npm.cmd", "npm.exe") if IS_WIN else ("npm",)):
+        p = os.path.join(d, n)
+        if os.path.isfile(p):
+            return p, prefix
+    npm = shutil.which("npm")
+    return (npm, prefix) if npm else None
+
+
+def install_findings(latest=None, auto=True):
+    """装了几份、实际跑的是哪份、是不是官方的、是不是最新的。返回 (发现, 实际运行的那份或 None, 它的版本号)。
+
+    多份时只留一份：官方原生的 > 官方 npm / Homebrew 的 > 现在实际运行的那份；多出来的 npm 版用 npm uninstall --prefix 卸掉
+    （前缀按那份 claude 放在哪推，见 npm_next_to），别的（Homebrew、第三方包装、看不出来的）只提醒。升级只对留下的那份、
+    而且是官方的才做。auto=False（面板：服务进程看到的 PATH 可能和你的终端不一样）时卸载、升级都只提示，到终端里跑 cam env fix。"""
+    out = []
+    found = claude_installs()
+    if not found:
+        return [_finding("bad", "Claude Code 命令：没找到", "运行 cam env install 用官方安装器安装")], None, None
+    p, real, kind = found[0]
+    ver = claude_version(p)
+    if ver and "claude code" not in ver.lower():
+        out.append(_finding("warn", f"实际运行的 claude（{short_path(p)}）报的版本是“{ver[:60]}”，不像官方的 Claude Code（官方的写着 Claude Code）",
+                            "可能是第三方工具的包装。不用的话卸载它，再运行 cam env install 装官方的"))
+    if kind == "第三方":
+        out.append(_finding("warn", f"实际运行的 claude（{short_path(p)}）是第三方的 npm 包，不是官方的 @anthropic-ai/claude-code",
+                            "不用的话卸载它，再运行 cam env install 装官方的"))
+    keep, keep_ver = found[0], ver
+    terminal = "在终端里运行 cam env fix 处理（面板看到的 PATH 可能和你的终端不一样）"
+    if len(found) > 1:
+        keep = (next((f for f in found if f[2] == "原生"), None)
+                or next((f for f in found if f[2] in ("npm", "npm（本地）", "Homebrew")), found[0]))
+        keep_ver = ver if keep == found[0] else claude_version(keep[0])
+        extra = [f for f in found if f != keep]
+        npm = {q: npm_next_to(q) for q, r, k in extra if k == "npm"}
+        items = [{"npm": npm[q][0], "prefix": npm[q][1], "path": q, "keep": keep[0]} for q, r, k in extra if npm.get(q)]
+        by_hand = [(q, k) for q, r, k in extra if not npm.get(q)]
+        how = "；".join(f"{short_path(q)}：" + ("Homebrew 装的用 brew uninstall --cask claude-code 卸载" if k == "Homebrew" else "不用的话手动删掉它")
+                       for q, k in by_hand)
+        text = (f"PATH 里有 {len(found)} 份 claude，实际运行的是第一个："
+                + "；".join(f"{short_path(q)}（{k}）" + (f" → {short_path(r)}" if r != q else "") for q, r, k in found))
+        advice = f"多份并存容易出现“升级了却没生效”，保留 {short_path(keep[0])}（{keep[2]}）"
+        if items and not by_hand and auto:  # 多出来的都是 npm 装的：一键清理用 npm 卸掉
+            out.append(_finding("warn", text, advice + "，别的用 npm 卸掉", {"type": "npm_uninstall", "items": items}))
+        else:
+            out.append(_finding("warn", text, advice + (f"。{how}" if how else "") + ("" if auto or not items else f"。{terminal}")))
+            for a in items if auto else []:
+                out.append(_finding("info", f"多出来的一份：{short_path(a['path'])}（npm）", "一键清理会用 npm 卸掉",
+                                    {"type": "npm_uninstall", "items": [a]}))
+    cur = re.search(r"\d+\.\d+\.\d+", keep_ver or "")
+    if latest and cur and _version_key(latest[1]) and _version_key(cur.group(0)) and _version_key(latest[1]) > _version_key(cur.group(0)):
+        text = f"Claude Code 有新版本 {latest[1]}（现在是 {cur.group(0)}，{latest[0]} 渠道）"
+        if keep[2] == "Homebrew":
+            out.append(_finding("warn", text, "brew upgrade claude-code"))
+        elif keep[2] in ("原生", "npm", "npm（本地）") and auto:
+            out.append(_finding("warn", text, "运行 claude update 更新", {"type": "update", "exe": keep[0]}))
+        else:
+            out.append(_finding("warn", text, "运行 claude update 更新" + ("" if keep[2] in ("原生", "npm", "npm（本地）") else "（这份不是官方装的，先确认它是什么）")))
+    return out, found[0], ver
+
+
+def cache_finding():
+    """可以重新生成的缓存：可选（默认不清）。配置目录看着不像 Claude Code 的（没有 projects / settings.json / 凭据，或者就是主目录）时不碰，
+    免得 CLAUDE_CONFIG_DIR 指错了把同名的别的文件夹删了（大小写不敏感的 Mac 上 downloads 就是“下载”）。"""
+    cfg = claude_config_dir()
+    if os.path.realpath(cfg) == os.path.realpath(home()) or not any(
+            os.path.exists(os.path.join(cfg, n)) for n in ("projects", "settings.json", ".credentials.json", "statsig")):
+        return []
+    cache = [os.path.join(cfg, n) for n in CACHE_ITEMS if os.path.lexists(os.path.join(cfg, n))]
+    if not cache:
+        return []
+    size = sum(path_size(p) for p in cache)
+    return [_finding("info", f"Claude Code 的缓存 {len(cache)} 项（{human_size(size)}）：可以重新生成，清掉能排除旧缓存引起的怪问题",
+                     "和 cam env clean 一样，会话记录、设置不动（可选，默认不清）", {"type": "cache", "paths": cache}, True)]
+
+
+def env_fix_plan(latest=None, with_cache=True, auto_install=True):
+    """一键清理要做什么：{"fix": [默认就改的], "optional": [官方支持的用法、缓存，勾上才改], "manual": [要人自己处理的],
+    "live": [当前进程里还带着的变量], "running": 在跑的 claude 数（查不出来是 None，当作有）, "digest": 清单的指纹}。
+    每条 {"level", "text", "advice", "fix", "optional"}，fix 是怎么改（不含任何值）。auto_install 见 install_findings。"""
+    items, live = env_findings()
+    inst = install_findings(latest, auto_install)[0]
+    items = inst + items + (cache_finding() if with_cache else [])
+    procs = running_claude_processes()
+    plan = {"fix": [i for i in items if i["fix"] and not i["optional"]], "optional": [i for i in items if i["fix"] and i["optional"]],
+            "manual": [i for i in items if not i["fix"] and i["level"] != "ok"],
+            "live": live, "running": None if isinstance(procs, ProcsUnknown) else len(procs)}
+    plan["digest"], plan["digest_optional"] = env_plan_digest(plan["fix"]), env_plan_digest(plan["optional"])
+    return plan
+
+
+def env_plan_digest(items):
+    """要改的东西的指纹：面板确认的清单和真正执行时重新算的清单要一样，不一样就不改（比如刚好查到了新版本，多出一条升级）。
+    只看“怎么改”（哪个文件哪一项、哪一行），不看说明文字：缓存的大小一直在变，算进去就几乎每次都对不上。"""
+    raw = json.dumps([f["fix"] for f in items], ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _broadcast_env_change():
+    """Windows：告诉资源管理器环境变量改了，之后新开的终端才拿到新值（已经开着的不变）。"""
+    try:
+        import ctypes  # noqa: PLC0415
+        res = ctypes.c_ulong()
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(res))
+    except (ImportError, AttributeError, OSError):
+        pass
+
+
+def _win_env_set(name, value, kind):
+    import winreg  # noqa: PLC0415
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WIN_USER_ENV, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, name, 0, kind, value)
+
+
+ENV_FIX_SLOW = ("npm_uninstall", "update", "cache")  # 有 claude 在跑时先不做的（文件正被占用、会话会出错）
+
+
+def read_text_file(path):
+    """读文本配置文件：(文本, (BOM, 编码))。认 UTF-8（带不带 BOM）和 UTF-16（Windows PowerShell 5.1 的 Out-File 默认写这个）；
+    UTF-8 里的坏字节原样保留（surrogateescape），写回去一个字节不差。读不了返回 (None, None)。"""
+    try:
+        raw = read_bytes(path)
+    except CamError:
+        return None, None
+    if raw is None:
+        return None, None
+    for bom, codec in ((b"\xef\xbb\xbf", "utf-8"), (b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+        if raw.startswith(bom):
+            body = raw[len(bom):]
+            break
+    else:
+        bom, codec, body = b"", "utf-8", raw
+    try:
+        return body.decode(codec, errors="surrogateescape" if codec == "utf-8" else "strict"), (bom, codec)
+    except UnicodeDecodeError:
+        return None, None
+
+
+def write_bytes_atomic(path, data):
+    """先写同目录的临时文件再换过去（写到一半断电也不会留下半个文件），权限照原来的。链接写到它指向的文件。"""
+    real = os.path.realpath(path)
+    try:
+        st = os.stat(real)
+        mode = st.st_mode & 0o7777
+    except OSError:
+        st, mode = None, None
+    if st is not None and st.st_nlink > 1:  # 硬链接（dotfiles 工具常这么管）：换成新文件会断开链接，只能原地写
+        with open(real, "r+b") as f:
+            f.write(data)
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
+        return
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-cam-", dir=os.path.dirname(real))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None and not IS_WIN:
+            os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def write_text_file(path, text, fmt):
+    """按 read_text_file 读出来的格式写回去：同样的 BOM 和编码。"""
+    bom, codec = fmt
+    write_bytes_atomic(path, bom + text.encode(codec, errors="surrogateescape" if codec == "utf-8" else "strict"))
+
+
+def _sha(data):
+    return hashlib.sha256(data or b"").hexdigest()
+
+
+ENV_FIX_KEEP = 10  # 一键清理的备份留最近几次（里面有整份配置文件，可能带着别的密钥，不一直攒着）
+
+
+def env_fix_apply(store, plan, force=False, optional=False):
+    """按 env_fix_plan 的结果改，同一时间只让一个清理在跑。
+
+    改之前把要动的文件原样存进 cam 的 env-backups/时间-fix/（只有自己能读），清单 manifest.json 每做完一步就写一次
+    （中途断电、被结束也撤销得了）：文件记改完后的指纹和改了哪几处（去掉的键和原值、加了标记的行），环境变量记原值；
+    撤销时文件没再动过就整份放回，动过就只把改的那几处改回来（不盖掉之后的改动）。卸载、升级、清缓存记一笔，改不回去时说怎么重新装。
+    有 claude 在跑（或者查不出来）时卸载、升级、清缓存先不做（force 照做）。
+    返回 {"done", "failed": [{"text", "error"}], "skipped", "backup", "next"}。"""
+    lock = FileLock(os.path.join(store.root, "env-fix.lock"), timeout=0)
+    if not lock.try_acquire():
+        raise CamError("另一个一键清理正在进行，等它做完再试")
+    try:
+        return _env_fix_apply(store, plan, force, optional)
+    finally:
+        lock.release()
+
+
+def _env_fix_apply(store, plan, force, optional):
+    # 目录名带到微秒：一秒里清理两次也各是各的备份（同名的话后一次会盖掉前一次的清单，前一次就撤销不了了）
+    bdir = os.path.join(store.root, "env-backups", dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-fix")
+    os.makedirs(bdir)
+    if not IS_WIN:
+        os.chmod(bdir, 0o700)
+    manifest = {"at": now_iso(), "items": []}
+    done, failed, skipped = [], [], []
+    busy = (plan.get("running") is None or plan.get("running")) and not force
+    stamp = dt.date.today().isoformat()
+    mark = ENV_FIX_MARK.format(date=stamp)
+
+    def save():
+        write_json_atomic(os.path.join(bdir, "manifest.json"), manifest, private=True)
+
+    def backup_file(real):
+        saved = f"file-{len(manifest['items'])}"
+        data = read_bytes(real)
+        with open(os.path.join(bdir, saved), "wb") as f:
+            f.write(data or b"")
+        if not IS_WIN:
+            os.chmod(os.path.join(bdir, saved), 0o600)
+        item = {"type": "file", "path": real, "saved": saved, "before": _sha(data)}
+        manifest["items"].append(item)
+        save()
+        return item
+
+    todo = plan["fix"] + (plan.get("optional") or [] if optional else [])
+    by_file = {}
+    for f in todo:
+        if f["fix"]["type"] in ("json_key", "comment"):
+            real = os.path.realpath(f["fix"]["path"])
+            by_file.setdefault((f["fix"]["type"], real), []).append(f)
+    for (t, real), fs in by_file.items():
+        try:
+            item = backup_file(real)
+            if t == "json_key":
+                removed = []
+
+                def mutate(obj, fs=fs, removed=removed):
+                    removed.clear()
+                    for f in fs:
+                        k = f["fix"]["key"]
+                        box = obj.get("env") if f["fix"]["env"] else obj
+                        if isinstance(box, dict) and k in box:
+                            removed.append({"env": f["fix"]["env"], "key": k, "value": box.pop(k)})
+                    if isinstance(obj.get("env"), dict) and not obj["env"] and any(r["env"] for r in removed):
+                        obj.pop("env")
+                    return lambda now: all(k not in ((now.get("env") or {}) if e else now) for e, k in
+                                           ((f["fix"]["env"], f["fix"]["key"]) for f in fs))
+                update_json_file(real, mutate)
+                item["changes"] = {"kind": "json", "removed": removed}
+            else:
+                text, fmt = read_text_file(real)
+                if text is None:
+                    raise CamError("读不了这个文件（编码认不出来或者没有权限）")
+                lines = text.splitlines(keepends=True)
+                ok = {(n, k) for n, k, _, simple in shell_env_lines(real, SCAN_ENV, text, fs[0]["fix"].get("syntax")) if simple}
+                hit, orig = [], []
+                for f in fs:
+                    n = f["fix"]["line"]
+                    if (n, f["fix"]["key"]) not in ok:
+                        raise CamError(f"第 {n} 行变了，没改")
+                    if n not in hit:
+                        orig.append([n, lines[n - 1].rstrip("\r\n")])
+                        lines[n - 1] = mark + lines[n - 1]
+                        hit.append(n)
+                write_text_file(real, "".join(lines), fmt)
+                item["changes"] = {"kind": "comment", "marker": mark, "lines": hit, "orig": orig}
+            item["after"] = _sha(read_bytes(real))
+            save()
+            done += [f["text"] for f in fs]
+        except (OSError, CamError, UnicodeError) as e:
+            failed += [{"text": f["text"], "error": str(e) or type(e).__name__} for f in fs]
+    for f in todo:
+        t, fx = f["fix"]["type"], f["fix"]
+        if t in ("json_key", "comment"):
+            continue
+        if busy and t in ENV_FIX_SLOW:
+            skipped.append(f["text"])
+            continue
+        try:
+            if t == "win_env":
+                import winreg  # noqa: PLC0415
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WIN_USER_ENV, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                    value, kind = winreg.QueryValueEx(key, fx["key"])
+                    manifest["items"].append({"type": "win_env", "key": fx["key"], "value": value, "kind": kind})
+                    save()  # 先记下原值再删：删了之后进程没了，值也不会丢
+                    winreg.DeleteValue(key, fx["key"])
+            elif t == "launchctl":
+                r = subprocess.run(["launchctl", "getenv", fx["key"]], capture_output=True, text=True, timeout=5)
+                if r.returncode != 0:
+                    raise CamError(f"读不到 {fx['key']} 原来的值，没改（launchctl 退出码 {r.returncode}）")
+                if r.stdout.strip():
+                    manifest["items"].append({"type": "launchctl", "key": fx["key"], "value": r.stdout.strip()})
+                    save()
+                r = subprocess.run(["launchctl", "unsetenv", fx["key"]], timeout=10, capture_output=True)
+                if r.returncode != 0:
+                    raise CamError(f"launchctl unsetenv 失败（退出码 {r.returncode}）")
+            elif t == "npm_uninstall":
+                for one in fx["items"]:
+                    r = subprocess.run([one["npm"], "uninstall", "-g", "--prefix", one["prefix"], "@anthropic-ai/claude-code"],
+                                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                                       stdin=subprocess.DEVNULL, **NO_WINDOW)
+                    if r.returncode != 0:
+                        raise CamError(f"{short_path(one['path'])}：" + (last_line_of(r.stderr, r.stdout) or f"npm 退出码 {r.returncode}"))
+                    manifest["items"].append({"type": "note", "text": f"卸载了 {short_path(one['path'])}：要的话重新装，"
+                                              f"npm install -g --prefix \"{one['prefix']}\" @anthropic-ai/claude-code"})
+                    save()
+                    if os.path.lexists(one["path"]):
+                        raise CamError(f"npm 说卸好了，但 {short_path(one['path'])} 还在")
+                    if one.get("keep") and (not os.path.exists(one["keep"]) or not claude_version(one["keep"])):
+                        raise CamError(f"要留下的 {short_path(one['keep'])} 运行不了了：运行 cam env install 重新装一份")
+            elif t == "update":
+                r = subprocess.run([fx["exe"], "update"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   timeout=600, stdin=subprocess.DEVNULL, **NO_WINDOW)
+                if r.returncode != 0:
+                    raise CamError(last_line_of(r.stderr, r.stdout) or f"claude update 退出码 {r.returncode}")
+                manifest["items"].append({"type": "note", "text": "升级了 Claude Code（升级改不回去，一般也不用）"})
+            elif t == "cache":
+                for p in fx["paths"]:
+                    if os.path.lexists(p):
+                        remove_path(p)
+                manifest["items"].append({"type": "note", "text": "清了缓存（会自己重新生成）"})
+            save()
+            done.append(f["text"])
+        except ImportError:
+            failed.append({"text": f["text"], "error": "这台电脑不是 Windows"})
+        except subprocess.TimeoutExpired:
+            failed.append({"text": f["text"], "error": "超时了"})
+        except (OSError, CamError, subprocess.SubprocessError) as e:
+            failed.append({"text": f["text"], "error": str(e) or type(e).__name__})
+    if any(i["type"] == "win_env" for i in manifest["items"]):
+        _broadcast_env_change()
+    if not manifest["items"]:
+        shutil.rmtree(bdir, ignore_errors=True)
+    prune_env_fix_backups(store)
+    nxt = []
+    if [k for k in plan.get("live") or [] if os.environ.get(k)] and done:
+        nxt.append("这个终端里还带着旧的设置：新开一个终端再用 claude")
+    if plan.get("running") is None or plan.get("running"):
+        nxt.append("正在跑的 claude 要退出重开才用新设置" + ("；卸载、升级、清缓存等它们都退出后再运行一次 cam env fix" if skipped else ""))
+    return {"done": done, "failed": failed, "skipped": skipped, "backup": bdir if manifest["items"] else None, "next": nxt}
+
+
+def prune_env_fix_backups(store):
+    """一键清理的备份留最近 ENV_FIX_KEEP 次；再早的只删撤销完了的、或者没有能撤销的东西的（只记了卸载、升级、清缓存）。
+    还没撤销的文件、环境变量备份一直留着，不然以后想改回去就没得改了。"""
+    for d, m in env_fix_backups(store)[ENV_FIX_KEEP:]:
+        if m.get("undone_at") or all(i.get("type") == "note" or i.get("undone") for i in m.get("items") or []):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def last_line_of(*texts):
+    for t in texts:
+        rows = [r.strip() for r in (t or "").splitlines() if r.strip()]
+        if rows:
+            return rows[-1][:240]
+    return ""
+
+
+def env_fix_backups(store):
+    """一键清理留下的备份，新的在前：[(目录, 清单)]。"""
+    root = os.path.join(store.root, "env-backups")
+    out = []
+    try:
+        names = sorted((n for n in os.listdir(root) if n.endswith("-fix")), reverse=True)
+    except OSError:
+        return out
+    for n in names:
+        try:
+            m = read_json(os.path.join(root, n, "manifest.json"))
+        except CamError:
+            continue
+        if isinstance(m, dict):
+            out.append((os.path.join(root, n), m))
+    return out
+
+
+def env_fix_undo(store):
+    """把最近一次还没撤销完的一键清理改回去。文件：清理后没再动过就整份放回（权限照现在的），动过就只把改的那几处改回来
+    （去掉的键放回去、加了标记的行去掉标记），不盖掉之后的改动；环境变量：现在没有才设回原值。卸载、升级、清缓存改不回去，照清单说一声。
+    每一项撤销完就记下，有失败的下次再撤销时只做剩下的。返回 {"restored", "failed", "notes", "backup"}；没有可撤销的抛 CamError。"""
+    lock = FileLock(os.path.join(store.root, "env-fix.lock"), timeout=0)
+    if not lock.try_acquire():
+        raise CamError("一键清理正在进行，等它做完再撤销")
+    try:
+        todo = next(((d, m) for d, m in env_fix_backups(store) if not m.get("undone_at")), None)
+        if not todo:
+            raise CamError("没有可以撤销的一键清理（cam env fix 改过的东西都在 cam 数据目录的 env-backups 里）")
+        bdir, m = todo
+        restored, failed, notes = [], [], []
+        win = False
+        for it in reversed(m.get("items") or []):
+            if it.get("undone"):
+                continue
+            try:
+                if it["type"] == "file":
+                    restored.append(_undo_file(bdir, it))
+                elif it["type"] == "win_env":
+                    if it["key"].upper() in win_env_values():
+                        notes.append(f"用户环境变量 {it['key']} 现在又有值了，没动它")
+                    else:
+                        _win_env_set(it["key"], it["value"], it["kind"])
+                        win = True
+                        restored.append(f"用户环境变量 {it['key']}")
+                elif it["type"] == "launchctl":
+                    r = subprocess.run(["launchctl", "setenv", it["key"], it["value"]], timeout=10, capture_output=True)
+                    if r.returncode != 0:  # 报错里不能带命令行：里面有原值
+                        raise CamError(f"launchctl setenv 失败（退出码 {r.returncode}）")
+                    restored.append(f"launchctl 的 {it['key']}")
+                elif it["type"] == "note":
+                    notes.append(it["text"])
+                it["undone"] = True
+            except subprocess.TimeoutExpired:
+                failed.append({"text": it.get("key") or it["type"], "error": "超时了"})
+            except (OSError, KeyError, CamError, UnicodeError, ImportError) as e:
+                failed.append({"text": short_path(it.get("path") or "") or it.get("key") or it["type"], "error": str(e) or type(e).__name__})
+            write_json_atomic(os.path.join(bdir, "manifest.json"), m, private=True)
+        if win:
+            _broadcast_env_change()
+        if all(i.get("undone") for i in m.get("items") or []):
+            m["undone_at"] = now_iso()
+            write_json_atomic(os.path.join(bdir, "manifest.json"), m, private=True)
+        return {"restored": restored, "failed": failed, "notes": notes, "backup": bdir}
+    finally:
+        lock.release()
+
+
+def _undo_file(bdir, it):
+    """撤销一个文件的改动，返回说明。"""
+    path, saved = it["path"], os.path.join(bdir, it["saved"])
+    cur = read_bytes(path)
+    ch = it.get("changes") or {}
+    if not it.get("after"):  # 那次这个文件没改成（中途出错）：没东西要撤销，也不能拿旧备份盖掉现在的内容
+        return f"{short_path(path)}（那次没改成，不用撤销）"
+    if cur is None or _sha(cur) == it["after"]:
+        with open(saved, "rb") as f:
+            write_bytes_atomic(path, f.read())
+        return short_path(path)
+    if ch.get("kind") == "json":
+        def mutate(obj):
+            for r in ch.get("removed") or []:
+                box = obj.setdefault("env", {}) if r["env"] else obj
+                if isinstance(box, dict) and r["key"] not in box:
+                    box[r["key"]] = r["value"]
+        update_json_file(path, mutate)
+        return f"{short_path(path)}（文件清理后又改过：只把去掉的几项放回去，你后来的改动留着）"
+    if ch.get("kind") == "comment":
+        text, fmt = read_text_file(path)
+        if text is None:
+            raise CamError("读不了这个文件")
+        lines = text.splitlines(keepends=True)
+        marker, new = ch.get("marker") or "", list(lines)
+        for n, orig in ch.get("orig") or []:  # 这次加了标记的每一行原文：先看原来那一行，挪了位置就按内容找
+            want = marker + orig
+            idx = n - 1 if 0 < n <= len(new) and new[n - 1].rstrip("\r\n") == want else \
+                next((i for i, ln in enumerate(new) if ln.rstrip("\r\n") == want), None)
+            if idx is not None:
+                new[idx] = new[idx][len(marker):]
+        if new != lines:
+            write_text_file(path, "".join(new), fmt)
+        return f"{short_path(path)}（文件清理后又改过：只去掉 cam 加的注释标记，你后来的改动留着）"
+    with open(saved, "rb") as f:
+        write_bytes_atomic(path, f.read())
+    return short_path(path)
 
 
 def path_size(p):
@@ -6783,6 +7817,89 @@ def mark_logged_out(store):
         data["active"]["claude_code"] = None
         data.pop("live_mismatch", None)
         store.save(data)
+
+
+def print_env_plan(plan):
+    print(color("本机 Claude Code 的配置和安装：第三方中转、API Key 这类设置在哪、装了几份、版本、缓存（只提示，不打分）", "d"))
+    if plan["fix"]:
+        print("\n" + color(f"可以一键清理的（{len(plan['fix'])} 项）：", "b"))
+        for n, f in enumerate(plan["fix"], 1):
+            print(f"  {n}. {f['text']}")
+            if f.get("advice"):
+                print(color(f"     → {f['advice']}", "d"))
+    if plan.get("optional"):
+        print("\n" + color(f"官方支持的用法（{len(plan['optional'])} 项，默认不动；想用订阅账号切号就加 --all 一起清理）：", "b"))
+        for f in plan["optional"]:
+            print(f"  · {f['text']}")
+            if f.get("advice"):
+                print(color(f"     → {f['advice']}", "d"))
+    if plan["manual"]:
+        print("\n" + color(f"要你自己处理的（{len(plan['manual'])} 项）：", "b"))
+        for f in plan["manual"]:
+            print(f"  · {f['text']}")
+            if f.get("advice"):
+                print(color(f"     → {f['advice']}", "d"))
+    if not plan["fix"] and not plan["manual"] and not plan.get("optional"):
+        print(color("✓ 没有第三方中转、API Key 这类设置，也只装了一份 Claude Code，不用清理", "g"))
+    if (plan["running"] is None or plan["running"]) and any(f["fix"]["type"] in ENV_FIX_SLOW for f in plan["fix"] + plan.get("optional", [])):
+        who = "看不出有没有 claude 在运行" if plan["running"] is None else f"有 {plan['running']} 个 claude 在运行"
+        print(color(f"\n{who}：卸载、升级、清缓存这几项先跳过（确认都退出了可以加 --force 照做），别的照常改", "y"))
+
+
+def cmd_env_fix(store, args):
+    """一键清理本机 Claude Code 的环境：第三方中转、API Key 这类设置，多装的几份，旧版本，缓存。默认只列出来；
+    交互终端里问一句再改，--apply 直接改。改之前都备份，--undo 改回去。"""
+    if args.undo:
+        r = env_fix_undo(store)
+        for x in r["restored"]:
+            print(color("✓ ", "g") + f"改回去了：{x}")
+        for x in r["failed"]:
+            print(color("✗ ", "r") + f"没改回去：{x['text']}（{x['error']}）")
+        for x in r["notes"]:
+            print(color("· ", "d") + x)
+        print(f"用的是 {r['backup']} 里的备份。新开一个终端、正在跑的 claude 重开后生效")
+        return 1 if r["failed"] else 0
+    latest = None if args.offline else _quiet(latest_claude_version)[0]
+    plan = env_fix_plan(latest)
+    if args.json:
+        print(json.dumps(env_plan_view(store, plan), ensure_ascii=False, indent=2))
+        return 0
+    if args.check:  # 给安装脚本用：有可以一键清理的就退出码 1
+        print(len(plan["fix"]))
+        return 1 if plan["fix"] else 0
+    print_env_plan(plan)
+    if not plan["fix"] and not (args.all and plan.get("optional")):
+        if plan.get("optional") and not args.all:
+            print(color("\n默认要清理的没有。官方支持的那几项想去掉的话：cam env fix --all", "d"))
+        return 0
+    if not args.apply:
+        if not confirm("\n现在清理吗？改之前会先备份，cam env fix --undo 能改回去"):
+            print(color("\n没有改任何东西。要清理就运行 cam env fix --apply", "y"))
+            return 0
+    res = env_fix_apply(store, plan, force=args.force, optional=args.all)
+    print()
+    for x in res["done"]:
+        print(color("✓ 已处理：", "g") + x)
+    for x in res["skipped"]:
+        print(color("· 先跳过（有 claude 在运行）：", "y") + x)
+    for x in res["failed"]:
+        print(color("✗ ", "r") + f"{x['text']}：{x['error']}")
+    if res["backup"]:
+        print(color(f"\n改之前的样子备份在 {res['backup']}，要改回去：cam env fix --undo", "d"))
+    for x in res["next"]:
+        print(color("→ ", "y") + x)
+    return 1 if res["failed"] else 0
+
+
+def env_plan_view(store, plan):
+    """给面板的：每条只带文字、怎么办、扣几分，不带路径以外的任何值；还有没有能撤销的备份。"""
+    def one(f):
+        return {"level": f["level"], "text": f["text"], "advice": f.get("advice") or "",
+                "slow": bool(f.get("fix")) and f["fix"]["type"] in ENV_FIX_SLOW}
+    undo = next((m.get("at") for _, m in env_fix_backups(store) if not m.get("undone_at")), None)
+    return {"fix": [one(f) for f in plan["fix"]], "optional": [one(f) for f in plan.get("optional") or []],
+            "manual": [one(f) for f in plan["manual"]], "running": plan["running"], "undo_at": undo,
+            "digest": plan["digest"], "digest_optional": plan["digest_optional"]}
 
 
 def cmd_env_clean(store, args):
@@ -8986,26 +10103,17 @@ def checkup_service(store, offline, svc=None, summary=None):
 
 def checkup_local_claude(store, latest=None):
     out = []
-    found = claude_installs()
-    if found:
-        p, real, kind = found[0]
-        ver = claude_version(p)
-        out.append(ck("ok", f"Claude Code 命令：{p}（{kind}，{ver or '版本未知'}）"))
-        if len(found) > 1:
-            out.append(ck("warn", f"PATH 里有 {len(found)} 份 claude，实际运行的是第一个："
-                          + "；".join(f"{q}（{k}）" + (f" → {r}" if r != q else "") for q, r, k in found),
-                          "多份并存容易出现“升级了却没生效”。保留一份即可，npm 版可用 npm uninstall -g @anthropic-ai/claude-code 卸载"))
+    inst, first, ver = install_findings(latest)
+    if first:
+        out.append(ck("ok", f"Claude Code 命令：{first[0]}（{first[2]}，{ver or '版本未知'}）"))
         cur = re.search(r"\d+\.\d+\.\d+", ver or "")
-        if latest and cur and _version_key(latest[1]) and _version_key(cur.group(0)):
-            if _version_key(latest[1]) > _version_key(cur.group(0)):
-                out.append(ck("warn", f"Claude Code 有新版本 {latest[1]}（现在是 {cur.group(0)}，{latest[0]} 渠道）",
-                              "brew upgrade claude-code" if kind == "Homebrew" else "运行 claude update 更新"))
-            else:
-                out.append(ck("ok", f"Claude Code 已是最新版本（{latest[0]} 渠道 {latest[1]}）"))
-    else:
-        out.append(ck("bad", "Claude Code 命令：没找到", "运行 cam env install 用官方安装器安装"))
-    for f in override_findings():
-        out.append(ck("warn", f"{f}：它会优先于订阅登录，切换账号可能不生效", "不需要的话去掉它"))
+        if latest and cur and _version_key(latest[1]) and _version_key(cur.group(0)) \
+                and _version_key(latest[1]) <= _version_key(cur.group(0)):
+            out.append(ck("ok", f"Claude Code 已是最新版本（{latest[0]} 渠道 {latest[1]}）"))
+    found = inst + env_findings()[0]
+    for f in found:  # 第三方中转、API Key 这类设置，多装的、旧版本：能一键清理的带上 fix，面板和 cam doctor 据此提示
+        tail = "" if not f["fix"] else "（想去掉的话 cam env fix --all 一起清理）" if f["optional"] else "（cam env fix 可以一键清理）"
+        out.append(ck(f["level"], f["text"], f["advice"] + tail, fix=bool(f["fix"]) and not f["optional"]))
     cfg = claude_config_dir()
     out.append(ck("info", f"配置目录：{cfg}" + ("" if os.path.isdir(cfg) else "（不存在）")))
     f = claude_credentials_file()
@@ -9355,10 +10463,11 @@ def full_checkup(store, offline=False):
     bad = [i for i in counted if i["level"] == "bad"]
     warn = [i for i in counted if i["level"] == "warn"]
     first = (bad or warn or [None])[0]  # 菜单栏通知里说的“第一项”，带上账号名
+    fixable = sum(1 for i in counted if i.get("fix"))
     return {"version": VERSION, "generated_at": now_iso(), "offline": bool(offline),
             "header": checkup_header(),
             "sections": sections,
-            "summary": {"bad": len(bad), "warn": len(warn), "text": f"{len(bad)} 项要处理，{len(warn)} 项留意",
+            "summary": {"bad": len(bad), "warn": len(warn), "fixable": fixable, "text": f"{len(bad)} 项要处理，{len(warn)} 项留意",
                         "first": ((f"{first['group']}：" if first.get("group") else "") + first["text"]) if first else None}}
 
 
@@ -9390,6 +10499,8 @@ def print_checkup(res):
     s = res["summary"]
     print("\n" + color(f"总结：{s['text']}" + ("，一切正常" if not s["bad"] and not s["warn"] else ""),
                        "r" if s["bad"] else "y" if s["warn"] else "g"))
+    if s.get("fixable"):
+        print(color(f"其中 {s['fixable']} 项可以一键清理：运行 cam env fix（先列出要改什么，确认了才改，改之前都备份）", "y"))
 
 
 def cmd_doctor(store, as_json=False, offline=False):
@@ -10099,6 +11210,14 @@ def main(argv=None):
     e.add_argument("--apply", action="store_true", help="真正执行；不加只显示将要做什么")
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也执行")
     e.add_argument("-y", "--yes", action="store_true", help="--purge 时不再确认")
+    e = esub.add_parser("fix", help="一键清理：第三方中转、API Key 这类设置，多装的几份，旧版本，缓存（先列出来，确认了才改）")
+    e.add_argument("--apply", "-y", "--yes", dest="apply", action="store_true", help="不问，直接改")
+    e.add_argument("--force", action="store_true", help="有 claude 正在运行时也卸载、升级、清缓存")
+    e.add_argument("--undo", action="store_true", help="把上一次一键清理改回去")
+    e.add_argument("--all", action="store_true", help="官方支持的用法（API Key、长期令牌、云厂商）也一起清理（默认不动）")
+    e.add_argument("--offline", action="store_true", help="不联网（不查新版本）")
+    e.add_argument("--check", action="store_true", help="只输出能一键清理的项数，有的话退出码 1（给安装脚本用）")
+    e.add_argument("--json", action="store_true", help="输出 JSON（不含任何密钥）")
     s = sub.add_parser("risk", help="cam claude 启动前的环境风险提醒档位（只提醒和确认，不拦截）")
     s.add_argument("--confirm", type=int, metavar="分", help="低于这个分数时问“是否继续 [y/N]”（默认 60）")
     s.add_argument("--strong", type=int, metavar="分", help="低于这个分数时要输入“继续”才启动（默认 30）")
@@ -10239,6 +11358,8 @@ def main(argv=None):
             cmd_env_install(store, args)
         elif c == "env" and args.env_cmd == "clean":
             cmd_env_clean(store, args)
+        elif c == "env" and args.env_cmd == "fix":
+            return cmd_env_fix(store, args)
         elif c == "rule":
             cmd_rule(store, args)
         elif c == "risk":

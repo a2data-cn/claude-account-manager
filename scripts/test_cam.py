@@ -371,6 +371,13 @@ class CamTest(unittest.TestCase):
     def run_cam(self, *args):
         return self.cam.main(list(args))
 
+    def run_cam_out(self, *args):
+        """跑一个 cam 命令，返回 (退出码, 输出)。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.cam.main(list(args))
+        return code, buf.getvalue()
+
     def data(self):
         return self.cam.Store().load()
 
@@ -2269,6 +2276,7 @@ class CamTest(unittest.TestCase):
         self.assertEqual(acts["全面体检"], ["menu", "checkup"])
         more = next(i for i in out["items"] if i.get("text") == "更多")  # 不常用的收在“更多”里
         self.assertTrue(any(c.get("text") == "在终端看完整体检结果" and c.get("run") == ["terminal", "doctor"] for c in more["children"]), more)
+        self.assertTrue(any(c.get("text") == "一键清理环境…" and c.get("run") == ["terminal", "env", "fix"] for c in more["children"]), more)
         # 90% 以上红底，用满写“满”；后台定时刷新发现超过提醒阈值，通知交给托盘弹
         MockAnthropic.tokens["at-B1"]["u5"] = 100.0
         tray.cam_menu.REFRESH_MIN = 10
@@ -4525,6 +4533,557 @@ foreach ($dark in @($false, $true)) {{
         self.assertIn("已经装好了", out)
         self.assertNotIn("sk-ant-x", out)
 
+    # ---- 一键清理（cam env fix）：第三方中转、API Key 这类设置在哪、多装的几份；改之前备份，--undo 改回去
+
+    def _relay_setup(self):
+        """一套“用过第三方中转”的配置：settings.json 的 env、settings.local.json 的 apiKeyHelper、托管设置、.bashrc、fish、
+        PowerShell 配置文件、~/.claude.json 的 primaryApiKey，再加一个只在当前进程里的变量。值里都带 SECRET，测试看它们不出现。"""
+        cfg = os.path.join(self.tmp, ".claude")
+        with open(os.path.join(cfg, "settings.json"), "w") as f:
+            json.dump({"env": {"ANTHROPIC_BASE_URL": "https://relay.example.net/api", "ANTHROPIC_AUTH_TOKEN": "SECRET-1",
+                               "ANTHROPIC_MODEL": "glm-4.6", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5",
+                               "DISABLE_TELEMETRY": "1"},
+                       "model": "kimi-k2", "forceLoginMethod": "console", "theme": "dark"}, f)
+        with open(os.path.join(cfg, "settings.local.json"), "w") as f:
+            json.dump({"apiKeyHelper": "/bin/echo SECRET-2", "env": {"CLAUDE_CODE_USE_BEDROCK": "0"}}, f)
+        managed = os.path.join(self.tmp, "managed-settings.json")
+        with open(managed, "w") as f:
+            json.dump({"env": {"ANTHROPIC_BASE_URL": "https://corp-relay.example.org"}}, f)
+        bashrc = os.path.join(self.tmp, ".bashrc")
+        with open(bashrc, "w", newline="") as f:
+            f.write('export PATH=$HOME/bin:$PATH\r\nexport ANTHROPIC_AUTH_TOKEN="SECRET-3"\r\n# export ANTHROPIC_API_KEY=SECRET-x\r\n'
+                    "export ANTHROPIC_BASE_URL=https://api.anthropic.com\r\nANTHROPIC_API_KEY=$(cat ~/.key) claude\r\n")
+        fish = os.path.join(self.tmp, ".config", "fish", "config.fish")
+        os.makedirs(os.path.dirname(fish))
+        with open(fish, "w") as f:
+            f.write("set -gx ANTHROPIC_BASE_URL https://relay2.example.net\n")
+        ps = os.path.join(self.tmp, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1")
+        os.makedirs(os.path.dirname(ps))
+        with open(ps, "w", encoding="utf-8-sig") as f:
+            f.write('$env:ANTHROPIC_AUTH_TOKEN = "SECRET-4"\n$env:ANTHROPIC_MODEL = "claude-opus-5-5"\n')
+        with open(self.cj_path) as f:
+            cj = json.load(f)
+        cj.update(primaryApiKey="SECRET-5", oauthAccount=oauth_account("u-1", "a@x.com"))
+        with open(self.cj_path, "w") as f:
+            json.dump(cj, f)
+        patcher = mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": managed, "CAM_TEST_PS_PROFILES": "1",
+                                               "CLAUDE_CODE_OAUTH_TOKEN": "SECRET-6"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for k in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"):
+            if k in os.environ:
+                p2 = mock.patch.dict(os.environ)
+                p2.start()
+                self.addCleanup(p2.stop)
+                os.environ.pop(k)
+        return {"settings": os.path.join(cfg, "settings.json"), "local": os.path.join(cfg, "settings.local.json"),
+                "bashrc": bashrc, "fish": fish, "ps": ps, "cj": self.cj_path, "managed": managed}
+
+    def test_env_fix_finds_relay_settings_everywhere_and_undo_restores_bytes(self):
+        cam = self.cam
+        files = self._relay_setup()
+        before = {k: _rb(p) for k, p in files.items()}
+        plan = cam.env_fix_plan(None)
+        dumped = json.dumps(plan, ensure_ascii=False)
+        self.assertNotIn("SECRET", dumped)  # 令牌、Key 的值一个都不出现（apiKeyHelper 的命令也不写）
+        texts = [f["text"] for f in plan["fix"]]
+        opt = [f["text"] for f in plan["optional"]]  # 官方支持的用法：一键清理默认不动
+        manual = [f["text"] for f in plan["manual"]]
+        has = lambda xs, *words: any(all(w in t for w in words) for t in xs)  # noqa: E731
+        self.assertTrue(has(texts, "settings.json 的 env", "ANTHROPIC_BASE_URL（指向 relay.example.net）"), texts)
+        self.assertTrue(has(texts, "settings.json 的 env", "ANTHROPIC_AUTH_TOKEN"))
+        self.assertTrue(has(texts, "ANTHROPIC_MODEL=glm-4.6"))
+        self.assertFalse(has(texts + manual, "ANTHROPIC_DEFAULT_SONNET_MODEL"))  # Claude 的模型名不管
+        self.assertTrue(has(texts, "model=kimi-k2"))
+        self.assertTrue(has(opt, "forceLoginMethod=console"))
+        self.assertTrue(has(opt, "settings.local.json", "apiKeyHelper"))
+        self.assertFalse(has(texts + opt + manual, "CLAUDE_CODE_USE_BEDROCK"))  # 关着的开关不算
+        self.assertTrue(has(texts, ".bashrc 第 2 行", "ANTHROPIC_AUTH_TOKEN"))
+        # 只对后面那条命令生效的前缀写法：只提示在哪，不替人改（整行注释掉会连那条命令一起没了）；值是 $(…) 看不出来，当作有
+        self.assertTrue(has(manual, ".bashrc 第 5 行", "ANTHROPIC_API_KEY"))
+        self.assertFalse(has(texts + manual, ".bashrc 第 3 行"))  # 注释掉的不算
+        self.assertFalse(has(texts + manual, ".bashrc 第 4 行"))  # 指向官方的 BASE_URL 不算
+        self.assertTrue(has(texts, "config.fish 第 1 行", "relay2.example.net"))
+        self.assertTrue(has(texts, "Microsoft.PowerShell_profile.ps1 第 1 行", "ANTHROPIC_AUTH_TOKEN"))
+        self.assertFalse(has(texts + manual, "Microsoft.PowerShell_profile.ps1 第 2 行"))
+        self.assertTrue(has(opt, "primaryApiKey"))
+        self.assertTrue(all(f["level"] == "info" for f in plan["optional"]))  # 官方支持的用法：只是提示
+        self.assertTrue(has(manual, "系统级托管设置", "corp-relay.example.org"))  # 托管设置只提醒：要管理员改
+        self.assertTrue(has(manual, "CLAUDE_CODE_OAUTH_TOKEN", "只在当前这个终端里有"))
+        # 改：settings 只去掉那几项，别的设置原样留着；shell 那几行加标记注释掉（Windows 的换行原样保留）；~/.claude.json 只去掉 primaryApiKey
+        res = cam.env_fix_apply(cam.Store(), plan, optional=True)  # 连官方支持的用法一起清（--all）
+        self.assertEqual(res["failed"], [])
+        self.assertNotIn("SECRET", json.dumps(res, ensure_ascii=False))
+        with open(files["settings"]) as f:
+            self.assertEqual(json.load(f), {"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5", "DISABLE_TELEMETRY": "1"},
+                                            "theme": "dark"})
+        with open(files["local"]) as f:
+            self.assertEqual(json.load(f), {"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}})
+        with open(files["bashrc"], newline="") as f:
+            rows = f.read().split("\r\n")
+        self.assertTrue(rows[1].startswith("# [cam env fix ") and rows[1].endswith('export ANTHROPIC_AUTH_TOKEN="SECRET-3"'), rows)
+        self.assertEqual(rows[4], "ANTHROPIC_API_KEY=$(cat ~/.key) claude")  # 前缀命令只提示，不动
+        self.assertEqual(rows[3], "export ANTHROPIC_BASE_URL=https://api.anthropic.com")
+        with open(files["cj"]) as f:
+            cj = json.load(f)
+        self.assertNotIn("primaryApiKey", cj)
+        self.assertEqual(cj["oauthAccount"]["emailAddress"], "a@x.com")
+        self.assertEqual(_rb(files["managed"]), before["managed"])  # 托管设置不碰
+        bdir = res["backup"]
+        self.assertTrue(bdir and bdir.startswith(os.path.join(self.tmp, ".claude-accounts", "env-backups")))
+        if os.name != "nt":
+            self.assertEqual(os.stat(bdir).st_mode & 0o777, 0o700)
+            self.assertTrue(all(os.stat(os.path.join(bdir, n)).st_mode & 0o077 == 0 for n in os.listdir(bdir)))
+        after = cam.env_fix_plan(None)
+        self.assertEqual([f["text"] for f in after["fix"] + after["optional"] if f["fix"]["type"] != "cache"], [])
+        view = cam.env_plan_view(cam.Store(), after)
+        self.assertTrue(view["undo_at"])
+        # 撤销：每个文件和原来一个字节都不差；再撤销就没有了
+        r = cam.env_fix_undo(cam.Store())
+        self.assertEqual(r["failed"], [])
+        for k, p in files.items():
+            self.assertEqual(_rb(p), before[k], k)
+        with self.assertRaises(cam.CamError):
+            cam.env_fix_undo(cam.Store())
+        self.assertIsNone(cam.env_plan_view(cam.Store(), cam.env_fix_plan(None))["undo_at"])
+
+    def test_env_fix_command_previews_and_skips_slow_steps_while_claude_runs(self):
+        files = self._relay_setup()
+        cfg = os.path.join(self.tmp, ".claude")
+        os.makedirs(os.path.join(cfg, "statsig"))
+        with open(os.path.join(cfg, "statsig", "x"), "w") as f:
+            f.write("cache")
+        before = _rb(files["settings"])
+        code, out = self.run_cam_out("env", "fix", "--offline")
+        self.assertEqual(code, 0)
+        self.assertIn("可以一键清理的", out)
+        self.assertIn("没有改任何东西", out)
+        self.assertNotIn("SECRET", out)
+        self.assertEqual(_rb(files["settings"]), before)  # 预演不改
+        self.assertEqual(self.run_cam_out("env", "fix", "--offline", "--check")[0], 1)
+        st, txt = self.run_cam_out("env", "fix", "--offline", "--json")
+        self.assertNotIn("SECRET", txt)
+        self.assertTrue(json.loads(txt)["fix"])
+        # 有 claude 在跑：设置照改，清缓存先跳过
+        self.cam.running_claude_processes = lambda: [(1, "claude")]
+        local_before = _rb(files["local"])
+        code, out = self.run_cam_out("env", "fix", "--offline", "--apply")
+        self.assertEqual(code, 0, out)
+        self.assertIn("先跳过", out)
+        self.assertIn("官方支持的用法", out)
+        self.assertTrue(os.path.isdir(os.path.join(cfg, "statsig")))
+        self.assertNotEqual(_rb(files["settings"]), before)
+        self.assertEqual(_rb(files["local"]), local_before)  # apiKeyHelper 是官方支持的：默认不动
+        self.assertIn("cam env fix --undo", out)
+        with open(files["settings"]) as f:
+            self.assertEqual(json.load(f).get("forceLoginMethod"), "console")
+        code, out = self.run_cam_out("env", "fix", "--offline", "--apply", "--all")
+        self.assertEqual(code, 0, out)
+        with open(files["local"]) as f:
+            self.assertNotIn("apiKeyHelper", json.load(f))
+        code, out = self.run_cam_out("env", "fix", "--undo")  # 先撤销 --all 那次
+        self.assertEqual(code, 0, out)
+        self.assertEqual(_rb(files["local"]), local_before)
+        code, out = self.run_cam_out("env", "fix", "--undo")  # 再撤销第一次
+        self.assertEqual(code, 0, out)
+        self.assertEqual(_rb(files["settings"]), before)
+
+    def test_claude_installs_counts_npm_shims_once_and_spots_third_party(self):
+        """Windows 上 npm 在同一个目录放 claude.cmd 和 claude 两个启动脚本，算一份（以前误报“2 份”）；nvm 用链接指过去的目录也只算一份；
+        启动脚本指向别的 npm 包的是第三方包装。"""
+        cam = self.cam
+        real = os.path.join(self.tmp, "nvm", "v24")
+        os.makedirs(real)
+        for name, body in (("claude.cmd", '@"%~dp0\\node.exe" "%~dp0\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n'),
+                           ("claude", '#!/bin/sh\nexec node "$basedir/node_modules/@anthropic-ai/claude-code/cli.js" "$@"\n'),
+                           ("npm.cmd", "@echo npm\r\n")):
+            with open(os.path.join(real, name), "w") as f:
+                f.write(body)
+            os.chmod(os.path.join(real, name), 0o755)
+        os.makedirs(os.path.join(real, "node_modules", "@anthropic-ai", "claude-code"))  # Windows 上全局包在 前缀\node_modules 里
+        link = os.path.join(self.tmp, "nvm4w-nodejs")
+        os.symlink(real, link, target_is_directory=True)
+        other = os.path.join(self.tmp, "relaytool")
+        os.makedirs(other)
+        with open(os.path.join(other, "claude.cmd"), "w") as f:
+            f.write('@node "%~dp0\\node_modules\\some-relay-cli\\bin\\claude.js" %*\r\n')
+        os.chmod(os.path.join(other, "claude.cmd"), 0o755)
+        with mock.patch.object(cam, "IS_WIN", True), mock.patch.dict(os.environ, {"PATH": os.pathsep.join([link, real])}):
+            found = cam.claude_installs()
+            self.assertEqual(len(found), 1, found)
+            self.assertEqual((os.path.basename(found[0][0]), found[0][2]), ("claude.cmd", "npm"))
+        with mock.patch.object(cam, "IS_WIN", True), mock.patch.dict(os.environ, {"PATH": os.pathsep.join([other, link])}):
+            found = cam.claude_installs()
+            self.assertEqual([k for _, _, k in found], ["第三方", "npm"])
+            items, first, _ = cam.install_findings(None)
+            texts = [i["text"] for i in items]
+            self.assertTrue(any("第三方的 npm 包" in t for t in texts), texts)
+            dup = next(i for i in items if "PATH 里有 2 份" in i["text"])
+            # 留官方的那份（哪怕它排在后面），第三方包装不替人卸载，说怎么手动处理
+            self.assertIsNone(dup["fix"])
+            self.assertIn(f"保留 ~{os.sep}nvm4w-nodejs{os.sep}claude.cmd（npm）", dup["advice"])  # 主目录写成 ~
+            self.assertIn("手动删掉", dup["advice"])
+        two = os.path.join(self.tmp, "nvm", "v22")  # 两个 nvm 版本各装了一份官方的：留实际运行的，另一份用它旁边的 npm 卸掉
+        shutil.copytree(real, two)
+        with mock.patch.object(cam, "IS_WIN", True), mock.patch.dict(os.environ, {"PATH": os.pathsep.join([link, two])}):
+            dup = next(i for i in cam.install_findings(None)[0] if "PATH 里有 2 份" in i["text"])
+            self.assertEqual(dup["fix"], {"type": "npm_uninstall", "items": [{"npm": os.path.join(two, "npm.cmd"), "prefix": two,
+                                                                               "path": os.path.join(two, "claude.cmd"),
+                                                                               "keep": os.path.join(link, "claude.cmd")}]})
+            # 前缀下面没有官方的包（不知道 npm 会卸到哪去）：不自动卸，只提示
+            shutil.rmtree(os.path.join(two, "node_modules"))
+            dup = next(i for i in cam.install_findings(None)[0] if "PATH 里有 2 份" in i["text"])
+            self.assertIsNone(dup["fix"])
+
+    def test_env_fix_only_comments_plain_top_level_lines(self):
+        """shell 配置文件：只自动注释“顶格、单独一行、只设这一个变量”的行；一行里还有别的命令、在函数 / if 里、续行的只提示；
+        alias、echo、heredoc 里的字不算；PowerShell 的 $env:X = $null 是在清掉它，不算。带 BOM 的 PowerShell 配置文件，标记加在 BOM 后面。"""
+        cam = self.cam
+        rc = os.path.join(self.tmp, ".zshrc")
+        lines = ["export ANTHROPIC_BASE_URL=https://relay.example.net",              # 1 顶格单独一行：自动改
+                 "export PATH=$HOME/bin:$PATH; export ANTHROPIC_AUTH_TOKEN=SECRET-a",  # 2 和别的命令写在一起：只提示
+                 "relay() {",
+                 "  export ANTHROPIC_AUTH_TOKEN=SECRET-b",                             # 4 函数里：只提示
+                 "}",
+                 "if [ -n \"$X\" ]; then",
+                 "export ANTHROPIC_AUTH_TOKEN=SECRET-c",                               # 7 if 里（没缩进）：只提示
+                 "fi",
+                 "alias cc='ANTHROPIC_BASE_URL=https://r.example ANTHROPIC_AUTH_TOKEN=SECRET-d claude'",  # 9 不算
+                 "echo \"set ANTHROPIC_API_KEY=SECRET-e\"",                            # 10 不算
+                 "cat <<EOF",
+                 "ANTHROPIC_AUTH_TOKEN=SECRET-f",                                     # 12 heredoc 里：不算
+                 "EOF",
+                 "ANTHROPIC_MODEL=glm-4.6 claude -p hi",                               # 14 前缀命令：只提示
+                 "export ANTHROPIC_AUTH_TOKEN=SECRET-g  # 中转"]                        # 15 顶格带注释：自动改
+        with open(rc, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        got = {(n, k): simple for n, k, _, simple in cam.shell_env_lines(rc, cam.OVERRIDE_ENV + cam.MODEL_ENV)}
+        self.assertEqual(got, {(1, "ANTHROPIC_BASE_URL"): True, (2, "ANTHROPIC_AUTH_TOKEN"): False, (4, "ANTHROPIC_AUTH_TOKEN"): False,
+                               (7, "ANTHROPIC_AUTH_TOKEN"): False, (14, "ANTHROPIC_MODEL"): False, (15, "ANTHROPIC_AUTH_TOKEN"): True})
+        ps = os.path.join(self.tmp, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1")
+        os.makedirs(os.path.dirname(ps))
+        with open(ps, "w", encoding="utf-8-sig", newline="") as f:
+            f.write('$env:ANTHROPIC_AUTH_TOKEN = "SECRET-h"\r\n$env:ANTHROPIC_API_KEY = $null\r\n# 中文注释\r\n')
+        got = [(n, k, simple) for n, k, v, simple in cam.shell_env_lines(ps, cam.OVERRIDE_ENV) if cam.env_value_matters(k, v)]
+        self.assertEqual(got, [(1, "ANTHROPIC_AUTH_TOKEN", True)])
+        with mock.patch.dict(os.environ, {"CAM_TEST_PS_PROFILES": "1", "CAM_MANAGED_SETTINGS": ""}):
+            plan = cam.env_fix_plan(None, with_cache=False)
+            self.assertNotIn("SECRET", json.dumps(plan, ensure_ascii=False))
+            auto = sorted((f["fix"]["path"], f["fix"]["line"]) for f in plan["fix"] if f["fix"]["type"] == "comment")
+            self.assertEqual(auto, sorted([(os.path.realpath(rc), 1), (os.path.realpath(rc), 15), (os.path.realpath(ps), 1)]))
+            hand = [f for f in plan["manual"] if ".zshrc" in f["text"]]
+            self.assertEqual(len(hand), 4)
+            self.assertTrue(all("cam 不替你改" in f["advice"] for f in hand))
+            res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertEqual(res["failed"], [])
+        raw = _rb(ps)
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf# [cam env fix "), raw[:40])  # BOM 还在最前面
+        self.assertIn("中文注释".encode("utf-8"), raw)
+        with open(rc) as f:
+            out = f.read().split("\n")
+        self.assertTrue(out[0].startswith("# [cam env fix ") and out[14].startswith("# [cam env fix "))
+        self.assertEqual(out[1:14], lines[1:14])  # 别的行一个字都没动
+
+    def test_env_fix_undo_keeps_later_edits_and_file_mode(self):
+        """撤销：清理后文件又被改过（比如 Claude Code 写进了新的权限设置），只把去掉的那几项放回去，后来的改动留着；
+        没再改过就整份放回。权限照现在的（以前撤销后变成 0600）；撤销一半失败的，下次只做剩下的。"""
+        cam = self.cam
+        files = self._relay_setup()
+        if os.name != "nt":
+            os.chmod(files["bashrc"], 0o644)
+        res = cam.env_fix_apply(cam.Store(), cam.env_fix_plan(None, with_cache=False))
+        self.assertEqual(res["failed"], [])
+        with open(files["settings"]) as f:
+            st = json.load(f)
+        st["permissions"] = {"allow": ["Bash(ls)"]}  # 清理后又改了
+        with open(files["settings"], "w") as f:
+            json.dump(st, f)
+        bash_after = _rb(files["bashrc"])
+        r = cam.env_fix_undo(cam.Store())
+        self.assertEqual(r["failed"], [])
+        with open(files["settings"]) as f:
+            back = json.load(f)
+        self.assertEqual(back["permissions"], {"allow": ["Bash(ls)"]})  # 后来的改动还在
+        self.assertEqual(back["env"]["ANTHROPIC_AUTH_TOKEN"], "SECRET-1")  # 去掉的放回来了
+        self.assertEqual(back["model"], "kimi-k2")
+        self.assertTrue(any("又改过" in x for x in r["restored"]))
+        self.assertNotEqual(_rb(files["bashrc"]), bash_after)
+        if os.name != "nt":
+            self.assertEqual(os.stat(files["bashrc"]).st_mode & 0o777, 0o644)
+        # 撤销时某一项失败：这次不算撤销完，下次只做剩下的
+        res = cam.env_fix_apply(cam.Store(), cam.env_fix_plan(None, with_cache=False))
+        real_write = cam.write_bytes_atomic
+        calls = []
+
+        def flaky(path, data):
+            calls.append(path)
+            if len(calls) == 1:
+                raise OSError("磁盘满了")
+            return real_write(path, data)
+        with mock.patch.object(cam, "write_bytes_atomic", flaky):
+            r = cam.env_fix_undo(cam.Store())
+        self.assertEqual(len(r["failed"]), 1)
+        r = cam.env_fix_undo(cam.Store())  # 再撤销一次：只做刚才失败的那一项
+        self.assertEqual((r["failed"], len(r["restored"])), ([], 1))
+
+    def test_env_fix_npm_uninstall_uses_prefix_and_checks_result(self):
+        """npm 卸载用 --prefix 指明是哪一份（不按 npm 自己配置的前缀，免得卸到要留的那份上），卸完核对那份真没了、要留的还在。"""
+        cam = self.cam
+        calls = []
+        fake = {"path": os.path.join(self.tmp, "old", "bin", "claude"), "keep": os.path.join(self.tmp, "keep-claude")}
+        os.makedirs(os.path.dirname(fake["path"]))
+        for p in fake.values():
+            with open(p, "w") as f:
+                f.write("x")
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[1] == "uninstall":
+                os.unlink(fake["path"])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        item = {"npm": "/x/npm", "prefix": os.path.join(self.tmp, "old"), "path": fake["path"], "keep": fake["keep"]}
+        plan = {"fix": [{"text": "多一份", "level": "warn", "advice": "", "optional": False,
+                         "fix": {"type": "npm_uninstall", "items": [item]}}], "optional": [], "live": [], "running": 0}
+        with mock.patch.object(cam.subprocess, "run", run), mock.patch.object(cam, "claude_version", lambda p: "2.1.0 (Claude Code)"):
+            res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertEqual(res["failed"], [])
+        self.assertEqual(calls[0], ["/x/npm", "uninstall", "-g", "--prefix", item["prefix"], "@anthropic-ai/claude-code"])
+        # 卸完要留的那份运行不了（比如它其实是指向刚卸掉那份的包装）：报失败
+        with open(fake["path"], "w") as f:
+            f.write("x")
+        with mock.patch.object(cam.subprocess, "run", run), mock.patch.object(cam, "claude_version", lambda p: None):
+            res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertIn("运行不了", res["failed"][0]["error"])
+        # npm 说成功了但那份还在（卸到别处去了）：报失败
+        with open(fake["path"], "w") as f:
+            f.write("x")
+        with mock.patch.object(cam.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")):
+            res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertIn("还在", res["failed"][0]["error"])
+        # 查不出有没有 claude 在跑：卸载、升级、清缓存先跳过
+        plan["running"] = None
+        res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertEqual(res["skipped"], ["多一份"])
+
+    def test_env_fix_kinds_models_and_secret_safety(self):
+        """~/.local/bin 里随便一个脚本不算官方原生版；装在 Homebrew 的 Node 下面的 npm 包是 npm 不是 Homebrew；
+        Bedrock 的推理配置 ARN、us-gov. 前缀是 Claude 的模型；开着云厂商时模型变量当官方支持的用法（默认不动）；
+        撤销 launchctl 失败时报错里没有原值；配置目录就是主目录时不清缓存。"""
+        cam = self.cam
+        lb = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(lb)
+        with open(os.path.join(lb, "claude"), "w") as f:
+            f.write("#!/bin/sh\nexec relay-tool \"$@\"\n")
+        self.assertEqual(cam.install_kind(os.path.join(lb, "claude")), "其它")
+        self.assertEqual(cam.install_kind("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"), "npm")
+        self.assertEqual(cam.install_kind("/opt/homebrew/Caskroom/claude-code/2.1.0/claude"), "Homebrew")
+        self.assertEqual(cam.install_kind(os.path.join(self.tmp, ".local", "share", "claude", "versions", "2.1.0")), "原生")
+        for m in ("arn:aws:bedrock:us-east-1:123:application-inference-profile/abc", "us-gov.anthropic.claude-sonnet-4-5",
+                  "global.anthropic.claude-opus-4-1", "claude-sonnet-4@20250514", "opusplan"):
+            self.assertTrue(cam.is_claude_model(m), m)
+        self.assertFalse(cam.is_claude_model("glm-4.6"))
+        with open(os.path.join(self.tmp, ".claude", "settings.json"), "w") as f:
+            json.dump({"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": "my-deployment"}, "model": "my-deployment"}, f)
+        with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
+            plan = cam.env_fix_plan(None, with_cache=False)
+        self.assertEqual(plan["fix"], [])
+        self.assertEqual(len(plan["optional"]), 3)  # 开关本身、模型变量、settings 的 model：都默认不动
+        bdir = os.path.join(self.tmp, ".claude-accounts", "env-backups", "20260101-000000-000000-fix")
+        os.makedirs(bdir)
+        with open(os.path.join(bdir, "manifest.json"), "w") as f:
+            json.dump({"at": "x", "items": [{"type": "launchctl", "key": "ANTHROPIC_AUTH_TOKEN", "value": "SECRET-z"}]}, f)
+        with mock.patch.object(cam.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b"denied " + cmd[-1].encode())):
+            r = cam.env_fix_undo(cam.Store())
+        self.assertTrue(r["failed"])
+        self.assertNotIn("SECRET", json.dumps(r, ensure_ascii=False))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.tmp}):
+            os.makedirs(os.path.join(self.tmp, "downloads"), exist_ok=True)
+            self.assertEqual(cam.cache_finding(), [])
+
+    def test_env_checks_tls_autoupdate_hooks_mcp_and_owner(self):
+        """本机配置的另外几项：关了证书校验（注意，能一键清理）、关了自动更新（官方支持的用法，可选）、NODE_EXTRA_CA_CERTS 指向的文件不在、
+        钩子 / 状态栏 / MCP 的命令找不到、项目的 .mcp.json 写坏了。都不带任何值。"""
+        cam = self.cam
+        cfg = os.path.join(self.tmp, ".claude")
+        hook = os.path.join(self.tmp, "hooks", "ok.sh")
+        os.makedirs(os.path.dirname(hook))
+        with open(hook, "w") as f:
+            f.write("#!/bin/sh\n")
+        with open(os.path.join(cfg, "settings.json"), "w") as f:
+            json.dump({"env": {"NODE_TLS_REJECT_UNAUTHORIZED": "0", "DISABLE_AUTOUPDATER": "1",
+                               "NODE_EXTRA_CA_CERTS": os.path.join(self.tmp, "gone.pem")},
+                       "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"bash {hook}"},
+                                                                              {"type": "command", "command": "/nowhere/guard.sh"},
+                                                                              {"type": "command", "command": "echo hi | tee x"}]}]},
+                       "statusLine": {"type": "command", "command": "~/.claude/missing-statusline.sh"}}, f)
+        proj = os.path.join(self.tmp, "work", "p1")
+        os.makedirs(proj)
+        with open(os.path.join(proj, ".mcp.json"), "w") as f:
+            f.write("{not json")
+        with open(self.cj_path) as f:
+            cj = json.load(f)
+        cj["mcpServers"] = {"gone": {"command": "definitely-not-a-real-cmd-xyz"}, "web": {"type": "http", "url": "https://x"},
+                            "fine": {"command": "sh", "args": ["-c", "true"]}}
+        cj["projects"] = {proj: {"mcpServers": {"local": {"command": os.path.join(self.tmp, "no", "server")}}}}
+        with open(self.cj_path, "w") as f:
+            json.dump(cj, f)
+        with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
+            plan = cam.env_fix_plan(None, with_cache=False)
+        texts = [f["text"] for f in plan["fix"]]
+        opt = [f["text"] for f in plan["optional"]]
+        manual = [f["text"] for f in plan["manual"]]
+        has = lambda xs, *words: any(all(w in t for w in words) for t in xs)  # noqa: E731
+        self.assertTrue(has(texts, "NODE_TLS_REJECT_UNAUTHORIZED", "证书校验"), texts)
+        self.assertTrue(has(opt, "DISABLE_AUTOUPDATER"), opt)
+        self.assertTrue(has(manual, "NODE_EXTRA_CA_CERTS", "gone.pem"))
+        self.assertTrue(has(manual, "钩子 PreToolUse", "/nowhere/guard.sh"))
+        self.assertFalse(has(manual, "ok.sh"))  # 找得到的不报；管道这类看不出来的不报
+        self.assertFalse(has(manual, "tee"))
+        self.assertTrue(has(manual, "状态栏", "missing-statusline.sh"))
+        self.assertTrue(has(manual, "MCP 服务器 gone", "definitely-not-a-real-cmd-xyz"))
+        self.assertTrue(has(manual, "MCP 服务器 local", "的本地"))
+        self.assertFalse(has(manual, "MCP 服务器 web") or has(manual, "MCP 服务器 fine"))
+        self.assertTrue(has(manual, ".mcp.json 不是合法的 JSON"))
+        # 一键清理只去掉关证书校验那一项，自动更新（可选）和别的设置照旧
+        res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertEqual(res["failed"], [])
+        with open(os.path.join(cfg, "settings.json")) as f:
+            st = json.load(f)
+        self.assertNotIn("NODE_TLS_REJECT_UNAUTHORIZED", st["env"])
+        self.assertEqual(st["env"]["DISABLE_AUTOUPDATER"], "1")
+        self.assertIn("hooks", st)
+
+    @unittest.skipIf(os.name == "nt", "Windows 上不查文件归属")
+    def test_env_checks_files_owned_by_someone_else(self):
+        """配置目录里有不归自己的文件（用 sudo 跑过 claude）：提醒，给出 chown 的命令。造不出 root 的文件，就假装自己是另一个用户。"""
+        cam = self.cam
+        self.assertEqual(cam.owner_findings(), [])
+        with mock.patch.object(os, "getuid", lambda: os.stat(self.tmp).st_uid + 1):
+            f = cam.owner_findings()
+        self.assertEqual(len(f), 1)
+        self.assertIn("sudo chown -R", f[0]["advice"])
+        self.assertIn("sudo", f[0]["text"])
+
+    def test_env_fix_second_review_cases(self):
+        """复审查出的几种情况：块开头那行带注释、块里唯一的一句、单行的 if…fi、<<< 不是 heredoc；那次没改成的文件撤销时不碰；
+        部分撤销只改回记下的那几行；~/.local/bin 里提到官方包的包装脚本不算 npm；链接过去的 fish 配置照样能改；
+        备份只删撤销完了的；面板的指纹不跟着缓存大小变。"""
+        cam = self.cam
+        rc = os.path.join(self.tmp, ".bashrc")
+        with open(rc, "w") as f:
+            f.write("relay() {  # 中转\n"
+                    "export ANTHROPIC_AUTH_TOKEN=SECRET-1\n"          # 2 函数里唯一的一句：不自动改
+                    "}\n"
+                    "if [ -f x ]; then echo y; fi\n"                  # 4 单行 if：块深度不卡住
+                    "cat <<< \"hi\"\n"                                 # 5 here-string：不是 heredoc
+                    "export ANTHROPIC_BASE_URL=https://r.example\n")  # 6 顶格单独一行：自动改
+        got = {(n, k): simple for n, k, _, simple in cam.shell_env_lines(rc, cam.SCAN_ENV)}
+        self.assertEqual(got, {(2, "ANTHROPIC_AUTH_TOKEN"): False, (6, "ANTHROPIC_BASE_URL"): True})
+        # 链接过去的 fish 配置：按原来的名字认语法
+        real_fish = os.path.join(self.tmp, "dotfiles", "fish-config")
+        os.makedirs(os.path.dirname(real_fish))
+        with open(real_fish, "w") as f:
+            f.write("set -gx ANTHROPIC_BASE_URL https://r2.example\n")
+        os.makedirs(os.path.join(self.tmp, ".config", "fish"))
+        os.symlink(real_fish, os.path.join(self.tmp, ".config", "fish", "config.fish"))
+        with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
+            plan = cam.env_fix_plan(None, with_cache=False)
+        res = cam.env_fix_apply(cam.Store(), plan)
+        self.assertEqual(res["failed"], [])
+        with open(real_fish) as f:
+            self.assertTrue(f.read().startswith("# [cam env fix "))
+        # 部分撤销：同一天别的清理加了标记的行不跟着去掉
+        mark = cam.ENV_FIX_MARK.format(date=dt.date.today().isoformat())
+        with open(rc, "a") as f:
+            f.write(mark + "export UNRELATED=1\n")  # 文件又改过；还多了一行同样标记的（不是这次加的）
+        cam.env_fix_undo(cam.Store())
+        with open(rc) as f:
+            after = f.read()
+        self.assertIn("\nexport ANTHROPIC_BASE_URL=https://r.example\n", after)
+        self.assertIn(mark + "export UNRELATED=1", after)
+        # 那次没改成的文件（没有改后的指纹）：撤销时不拿旧备份盖掉
+        bdir = os.path.join(self.tmp, ".claude-accounts", "env-backups", "20250101-000000-000000-fix")
+        os.makedirs(bdir)
+        with open(os.path.join(bdir, "file-0"), "w") as f:
+            f.write("OLD")
+        with open(os.path.join(bdir, "manifest.json"), "w") as f:
+            json.dump({"at": "x", "items": [{"type": "file", "path": rc, "saved": "file-0", "before": "x"}]}, f)
+        cur = _rb(rc)
+        r = cam.env_fix_undo(cam.Store())
+        self.assertTrue(any("没改成" in x for x in r["restored"]), r)
+        self.assertEqual(_rb(rc), cur)
+        # ~/.local/bin 里提到官方包的包装脚本：不算 npm（旁边没有装好的包）
+        lb = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(lb, exist_ok=True)
+        with open(os.path.join(lb, "claude"), "w") as f:
+            f.write("#!/bin/sh\nexec node ~/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js \"$@\"\n")
+        self.assertEqual(cam.install_kind(os.path.join(lb, "claude")), "其它")
+        # 备份：超过 ENV_FIX_KEEP 次以后只删撤销完了的和只记了卸载 / 升级的
+        root = os.path.join(self.tmp, ".claude-accounts", "env-backups")
+        for i in range(cam.ENV_FIX_KEEP + 3):
+            d = os.path.join(root, f"2024010{i % 10}-00000{i // 10}-{i:06d}-fix")
+            os.makedirs(d, exist_ok=True)
+            items = [{"type": "note", "text": "升级"}] if i % 2 else [{"type": "file", "path": rc, "saved": "f", "after": "a"}]
+            with open(os.path.join(d, "manifest.json"), "w") as f:
+                json.dump({"at": "x", "items": items}, f)
+        cam.prune_env_fix_backups(cam.Store())
+        left = [m for _, m in cam.env_fix_backups(cam.Store())]
+        self.assertTrue(all(any(i["type"] == "file" for i in m["items"]) for m in left[cam.ENV_FIX_KEEP:]))
+        # 面板的指纹：缓存大小变了不影响
+        cfg = os.path.join(self.tmp, ".claude")
+        os.makedirs(os.path.join(cfg, "statsig"), exist_ok=True)
+        with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
+            d1 = cam.env_fix_plan(None)
+            with open(os.path.join(cfg, "statsig", "big"), "w") as f:
+                f.write("x" * 50000)
+            d2 = cam.env_fix_plan(None)
+        self.assertEqual((d1["digest"], d1["digest_optional"]), (d2["digest"], d2["digest_optional"]))
+
+    def test_env_fix_http_api(self):
+        files = self._relay_setup()
+        before = _rb(files["settings"])
+        store = self.cam.Store()
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(method, path, body=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", method=method,
+                                         data=None if body is None else json.dumps(body).encode(),
+                                         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+            try:
+                with opener.open(req, timeout=60) as r:
+                    return r.status, json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read().decode() or "{}")
+
+        try:
+            self.assertEqual(call("GET", "/api/env-fix?probe=1"), (200, {"ok": True}))
+            st, plan = call("GET", "/api/env-fix?offline=1")
+            self.assertEqual(st, 200)
+            self.assertNotIn("SECRET", json.dumps(plan, ensure_ascii=False))
+            self.assertTrue(plan["fix"] and plan["optional"] and plan["undo_at"] is None)
+            self.assertNotIn("score", plan)  # 本机配置只提示，不打分
+            self.assertNotIn("fix", plan["fix"][0])  # 给面板的不带怎么改的细节
+            self.assertEqual(call("POST", "/api/env-fix", {})[0], 400)  # 要带 apply: true
+            # 和面板上确认过的清单（digest）不一样：不改
+            st, res = call("POST", "/api/env-fix?offline=1", {"apply": True, "digest": "0" * 16})
+            self.assertEqual(st, 400)
+            self.assertIn("不一样", res.get("error", ""))
+            self.assertEqual(_rb(files["settings"]), before)
+            st, res = call("POST", "/api/env-fix?offline=1", {"apply": True, "digest": plan["digest"]})
+            self.assertEqual((st, res["failed"]), (200, []))
+            self.assertNotEqual(_rb(files["settings"]), before)
+            self.assertTrue(call("GET", "/api/env-fix?offline=1")[1]["undo_at"])
+            st, res = call("POST", "/api/env-fix", {"undo": True})
+            self.assertEqual((st, res["failed"]), (200, []))
+            self.assertEqual(_rb(files["settings"]), before)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
     # ---- 全面体检（cam doctor）
 
     def _stub_claude(self, version="2.1.0"):
@@ -4887,9 +5446,9 @@ exit 2""")
             for it in sec["items"]:
                 self.assertIn(it["level"], ("ok", "warn", "bad", "info"))
                 self.assertTrue(isinstance(it["text"], str) and it["text"] and isinstance(it["advice"], str), it)
-                self.assertLessEqual(set(it), {"level", "text", "advice", "group", "kind", "score", "grade", "ms"})
+                self.assertLessEqual(set(it), {"level", "text", "advice", "group", "kind", "score", "grade", "ms", "fix"})  # fix：cam env fix 能一键改
         s = res["summary"]
-        self.assertEqual(set(s), {"bad", "warn", "text", "first"})
+        self.assertEqual(set(s), {"bad", "warn", "fixable", "text", "first"})  # fixable：本机 Claude Code 里 cam env fix 能一键改的
         items = [i for sec in res["sections"] for i in sec["items"] if i.get("kind") != "summary"]
         self.assertEqual((s["bad"], s["warn"]), (sum(i["level"] == "bad" for i in items), sum(i["level"] == "warn" for i in items)))
         self.assertEqual(s["text"], f"{s['bad']} 项要处理，{s['warn']} 项留意")
@@ -5988,6 +6547,11 @@ def write(path, text):
 def menu_arg(path):
     """菜单栏插件把路径写进 bash= / param1= 时会把反斜杠写成两个（Windows 路径才有）。"""
     return path.replace("\\", "\\\\")
+
+
+def _rb(path):
+    with open(path, "rb") as f:
+        return f.read()
 
 
 def stub(bindir, name, body):

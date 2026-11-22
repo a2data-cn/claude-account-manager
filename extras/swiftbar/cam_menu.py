@@ -1001,6 +1001,8 @@ def render(store, st, out=print, rich=None, phase=None):
     out("更多 | sfimage=ellipsis.circle")
     out(f"--打开终端查看 | {action(terminal=True, refresh=False)} sfimage=terminal")
     out(f"--在终端看完整体检结果 | {action('doctor', terminal=True, refresh=False)} sfimage=list.bullet.clipboard")
+    # 一键清理在终端里跑：先列出要改什么、本机配置分，问一句再改（改之前备份，cam env fix --undo 改回去）
+    out(f"--一键清理环境… | {action('env', 'fix', terminal=True, refresh=False)} sfimage=wand.and.stars")
     out(f"--检查更新 | {action('update-check', script=MENU_PY)} sfimage=arrow.triangle.2.circlepath")
     if rich:  # 动画模式、图标样式：打勾的是现在的，点另一行就换（卡片小面板的“设置”里是真正的开关）
         out("-----")

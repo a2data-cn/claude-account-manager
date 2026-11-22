@@ -229,6 +229,18 @@ if ($problems.Count) {
 } else {
   Ok "没发现问题（完整结果：cam doctor）"
 }
+# 能一键清理的（第三方中转、API Key 这类设置，多装的几份，旧版本）：问一句再看。默认否、-Yes 时不改：改的是你自己的设置，要先看过
+$fixOut = @(& $PyExe @PyArgs $CamPy env fix --check 2>$null | ForEach-Object { "$_" })
+$fixN = 0
+if ($fixOut.Count) { [void][int]::TryParse($fixOut[-1].Trim(), [ref]$fixN) }
+if ($fixN -gt 0) {
+  Note "其中 $fixN 项可以一键清理（第三方中转、API Key 这类设置，多装的几份，旧版本）"
+  if (Ask "现在看看要改什么吗？（先列出来再问一次，改之前都备份，能撤销）" $false) {
+    & $PyExe @PyArgs $CamPy env fix
+  } else {
+    Note "以后想清理：cam env fix（先列出来，确认了才改；cam env fix --undo 改回去）"
+  }
+}
 
 Write-Host ""
 Write-Host "✓ 安装完成" -ForegroundColor Green

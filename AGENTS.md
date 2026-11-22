@@ -18,7 +18,7 @@
 
 ## 验证
 
-- `cam doctor`：全面体检（账号登录、Claude 服务、本机 Claude Code 和正在运行的会话、cam 自己、聊天机器人），不显示密钥。联网时会刷新用量、替不在用的号续快过期的登录（当前登录不碰）；只想看、不想改任何东西用 `cam doctor --offline`（`--json` 给脚本用）。`cam verify`：按 `SHA256SUMS` 校验代码文件
+- `cam doctor`：全面体检（账号登录、Claude 服务、本机 Claude Code 和正在运行的会话、cam 自己、聊天机器人），不显示密钥。联网时会刷新用量、替不在用的号续快过期的登录（当前登录不碰）；只想看、不想改任何东西用 `cam doctor --offline`（`--json` 给脚本用）。`cam verify`：按 `SHA256SUMS` 校验代码文件。`cam env fix`：列出第三方中转、API Key 这类设置和多装的 claude（默认只列，`--apply` 才改、改前备份，`--undo` 改回去）；替用户改他的设置前先给他看清单
 - 三套测试，都不碰真实账号：
   - `python3 -m unittest scripts.test_cam`（账号库和身份识别的测试一起跑：`python3 -m unittest discover -s scripts -p 'test_*.py'`）
   - `cd desktop/src-tauri/engine && cargo test`；改了 Rust 还要在 `desktop/src-tauri` 运行 `cargo fmt --all`（自动编译会检查排版，不对就失败）

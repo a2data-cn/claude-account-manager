@@ -238,6 +238,7 @@ cam doctor                # 全面体检：账号登录还能不能续、Claude 
 cam doctor --offline      # 不联网：不续登录、不刷新、不测服务，只看本机和上次的结果（--json 给脚本用）
 cam env install           # 用 Anthropic 官方安装器安装 Claude Code
 cam env clean             # 清理 Claude Code 缓存（默认只预演，加 --apply 才执行）
+cam env fix               # 一键清理第三方中转、API Key 这类设置和多装的 claude（先列出来，确认了才改，--undo 改回去）
 cam update --check        # 看有没有新版本；cam update 更新（见上面“更新”）
 cam verify                # 按 SHA256SUMS 校验代码文件
 cam completion bash       # Tab 补全脚本（bash / zsh / powershell），见下面“命令行补全”
@@ -322,6 +323,45 @@ cam env clean --purge --apply      # 把整个 Claude Code 配置移到备份目
 - `--logout` 退出前先把当前账号的最新凭据存进 cam，之后 `cam switch` 能切回来；退出前的登录状态另外备份在 `backups/`
 - `--purge` 不删除，而是把 `~/.claude/`、`~/.claude.json`（macOS 还有钥匙串里的登录）移到 `~/.claude-accounts/env-backups/<时间>/`，要恢复时移回去即可。这一步会带走会话记录和设置，所以会再确认一次（`-y` 跳过）
 - 有 `claude` 正在运行时拒绝执行，先退出它们，或加 `--force`
+
+#### 一键清理：第三方中转、API Key 这类设置（cam env fix）
+
+用过第三方中转、或者照着教程设过 API Key 的电脑，`claude` 会优先用那些设置，切换账号看起来就“不生效”，或者请求发到了别处。`cam env fix` 把它们找出来，告诉你每一项设在哪个文件第几行、有什么影响，确认了再一起改：
+
+```bash
+cam env fix              # 列出要改什么，交互终端里问一句再改（非交互只列出来）
+cam env fix --all        # 官方支持的用法（API Key、长期令牌、云厂商）也一起清理
+cam env fix --apply      # 不问，直接改
+cam env fix --undo       # 把上一次一键清理原样改回去
+cam env fix --json       # 给脚本用（不含任何密钥）
+```
+
+- 查的地方：
+  - `~/.claude/settings.json` 和 `settings.local.json`：它们的 `env`，以及 `apiKeyHelper`、强制用 API 登录的 `forceLoginMethod`、不是 Claude 的 `model`
+  - 写在 shell 配置文件里的环境变量：zsh、bash、fish 的配置文件，Windows 上还有 PowerShell 的配置文件
+  - Windows 的用户和系统环境变量
+  - macOS 的 `launchctl`
+  - `~/.claude.json` 里存的 `primaryApiKey`
+  - 系统级的托管设置 `managed-settings.json`
+  - 只在当前终端里有的变量
+- 查哪些变量：
+  - `ANTHROPIC_BASE_URL`：指向官方地址的不算
+  - `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_API_KEY`、`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_CUSTOM_HEADERS`
+  - `CLAUDE_CODE_USE_BEDROCK` / `VERTEX` / `FOUNDRY`：开着的才算
+  - 模型名被改成不是 Claude 的那几个模型变量
+- 装了几份：
+  - npm 在同一个目录里放的 claude、claude.cmd 算一份；nvm 链接过去的目录也算一份
+  - 多份时留官方原生的，没有就留官方 npm 的；多出来的 npm 版用它旁边的 npm 卸掉
+  - 实际运行的 claude 不是官方的（第三方包装）只提醒，不替你卸载
+- 还有：Claude Code 有新版本就用 `claude update` 升级；装了 claude-code-router 时提醒一声；可以重新生成的缓存列在可选里，默认不清
+- 跟着中转教程常一起设的：`NODE_TLS_REJECT_UNAUTHORIZED=0`（关掉了 HTTPS 证书校验，能一键去掉）、`DISABLE_AUTOUPDATER`（关掉了自动更新，官方支持的用法，可选）；`NODE_EXTRA_CA_CERTS` 指向的证书文件不在了也提醒
+- 只提示、不替你改的：settings.json 里钩子（hooks）、状态栏（statusLine）要运行的程序找不到，MCP 服务器（`~/.claude.json` 的用户级和项目级、项目里的 `.mcp.json`）的命令找不到或 `.mcp.json` 写坏了，配置目录里有不归你的文件（用 sudo 跑过 claude，之后登录、切号写不进去；给出 `chown` 的命令）
+- 怎么改：settings 文件只去掉那几项，别的设置原样留着；shell 配置文件里只自动注释“顶格、单独一行、只设这一个变量、不在函数和 if 里”的行（加上 `# [cam env fix 日期 注释掉]`，不删），和别的命令写在一起的、只对后面那条命令生效的前缀写法、函数里的只告诉你在哪一行，自己改；Windows 用户环境变量删掉后通知系统，新开的终端就拿不到了；`~/.claude.json` 只去掉 `primaryApiKey`
+- 改之前把要动的文件原样存进 `~/.claude-accounts/env-backups/<时间>-fix/`，环境变量的原值也记下来，每做完一步记一次（中途断了也撤销得了）；这个目录只有你能读，只留最近 10 次。`--undo`：文件清理后没再改过就整份放回，改过就只把清理动过的那几处改回来，你后来的改动留着；文件权限照旧。卸载、升级、清缓存改不回去，撤销时会说怎么重新装
+- 多装的 npm 版用 `npm uninstall -g --prefix <那一份的目录>` 卸载，卸完核对那份真的没了、要留的那份还在；管理面板里卸载、升级只提示（面板服务看到的 PATH 可能和你的终端不一样），到终端里跑 `cam env fix`。面板上点“确认清理”时会核对要改的东西和你看到的清单一样，不一样就让你重新看
+- 系统环境变量、托管设置要管理员权限，只告诉你去哪改。有 `claude` 在运行时，卸载、升级、清缓存这几项先跳过（`--force` 照做），别的照改，正在跑的 `claude` 重开后才用新设置
+- 只提示、不打分。官方支持的用法（API Key、`apiKeyHelper`、官方长期令牌、Bedrock / Vertex / Foundry）标成“提示”，一键清理默认不动，单独列出来；想用订阅账号、用 cam 切号时加 `--all`（面板里勾上）一起清理
+- 入口：`cam doctor` 的“本机 Claude Code”一节、管理面板环境页的“一键清理”按钮、菜单栏 / 托盘菜单“更多 → 一键清理环境…”（开一个终端跑 `cam env fix`）、安装脚本发现能清理的项时问一句（默认不改，`--yes` 时也不改）
 
 ### 切号规则
 

@@ -277,6 +277,22 @@ if [[ -n "$PROBLEMS" ]]; then
 else
   ok "没发现问题（完整结果：cam doctor）"
 fi
+# 能一键清理的（第三方中转、API Key 这类设置，多装的几份，旧版本）：问一句再看。默认否、--yes 时不改：改的是你自己的设置，要先看过
+FIXN="$("$PY" "$ROOT/scripts/cam.py" env fix --check 2>/dev/null | tail -n 1)" || true
+if [[ "$FIXN" =~ ^[1-9][0-9]*$ ]]; then
+  note "其中 ${FIXN} 项可以一键清理（第三方中转、API Key 这类设置，多装的几份，旧版本）"
+  if ask "现在看看要改什么吗？（先列出来再问一次，改之前都备份，能撤销）" n; then
+    if [[ -t 0 ]]; then
+      "$PY" "$ROOT/scripts/cam.py" env fix || true
+    elif [[ -r /dev/tty ]]; then
+      "$PY" "$ROOT/scripts/cam.py" env fix </dev/tty || true
+    else
+      "$PY" "$ROOT/scripts/cam.py" env fix || true
+    fi
+  else
+    note "以后想清理：cam env fix（先列出来，确认了才改；cam env fix --undo 改回去）"
+  fi
+fi
 
 echo
 echo "✓ 安装完成"
