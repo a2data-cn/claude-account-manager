@@ -299,7 +299,7 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .mbchips button[aria-pressed="true"]::before { content: "✓ "; }
 .mbchips button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .mbchips button:disabled { cursor: progress; opacity: .7; }
-@media (max-width: 560px) { .mb-opts { grid-template-columns: 1fr; gap: 6px; } }
+@media (max-width: 560px) { .mb-opts { grid-template-columns: 1fr; gap: 6px; } .mb-opts .seg-mini button { padding: 2px 7px; } }  /* 手机上托盘的六种样式也排得下 */
 .g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
 .g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
 .g-mini b { color: var(--ink); font-weight: 600; }
@@ -1786,6 +1786,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   // 在回答时彩色那段每秒闪一次，等你确认时整个图标快一倍地闪，和插件一个节奏。卡片小面板的设置页是同一套
   const MB_ICONS = [["bars", "信号格"], ["lamp", "红绿灯"], ["ring", "圆环"], ["rings", "双环"], ["twobar", "两根小条"]];
   const MB_TEXT = [["name", "名字"], ["five", "5 小时 %"], ["seven", "7 天 %"], ["sessions", "在回答的会话数"]];
+  const TRAY_ICONS = [["badge", "数字方块"], ...MB_ICONS];  // Windows 托盘：多一种数字方块（托盘图标旁边不能写字）
   let lightNow = { lv: "ok", anim: "" }, mbSet = null, mbBusy = false;
   function mbIcon(style, lv, p5, p7) {
     const tone = `var(--mb-${lv === "bad" ? "bad" : lv === "busy" ? "warn" : "ok"})`, q5 = p5 == null ? 100 : Math.max(0, Math.min(100, p5));
@@ -1795,6 +1796,10 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       return p <= 0 ? "" : `<circle class="${cls || ""}" cx="8" cy="8" r="${r}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="${p >= 100 ? "butt" : "round"}"
         stroke-dasharray="${p >= 100 ? (L + 1).toFixed(2) : ((L * p) / 100).toFixed(2)} ${(L + 1).toFixed(2)}" transform="rotate(-90 8 8)"/>`;
     };
+    if (style === "badge") {  // Windows 托盘的数字方块：底色跟着 5 小时额度（70% 以下绿、70–89% 黄、90% 以上红），写着百分比
+      const c = p5 == null ? "#6E6E73" : p5 >= 90 ? "#BF3B33" : p5 >= 70 ? "#B87A08" : "#1F8A4C", t = p5 == null ? "C" : p5 >= 100 ? "满" : String(Math.round(p5));
+      return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect class="mb-lit" width="16" height="16" rx="4" fill="${c}"/><text x="8" y="12" text-anchor="middle" font-size="${t.length >= 2 ? 10.5 : 12.5}" font-weight="700" fill="#fff" font-family="Segoe UI, system-ui, sans-serif">${t}</text></svg>`;
+    }
     if (style === "lamp") return `<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><rect x=".6" y=".6" width="10.8" height="18.8" rx="4.4" fill="none" stroke="var(--mb-glyph)" stroke-width="1.2"/>${
       [["bad", 4.2], ["busy", 10], ["ok", 15.8]].map(([l, cy]) => `<circle class="${l === lv ? "mb-lit" : ""}" cx="6" cy="${cy}" r="2.5" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")}</svg>`;
     if (style === "ring") return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${trk(6.25, 2.5)}${arc(6.25, 2.5, q5, tone, "mb-lit")}</svg>`;
@@ -1816,24 +1821,28 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   function renderMenubar() {
     const box = $("#mb-card");
-    if (!mbSet || !mbSet.available || !state) { $("#menubar-block").hidden = true; return; }
+    if (!mbSet || !(mbSet.available || mbSet.tray) || !state) { $("#menubar-block").hidden = true; return; }
     $("#menubar-block").hidden = false;
+    const tray = !mbSet.available;  // Windows 托盘：只有图标样式能选，旁边不能写字
+    $("#menubar-block h2").textContent = tray ? "托盘图标" : "菜单栏";
+    $("#menubar-block .sec-head .hint").textContent = tray ? "Windows 任务栏右下角 cam 的图标：用哪种样式，选了一分钟内换上" : "Mac 菜单栏上 cam 那一小块：用哪种图标、旁边写什么，选了马上换";
+    $('#subnav [data-for="menubar-block"]').textContent = tray ? "托盘图标" : "菜单栏";
     // 预览用的数：当前的 Claude Code 号（名字按菜单栏的规则：太长或是邮箱时写“1号”）、它的 5 小时 / 7 天、在回答的会话数、红绿灯的级别
     const accs = state.accounts || [], i = accs.findIndex((a) => a.kind === "claude_code" && a.is_active), cur = accs[i];
     const wide = (t) => [...String(t || "")].reduce((n, c) => n + (c.codePointAt(0) > 0x2e7f ? 2 : 1), 0);
     const name = !cur ? "Claude" : !cur.label || cur.label.includes("@") || wide(cur.label) > 12 ? `${i + 1}号` : cur.label;
     const u = (cur && cur.usage) || {}, ss = state.sessions || {};
     const win = (w) => (w && typeof w.utilization === "number" ? Math.max(0, Math.min(100, w.utilization)) : null);
-    const p5 = win(u.five_hour), p7 = win(u.seven_day), items = mbSet.text || [];
+    const p5 = win(u.five_hour), p7 = win(u.seven_day), items = tray ? [] : mbSet.text || [];
     const t = mbTitle(items, name, p5, p7, ss.answering || (ss.busy ? true : 0)), now = new Date(), two = (n) => String(n).padStart(2, "0");
     const wifi = `<svg width="15" height="11" viewBox="0 0 17 12" aria-hidden="true"><path fill="currentColor" d="M8.5 11.2l2.2-2.7a3.4 3.4 0 0 0-4.4 0zM8.5 4.6a6.6 6.6 0 0 1 4.3 1.6l1.2-1.4a8.5 8.5 0 0 0-11 0l1.2 1.4a6.6 6.6 0 0 1 4.3-1.6zM8.5.6a10.7 10.7 0 0 1 7 2.6l1-1.3A12.5 12.5 0 0 0 .5 1.9l1 1.3A10.7 10.7 0 0 1 8.5.6z"/></svg>`;
     const dis = mbBusy ? " disabled" : "";
     box.innerHTML = `<h3><span class="eico"><svg><use href="#i-signal"/></svg></span>样式<span class="hint">图标的颜色和闪法表示状态：绿 = 空闲正常，橙 = 在回答 / 要注意，红 = 要处理；在回答时闪，等你确认时快闪</span></h3>
       <div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${lightNow.anim ? " mb-" + lightNow.anim : ""}">${mbIcon(mbSet.icon, lightNow.lv, p5, p7)}${t ? `<span>${esc(t)}</span>` : ""}</span>
         <span class="mbp-sys">${wifi}<span>${two(now.getHours())}:${two(now.getMinutes())}</span></span></div>
-      <div class="mb-opts"><span class="k">图标</span><span class="seg-mini" role="group" aria-label="菜单栏图标">${MB_ICONS.map(([v, tt]) => `<button type="button" data-mbicon="${v}" aria-pressed="${mbSet.icon === v}"${dis}>${tt}</button>`).join("")}</span>
-        <span class="k">旁边写什么</span><span class="mbchips" role="group" aria-label="图标旁边写什么">${MB_TEXT.map(([v, tt]) => `<button type="button" data-mbtext="${v}" aria-pressed="${items.includes(v)}"${dis}>${tt}</button>`).join("")}</span></div>
-      <p class="hint" style="margin:10px 0 0">可以多选，都不选就只有图标。菜单栏下拉菜单的“更多”里、卡片小面板的“设置”里也能改。</p>`;
+      <div class="mb-opts"><span class="k">图标</span><span class="seg-mini" role="group" aria-label="${tray ? "托盘图标" : "菜单栏图标"}">${(tray ? TRAY_ICONS : MB_ICONS).map(([v, tt]) => `<button type="button" data-mbicon="${v}" aria-pressed="${mbSet.icon === v}"${dis}>${tt}</button>`).join("")}</span>
+        ${tray ? "" : `<span class="k">旁边写什么</span><span class="mbchips" role="group" aria-label="图标旁边写什么">${MB_TEXT.map(([v, tt]) => `<button type="button" data-mbtext="${v}" aria-pressed="${items.includes(v)}"${dis}>${tt}</button>`).join("")}</span>`}</div>
+      <p class="hint" style="margin:10px 0 0">${tray ? "托盘图标右键菜单的“更多”里、卡片小面板的“设置”里也能改。数字方块写着 5 小时额度用了百分之几；别的样式鼠标停在图标上能看到额度。" : "可以多选，都不选就只有图标。菜单栏下拉菜单的“更多”里、卡片小面板的“设置”里也能改。"}</p>`;
   }
   async function loadMenubar() {
     try { mbSet = await api("GET", "/api/menubar"); } catch (_) { mbSet = null; }  // 桌面版、老版本的 cam serve 没有这个接口

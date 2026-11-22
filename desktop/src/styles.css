@@ -286,7 +286,7 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
 .mbchips button[aria-pressed="true"]::before { content: "✓ "; }
 .mbchips button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .mbchips button:disabled { cursor: progress; opacity: .7; }
-@media (max-width: 560px) { .mb-opts { grid-template-columns: 1fr; gap: 6px; } }
+@media (max-width: 560px) { .mb-opts { grid-template-columns: 1fr; gap: 6px; } .mb-opts .seg-mini button { padding: 2px 7px; } }  /* 手机上托盘的六种样式也排得下 */
 .g-empty { color: var(--muted); font-size: 13px; padding-top: 4px; }
 .g-mini { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
 .g-mini b { color: var(--ink); font-weight: 600; }

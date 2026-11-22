@@ -260,7 +260,7 @@ def _mix(a, b, g):
 
 
 @functools.lru_cache(maxsize=256)
-def status_icon(dark, level="ok", kind="", phase=0.0, style="bars", p5=None, p7=None):
+def status_icon(dark, level="ok", kind="", phase=0.0, style="bars", p5=None, p7=None, k=SCALE):
     """菜单栏图标，五种样式，菜单或卡片小面板的设置里选：四格信号（像手机信号）、竖的小红绿灯，以及画额度的三种——
     圆环（5 小时用了多少）、双环（外圈 5 小时、内圈 7 天）、两根小条（上 5 小时、下 7 天）。p5 / p7 是整数百分比
     （画额度的样式才用，别的样式传 None，缓存才命中）。百分比的数字用系统字体写在旁边的文字里，菜单栏这么小，画出来的数字不如文字清楚。
@@ -269,7 +269,8 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars", p5=None, p7=
     信号格一格格渐亮涨上去再从头来 / 红绿灯照真红绿灯的黄闪：亮着的那盏灯一亮一灭（灭的时候还看得见镜片的颜色），红绿不动；
     "blink"（等你确认：Claude Code 弹着权限提示、或者切换要你确认）时信号格全亮全灭、红绿灯三盏灯一起闪，比黄闪快一倍。
     经典模式只有两帧（phase 0 和 0.375：两种动画都是一帧亮一帧灭），
-    流式模式每 0.25 秒一帧。画好的图按参数缓存。
+    流式模式每 0.25 秒一帧。画好的图按参数缓存。k 是一点画几个像素：菜单栏是 2 倍图；Windows 托盘按屏幕缩放画成实际像素
+    （16 像素高的托盘图标，红绿灯 k=0.8）。
     """
     if kind == "pulse":
         glow = 0.5 - 0.5 * math.cos(2 * math.pi * phase)  # 0 → 1 → 0
@@ -278,11 +279,11 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars", p5=None, p7=
     else:
         glow = 1.0
     if style in QUOTA_STYLES:
-        return _quota_icon(dark, level, kind, phase, style, p5, p7)
+        return _quota_icon(dark, level, kind, phase, style, p5, p7, k)
     if style == "lamp":
-        W, H = LAMP_W * SCALE, LAMP_H * SCALE
-        stroke, br, lr, cx = 1.2 * SCALE, 4.5 * SCALE, 2.5 * SCALE, W / 2  # 线框粗细、灯体圆角、灯的半径
-        lamps = (("bad", 4.2 * SCALE), ("busy", 10.0 * SCALE), ("ok", 15.8 * SCALE))  # 红、橙、绿三盏灯的圆心 y
+        W, H = round(LAMP_W * k), round(LAMP_H * k)
+        stroke, br, lr, cx = 1.2 * k, 4.5 * k, 2.5 * k, W / 2  # 线框粗细、灯体圆角、灯的半径
+        lamps = (("bad", 4.2 * k), ("busy", 10.0 * k), ("ok", 15.8 * k))  # 红、橙、绿三盏灯的圆心 y
         ink = GLYPH[dark]
 
         def rrect(inset, r):  # 圆角矩形，四边往里缩 inset
@@ -317,18 +318,18 @@ def status_icon(dark, level="ok", kind="", phase=0.0, style="bars", p5=None, p7=
             else:
                 bulbs.append((lamp(cy, lr), (*ink[:3], ink[3] * 0.3)))  # 没亮的灯：淡淡的一个点，看得出三盏都在
         return _png(W, H, _raster(W, H, [(frame, ink)] + bulbs))
-    S = ICON_H * SCALE
+    S = round(ICON_H * k)
     if kind == "pulse":
         fill = 1 + phase * 3  # 亮的格数 1 → 4 再从头来，每一格渐亮
         lit_of = lambda i: min(max(fill - i, 0.0), 1.0)  # noqa: E731
     else:
         lit_of = lambda i: glow  # noqa: E731
-    bw, gap, r = 3 * SCALE, 1 * SCALE, 1.5 * SCALE  # 格子宽 3 点、间隔 1 点、顶是圆的
-    bottom = S - 1 * SCALE
+    bw, gap, r = 3 * k, 1 * k, 1.5 * k  # 格子宽 3 点、间隔 1 点、顶是圆的
+    bottom = S - 1 * k
     tone = (*FILL[{"busy": "warn"}.get(level, level)][dark], 1.0)
 
     def bar(i, h):
-        cx, top = i * (bw + gap) + bw / 2, bottom - h * SCALE
+        cx, top = i * (bw + gap) + bw / 2, bottom - h * k
 
         def inside(px, py):
             qy = min(max(py, top + r), bottom - r)
@@ -357,7 +358,7 @@ def _annulus(c, ro, ri):
     return lambda px, py: ri * ri <= (px - c) ** 2 + (py - c) ** 2 <= ro * ro
 
 
-def _quota_icon(dark, level, kind, phase, style, p5, p7):
+def _quota_icon(dark, level, kind, phase, style, p5, p7, k=SCALE):
     """画额度的三种菜单栏图标：颜色是状态（绿 = 空闲正常，橙 = 工作中 / 要注意，红 = 要处理，和红绿灯一样），长短是额度。
     5 小时用状态色，7 天用菜单栏文字的颜色。还没有 5 小时的数时画满一圈 / 一整根，只当状态灯用。
 
@@ -372,18 +373,18 @@ def _quota_icon(dark, level, kind, phase, style, p5, p7):
         lit = True
     fade = 0.25 if kind == "blink" and not lit else 1.0  # 等你确认的暗拍：整个图标只剩两成五
 
-    def a(rgba, k=1.0):
-        return (*rgba[:3], rgba[3] * k * fade)
+    def a(rgba, m=1.0):
+        return (*rgba[:3], rgba[3] * m * fade)
     tone = (*FILL[{"busy": "warn"}.get(level, level)][dark], 1.0)
     col = a(tone, 1.0 if lit or kind == "blink" else 0.35)
     ink = a(GLYPH[dark])
     track = a(TRACK[dark])
     p5v = 100 if p5 is None else p5
     if style == "twobar":
-        W, H = TWOBAR_W * SCALE, TWOBAR_H * SCALE
-        r = 2 * SCALE
-        y5, y7 = 3.5 * SCALE, 10.5 * SCALE
-        x0, x1 = 0.5 * SCALE, W - 0.5 * SCALE
+        W, H = round(TWOBAR_W * k), round(TWOBAR_H * k)
+        r = 2 * k
+        y5, y7 = 3.5 * k, 10.5 * k
+        x0, x1 = 0.5 * k, W - 0.5 * k
 
         def fill(p):
             return x0 + max(2 * r, (x1 - x0) * min(max(p, 0), 100) / 100)
@@ -393,16 +394,16 @@ def _quota_icon(dark, level, kind, phase, style, p5, p7):
         if p7 is not None and p7 > 0:
             shapes.append((_pill(x0, fill(p7), y7, r), ink))
         return _png(W, H, _raster(W, H, shapes))
-    S = ICON_W * SCALE
+    S = round(ICON_W * k)
     c = S / 2
     if style == "ring":
-        ro, ri = c - 0.5 * SCALE, c - 3.0 * SCALE
+        ro, ri = c - 0.5 * k, c - 3.0 * k
         shapes = [(_annulus(c, ro, ri), track)]
         if p5v > 0:
             shapes.append((_arc(c, ro, ri, p5v), col))
         return _png(S, S, _raster(S, S, shapes))
-    ro, ri = c - 0.5 * SCALE, c - 2.7 * SCALE  # 双环：外圈 2.2 点粗，空 1 点，内圈 2 点粗
-    ro2, ri2 = ri - 1.0 * SCALE, ri - 3.0 * SCALE
+    ro, ri = c - 0.5 * k, c - 2.7 * k  # 双环：外圈 2.2 点粗，空 1 点，内圈 2 点粗
+    ro2, ri2 = ri - 1.0 * k, ri - 3.0 * k
     shapes = [(_annulus(c, ro, ri), track), (_annulus(c, ro2, ri2), track)]
     if p5v > 0:
         shapes.append((_arc(c, ro, ri, p5v), col))
@@ -752,6 +753,15 @@ def status_light(store, data, accs, active, st):
     return level, text, blink, len(items) - 1
 
 
+def title_account(accs, active):
+    """菜单栏标题（Windows 托盘图标）显示哪个号：当前 Claude Code 账号；它没有 5 小时额度时退回到 5 小时用得最少的网页账号，
+    也没有就还是当前号（可能是 None）。"""
+    if active is not None and pct(active, "five_hour") is not None:
+        return active
+    web = sorted((a for a in accs if a["kind"] == "claude_web" and pct(a, "five_hour") is not None), key=lambda a: pct(a, "five_hour"))
+    return web[0] if web else active
+
+
 def render(store, st, out=print, rich=None, phase=None):
     """rich：菜单栏画额度环、账号下面画进度条图（SwiftBar 认 image 参数；Windows 托盘不认，用文字进度条）。默认 macOS 上开。"""
     rich = cam.IS_MAC if rich is None else rich
@@ -761,15 +771,6 @@ def render(store, st, out=print, rich=None, phase=None):
     pos = {a["id"]: n for n, a in enumerate(accs, 1)}  # 和 cam 列表里的序号一致；菜单栏的“1号”、快捷键的数字都用它
     act_id = data["active"].get("claude_code")
     active = next((a for a in accs if a["id"] == act_id), None)
-
-    # 标题优先显示当前 Claude Code 账号；没有则退回到有额度的网页账号
-    title_acc = active
-    if title_acc is None or pct(title_acc, "five_hour") is None:
-        web_with_usage = sorted(
-            (a for a in accs if a["kind"] == "claude_web" and pct(a, "five_hour") is not None),
-            key=lambda a: pct(a, "five_hour"))
-        if web_with_usage:
-            title_acc = web_with_usage[0]
 
     # ---- 菜单栏标题（标题行上的快捷键是“打开菜单”）
     # rich 时图标是四格信号（红绿灯）；要动画时（工作中、等你确认）经典模式放两帧在标题里让 SwiftBar 每 5 秒轮换，
@@ -794,8 +795,7 @@ def render(store, st, out=print, rich=None, phase=None):
         return image_param(lambda _v, dark: status_icon(dark, light[0], kind, ph, style, a5, a7), None, *icon_size(style))
 
     heads = []
-    # 标题优先显示当前 Claude Code 账号；当前号没有 5 小时额度时退回到有额度的网页账号（上面的 title_acc）
-    shown = title_acc if title_acc is not None and pct(title_acc, "five_hour") is not None else active
+    shown = title_account(accs, active)
     if not accs:
         heads.append("Claude ⚠ | sfimage=person.2.circle")
     elif shown is not None:

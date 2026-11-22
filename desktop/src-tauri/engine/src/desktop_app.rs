@@ -251,6 +251,12 @@ impl DesktopRuntime for SystemRuntime {
                 let mut cmd = if cfg!(target_os = "windows") {
                     let mut c = Command::new("taskkill");
                     c.args(["/PID", &p.pid.to_string()]);
+                    #[cfg(windows)]
+                    {
+                        // 桌面版是 GUI 程序，不加这个会闪一下控制台窗口
+                        use std::os::windows::process::CommandExt;
+                        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                    }
                     c
                 } else {
                     let mut c = Command::new("kill");

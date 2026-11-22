@@ -267,6 +267,7 @@ button { font: inherit; color: inherit; }
 .mbopt { display: grid; gap: 5px; padding: 8px 2px 2px; }
 .mbopt .k { font-size: 11px; color: var(--muted); }
 .mbopt .seg-mini { align-self: start; justify-self: start; }
+.mbopt .seg-mini.tight button { padding: 2px 7px; }  /* Windows 托盘多一种“数字方块”：六个挤得下 380 宽的小面板 */
 .mbchips { display: flex; flex-wrap: wrap; gap: 5px; }
 .mbchips button { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer; }
 .mbchips button:hover { border-color: var(--muted); color: var(--ink); }
@@ -309,6 +310,7 @@ button { font: inherit; color: inherit; }
   // 橙 = 在回答 / 要注意，红 = 要处理；在回答时彩色那段每秒闪一次，等你确认时整个图标快一倍地闪，和插件一个节奏
   const MB_ICONS = [["bars", "信号格"], ["lamp", "红绿灯"], ["ring", "圆环"], ["rings", "双环"], ["twobar", "两根小条"]];
   const MB_TEXT = [["name", "名字"], ["five", "5 小时 %"], ["seven", "7 天 %"], ["sessions", "在回答的会话数"]];
+  const TRAY_ICONS = [["badge", "数字方块"], ...MB_ICONS];  // Windows 托盘：多一种数字方块（托盘图标旁边不能写字）
   let lightNow = { lv: "ok", anim: "" };  // 顶上红绿灯最要紧的那条：级别和动画（lightHtml 记下，预览用）
   function mbIcon(style, lv, p5, p7) {
     const tone = `var(--mb-${lv === "bad" ? "bad" : lv === "busy" ? "warn" : "ok"})`, q5 = p5 == null ? 100 : Math.max(0, Math.min(100, p5));
@@ -318,6 +320,10 @@ button { font: inherit; color: inherit; }
       return p <= 0 ? "" : `<circle class="${cls || ""}" cx="8" cy="8" r="${r}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="${p >= 100 ? "butt" : "round"}"
         stroke-dasharray="${p >= 100 ? (L + 1).toFixed(2) : ((L * p) / 100).toFixed(2)} ${(L + 1).toFixed(2)}" transform="rotate(-90 8 8)"/>`;
     };
+    if (style === "badge") {  // Windows 托盘的数字方块：底色跟着 5 小时额度（70% 以下绿、70–89% 黄、90% 以上红），写着百分比
+      const c = p5 == null ? "#6E6E73" : p5 >= 90 ? "#BF3B33" : p5 >= 70 ? "#B87A08" : "#1F8A4C", t = p5 == null ? "C" : p5 >= 100 ? "满" : String(Math.round(p5));
+      return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect class="mb-lit" width="16" height="16" rx="4" fill="${c}"/><text x="8" y="12" text-anchor="middle" font-size="${t.length >= 2 ? 10.5 : 12.5}" font-weight="700" fill="#fff" font-family="Segoe UI, system-ui, sans-serif">${t}</text></svg>`;
+    }
     if (style === "lamp") return `<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><rect x=".6" y=".6" width="10.8" height="18.8" rx="4.4" fill="none" stroke="var(--mb-glyph)" stroke-width="1.2"/>${
       [["bad", 4.2], ["busy", 10], ["ok", 15.8]].map(([l, cy]) => `<circle class="${l === lv ? "mb-lit" : ""}" cx="6" cy="${cy}" r="2.5" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")}</svg>`;
     if (style === "ring") return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${trk(6.25, 2.5)}${arc(6.25, 2.5, q5, tone, "mb-lit")}</svg>`;
@@ -358,6 +364,11 @@ button { font: inherit; color: inherit; }
         <label class="sw"><input type="checkbox" data-set="confirm" ${s.confirm_switch ? "checked" : ""}><i></i></label></div>
       <div class="row"><div class="lab"><b>等你确认时闪灯</b><span>${s.hooks ? "Claude Code 弹权限确认（yes / no）时红绿灯三盏灯一起闪，答了就恢复" : "关着看不出 Claude Code 在等你点 yes。打开会往 ~/.claude/settings.json 加几条钩子，正在跑的 claude 重开后生效"}</span></div>
         <label class="sw"><input type="checkbox" data-set="hooks" ${s.hooks ? "checked" : ""}><i></i></label></div>`;
+    if (!s.available && s.tray) return `<div class="tile glass set">${confirmRow}
+      <div class="row mbrow"><div class="lab"><b>托盘图标</b><span>任务栏右下角 cam 的图标，选了一分钟内换上。颜色和闪法表示状态，鼠标停在图标上能看到额度</span></div></div>
+      ${mbPreview({ ...s, text: [] }, menubarInfo())}
+      <div class="mbopt"><span class="k">图标</span><span class="seg-mini tight" role="group" aria-label="托盘图标">${TRAY_ICONS.map(([v, t]) => `<button type="button" data-icon="${v}" aria-pressed="${s.icon === v}">${t}</button>`).join("")}</span></div>
+      <div class="hint">托盘图标右键菜单的“更多”里也能换。<a href="#" data-act="set-close">收起</a></div></div>`;
     if (!s.available) return `<div class="tile glass set">${confirmRow}<div class="hint"><a href="#" data-act="set-close">收起</a></div></div>`;
     if (!s.installed) return `<div class="tile glass set">${confirmRow}<div class="hint">还没装菜单栏小工具：终端运行 bash extras/swiftbar/install.sh。<a href="#" data-act="set-close">收起</a></div></div>`;
     return `<div class="tile glass set">${confirmRow}

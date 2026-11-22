@@ -1,5 +1,6 @@
-﻿# cam 的 Windows 托盘小工具：任务栏右下角的图标上写着当前 Claude Code 账号 5 小时额度用了百分之几，
-# 底色跟着额度变（70% 以下绿、70–89% 黄、90% 以上红）。左键或右键点开能看到所有账号的额度，点一下切换。
+﻿# cam 的 Windows 托盘小工具：任务栏右下角的图标显示当前 Claude Code 账号的状态。样式在右键菜单“更多”或卡片小面板的设置里选：
+# 数字方块（写着 5 小时额度用了百分之几，底色 70% 以下绿、70–89% 黄、90% 以上红），或者和 macOS 菜单栏一样的信号格、红绿灯、
+# 圆环、双环、两根小条。Claude Code 在回答时图标一闪一闪，等你确认时整个图标快闪。左键开卡片小窗，右键菜单里点一下切换。
 # 菜单内容和 macOS 菜单栏小工具一样，由 cam_tray.py 每分钟算一次，顺带做后台任务（自动保存新登录、时间规则、
 # 等待中的切换、刷新用量、额度提醒）；这个脚本只画图标和菜单、把点击交给 cam_tray.py、弹通知。
 #
@@ -103,7 +104,16 @@ $script:menuAgain = $false
 function Request-Menu {
   if ($script:menuBusy) { $script:menuAgain = $true; return }
   $script:menuBusy = $true
-  Start-TrayPy @("menu") "menu" $false
+  Start-TrayPy @("menu", "$IconPx") "menu" $false
+}
+
+# 开着 Claude Code 会话（cam_tray.py 说 watch）时每 20 秒只看一下状态，图标的动画跟得上；菜单还是每分钟算一次
+$script:watch = $false
+$script:lightBusy = $false
+function Request-Light {
+  if (-not $script:watch -or $script:lightBusy -or $script:menuBusy) { return }
+  $script:lightBusy = $true
+  Start-TrayPy @("light", "$IconPx") "light" $false
 }
 
 function Complete-Job($j) {
@@ -112,7 +122,10 @@ function Complete-Job($j) {
     # cam_tray.py 最后一行是 JSON
     $rows = @(($j.out.Result -split "`r?`n") | Where-Object { $_.Trim() })
     if ($rows.Count) { try { $res = $rows[-1] | ConvertFrom-Json } catch { $res = $null } }
-    if (-not $res) {
+    if ($j.kind -eq "light") {
+      # 只看状态的那次出错不弹通知（20 秒一次会一直弹），下一分钟的菜单会报
+      if ($res -and $res.icon) { Update-Icon $res }
+    } elseif (-not $res) {
       $lines = @(($j.err.Result -split "`r?`n") | Where-Object { $_.Trim() })
       $why = if ($lines.Count) { $lines[-1] } else { "没有输出（退出码 $($j.proc.ExitCode)）" }
       Add-Note "托盘小工具出错了" $why
@@ -127,6 +140,8 @@ function Complete-Job($j) {
   if ($j.kind -eq "menu") {
     $script:menuBusy = $false
     if ($script:menuAgain) { $script:menuAgain = $false; Request-Menu }
+  } elseif ($j.kind -eq "light") {
+    $script:lightBusy = $false
   } elseif ($j.refresh) {
     Request-Menu
   }
@@ -150,25 +165,36 @@ function Show-NextNote {
   $script:lastNote = Get-Date
 }
 
-# ---- 图标：圆角方块，写着百分比，底色跟着额度变
-$script:iconKey = ""
-$script:iconHandle = [IntPtr]::Zero
-function Set-TrayIcon([string]$level, [string]$badge) {
-  $key = "$level|$badge"
-  if ($key -eq $script:iconKey) { return }
-  $size = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width
+# ---- 图标。托盘图标的实际像素（屏幕缩放 100% 是 16，150% 是 24），cam_tray.py 按它画，不再缩放，高分屏上不发虚
+$IconPx = [System.Windows.Forms.SystemInformation]::SmallIconSize.Width
+
+# 位图转成托盘图标。图标句柄要自己释放（Remove-Frames），不然每换一次漏一个，几天后托盘就画不出来了
+function New-Frame($bmp) {
+  $h = $bmp.GetHicon()
+  return @{ icon = [System.Drawing.Icon]::FromHandle($h); handle = $h }
+}
+
+# 数字方块：圆角方块，写着百分比，底色跟着额度变。$bg 是底色的不透明度（工作中暗拍留 0.35），$all 是整个图标的（等你确认暗拍 0.25）
+function New-BadgeFrame([string]$level, [string]$badge, [double]$bg = 1.0, [double]$all = 1.0) {
+  $size = $IconPx
   $hex = switch ($level) { "green" { "#1F8A4C" } "yellow" { "#B87A08" } "red" { "#BF3B33" } default { "#6E6E73" } }
-  $bmp = New-Object System.Drawing.Bitmap($size, $size)
+  $base = [System.Drawing.ColorTranslator]::FromHtml($hex)
+  $bmp = New-Object System.Drawing.Bitmap($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
   $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.Clear([System.Drawing.Color]::Transparent)
   $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
   $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-  $brush = New-Object System.Drawing.SolidBrush([System.Drawing.ColorTranslator]::FromHtml($hex))
-  $r = [Math]::Max(2, [int]($size / 4))
+  $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb([int](255 * $bg * $all), $base))
+  $ink = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb([int](255 * $all), 255, 255, 255))
+  $d = [single][Math]::Max(4.0, $size / 2.0)  # 圆角的直径
+  $e = [single]($size - $d)
+  $z = [single]0
   $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-  $path.AddArc(0, 0, 2 * $r, 2 * $r, 180, 90)
-  $path.AddArc($size - 1 - 2 * $r, 0, 2 * $r, 2 * $r, 270, 90)
-  $path.AddArc($size - 1 - 2 * $r, $size - 1 - 2 * $r, 2 * $r, 2 * $r, 0, 90)
-  $path.AddArc(0, $size - 1 - 2 * $r, 2 * $r, 2 * $r, 90, 90)
+  $path.AddArc($z, $z, $d, $d, [single]180, [single]90)
+  $path.AddArc($e, $z, $d, $d, [single]270, [single]90)
+  $path.AddArc($e, $e, $d, $d, [single]0, [single]90)
+  $path.AddArc($z, $e, $d, $d, [single]90, [single]90)
   $path.CloseFigure()
   $g.FillPath($brush, $path)
   # 两位数字要挤在 16 像素里，字号按位数调；“满”这样的汉字用雅黑
@@ -179,15 +205,81 @@ function Set-TrayIcon([string]$level, [string]$badge) {
   $fmt.Alignment = [System.Drawing.StringAlignment]::Center
   $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
   $rect = New-Object System.Drawing.RectangleF(0, [single]($size * 0.04), $size, $size)
-  $g.DrawString($badge, $font, [System.Drawing.Brushes]::White, $rect, $fmt)
-  $h = $bmp.GetHicon()
-  $script:notify.Icon = [System.Drawing.Icon]::FromHandle($h)
-  # 图标句柄要自己释放，不然每分钟漏一个，几天后托盘就画不出来了
-  if ($script:iconHandle -ne [IntPtr]::Zero) { [void][CamTray.Native]::DestroyIcon($script:iconHandle) }
-  $script:iconHandle = $h
-  $script:iconKey = $key
-  $fmt.Dispose(); $font.Dispose(); $path.Dispose(); $brush.Dispose(); $g.Dispose(); $bmp.Dispose()
+  $g.DrawString($badge, $font, $ink, $rect, $fmt)
+  $f = New-Frame $bmp
+  $fmt.Dispose(); $font.Dispose(); $path.Dispose(); $ink.Dispose(); $brush.Dispose(); $g.Dispose(); $bmp.Dispose()
+  return $f
 }
+
+# cam_tray.py 画好的一帧（PNG）：长边等于托盘图标大小，摆到正中（红绿灯竖着、两根小条横着）
+function New-PngFrame([string]$file) {
+  $bytes = [System.IO.File]::ReadAllBytes($file)
+  $ms = New-Object System.IO.MemoryStream(, $bytes)
+  $img = [System.Drawing.Image]::FromStream($ms)
+  $bmp = New-Object System.Drawing.Bitmap($IconPx, $IconPx, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.Clear([System.Drawing.Color]::Transparent)
+  $x = [Math]::Floor(($IconPx - $img.Width) / 2)
+  $y = [Math]::Floor(($IconPx - $img.Height) / 2)
+  $g.DrawImage($img, [int]$x, [int]$y, $img.Width, $img.Height)  # 给定宽高：按像素画，不按 PNG 里记的 dpi 缩放
+  $f = New-Frame $bmp
+  $g.Dispose(); $bmp.Dispose(); $img.Dispose(); $ms.Dispose()
+  return $f
+}
+
+function Remove-Frames($frames) {
+  foreach ($f in @($frames)) {
+    if (-not $f) { continue }
+    $f.icon.Dispose()
+    [void][CamTray.Native]::DestroyIcon($f.handle)
+  }
+}
+
+# 动画：和 macOS 菜单栏一样 0.25 秒一帧、8 帧两秒一圈。工作中（pulse）亮半秒暗半秒，等你确认（blink）快一倍
+$script:frames = @()
+$script:frameAt = 0
+$script:iconKey = ""
+function Set-TrayIcon($spec) {
+  $key = $spec | ConvertTo-Json -Compress -Depth 4
+  if ($key -eq $script:iconKey) { return }
+  $new = @()
+  if ($spec.style -ne "badge" -and @($spec.frames).Count) {
+    $made = @{}
+    foreach ($file in @($spec.frames)) {
+      if (-not $made.ContainsKey($file)) { $made[$file] = New-PngFrame $file }
+    }
+    $new = @(@($spec.frames) | ForEach-Object { $made[$_] })
+    $own = @($made.Values)
+  } else {
+    $lit = New-BadgeFrame ([string]$spec.level) ([string]$spec.text)
+    $own = @($lit)
+    if ($spec.kind -eq "pulse") {
+      $dim = New-BadgeFrame ([string]$spec.level) ([string]$spec.text) 0.35 1.0
+      $own += $dim
+      $new = @($lit, $lit, $dim, $dim, $lit, $lit, $dim, $dim)
+    } elseif ($spec.kind -eq "blink") {
+      $dim = New-BadgeFrame ([string]$spec.level) ([string]$spec.text) 1.0 0.25
+      $own += $dim
+      $new = @($lit, $dim, $lit, $dim, $lit, $dim, $lit, $dim)
+    } else {
+      $new = @($lit)
+    }
+  }
+  $old = $script:ownFrames
+  $script:frames = $new
+  $script:ownFrames = $own
+  $script:frameAt = 0
+  $script:notify.Icon = $new[0].icon
+  Remove-Frames $old  # 新图标已经换上了，再释放旧的
+  $script:iconKey = $key
+  if ($new.Count -gt 1) {
+    $script:anim.Interval = [Math]::Max(100, [int]$spec.ms)
+    $script:anim.Start()
+  } else {
+    $script:anim.Stop()
+  }
+}
+$script:ownFrames = @()
 
 # ---- 菜单
 $script:pending = $null
@@ -254,12 +346,20 @@ function Toggle-Card {
     "--window-size=$w,$hh", "--window-position=$x,$y")
 }
 
-function Update-Tray($res) {
-  $script:mini = $res.mini
+# 图标和鼠标停上去的提示：菜单和 light 的结果都有
+function Update-Icon($res) {
   $tip = [string]$res.tip
   if ($tip.Length -gt 63) { $tip = $tip.Substring(0, 62) + "…" }  # 托盘提示最多 63 个字
   $script:notify.Text = $tip
-  Set-TrayIcon ([string]$res.level) ([string]$res.badge)
+  $spec = $res.icon
+  if (-not $spec) { $spec = @{ style = "badge"; kind = ""; ms = 250; text = [string]$res.badge; level = [string]$res.level } }  # 出错时只有 badge
+  Set-TrayIcon $spec
+  $script:watch = [bool]$res.watch
+}
+
+function Update-Tray($res) {
+  $script:mini = $res.mini
+  Update-Icon $res
   # 菜单开着的时候不换内容，关上以后再换
   if ($script:menu.Visible) { $script:pending = $res.items; return }
   Set-Menu $res.items
@@ -278,7 +378,7 @@ function Set-Menu($items) {
 }
 
 function Stop-Tray {
-  foreach ($t in @($script:poll, $script:tick)) { if ($t) { $t.Stop() } }
+  foreach ($t in @($script:poll, $script:tick, $script:anim, $script:lightTick)) { if ($t) { $t.Stop() } }
   $script:notify.Visible = $false
   $script:notify.Dispose()
   [System.Windows.Forms.Application]::Exit()
@@ -315,7 +415,17 @@ Set-Menu @(@{ text = "正在读取账号…"; dim = $true })
 $script:notify = New-Object System.Windows.Forms.NotifyIcon
 $script:notify.ContextMenuStrip = $script:menu
 $script:notify.Text = "Claude 账号"
-Set-TrayIcon "gray" "C"
+$script:anim = New-Object System.Windows.Forms.Timer
+$script:anim.Interval = 250
+$script:anim.Add_Tick({
+  try {
+    if ($script:frames.Count -gt 1) {
+      $script:frameAt = ($script:frameAt + 1) % $script:frames.Count
+      $script:notify.Icon = $script:frames[$script:frameAt].icon
+    }
+  } catch { $script:anim.Stop(); Add-Note "托盘小工具出错了" $_.Exception.Message }
+})
+Set-TrayIcon @{ style = "badge"; kind = ""; ms = 250; text = "C"; level = "gray" }
 $script:notify.Visible = $true
 # 左键开 / 关卡片小窗（没有卡片页时弹菜单：借用 NotifyIcon 内部弹菜单的方法），右键菜单由 NotifyIcon 自己弹
 $showMenu = [System.Windows.Forms.NotifyIcon].GetMethod("ShowContextMenu", [System.Reflection.BindingFlags]"Instance,NonPublic")
@@ -356,6 +466,11 @@ $script:tick.Add_Tick({
 })
 $script:tick.Start()
 
+$script:lightTick = New-Object System.Windows.Forms.Timer
+$script:lightTick.Interval = 20000
+$script:lightTick.Add_Tick({ try { Request-Light } catch { Add-Note "托盘小工具出错了" $_.Exception.Message } })
+$script:lightTick.Start()
+
 Request-Menu
 [System.Windows.Forms.Application]::Run()
-if ($script:iconHandle -ne [IntPtr]::Zero) { [void][CamTray.Native]::DestroyIcon($script:iconHandle) }
+Remove-Frames $script:ownFrames

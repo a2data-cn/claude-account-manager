@@ -300,6 +300,12 @@ CODE_STAMP = str(int(os.path.getmtime(os.path.realpath(__file__))))  # 这份代
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
+# Windows：运行 powershell、taskkill、git 这类控制台程序时不给它开窗口。cam 在没有窗口的进程里跑时（后台面板服务、托盘小工具、
+# 桌面版），不加这个，每调一次 Windows 就给它新开一个控制台窗口，屏幕上闪一下蓝框（PowerShell）或黑框
+NO_WINDOW = {"creationflags": 0x08000000} if IS_WIN else {}  # CREATE_NO_WINDOW
+# 后台起的 cam 进程（面板服务、环境检测）：带一个看不见的控制台、单独一个进程组（终端里按 Ctrl+C、关掉终端都不影响它）。
+# 不用 DETACHED_PROCESS：那样它没有控制台，它再起的每个控制台程序都会各自弹出窗口
+BG_FLAGS = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -1234,7 +1240,8 @@ def windows_processes(max_age=0):
         if max_age > 0 and _WIN_PROCS["rows"] is not None and time.monotonic() - _WIN_PROCS["t"] < max_age:
             return _WIN_PROCS["rows"]
         try:
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", WIN_PROCS_PS], capture_output=True, timeout=20)
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", WIN_PROCS_PS], capture_output=True, timeout=20,
+                               **NO_WINDOW)
         except subprocess.SubprocessError as e:
             raise OSError(f"PowerShell 查进程超时：{e}") from e
         if r.returncode != 0:  # PowerShell 自己出错了：不是“没有进程”
@@ -2881,7 +2888,7 @@ def spawn_background_check():
         return False
     kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "close_fds": True}
     if IS_WIN:
-        kw["creationflags"] = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+        kw["creationflags"] = BG_FLAGS
     else:
         kw["start_new_session"] = True
     try:
@@ -3771,7 +3778,7 @@ def _quit_claude_desktop():
         else:
             for pid in _desktop_pids():
                 cmd = ["taskkill", "/PID", str(pid)] if IS_WIN else ["kill", str(pid)]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True)
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=True, **NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as e:
         raise CamError(f"无法正常退出 Claude 桌面版，请手动退出后重试：{e}") from e
     deadline = time.time() + 8
@@ -6033,7 +6040,7 @@ def ensure_panel(store, port=8787, need_mini=False):
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
               "close_fds": True}
         if IS_WIN:
-            kw["creationflags"] = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+            kw["creationflags"] = BG_FLAGS
         else:
             kw["start_new_session"] = True
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", "--port", str(p)], **kw)
@@ -6645,7 +6652,7 @@ def claude_installs():
 
 def claude_version(exe):
     try:
-        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20, **NO_WINDOW)
         return (r.stdout or r.stderr).strip().splitlines()[0] if r.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, IndexError):
         return None
@@ -7468,7 +7475,7 @@ def system_timezone():
             zone = ""
     if not zone and IS_WIN:
         try:
-            zone = subprocess.run(["tzutil", "/g"], capture_output=True, text=True, timeout=5).stdout.strip()
+            zone = subprocess.run(["tzutil", "/g"], capture_output=True, text=True, timeout=5, **NO_WINDOW).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             zone = ""
     if not zone:
@@ -7503,7 +7510,7 @@ def decode_output(b):
 
 def _run_text(cmd, timeout=8):
     try:
-        return decode_output(subprocess.run(cmd, capture_output=True, timeout=timeout).stdout)
+        return decode_output(subprocess.run(cmd, capture_output=True, timeout=timeout, **NO_WINDOW).stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return ""
 
@@ -9254,7 +9261,8 @@ def installed_bots():
 def run_bot_doctor(path):
     """运行 <机器人命令> doctor，返回 (退出码, 输出)；超时退出码是 None。"""
     try:
-        r = subprocess.run([path, "doctor"], capture_output=True, timeout=BOT_DOCTOR_TIMEOUT, stdin=subprocess.DEVNULL)
+        r = subprocess.run([path, "doctor"], capture_output=True, timeout=BOT_DOCTOR_TIMEOUT, stdin=subprocess.DEVNULL,
+                           **NO_WINDOW)
     except subprocess.TimeoutExpired:
         return None, ""
     except OSError as e:
@@ -9408,8 +9416,9 @@ NOT_CHECKOUT = ("这份代码不是用 git 下载的（没有 .git 目录），�
 
 
 MENUBAR_PLUGIN = "Claude 账号.1m.sh"  # SwiftBar 插件目录里的启动脚本（extras/swiftbar/install.sh 写的）
-# 菜单栏图标：信号格、红绿灯（竖的三盏灯）、圆环（5 小时用了多少）、双环（外圈 5 小时、内圈 7 天）、两根小条（上 5 小时、下 7 天）
-ICON_STYLES = ("bars", "lamp", "ring", "rings", "twobar")
+# 菜单栏图标：信号格、红绿灯（竖的三盏灯）、圆环（5 小时用了多少）、双环（外圈 5 小时、内圈 7 天）、两根小条（上 5 小时、下 7 天）；
+# badge（数字方块：图标里写 5 小时 %）只有 Windows 托盘有，那边图标旁边不能写字。macOS 和 Windows 共用 prefs.menu_icon 这一项
+ICON_STYLES = ("bars", "lamp", "ring", "rings", "twobar", "badge")
 # 菜单栏图标旁边写什么（prefs.menu_text，按这个顺序）：名字、5 小时 %、7 天 %、在回答的会话数。默认名字 + 5 小时
 MENU_TEXT = ("name", "five", "seven", "sessions")
 MENU_TEXT_DEFAULT = ("name", "five")
@@ -9434,7 +9443,7 @@ def swiftbar_plugin_dir():
 
 def menubar_settings(store):
     """菜单栏小工具的设置，给卡片小面板和管理面板的“设置”页：装没装、动画模式（看启动脚本里有没有 streamable）、
-    图标样式和图标旁边写什么（prefs.menu_icon、prefs.menu_text）。"""
+    图标样式和图标旁边写什么（prefs.menu_icon、prefs.menu_text）。tray：这是 Windows，设置页显示“托盘图标”（只有样式能选）。"""
     path = os.path.join(swiftbar_plugin_dir(), MENUBAR_PLUGIN)
     installed = os.path.isfile(path)
     mode = None
@@ -9445,8 +9454,12 @@ def menubar_settings(store):
         except OSError:
             mode = None
     prefs = store.load().get("prefs") or {}
-    return {"available": IS_MAC or bool(os.environ.get("CAM_SWIFTBAR_DIR")), "installed": installed, "mode": mode,
-            "icon": prefs.get("menu_icon") if prefs.get("menu_icon") in ICON_STYLES else "bars", "text": menu_text_items(prefs),
+    available = IS_MAC or bool(os.environ.get("CAM_SWIFTBAR_DIR"))
+    tray = IS_WIN or os.environ.get("CAM_TRAY_TEST") == "1"  # Windows 托盘小工具：只有图标样式这一项（extras/windows-tray）
+    icon = prefs.get("menu_icon")
+    if icon not in ICON_STYLES or (icon == "badge" and (available or not tray)):
+        icon = "bars" if available or not tray else "badge"  # 没选过：菜单栏默认信号格，Windows 托盘默认数字方块（以前的样子）
+    return {"available": available, "tray": tray, "installed": installed, "mode": mode, "icon": icon, "text": menu_text_items(prefs),
             "confirm_switch": bool(prefs.get("confirm_switch")), "plugin": path,  # confirm_switch：卡片里点其它号先问一句再切
             "hooks": hooks_status()["installed"]}  # hooks：Claude Code 的钩子装没装（等你确认时三盏灯一起闪）
 
@@ -9469,7 +9482,8 @@ def save_menubar_settings(store, body):
             store.save(data)
     if "icon" in body:
         if body["icon"] not in ICON_STYLES:
-            raise CamError("图标样式只能是 bars（信号格）、lamp（红绿灯）、ring（圆环）、rings（双环）或 twobar（两根小条）")
+            raise CamError("图标样式只能是 bars（信号格）、lamp（红绿灯）、ring（圆环）、rings（双环）、twobar（两根小条）"
+                           "或 badge（数字方块，Windows 托盘才有）")
         with store.lock():
             data = store.load()
             data.setdefault("prefs", {})["menu_icon"] = body["icon"]
@@ -9647,7 +9661,8 @@ def git(root, *args, timeout=30):
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     try:
         return subprocess.run(["git", "-C", root, "-c", "core.quotepath=false", *args], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+                              encoding="utf-8", errors="replace", timeout=timeout, env=env, stdin=subprocess.DEVNULL,
+                              **NO_WINDOW)
     except OSError:
         raise CamError("没找到 git 命令，先安装 git 再试")
     except subprocess.TimeoutExpired:
@@ -9770,7 +9785,7 @@ def update_self_check(root):
             try:
                 r = subprocess.run([sys.executable, os.path.join(root, "scripts", "cam.py"), *args], env=env, cwd=tmp,
                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                                   stdin=subprocess.DEVNULL)
+                                   stdin=subprocess.DEVNULL, **NO_WINDOW)
             except (OSError, subprocess.SubprocessError) as e:
                 return f"{shown} 没能运行：{e}"
             if r.returncode != 0:

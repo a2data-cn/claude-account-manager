@@ -6,11 +6,15 @@
 和菜单栏小工具共用后台锁：桌面版或 cam serve 在跑时由它们做。
 
 用法（都由 cam-tray.ps1 调用，输出一行 JSON）：
-  cam_tray.py menu               托盘图标、提示文字和菜单：{"tip", "badge", "level", "items", "notes", "mini"}
+  cam_tray.py menu [像素]         托盘图标、提示文字和菜单：{"tip", "badge", "level", "icon", "watch", "items", "notes", "mini"}
+                                 像素是托盘图标的实际大小（随屏幕缩放：16、20、24…），不给就是 16
+  cam_tray.py light [像素]        只看状态、不做后台任务不算菜单：{"tip", "badge", "level", "icon", "watch", "notes"}；
+                                 开着 Claude Code 会话时托盘每 20 秒问一次，图标的动画（工作中、等你确认）跟得上
   cam_tray.py do <种类> 参数…    菜单里点了某一项：{"notes": [{"title", "body"}]}，通知由托盘弹出
     menu switch|update-check|update|checkup …  菜单栏小工具自己的命令
     cam  usage|open|panel …                     cam 命令，出错时把报错写进通知
     terminal [cam 参数…]                        新开一个终端窗口运行 cam
+    icon <样式>                                 换托盘图标的样式（记到账号库 prefs.menu_icon，和 macOS 菜单栏共用这一项）
 """
 import contextlib
 import io
@@ -19,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "swiftbar"))
@@ -31,6 +36,11 @@ CREATE_NEW_CONSOLE = 0x00000010
 CHARS = str.maketrans({"▰": "■", "▱": "□", "⚠": "！", "⏳": "…"})
 # 菜单栏小工具的三种颜色（浅色模式那一个）对应托盘图标的底色
 LEVELS = {cam_menu.GREEN: "green", cam_menu.YELLOW: "yellow", cam_menu.RED: "red"}
+
+# 托盘图标的样式：macOS 菜单栏的五种，加上 Windows 才有的“数字方块”（托盘图标旁边不能写字，要看数字只能画在图标里）。
+# 没选过时用数字方块（以前的样子）；在 Mac 上选的样式这里也认
+TRAY_STYLES = (("badge", "数字方块（图标里写 5 小时 %）"),) + tuple(cam_menu.ICON_STYLES)
+FRAMES, FRAME_MS = cam_menu.FRAMES, int(cam_menu.FRAME * 1000)  # 动画和菜单栏流式模式一样：0.25 秒一帧，8 帧两秒一圈
 
 PARAM = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
 
@@ -118,6 +128,75 @@ def badge_of(title):
     return "C", "gray", f"Claude 账号：{text}" if text != "Claude" else "Claude 账号"
 
 
+def tray_style(data):
+    s = (data.get("prefs") or {}).get("menu_icon")
+    return s if s in dict(TRAY_STYLES) else "badge"
+
+
+def taskbar_dark():
+    """任务栏是不是深色：Windows 设置里“选择你的默认 Windows 模式”是深色时（SystemUsesLightTheme=0）是。读不到当深色（Windows 10 的默认）。
+    测试用 CAM_TRAY_DARK=0 / 1。"""
+    v = os.environ.get("CAM_TRAY_DARK")
+    if v in ("0", "1"):
+        return v == "1"
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "SystemUsesLightTheme")[0] == 0
+    except (ImportError, OSError):
+        return True
+
+
+def icon_dir():
+    """画好的托盘图标放哪：%LOCALAPPDATA%\\cam\\tray-icons（测试用 CAM_TRAY_ICONS 指到临时目录）。按参数起文件名，画过的不再画。"""
+    d = os.environ.get("CAM_TRAY_ICONS") or os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "cam", "tray-icons")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+ICON_KEEP = 400  # 画额度的样式每个百分比一张图，攒多了删掉最早的（每张几百字节）
+
+
+def icon_file(style, level, kind, phase, p5, p7, dark, px):
+    """画一帧托盘图标存成 PNG，返回路径。和 macOS 菜单栏是同一套画法（cam_menu.status_icon），只是按屏幕的实际像素画：
+    图标的长边等于托盘图标的大小（红绿灯竖着、两根小条横着，cam-tray.ps1 摆到正中）。"""
+    d = icon_dir()
+    path = os.path.join(d, f"{style}-{level}-{kind or 'still'}-{phase:.3f}-{p5}-{p7}-{'d' if dark else 'l'}-{px}.png")
+    if not os.path.exists(path):
+        w, h = cam_menu.icon_size(style)
+        png = cam_menu.status_icon(int(dark), level, kind, phase, style, p5, p7, k=px / max(w, h))
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as f:
+            f.write(png)
+        os.replace(tmp, path)
+        names = [n for n in os.listdir(d) if n.endswith(".png")]
+        if len(names) > ICON_KEEP:
+            names.sort(key=lambda n: os.path.getmtime(os.path.join(d, n)))
+            for n in names[: len(names) - ICON_KEEP // 2]:
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(d, n))
+    return path
+
+
+def icon_of(data, light, badge, level, px):
+    """托盘图标：{"style", "kind", "ms", "frames": [PNG 路径…]}，有动画时 8 帧轮着放；数字方块要写字，由 cam-tray.ps1 自己画：
+    {"style": "badge", "kind", "ms", "text", "level"}。kind 是红绿灯的动画：pulse = 工作中，blink = 等你确认，空 = 不动。"""
+    kind = light[2] if light else ""
+    style = tray_style(data)
+    if style == "badge" or not light:  # 还没有账号时只有数字方块那种“!”
+        return {"style": "badge", "kind": kind, "ms": FRAME_MS, "text": badge, "level": level}
+    shown = cam_menu.title_account(data["accounts"], next(
+        (a for a in data["accounts"] if a["id"] == data["active"].get("claude_code")), None))
+    q = style in cam_menu.QUOTA_STYLES  # 画额度的样式才要数，取整（图按参数存）
+    p5 = cam_menu.pct(shown, "five_hour") if q and shown else None
+    p7 = cam_menu.pct(shown, "seven_day") if q and shown else None
+    p5, p7 = (round(p5) if p5 is not None else None), (round(p7) if p7 is not None else None)
+    dark = taskbar_dark()
+    phases = [i / FRAMES for i in range(FRAMES)] if kind else [0.0]
+    return {"style": style, "kind": kind, "ms": FRAME_MS,
+            "frames": [icon_file(style, light[0], kind, ph, p5, p7, dark, px) for ph in phases]}
+
+
 class Notes:
     """收集要弹的通知，最后放进输出的 JSON，由托盘弹出（Windows 上 cam.notify 不弹）。"""
 
@@ -128,17 +207,56 @@ class Notes:
         self.items.append({"title": str(title), "body": str(body or title)})
 
 
-def menu(store, notes):
+def menu(store, notes, px=16, full=True):
+    """full=False 是 light：不做后台任务（自动保存新登录、刷新用量这些每分钟一轮就够），不带菜单，只给图标和提示文字。"""
     cam_menu.notify = notes
-    try:
-        st = cam_menu.background_work(store)
-    except Exception as e:  # noqa: BLE001  和菜单栏小工具一样，后台出错不影响菜单
-        st = {"last_error": str(e)}
+    if full:
+        try:
+            st = cam_menu.background_work(store)
+        except Exception as e:  # noqa: BLE001  和菜单栏小工具一样，后台出错不影响菜单
+            st = {"last_error": str(e)}
+    else:
+        st = cam_menu.load_state(store)
     lines = []
     cam_menu.render(store, st, out=lines.append, rich=False)  # 托盘菜单不认图片，用文字进度条（不管在哪个系统上跑）
     title, items = convert(lines)
     badge, level, tip = badge_of(title)
-    return {"tip": tip, "badge": badge, "level": level, "items": items, "notes": notes.items, "mini": mini_info(store)}
+    light = cam_menu.LAST_LIGHT
+    if light:  # 提示文字第二行是红绿灯说的那句（工作中、等你确认、空闲……）
+        tip = f"{tip}\n{light[1]}"
+    data = store.load()
+    out = {"tip": tip, "badge": badge, "level": level, "icon": icon_of(data, light, badge, level, px),
+           # 开着会话、或者在动画（等你确认、工作中）：托盘每 20 秒看一次，不然每分钟跟着菜单看
+           "watch": bool(light and (light[2] or cam.session_count(max_age=60))), "notes": notes.items}
+    if full:
+        add_style_menu(items, tray_style(data))
+        out.update(items=items, mini=mini_info(store))
+    return out
+
+
+def add_style_menu(items, style):
+    """“更多”里加“托盘图标样式”：打勾的是现在的，点另一行就换，换完马上刷新。"""
+    more = next((i for i in items if i.get("text") == "更多" and "children" in i), None)
+    if more is None:
+        more = {"text": "更多", "children": []}
+        items.append(more)
+    kids = more["children"]
+    if kids:
+        kids.append({"sep": True})
+    kids.append({"text": "托盘图标样式", "dim": True})
+    for key, label in TRAY_STYLES:
+        kids.append({"text": label, "checked": True} if key == style else {"text": label, "run": ["icon", key], "refresh": True})
+
+
+def set_style(store, key, notes):
+    if key not in dict(TRAY_STYLES):
+        notes("没有完成", f"不认识的图标样式：{key}")
+        return 2
+    with store.lock():
+        data = store.load()
+        data.setdefault("prefs", {})["menu_icon"] = key
+        store.save(data)
+    return 0
 
 
 def mini_info(store):
@@ -193,6 +311,8 @@ def do(store, kind, args, notes):
         return fn()
     if kind == "cam":
         return run_cam(args, notes)
+    if kind == "icon":
+        return set_style(store, args[0] if args else "", notes)
     if kind == "terminal":
         try:
             open_terminal(args)
@@ -219,7 +339,8 @@ def main(argv=None):
                 code = do(store, argv[1], argv[2:], notes)
                 out = {"notes": notes.items}
             else:
-                out = menu(store, notes)
+                px = int(argv[1]) if argv[1:2] and argv[1].isdigit() else 16
+                out = menu(store, notes, min(max(px, 12), 64), full=argv[:1] != ["light"])
     except Exception as e:  # noqa: BLE001  什么错都要让托盘显示出来
         notes("托盘小工具出错了", str(e) or type(e).__name__)
         out = {"tip": "Claude 账号：出错了", "badge": "!", "level": "red", "notes": notes.items,

@@ -1938,6 +1938,35 @@ class CamTest(unittest.TestCase):
         with mock.patch.object(cam, "IS_WIN", False):
             self.assertEqual(pick(), {301: (None, None), 302: ("s-pid", "hook"), 303: (None, None)})
 
+    def test_windows_console_programs_run_without_window(self):
+        """Windows：后台起的 cam 进程（面板服务、环境检测）带一个看不见的控制台，不用 DETACHED_PROCESS（没有控制台时它再调
+        powershell 每次都会弹一个蓝框）；查进程、读系统设置、git 这些控制台程序都加 CREATE_NO_WINDOW。"""
+        cam = self.cam
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd[0], kw.get("creationflags")))
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        hide = {"creationflags": 0x08000000}
+        with mock.patch.object(cam, "NO_WINDOW", hide), mock.patch.object(cam.subprocess, "run", fake_run):
+            cam._run_text(["reg", "query", "HKCU"])
+            cam.windows_processes()
+            cam.claude_version("claude")
+            cam.git(self.tmp, "status")
+        self.assertEqual(calls, [("reg", 0x08000000), ("powershell", 0x08000000), ("claude", 0x08000000),
+                                 ("git", 0x08000000)])
+
+        spawned = []
+        with mock.patch.object(cam, "IS_WIN", True), mock.patch.dict(os.environ, {"CAM_NO_BG_CHECK": ""}), \
+                mock.patch.object(cam.subprocess, "Popen", lambda cmd, **kw: spawned.append(kw["creationflags"])):
+            self.assertTrue(cam.spawn_background_check())
+        self.assertEqual(spawned, [cam.BG_FLAGS])
+        self.assertTrue(cam.BG_FLAGS & 0x08000000)  # CREATE_NO_WINDOW
+        self.assertFalse(cam.BG_FLAGS & 0x00000008)  # 不是 DETACHED_PROCESS
+        if os.name != "nt":
+            self.assertEqual(cam.NO_WINDOW, {})  # 别的系统上 subprocess 不认 creationflags，传了会报错
+
     @unittest.skipIf(os.name == "nt", "假的 /proc 用符号链接记工作目录（Linux 的做法），Windows 上读回来的路径带 \\?\ 前缀，对不上")
     def test_sessions_view(self):
         """会话页：进程对上会话（钩子记的 pid → 工作目录 → 那个目录里最新的记录），读出状态、模型、几轮、上下文；
@@ -2254,6 +2283,134 @@ class CamTest(unittest.TestCase):
         with mock.patch.object(sys, "stdout", buf):
             self.assertEqual(tray.main(["do", "menu", "switch", b_id]), 0)
         self.assertEqual(json.loads(buf.getvalue())["notes"][-1]["title"], "已切换账号")
+
+    def test_windows_tray_icon_styles_and_animation(self):
+        """托盘图标：没选过是数字方块（cam-tray.ps1 自己写字）；选了别的样式由 cam_tray.py 按托盘的实际像素画成 PNG，
+        和 macOS 菜单栏同一套画法；工作中 / 等你确认时 8 帧两秒一圈。light 只给图标不带菜单；样式在“更多”里换。"""
+        import struct as st_
+        icons = os.path.join(self.tmp, "tray-icons")
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 42.0, "u7": 61.0, "email": "b@x.com", "plan": "max"}}
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        self.assertEqual(self.run_cam("usage"), 0)
+        tray = self._tray()
+        store = self.cam.Store()
+
+        def size(path):  # PNG 的宽高
+            with open(path, "rb") as f:
+                return st_.unpack(">II", f.read()[16:24])
+
+        with mock.patch.dict(os.environ, {"CAM_TRAY_ICONS": icons, "CAM_TRAY_DARK": "1"}):
+            out = tray.menu(store, tray.Notes(), 24)
+            self.assertEqual(out["icon"], {"style": "badge", "kind": "", "ms": 250, "text": "42", "level": "green"})
+            self.assertFalse(out["watch"])  # 没有 claude 会话：不用 20 秒看一次
+            self.assertIn("\n空闲", out["tip"])  # 第二行是红绿灯那句
+            more = next(i for i in out["items"] if i.get("text") == "更多")
+            styles = [c for c in more["children"] if c.get("run", [""])[0] == "icon" or c.get("checked")]
+            self.assertEqual([c["text"].split("（")[0] for c in styles], ["数字方块", "信号格", "红绿灯", "圆环", "双环", "两根小条"])
+            self.assertTrue(styles[0]["checked"])
+            self.assertEqual(styles[2]["run"], ["icon", "lamp"])
+            # 换成红绿灯：一张 PNG，按 24 像素高画（竖的，14×24）；在回答时 8 帧，亮暗轮着
+            notes = tray.Notes()
+            self.assertEqual(tray.do(store, "icon", ["lamp"], notes), 0)
+            self.assertEqual(tray.do(store, "icon", ["neon"], notes), 2)
+            out = tray.menu(store, tray.Notes(), 24)
+            self.assertEqual((out["icon"]["style"], len(out["icon"]["frames"])), ("lamp", 1))
+            self.assertEqual(size(out["icon"]["frames"][0]), (14, 24))
+            self.assertTrue(out["icon"]["frames"][0].startswith(icons))
+            busy = ("busy", "1 个会话 · 正在回答", "pulse", 0)
+            with mock.patch.object(tray.cam_menu, "status_light", lambda *a: busy):
+                out = tray.menu(store, tray.Notes(), 24, full=False)
+            self.assertNotIn("items", out)  # light：不带菜单
+            self.assertTrue(out["watch"])
+            frames = out["icon"]["frames"]
+            self.assertEqual(len(frames), 8)
+            with open(frames[0], "rb") as f0, open(frames[2], "rb") as f2, open(frames[4], "rb") as f4:
+                lit, dim, lit2 = f0.read(), f2.read(), f4.read()
+            self.assertNotEqual(lit, dim)  # 亮半秒、暗半秒
+            self.assertEqual(lit, lit2)
+            # 画额度的样式按 5 小时 / 7 天的数画；横的两根小条按宽 24 画
+            self.cam.save_menubar_settings(store, {"icon": "twobar"})
+            out = tray.menu(store, tray.Notes(), 24)
+            self.assertEqual(size(out["icon"]["frames"][0]), (24, 15))
+            self.assertIn("-42-61-d-24.png", out["icon"]["frames"][0])
+            # 命令行：light 输出一行 JSON
+            buf = io.StringIO()
+            with mock.patch.object(sys, "stdout", buf):
+                self.assertEqual(tray.main(["light", "20"]), 0)
+            got = json.loads(buf.getvalue())
+            self.assertEqual((got["icon"]["style"], "items" in got), ("twobar", False))
+        # 菜单栏插件那边不认数字方块：退回信号格
+        with mock.patch.dict(os.environ, {"CAM_SWIFTBAR_DIR": os.path.join(self.tmp, "sb")}):
+            self.cam.save_menubar_settings(store, {"icon": "badge"})
+            self.assertEqual(self.cam.menubar_settings(store)["icon"], "bars")
+        # Windows 的设置页：没有菜单栏小工具，只有托盘；没选过时是数字方块
+        with mock.patch.dict(os.environ, {"CAM_TRAY_TEST": "1", "CAM_SWIFTBAR_DIR": ""}), mock.patch.object(self.cam, "IS_MAC", False):
+            s = self.cam.menubar_settings(store)
+            self.assertEqual((s["available"], s["tray"], s["icon"]), (False, True, "badge"))
+            with self.cam.Store().lock():
+                data = store.load()
+                data["prefs"].pop("menu_icon")
+                store.save(data)
+            self.assertEqual(self.cam.menubar_settings(store)["icon"], "badge")
+
+    @unittest.skipUnless(os.name == "nt", "只在 Windows 上用 PowerShell 真跑")
+    def test_windows_tray_powershell_draws_icons(self):
+        """PowerShell 脚本的语法（install.ps1、cam-tray.ps1），再把 cam-tray.ps1 里画图标的几个函数取出来真跑一遍：
+        数字方块（写字、半透明的暗拍）、cam_tray.py 画的 PNG 摆到正中、按动画种类排帧、换图标时释放旧的。"""
+        cam_menu = self._menu_plugin()
+        png = os.path.join(self.tmp, "lamp.png")
+        with open(png, "wb") as f:
+            f.write(cam_menu.status_icon(1, "busy", "pulse", 0, "lamp", k=1.2))
+        q = lambda p: "'" + os.path.abspath(p).replace("'", "''") + "'"  # noqa: E731
+        tray_ps1 = os.path.join(HERE, "..", "extras", "windows-tray", "cam-tray.ps1")
+        script = f"""
+$ErrorActionPreference = 'Stop'
+foreach ($p in @({q(os.path.join(HERE, "..", "install.ps1"))}, {q(tray_ps1)})) {{
+  $errs = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
+  if ($errs) {{ $errs | ForEach-Object {{ "$p : $_" }}; exit 3 }}
+}}
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -Namespace CamTray -Name Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr handle);'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile({q(tray_ps1)}, [ref]$null, [ref]$null)
+$names = @('New-Frame', 'New-BadgeFrame', 'New-PngFrame', 'Remove-Frames', 'Set-TrayIcon')
+foreach ($f in $ast.FindAll({{ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }}, $true)) {{
+  if ($names -contains $f.Name) {{ . ([scriptblock]::Create($f.Extent.Text)) }}
+}}
+$IconPx = 24
+$script:notify = New-Object System.Windows.Forms.NotifyIcon
+$script:anim = New-Object System.Windows.Forms.Timer
+$script:ownFrames = @()
+$script:frames = @()
+Set-TrayIcon @{{ style = 'badge'; kind = 'pulse'; ms = 250; text = '42'; level = 'green' }}
+if ($script:frames.Count -ne 8 -or $script:ownFrames.Count -ne 2) {{ 'badge pulse frames'; exit 4 }}
+Set-TrayIcon @{{ style = 'badge'; kind = 'blink'; ms = 250; text = ([string][char]0x6EE1); level = 'red' }}
+Set-TrayIcon ('{{"style":"lamp","kind":"pulse","ms":250,"frames":[' + (@(1..8 | ForEach-Object {{ ({q(png)} | ConvertTo-Json) }}) -join ',') + ']}}' | ConvertFrom-Json)
+if ($script:frames.Count -ne 8 -or $script:ownFrames.Count -ne 1 -or $script:notify.Icon.Width -ne 24) {{ 'png frames'; exit 5 }}
+Set-TrayIcon @{{ style = 'badge'; kind = ''; ms = 250; text = 'C'; level = 'gray' }}
+if ($script:frames.Count -ne 1 -or $script:anim.Enabled) {{ 'still'; exit 6 }}
+Remove-Frames $script:ownFrames
+'ok'
+"""
+        check = os.path.join(self.tmp, "check.ps1")
+        with open(check, "w", encoding="utf-8-sig") as f:  # Windows PowerShell 5.1 认带 BOM 的 UTF-8
+            f.write(script)
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", check],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        self.assertEqual((r.returncode, r.stdout.strip().splitlines()[-1:] if r.stdout.strip() else []), (0, ["ok"]),
+                         r.stdout + r.stderr)
+
+    def test_icon_scale_for_windows_tray(self):
+        """同一个图标按 k（一点画几个像素）画：菜单栏 2 倍，Windows 托盘按实际像素。"""
+        import struct as st_
+        cam_menu = self._menu_plugin()
+        wh = lambda png: st_.unpack(">II", png[16:24])  # noqa: E731
+        self.assertEqual(wh(cam_menu.status_icon(1, "ok", "", 0, "lamp")), (24, 40))
+        self.assertEqual(wh(cam_menu.status_icon(1, "ok", "", 0, "lamp", k=0.8)), (10, 16))
+        self.assertEqual(wh(cam_menu.status_icon(1, "ok", "", 0, "ring", 50, None, k=1.5)), (24, 24))
+        self.assertEqual(wh(cam_menu.status_icon(1, "ok", "", 0, "bars", k=1)), (16, 16))
 
     def test_background_round_notifies_like_menubar(self):
         a_id, b_id = self._two_accounts()  # 当前是 B
