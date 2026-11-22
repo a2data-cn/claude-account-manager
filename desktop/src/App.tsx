@@ -118,9 +118,23 @@ type ServiceCheckState = ReturnType<typeof useServiceCheck>;
 const CHECK_TIP =
   "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书、代理 / VPN（设了代理的话看它在不在运行）、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
 
+/** 两个官方链接：claude.ai 和官方状态页（服务出问题时先看这里），用系统浏览器打开（只认 Claude / Anthropic 的 HTTPS 地址） */
+const OFFICIAL_LINKS: [string, string, string][] = [
+  ["https://claude.ai", "打开 claude.ai", "Claude 官网"],
+  ["https://status.claude.com", "官方状态页", "Anthropic 官方状态页：Claude、API、Claude Code 现在有没有故障"],
+];
+function openOfficial(url: string) {
+  api("POST", "/api/open-external", { url }).catch(() => window.open(url, "_blank", "noopener"));
+}
+
 function EnvActs({ label, sc: { items, checking, check, reset } }: { label: string; sc: ServiceCheckState }) {
   return (
     <span className="sec-acts env-acts">
+      {OFFICIAL_LINKS.map(([url, text, tip]) => (
+        <button key={url} className="btn quiet" title={tip} onClick={() => openOfficial(url)}>
+          {text}
+        </button>
+      ))}
       {items && !checking && (
         <button className="btn quiet" onClick={reset}>
           收起

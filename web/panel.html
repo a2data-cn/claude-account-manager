@@ -108,6 +108,7 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
   transition: border-color .12s, background-color .12s;
 }
 .btn:hover { border-color: var(--muted); }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }  /* 链接做成的按钮（官网、状态页、去升级）：和按钮一个样子 */
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: .5; cursor: progress; }
@@ -1006,6 +1007,17 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   </form>
 </dialog>
 
+<dialog id="dlg-confirm">
+  <form method="dialog">
+    <h3 id="cf-title"></h3>
+    <div class="dlg-text" id="cf-body"></div>
+    <div class="dlg-acts">
+      <button class="btn" value="cancel">取消</button>
+      <button class="btn primary" value="ok" id="cf-ok">确定</button>
+    </div>
+  </form>
+</dialog>
+
 <div class="toast" id="toast" role="status"></div>
 
 <script>
@@ -1570,7 +1582,10 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const fold = (envChecks || checkup || envFix || envFixRes) && !envChecking && !checkupBusy ? `<button class="btn quiet" data-act="env-fold">收起</button>` : "";
     const full = checkupAvail ? `<button class="btn" data-act="checkup" title="${CHECKUP_TIP}"${checkupBusy ? " disabled" : ""}>${checkupBusy ? "体检中，要等十几秒…" : "全面体检"}</button>` : "";
     const fix = envFixAvail ? `<button class="btn" data-act="env-fix" title="${ENV_FIX_TIP}"${envFixBusy ? " disabled" : ""}>${envFixBusy && !envFix ? "正在查…" : "一键清理"}</button>` : "";
-    return `<span class="sec-acts env-acts">${fold}${fix}${full}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></span>`;
+    // 两个官方链接：claude.ai 和官方状态页（服务出问题时先看这里），在当前浏览器新开一页
+    const links = `<a class="btn quiet" href="https://claude.ai" target="_blank" rel="noopener noreferrer" title="Claude 官网">打开 claude.ai</a>`
+      + `<a class="btn quiet" href="https://status.claude.com" target="_blank" rel="noopener noreferrer" title="Anthropic 官方状态页：Claude、API、Claude Code 现在有没有故障">官方状态页</a>`;
+    return `<span class="sec-acts env-acts">${links}${fold}${fix}${full}<button class="btn" data-act="recheck" title="${CHECK_TIP}"${envChecking ? " disabled" : ""}>${envChecking ? "检测中，要等几秒…" : label}</button></span>`;
   }
   function renderCheckup(r) {  // 总体结论一张通栏的卡，每个分区一张卡；账号的条目前面先列账号名
     const s = r.summary || {};
@@ -1623,6 +1638,20 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       ${optHtml}
       ${f.manual.length ? `<h4>要你自己处理的（${f.manual.length} 项）</h4>${rows(f.manual)}` : ""}${slow}
       <div class="sec-acts"><span class="purge-acts">${purge ? `<button class="btn quiet danger" data-act="purge-ask"${dis} title="把整个 Claude Code 配置移到备份目录，相当于重装；会先列出来再确认">彻底清理…</button>` : ""}${purge && purge.restore_at ? `<button class="btn quiet" data-act="purge-restore"${dis} title="把上一次彻底清理移走的配置放回去">恢复彻底清理前的样子（${esc(ago(purge.restore_at))}）</button>` : ""}</span>${close}${undo}${go}</div>${purgeHtml()}</div></div>`;
+  }
+  // 面板自己的确认框（和“移除账号”“切换账号”一个样子），不用浏览器自带的 confirm。点“确定”得 true，取消 / Esc 得 false
+  function askConfirm({ title, body, ok = "确定", danger = false }) {
+    return new Promise((resolve) => {
+      const d = $("#dlg-confirm");
+      $("#cf-title").textContent = title;
+      $("#cf-body").innerHTML = String(body || "").split("\n").map(esc).join("<br>");
+      const b = $("#cf-ok");
+      b.textContent = ok;
+      b.className = `btn ${danger ? "danger-fill" : "primary"}`;
+      d.returnValue = "";
+      d.addEventListener("close", () => resolve(d.returnValue === "ok"), { once: true });
+      d.showModal();
+    });
   }
   // 页面底部一行：后端版本、Claude Code 版本（有新版本时带个“去升级”）、数据更新时间
   function renderFooter() {
@@ -2414,7 +2443,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     finally { btn.disabled = false; btn.textContent = "检查更新"; }
   };
   $("#up-apply").onclick = async () => {
-    if (!upd || !confirm(`更新到最新版本（${upd.behind} 个新改动）？\n只做快进；更新后自检没过会自动退回原来的版本。账号数据不受影响。`)) return;
+    if (!upd || !(await askConfirm({ title: "更新 cam", ok: "更新",
+      body: `更新到最新版本（${upd.behind} 个新改动）？\n只做快进；更新后自检没过会自动退回原来的版本。账号数据不受影响。` }))) return;
     const btn = $("#up-apply");
     btn.disabled = true; btn.textContent = "正在更新…";
     try {
@@ -3000,7 +3030,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         }); break;
       case "open":
         if ((state.accounts.find((a) => a.id === id) || {}).kind === "claude_desktop"
-            && !confirm("会退出并重启电脑上的 Claude 桌面版，里面在跑的先处理好。继续？")) break;
+            && !(await askConfirm({ title: "切换 Claude 桌面版", ok: "继续", body: "会退出并重启电脑上的 Claude 桌面版，里面在跑的先处理好。继续？" }))) break;
         await busy(b, async () => {
           try {
             const r = await api("POST", `/api/accounts/${id}/open`);
@@ -3247,7 +3277,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         $("#v-revealed").innerHTML = `<code>${esc(vaultRevealed || "未保存密码")}</code><button class="btn" type="button" data-vact="copy-password">复制密码</button><button class="btn" type="button" data-vact="hide">隐藏</button><small>30 秒后自动隐藏；剪贴板由系统管理。</small>`;
         clearTimeout(vaultRevealTimer); vaultRevealTimer = setTimeout(hideVaultPassword, 30000);
       } else if (action === "delete" && entry) {
-        if (!confirm(`移除“${entry.label || entry.email}”的账号库资料和邮箱授权？Claude 账号记录会保留。`)) return;
+        if (!(await askConfirm({ title: "移除账号库资料", ok: "移除", danger: true,
+          body: `移除“${entry.label || entry.email}”的账号库资料和邮箱授权？Claude 账号记录会保留。` }))) return;
         const next = await api("DELETE", `/api/vault/entries/${encodeURIComponent(entry.id)}`); clearVaultPrivate(); applyVault(next); toast("账号库条目已移除");
       } else if (action === "connect" && entry) {
         const epoch = vaultMailEpoch;

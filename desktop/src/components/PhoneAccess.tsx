@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { command } from "../api";
 import type { ServerInfo, Settings } from "../types";
+import { ConfirmDialog, type ConfirmAsk } from "./Dialogs";
 
 /** 手机访问：开启内置 Web 面板，扫码即可在手机上查看和切换。 */
 export function PhoneAccess({ toast }: { toast: (m: string, bad?: boolean) => void }) {
@@ -9,6 +10,7 @@ export function PhoneAccess({ toast }: { toast: (m: string, bad?: boolean) => vo
   const [cfg, setCfg] = useState<Settings | null>(null);
   const [qr, setQr] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState<ConfirmAsk | null>(null);
 
   useEffect(() => {
     command<ServerInfo>("server_info")
@@ -49,8 +51,15 @@ export function PhoneAccess({ toast }: { toast: (m: string, bad?: boolean) => vo
       .then(() => toast("链接已复制"))
       .catch(() => toast("复制失败，请手动选中链接复制", true));
 
-  const resetToken = async () => {
-    if (!confirm("重置后，之前在手机上打开过的链接都会失效，需要重新扫码。继续？")) return;
+  const resetToken = () =>
+    setAsk({
+      title: "重置访问令牌",
+      body: "重置后，之前在手机上打开过的链接都会失效，需要重新扫码。继续？",
+      ok: "重置",
+      danger: true,
+      onOk: () => void doResetToken(),
+    });
+  const doResetToken = async () => {
     try {
       setInfo(await command<ServerInfo>("reset_token"));
       toast("访问令牌已重置");
@@ -131,6 +140,7 @@ export function PhoneAccess({ toast }: { toast: (m: string, bad?: boolean) => vo
         )}
         {info.running && !qr && cfg.lan && <p className="hint">没找到局域网地址，请确认电脑已连上 Wi-Fi 或网线。</p>}
       </div>
+      <ConfirmDialog ask={ask} onClose={() => setAsk(null)} />
     </section>
   );
 }

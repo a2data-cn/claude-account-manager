@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api";
 import { ago } from "../format";
 import type { Account, State } from "../types";
+import { ConfirmDialog, type ConfirmAsk } from "./Dialogs";
 import { openVaultUrl, safeVaultError, vaultUrl, VAULT_PROVIDERS, type VaultEntry, type VaultJob, type VaultMessages, type VaultProvider, type VaultState } from "../vault";
 
 const emptyForm = () => ({ id: "", label: "", email: "", provider: "credential" as VaultProvider, account_id: "", password: "", clear_password: false, client_id: "", client_secret: "", tenant: "common", imap_host: "", imap_port: "993", imap_username: "", notes: "" });
@@ -14,6 +15,7 @@ export function AccountVault({ accounts, onAccountsChanged, toast }: { accounts:
   const [form, setForm] = useState(emptyForm);
   const [selected, setSelected] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState<ConfirmAsk | null>(null);
   const working = useRef(false);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [messages, setMessages] = useState<VaultMessages | null>(null);
@@ -203,9 +205,11 @@ export function AccountVault({ accounts, onAccountsChanged, toast }: { accounts:
         <div className="field"><label htmlFor="vault-notes">备注</label><textarea id="vault-notes" rows={2} value={form.notes} onChange={(event) => set("notes", event.target.value)} /></div>
         <div className="vault-actions"><button className="btn primary" type="submit" disabled={busy}>保存资料</button>
           {active?.has_password && <button className="btn" type="button" disabled={busy} onClick={() => void run(async () => { const epoch = mailEpoch.current; const value = await api<{ password: string }>("POST", `/api/vault/entries/${encodeURIComponent(active.id)}/reveal`); if (epoch === mailEpoch.current && active.id === selectedRef.current && unlockedRef.current) setRevealed(value.password); })}>显示已保存密码</button>}
-          {active && <button className="btn quiet danger" type="button" disabled={busy} onClick={() => {
-            if (window.confirm(`移除“${active.label || active.email}”的账号库资料和邮箱授权？Claude 账号记录会保留。`)) void run(async () => { apply(await api<VaultState>("DELETE", `/api/vault/entries/${encodeURIComponent(active.id)}`)); choose(); toast("账号库条目已移除"); });
-          }}>移除资料</button>}
+          {active && <button className="btn quiet danger" type="button" disabled={busy} onClick={() => setAsk({
+            title: "移除账号库资料", ok: "移除", danger: true,
+            body: `移除“${active.label || active.email}”的账号库资料和邮箱授权？Claude 账号记录会保留。`,
+            onOk: () => void run(async () => { apply(await api<VaultState>("DELETE", `/api/vault/entries/${encodeURIComponent(active.id)}`)); choose(); toast("账号库条目已移除"); }),
+          })}>移除资料</button>}
         </div>
         {revealed !== null && <div className="vault-revealed"><code>{revealed || "未保存密码"}</code><button className="btn" type="button" disabled={busy || !revealed} onClick={() => void copy(revealed)}>复制密码</button><button className="btn" type="button" onClick={() => setRevealed(null)}>隐藏</button><small>30 秒后自动隐藏；剪贴板由系统管理。</small></div>}
       </form>
@@ -219,5 +223,6 @@ export function AccountVault({ accounts, onAccountsChanged, toast }: { accounts:
         {messages && <><p className="hint">最近检查：{ago(messages.checked_at)}{messages.status === "empty" ? " · 暂无匹配的验证邮件" : ""}</p><div className="vault-messages">{messages.messages.map((message) => <article className="vault-message" key={message.id}><b>{message.subject}</b><small>{message.sender} · {ago(message.received_at)}</small><div className="vault-actions">{message.codes.map((code) => <button className="btn vault-code" type="button" key={code} onClick={() => void copy(code)} title="点击复制验证码">{code}</button>)}{message.verification_links.filter((link) => vaultUrl(link)).map((link, index) => <button className="btn" type="button" key={link} onClick={() => void run(async () => openVaultUrl(link, false, active.id))}>打开验证链接 {index + 1}</button>)}</div></article>)}</div></>}
       </div>}
     </>}
+    <ConfirmDialog ask={ask} onClose={() => setAsk(null)} />
   </section>;
 }

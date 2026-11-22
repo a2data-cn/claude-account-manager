@@ -319,6 +319,45 @@ export function SwitchChoiceDialog({
 }
 
 /** 移除账号：Claude Code 当前账号、工具上次打开的桌面版配置要先切走。 */
+/** 要人点一下确认的事（重置令牌、移除资料这类），和“移除账号”一个样子，不用浏览器自带的 confirm。 */
+export interface ConfirmAsk {
+  title: string;
+  body: string;
+  ok?: string;
+  danger?: boolean;
+  onOk: () => void;
+}
+
+export function ConfirmDialog({ ask, onClose }: { ask: ConfirmAsk | null; onClose: () => void }) {
+  const ref = useModal(!!ask);
+  return (
+    <dialog ref={ref} onClose={onClose}>
+      {ask && (
+        <form method="dialog" onSubmit={(e) => e.preventDefault()}>
+          <h3>{ask.title}</h3>
+          <div className="dlg-text">{ask.body}</div>
+          <div className="dlg-acts">
+            <button type="button" className="btn" onClick={onClose}>
+              取消
+            </button>
+            <button
+              type="button"
+              className={`btn ${ask.danger ? "danger-fill" : "primary"}`}
+              onClick={() => {
+                const go = ask.onOk;
+                onClose();
+                go();
+              }}
+            >
+              {ask.ok || "确定"}
+            </button>
+          </div>
+        </form>
+      )}
+    </dialog>
+  );
+}
+
 export function RemoveDialog({
   account,
   onClose,

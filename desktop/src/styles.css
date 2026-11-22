@@ -95,6 +95,7 @@ header.top .light { display: inline-flex; align-items: center; gap: 7px; max-wid
   transition: border-color .12s, background-color .12s;
 }
 .btn:hover { border-color: var(--muted); }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }  /* 链接做成的按钮（官网、状态页、去升级）：和按钮一个样子 */
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: .5; cursor: progress; }
