@@ -23,6 +23,164 @@ Add-Type -Namespace CamTray -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr handle);
 '@
 
+# 右键菜单的样子（像 Windows 11 的菜单：圆角、细分隔线、绿色的勾、浅色 / 深色跟着系统）和账号行下面的额度条。
+# Windows PowerShell 5.1 的 Add-Type 用老的 C# 编译器：只能写 C# 5（没有 $"" 字符串、=> 成员、?.）
+function Add-MenuLook {
+  if ("CamTray.MenuRenderer" -as [type]) { return }
+  Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -IgnoreWarnings -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace CamTray {
+  // 账号行：名字下面画一根 5 小时的额度条
+  public class BarItem : ToolStripMenuItem {
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public double Bar { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Color BarColor { get; set; }
+    public BarItem(string text) : base(text) { Bar = -1; BarColor = Color.Empty; }
+  }
+
+  // 像 Windows 11 的菜单：浅色 / 深色两套颜色，圆角高亮，细分隔线，绿色的勾
+  public class MenuRenderer : ToolStripProfessionalRenderer {
+    public readonly bool Dark;
+    readonly Color back, border, hover, text, muted, line, check, track;
+
+    public MenuRenderer(bool dark) : base() {
+      Dark = dark;
+      RoundedEdges = false;
+      back = dark ? Color.FromArgb(44, 44, 44) : Color.FromArgb(249, 249, 249);
+      border = dark ? Color.FromArgb(66, 66, 66) : Color.FromArgb(222, 222, 222);
+      hover = dark ? Color.FromArgb(61, 61, 61) : Color.FromArgb(234, 234, 234);
+      text = dark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(28, 28, 30);
+      muted = dark ? Color.FromArgb(160, 160, 165) : Color.FromArgb(110, 110, 115);
+      line = dark ? Color.FromArgb(70, 70, 70) : Color.FromArgb(226, 226, 226);
+      check = dark ? Color.FromArgb(76, 194, 122) : Color.FromArgb(31, 138, 76);
+      track = dark ? Color.FromArgb(80, 80, 82) : Color.FromArgb(224, 224, 226);
+    }
+
+    public Color TextColor { get { return text; } }
+
+    static GraphicsPath Round(RectangleF r, float rad) {
+      GraphicsPath p = new GraphicsPath();
+      float d = rad * 2;
+      p.AddArc(r.Left, r.Top, d, d, 180, 90);
+      p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+      p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+      p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+      p.CloseFigure();
+      return p;
+    }
+
+    static float Px(Graphics g, float v) {
+      return v * g.DpiX / 96f;  // 按屏幕缩放放大（高分屏上 96 dpi 的 4 像素太细）
+    }
+
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {
+      using (SolidBrush b = new SolidBrush(back)) { e.Graphics.FillRectangle(b, e.AffectedBounds); }
+    }
+
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) {
+      // 勾的那一栏和背景同色，不画分界
+    }
+
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+      Rectangle r = new Rectangle(0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+      using (Pen p = new Pen(border)) { e.Graphics.DrawRectangle(p, r); }
+    }
+
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+      ToolStripItem it = e.Item;
+      if (!it.Selected || !it.Enabled || it.AccessibleRole == AccessibleRole.StaticText) { return; }
+      Graphics g = e.Graphics;
+      g.SmoothingMode = SmoothingMode.AntiAlias;
+      float m = Px(g, 4);
+      RectangleF r = new RectangleF(m, 1, it.Width - 2 * m, it.Height - 2);
+      using (GraphicsPath path = Round(r, Px(g, 4))) {
+        using (SolidBrush b = new SolidBrush(hover)) { g.FillPath(b, path); }
+      }
+    }
+
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
+      int y = e.Item.Height / 2;
+      int m = (int)Px(e.Graphics, 10);
+      using (Pen p = new Pen(line)) { e.Graphics.DrawLine(p, m, y, e.Item.Width - m, y); }
+    }
+
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+      e.ArrowColor = muted;
+      base.OnRenderArrow(e);
+    }
+
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) {
+      Graphics g = e.Graphics;
+      g.SmoothingMode = SmoothingMode.AntiAlias;
+      Rectangle r = e.ImageRectangle;
+      float s = Math.Min(r.Width, r.Height) * 0.75f;
+      float x = r.Left + (r.Width - s) / 2, y = r.Top + (r.Height - s) / 2;
+      using (Pen p = new Pen(check, Math.Max(1.6f, s / 7f))) {
+        p.StartCap = LineCap.Round;
+        p.EndCap = LineCap.Round;
+        p.LineJoin = LineJoin.Round;
+        g.DrawLines(p, new PointF[] {
+          new PointF(x + s * 0.12f, y + s * 0.55f), new PointF(x + s * 0.4f, y + s * 0.82f), new PointF(x + s * 0.9f, y + s * 0.22f) });
+      }
+    }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+      ToolStripMenuItem mi = e.Item as ToolStripMenuItem;
+      bool shortcut = mi != null && !string.IsNullOrEmpty(mi.ShortcutKeyDisplayString) && e.Text == mi.ShortcutKeyDisplayString && e.Text != mi.Text;
+      Color c = e.Item.ForeColor;
+      if (!e.Item.Enabled || shortcut) {
+        c = muted;
+      } else if (c == SystemColors.ControlText || c == SystemColors.MenuText || c == Color.Empty) {
+        c = text;
+      }
+      e.TextColor = c;
+      base.OnRenderItemText(e);
+      BarItem bi = e.Item as BarItem;
+      if (bi == null || shortcut || bi.Bar < 0) { return; }
+      Graphics g = e.Graphics;
+      g.SmoothingMode = SmoothingMode.AntiAlias;
+      float h = Px(g, 3);
+      float left = e.TextRectangle.Left + 1;
+      float right = e.Item.Width - Px(g, 14);
+      float y = e.Item.Height - Px(g, 6);
+      if (right - left < 10) { return; }
+      RectangleF all = new RectangleF(left, y, right - left, h);
+      using (GraphicsPath p = Round(all, h / 2)) {
+        using (SolidBrush b = new SolidBrush(track)) { g.FillPath(b, p); }
+      }
+      float w = (float)Math.Max(h, (right - left) * Math.Min(100, Math.Max(0, bi.Bar)) / 100);
+      using (GraphicsPath p = Round(new RectangleF(left, y, w, h), h / 2)) {
+        using (SolidBrush b = new SolidBrush(bi.BarColor.IsEmpty ? check : bi.BarColor)) { g.FillPath(b, p); }
+      }
+    }
+  }
+
+  public static class Look {
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    // Windows 11：菜单窗口画成圆角（系统自己加阴影）；Windows 10 没有这个属性，调用失败也不影响
+    public static void Round(ToolStripDropDown dd) {
+      dd.Opened += delegate(object s, EventArgs a) {
+        try {
+          int v = 2;  // DWMWCP_ROUND
+          DwmSetWindowAttribute(dd.Handle, 33, ref v, 4);  // DWMWA_WINDOW_CORNER_PREFERENCE
+        } catch (Exception) { }
+      };
+    }
+  }
+}
+'@
+}
+Add-MenuLook
+
 $created = $false
 $Mutex = New-Object System.Threading.Mutex($true, "Local\cam-tray", [ref]$created)
 if (-not $created) { exit 0 }
@@ -283,22 +441,65 @@ $script:ownFrames = @()
 
 # ---- 菜单
 $script:pending = $null
+$script:menuFont = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
+
+# 系统的应用模式是不是深色（设置 → 个性化 → 颜色）：菜单跟着它
+function Test-DarkMenu {
+  try {
+    $v = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name AppsUseLightTheme -ErrorAction Stop
+    return ($v.AppsUseLightTheme -eq 0)
+  } catch { return $false }
+}
+$script:darkMenu = Test-DarkMenu
+$script:renderer = New-Object CamTray.MenuRenderer($script:darkMenu)
+
+function Set-MenuLook($dd) {
+  $dd.Renderer = $script:renderer
+  $dd.Font = $script:menuFont
+  $dd.ShowItemToolTips = $true
+  $dd.ShowCheckMargin = $true
+  $dd.ShowImageMargin = $false
+  $dd.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 4)
+}
+
+# 颜色写成浅色、深色两个（cam_tray.py 给的 color / colorDark），按菜单现在的深浅取一个
+function Get-MenuColor($light, $dark) {
+  $c = if ($script:darkMenu -and $dark) { $dark } else { $light }
+  return [System.Drawing.ColorTranslator]::FromHtml([string]$c)
+}
+
 function Add-MenuItems($coll, $items) {
   foreach ($it in @($items)) {
     if (-not $it) { continue }
     if ($it.sep) { [void]$coll.Add((New-Object System.Windows.Forms.ToolStripSeparator)); continue }
     # 菜单里的 & 是快捷键标记，账号名、邮箱里的 & 要写成 && 才显示得出来
-    $mi = New-Object System.Windows.Forms.ToolStripMenuItem(([string]$it.text).Replace("&", "&&"))
+    $txt = ([string]$it.text).Replace("&", "&&")
+    if ($null -ne $it.bar) {
+      # 账号行：名字下面画 5 小时的额度条，行高一点给条留地方；右边对齐写额度
+      $mi = New-Object CamTray.BarItem($txt)
+      $mi.Bar = [double]$it.bar
+      $mi.BarColor = Get-MenuColor $it.barColor $it.barColorDark
+      $mi.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 11)
+    } else {
+      $mi = New-Object System.Windows.Forms.ToolStripMenuItem($txt)
+      $mi.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
+    }
+    if ($it.right) { $mi.ShortcutKeyDisplayString = [string]$it.right }
+    if ($it.tip) { $mi.ToolTipText = [string]$it.tip }
     if ($it.checked) { $mi.Checked = $true }
-    if ($it.color) { $mi.ForeColor = [System.Drawing.ColorTranslator]::FromHtml([string]$it.color) }
+    if ($it.color) { $mi.ForeColor = Get-MenuColor $it.color $it.colorDark }
     if ($it.children) {
       # 有子菜单的那一行点了只展开子菜单，和 macOS 一样；切换在子菜单里的“切换到这个账号”
       Add-MenuItems $mi.DropDownItems $it.children
+      Set-MenuLook $mi.DropDown
+      [CamTray.Look]::Round($mi.DropDown)
     } elseif ($it.run) {
       $mi.Tag = $it
       $mi.Add_Click({ try { Invoke-MenuItem $this.Tag } catch { Add-Note "托盘小工具出错了" $_.Exception.Message } })
     } elseif ($it.dim) {
       $mi.Enabled = $false
+    } else {
+      $mi.AccessibleRole = [System.Windows.Forms.AccessibleRole]::StaticText  # 说明行：点了不做事，鼠标移上去也不高亮
     }
     [void]$coll.Add($mi)
   }
@@ -366,13 +567,22 @@ function Update-Tray($res) {
 }
 
 function Set-Menu($items) {
+  # 系统换了深色 / 浅色：换一套颜色
+  $d = Test-DarkMenu
+  if ($d -ne $script:darkMenu) {
+    $script:darkMenu = $d
+    $script:renderer = New-Object CamTray.MenuRenderer($d)
+    Set-MenuLook $script:menu
+  }
   # 旧的菜单项释放掉（每分钟换一批，不释放就交给垃圾回收慢慢清）；只在菜单没打开时调用
   $old = @($script:menu.Items | ForEach-Object { $_ })
   $script:menu.Items.Clear()
   foreach ($o in $old) { $o.Dispose() }
   Add-MenuItems $script:menu.Items $items
   [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-  $quit = New-Object System.Windows.Forms.ToolStripMenuItem("退出托盘小工具（下次登录 Windows 时自动运行）")
+  $quit = New-Object System.Windows.Forms.ToolStripMenuItem("退出托盘小工具")
+  $quit.ToolTipText = "只退出这一次，下次登录 Windows 时还会自动运行"
+  $quit.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
   $quit.Add_Click({ Stop-Tray })
   [void]$script:menu.Items.Add($quit)
 }
@@ -401,9 +611,8 @@ function Restart-IfUpdated {
 
 # ---- 托盘图标
 $script:menu = New-Object System.Windows.Forms.ContextMenuStrip
-$script:menu.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
-$script:menu.ShowCheckMargin = $true
-$script:menu.ShowImageMargin = $false
+Set-MenuLook $script:menu
+[CamTray.Look]::Round($script:menu)
 $script:menu.Add_Closed({
   if ($script:pending) {
     $items = $script:pending; $script:pending = $null

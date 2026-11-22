@@ -2233,8 +2233,28 @@ class CamTest(unittest.TestCase):
         self.assertTrue(b_row.get("checked"))
         self.assertFalse(a_row.get("checked"))
         self.assertEqual([i["text"] for i in out["items"] if i.get("checked")], [b_row["text"]])  # 只勾当前账号
-        self.assertIn("■", a_row["text"])  # 进度条换成雅黑里一定有的字符
+        # 账号行：左边名字，右边对齐写额度（不再带一串方块进度条，菜单窄一半），名字下面画 5 小时的额度条（颜色按额度）；
+        # 套餐放进子菜单第一行；额度高低看额度条，名字不整行上色
+        self.assertEqual((a_row["text"], a_row["right"], a_row["bar"], a_row["barColor"]), ("A", "10% · 7天 5%", 10.0, "#1F8A4C"))
+        self.assertEqual((b_row["right"], b_row["barColor"], b_row["barColorDark"]), ("75% · 7天 30%", "#B87A08", "#E0A93B"))
+        self.assertNotIn("color", b_row)
+        self.assertEqual(a_row["children"][0], {"text": "Max", "dim": True})
         self.assertNotIn("▰", dumped)
+        self.assertNotIn("■", dumped)
+        # 菜单不能太宽：超过 WIDTH 的说明拆成几行（续行缩进），能点的截短、全文放提示
+        def walk(xs):
+            for x in xs:
+                yield x
+                yield from walk(x.get("children") or [])
+        widest = max(tray.width(x.get("text", "")) for x in walk(out["items"]))
+        self.assertLessEqual(widest, tray.WIDTH + 2)
+        self.assertEqual(tray.wrap("按最近一天的速度，7 天额度 11-20 07:44 左右用完（比重置早 4 天 3 小时）", 30),
+                         ["按最近一天的速度，", "7 天额度 11-20 07:44 左右用完", "（比重置早 4 天 3 小时）"])
+        self.assertEqual(tray.wrap("没续的话这个号可能已经降级为免费版。", 34), ["没续的话这个号可能已经降级为免费版。"])  # 不留一个孤零零的“。”
+        long = tray.fit([{"text": "七天额度" * 12, "run": ["cam", "usage"]}, {"text": "说明，" * 15}])
+        self.assertTrue(long[0]["text"].endswith("…") and long[0]["tip"] == "七天额度" * 12)
+        self.assertGreater(len(long), 2)
+        self.assertTrue(all(x["text"].startswith("　") for x in long[2:]))
         # 切换在子菜单里，交给菜单栏小工具自己的 switch（结果用通知告诉用户），切完刷新菜单
         self.assertIn({"text": "切换到这个账号", "run": ["menu", "switch", a_id], "refresh": True}, a_row["children"])
         # 按住 Option 才显示的邮箱行没带过来；分隔线不连着、不在末尾
@@ -2357,8 +2377,17 @@ class CamTest(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "只在 Windows 上用 PowerShell 真跑")
     def test_windows_tray_powershell_draws_icons(self):
         """PowerShell 脚本的语法（install.ps1、cam-tray.ps1），再把 cam-tray.ps1 里画图标的几个函数取出来真跑一遍：
-        数字方块（写字、半透明的暗拍）、cam_tray.py 画的 PNG 摆到正中、按动画种类排帧、换图标时释放旧的。"""
-        cam_menu = self._menu_plugin()
+        数字方块（写字、半透明的暗拍）、cam_tray.py 画的 PNG 摆到正中、按动画种类排帧、换图标时释放旧的；
+        右键菜单：编译菜单的画法（C# 5），用真的菜单内容浅色 / 深色各画一遍（主菜单和账号的子菜单），不能太宽。"""
+        MockAnthropic.tokens = {"at-A1": {"u5": 10.0, "u7": 5.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 75.0, "u7": 30.0, "email": "b@x.com", "plan": "max"}}
+        self._two_accounts()
+        self.assertEqual(self.run_cam("usage"), 0)
+        tray = self._tray()
+        cam_menu = tray.cam_menu
+        items = os.path.join(self.tmp, "items.json")
+        with open(items, "w", encoding="utf-8") as f:
+            json.dump(tray.menu(self.cam.Store(), tray.Notes(), 24)["items"], f, ensure_ascii=False)
         png = os.path.join(self.tmp, "lamp.png")
         with open(png, "wb") as f:
             f.write(cam_menu.status_icon(1, "busy", "pulse", 0, "lamp", k=1.2))
@@ -2375,7 +2404,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -Namespace CamTray -Name Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr handle);'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile({q(tray_ps1)}, [ref]$null, [ref]$null)
-$names = @('New-Frame', 'New-BadgeFrame', 'New-PngFrame', 'Remove-Frames', 'Set-TrayIcon')
+$names = @('New-Frame', 'New-BadgeFrame', 'New-PngFrame', 'Remove-Frames', 'Set-TrayIcon', 'Add-MenuLook', 'Set-MenuLook', 'Get-MenuColor', 'Add-MenuItems')
 foreach ($f in $ast.FindAll({{ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }}, $true)) {{
   if ($names -contains $f.Name) {{ . ([scriptblock]::Create($f.Extent.Text)) }}
 }}
@@ -2392,6 +2421,29 @@ if ($script:frames.Count -ne 8 -or $script:ownFrames.Count -ne 1 -or $script:not
 Set-TrayIcon @{{ style = 'badge'; kind = ''; ms = 250; text = 'C'; level = 'gray' }}
 if ($script:frames.Count -ne 1 -or $script:anim.Enabled) {{ 'still'; exit 6 }}
 Remove-Frames $script:ownFrames
+Add-MenuLook
+$script:menuFont = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
+$data = (Get-Content -Raw -Encoding UTF8 -LiteralPath {q(items)}) | ConvertFrom-Json
+foreach ($dark in @($false, $true)) {{
+  $script:darkMenu = $dark
+  $script:renderer = New-Object CamTray.MenuRenderer($dark)
+  $menu = New-Object System.Windows.Forms.ContextMenuStrip
+  Set-MenuLook $menu
+  [CamTray.Look]::Round($menu)
+  Add-MenuItems $menu.Items $data
+  $bars = @($menu.Items | Where-Object {{ $_ -is [CamTray.BarItem] }})
+  if ($bars.Count -ne 2 -or -not $bars[0].ShortcutKeyDisplayString) {{ 'bar items'; exit 7 }}
+  foreach ($dd in @($menu, $bars[0].DropDown)) {{
+    $sz = $dd.GetPreferredSize([System.Drawing.Size]::Empty)
+    "size $($sz.Width)x$($sz.Height)"
+    if ($sz.Width -gt 520) {{ 'too wide'; exit 8 }}
+    $dd.Size = $sz
+    $bmp = New-Object System.Drawing.Bitmap($sz.Width, $sz.Height)
+    $dd.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle(0, 0, $sz.Width, $sz.Height)))
+    $bmp.Dispose()
+  }}
+  $menu.Dispose()
+}}
 'ok'
 """
         check = os.path.join(self.tmp, "check.ps1")
@@ -6202,7 +6254,8 @@ class UpdateTest(unittest.TestCase):
             self.assertFalse(self.cam.serve_outdated(1, token))  # 连不上不算旧
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/menubar", headers={"Authorization": "Bearer " + token})
             with opener.open(req) as r:
-                self.assertEqual(json.load(r)["icon"], "bars")
+                # 没选过：菜单栏默认信号格；Windows 上是托盘，默认数字方块
+                self.assertEqual(json.load(r)["icon"], "badge" if os.name == "nt" else "bars")
         self.assertTrue(self.cam.mini_available(port, token))
         self.assertFalse(self.cam.mini_available(1, token))  # 没人听的端口
         opened = []

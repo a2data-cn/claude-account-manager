@@ -40,6 +40,7 @@ LEVELS = {cam_menu.GREEN: "green", cam_menu.YELLOW: "yellow", cam_menu.RED: "red
 # 托盘图标的样式：macOS 菜单栏的五种，加上 Windows 才有的“数字方块”（托盘图标旁边不能写字，要看数字只能画在图标里）。
 # 没选过时用数字方块（以前的样子）；在 Mac 上选的样式这里也认
 TRAY_STYLES = (("badge", "数字方块（图标里写 5 小时 %）"),) + tuple(cam_menu.ICON_STYLES)
+SHORT = {"badge": "数字方块", "bars": "信号格", "lamp": "红绿灯", "ring": "圆环", "rings": "双环", "twobar": "两根小条"}
 FRAMES, FRAME_MS = cam_menu.FRAMES, int(cam_menu.FRAME * 1000)  # 动画和菜单栏流式模式一样：0.25 秒一帧，8 帧两秒一圈
 
 PARAM = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
@@ -56,8 +57,89 @@ def parse_params(s):
 
 
 def light(c):
-    """菜单栏小工具的颜色写成“浅色,深色”，托盘菜单的底色是浅的，取前一个。"""
+    """菜单栏小工具的颜色写成“浅色,深色”：浅色菜单用前一个。"""
     return (c or "").split(",")[0]
+
+
+def dark(c):
+    """深色菜单（Windows 的应用模式是深色时）用后一个，没有就用同一个。"""
+    parts = (c or "").split(",")
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
+WIDTH = 36  # 菜单一行最多多宽（汉字算 2，大约 18 个字）：再长的说明拆成几行，能点的截短、鼠标停上去看全文
+NAME_WIDTH = 20  # 账号行的名字（右边还有“88% · 7天 72%”）
+
+
+def width(s):
+    return cam_menu.display_width(s)
+
+
+def cut(s, limit):
+    """s 的前几个字不超过 limit 宽。"""
+    w = 0
+    for i, ch in enumerate(s):
+        w += 2 if ord(ch) > 0x2E7F else 1
+        if w > limit:
+            return max(i, 1)
+    return len(s)
+
+
+def clip(text, limit):
+    return text if width(text) <= limit else text[: cut(text, limit - 1)].rstrip() + "…"
+
+
+def pieces(text):
+    """能断行的地方：逗号、分号、冒号、右括号后面，左括号前面，“ · ”后面。"""
+    out, cur = [], ""
+    for i, ch in enumerate(text):
+        if ch in "（(" and cur.strip():
+            out.append(cur)
+            cur = ""
+        cur += ch
+        if ch in "，,；;：）)" or text[: i + 1].endswith(" · "):
+            out.append(cur)
+            cur = ""
+    if cur:
+        out.append(cur)
+    return out
+
+
+def wrap(text, limit):
+    lines, cur = [], ""
+    for p in pieces(text):
+        if cur.strip() and width(cur + p) > limit:
+            lines.append(cur.rstrip())
+            cur = p.lstrip()
+        else:
+            cur += p
+        while width(cur) > limit + 2:  # 一段本身就太长：硬断（多出一个标点就不断了，免得下一行只剩个“。”）
+            n = cut(cur, limit)
+            lines.append(cur[:n])
+            cur = cur[n:]
+    if cur.strip():
+        lines.append(cur.rstrip())
+    return lines
+
+
+def fit(items):
+    """菜单别太宽：超过 WIDTH 的说明行拆成几行（续行缩进一格），能点的、有子菜单的截短，全文放鼠标悬停提示（tip）。"""
+    out = []
+    for it in items:
+        if it.get("children"):
+            it["children"] = fit(it["children"])
+        t = it.get("text", "")
+        if it.get("sep") or width(t) <= WIDTH:
+            out.append(it)
+        elif it.get("run") or it.get("children") or it.get("checked"):
+            it["tip"] = t
+            it["text"] = clip(t, WIDTH)
+            out.append(it)
+        else:
+            lead = len(t) - len(t.lstrip())  # 本来就缩进的说明（问题下面的建议），续行跟着缩进
+            for n, line in enumerate(wrap(t.strip(), WIDTH - lead - 2)):
+                out.append({**it, "text": " " * lead + ("" if n == 0 else "　") + line})
+    return out
 
 
 def item_of(text, p):
@@ -66,10 +148,27 @@ def item_of(text, p):
     if p.get("sfimage") == "checkmark.circle.fill":  # 当前在用的账号（环境评分那行的盾牌图标不算）
         it["checked"] = True
     c = p.get("color")
-    if c == "gray" or p.get("size"):
+    if c == "gray" or (p.get("size") and not c):  # 灰色小字（分区标题、说明）；带颜色的小字（最上面红绿灯那句）照样上色
         it["dim"] = True
     elif c:
-        it["color"] = light(c)
+        it["color"], it["colorDark"] = light(c), dark(c)
+    if "wname" in p:  # 账号行：左边名字（有问题加 ⚠），右边对齐写额度，名字下面画 5 小时的额度条；套餐放进子菜单第一行
+        it["text"] = clip(p["wname"], NAME_WIDTH) + (f" · {p['wflag']}" if p.get("wflag") else "")
+        if clip(p["wname"], NAME_WIDTH) != p["wname"]:
+            it["tip"] = p["wname"]
+        nums = ([f"{p['wp5']}%"] if "wp5" in p else []) + ([f"7天 {p['wp7']}%"] if "wp7" in p else [])
+        if nums:
+            it["right"] = " · ".join(nums)
+        if "wp5" in p:
+            f5 = float(p["wp5"])
+            it["bar"] = f5
+            bc = cam_menu.color_for(f5) or cam_menu.GREEN
+            it["barColor"], it["barColorDark"] = light(bc), dark(bc)
+        if p.get("wplan"):
+            it["plan"] = p["wplan"]
+        if c != cam_menu.RED:  # 额度高低由额度条的颜色表示，名字不再整行上色；登录失效这类要处理的还是红字
+            it.pop("color", None)
+            it.pop("colorDark", None)
     if "bash" in p:
         args = [p[f"param{i}"] for i in range(2, 20) if f"param{i}" in p]
         script = p.get("param1")
@@ -111,7 +210,11 @@ def convert(lines):
             last.setdefault("children", []).append(it)
     while items and items[-1].get("sep"):
         items.pop()
-    return (head, parse_params(head_params)), items
+    for it in items:
+        plan = it.pop("plan", None)
+        if plan and it.get("children") is not None:
+            it["children"].insert(0, {"text": plan, "dim": True})
+    return (head, parse_params(head_params)), fit(items)
 
 
 def badge_of(title):
@@ -244,8 +347,9 @@ def add_style_menu(items, style):
     if kids:
         kids.append({"sep": True})
     kids.append({"text": "托盘图标样式", "dim": True})
-    for key, label in TRAY_STYLES:
-        kids.append({"text": label, "checked": True} if key == style else {"text": label, "run": ["icon", key], "refresh": True})
+    for key, label in TRAY_STYLES:  # 菜单里写短名字，说明放鼠标悬停提示
+        it = {"text": SHORT[key], "tip": label}
+        kids.append({**it, "checked": True} if key == style else {**it, "run": ["icon", key], "refresh": True})
 
 
 def set_style(store, key, notes):

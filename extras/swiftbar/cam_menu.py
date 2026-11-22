@@ -857,6 +857,11 @@ def render(store, st, out=print, rich=None, phase=None):
                 params += f" {switch_action(a['id'])}" + (f" color={c}" if c and not rich else "")
             if rich and plan:
                 params += f" badge={q(plan)}"
+            if not rich:  # Windows 托盘：名字、套餐、额度分开给，托盘排成“名字 …… 88% · 7天 72%”，名字下面画一根额度条（SwiftBar 看不到这些）
+                f5, f7 = pct(a, "five_hour"), pct(a, "seven_day")
+                params += f" wname={q(esc(a.get('label') or a.get('email') or '未命名'))}" + (f" wplan={q(plan)}" if plan else "") \
+                    + (f" wflag={q(h['label'])}" if flag else "") + (f" wp5={f5:.0f}" if f5 is not None else "") \
+                    + (f" wp7={f7:.0f}" if f7 is not None else "")
             # 快捷键只挂在这一行（按住 Option 的那行是同一项，不重复注册）；当前号没有切换动作，按了不做事
             hk = f" shortcut={HOTKEY}+{pos[a['id']]}" if HOTKEY and pos[a["id"]] <= 9 else ""
             out(f"{text(a.get('label') or a.get('email') or '未命名')} | {params}{hk}")
