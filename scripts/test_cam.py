@@ -4539,32 +4539,32 @@ foreach ($dark in @($false, $true)) {{
         """一套“用过第三方中转”的配置：settings.json 的 env、settings.local.json 的 apiKeyHelper、托管设置、.bashrc、fish、
         PowerShell 配置文件、~/.claude.json 的 primaryApiKey，再加一个只在当前进程里的变量。值里都带 SECRET，测试看它们不出现。"""
         cfg = os.path.join(self.tmp, ".claude")
-        with open(os.path.join(cfg, "settings.json"), "w") as f:
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
             json.dump({"env": {"ANTHROPIC_BASE_URL": "https://relay.example.net/api", "ANTHROPIC_AUTH_TOKEN": "SECRET-1",
                                "ANTHROPIC_MODEL": "glm-4.6", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5",
                                "DISABLE_TELEMETRY": "1"},
                        "model": "kimi-k2", "forceLoginMethod": "console", "theme": "dark"}, f)
-        with open(os.path.join(cfg, "settings.local.json"), "w") as f:
+        with open(os.path.join(cfg, "settings.local.json"), "w", encoding="utf-8") as f:
             json.dump({"apiKeyHelper": "/bin/echo SECRET-2", "env": {"CLAUDE_CODE_USE_BEDROCK": "0"}}, f)
         managed = os.path.join(self.tmp, "managed-settings.json")
-        with open(managed, "w") as f:
+        with open(managed, "w", encoding="utf-8") as f:
             json.dump({"env": {"ANTHROPIC_BASE_URL": "https://corp-relay.example.org"}}, f)
         bashrc = os.path.join(self.tmp, ".bashrc")
-        with open(bashrc, "w", newline="") as f:
+        with open(bashrc, "w", newline="", encoding="utf-8") as f:
             f.write('export PATH=$HOME/bin:$PATH\r\nexport ANTHROPIC_AUTH_TOKEN="SECRET-3"\r\n# export ANTHROPIC_API_KEY=SECRET-x\r\n'
                     "export ANTHROPIC_BASE_URL=https://api.anthropic.com\r\nANTHROPIC_API_KEY=$(cat ~/.key) claude\r\n")
         fish = os.path.join(self.tmp, ".config", "fish", "config.fish")
         os.makedirs(os.path.dirname(fish))
-        with open(fish, "w") as f:
+        with open(fish, "w", encoding="utf-8") as f:
             f.write("set -gx ANTHROPIC_BASE_URL https://relay2.example.net\n")
         ps = os.path.join(self.tmp, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1")
         os.makedirs(os.path.dirname(ps))
         with open(ps, "w", encoding="utf-8-sig") as f:
             f.write('$env:ANTHROPIC_AUTH_TOKEN = "SECRET-4"\n$env:ANTHROPIC_MODEL = "claude-opus-5-5"\n')
-        with open(self.cj_path) as f:
+        with open(self.cj_path, encoding="utf-8") as f:
             cj = json.load(f)
         cj.update(primaryApiKey="SECRET-5", oauthAccount=oauth_account("u-1", "a@x.com"))
-        with open(self.cj_path, "w") as f:
+        with open(self.cj_path, "w", encoding="utf-8") as f:
             json.dump(cj, f)
         patcher = mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": managed, "CAM_TEST_PS_PROFILES": "1",
                                                "CLAUDE_CODE_OAUTH_TOKEN": "SECRET-6"})
@@ -4614,17 +4614,17 @@ foreach ($dark in @($false, $true)) {{
         res = cam.env_fix_apply(cam.Store(), plan, optional=True)  # 连官方支持的用法一起清（--all）
         self.assertEqual(res["failed"], [])
         self.assertNotIn("SECRET", json.dumps(res, ensure_ascii=False))
-        with open(files["settings"]) as f:
+        with open(files["settings"], encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5", "DISABLE_TELEMETRY": "1"},
                                             "theme": "dark"})
-        with open(files["local"]) as f:
+        with open(files["local"], encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}})
-        with open(files["bashrc"], newline="") as f:
+        with open(files["bashrc"], newline="", encoding="utf-8") as f:
             rows = f.read().split("\r\n")
         self.assertTrue(rows[1].startswith("# [cam env fix ") and rows[1].endswith('export ANTHROPIC_AUTH_TOKEN="SECRET-3"'), rows)
         self.assertEqual(rows[4], "ANTHROPIC_API_KEY=$(cat ~/.key) claude")  # 前缀命令只提示，不动
         self.assertEqual(rows[3], "export ANTHROPIC_BASE_URL=https://api.anthropic.com")
-        with open(files["cj"]) as f:
+        with open(files["cj"], encoding="utf-8") as f:
             cj = json.load(f)
         self.assertNotIn("primaryApiKey", cj)
         self.assertEqual(cj["oauthAccount"]["emailAddress"], "a@x.com")
@@ -4651,7 +4651,7 @@ foreach ($dark in @($false, $true)) {{
         files = self._relay_setup()
         cfg = os.path.join(self.tmp, ".claude")
         os.makedirs(os.path.join(cfg, "statsig"))
-        with open(os.path.join(cfg, "statsig", "x"), "w") as f:
+        with open(os.path.join(cfg, "statsig", "x"), "w", encoding="utf-8") as f:
             f.write("cache")
         before = _rb(files["settings"])
         code, out = self.run_cam_out("env", "fix", "--offline")
@@ -4675,11 +4675,11 @@ foreach ($dark in @($false, $true)) {{
         self.assertNotEqual(_rb(files["settings"]), before)
         self.assertEqual(_rb(files["local"]), local_before)  # apiKeyHelper 是官方支持的：默认不动
         self.assertIn("cam env fix --undo", out)
-        with open(files["settings"]) as f:
+        with open(files["settings"], encoding="utf-8") as f:
             self.assertEqual(json.load(f).get("forceLoginMethod"), "console")
         code, out = self.run_cam_out("env", "fix", "--offline", "--apply", "--all")
         self.assertEqual(code, 0, out)
-        with open(files["local"]) as f:
+        with open(files["local"], encoding="utf-8") as f:
             self.assertNotIn("apiKeyHelper", json.load(f))
         code, out = self.run_cam_out("env", "fix", "--undo")  # 先撤销 --all 那次
         self.assertEqual(code, 0, out)
@@ -4697,7 +4697,7 @@ foreach ($dark in @($false, $true)) {{
         for name, body in (("claude.cmd", '@"%~dp0\\node.exe" "%~dp0\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n'),
                            ("claude", '#!/bin/sh\nexec node "$basedir/node_modules/@anthropic-ai/claude-code/cli.js" "$@"\n'),
                            ("npm.cmd", "@echo npm\r\n")):
-            with open(os.path.join(real, name), "w") as f:
+            with open(os.path.join(real, name), "w", encoding="utf-8") as f:
                 f.write(body)
             os.chmod(os.path.join(real, name), 0o755)
         os.makedirs(os.path.join(real, "node_modules", "@anthropic-ai", "claude-code"))  # Windows 上全局包在 前缀\node_modules 里
@@ -4705,7 +4705,7 @@ foreach ($dark in @($false, $true)) {{
         os.symlink(real, link, target_is_directory=True)
         other = os.path.join(self.tmp, "relaytool")
         os.makedirs(other)
-        with open(os.path.join(other, "claude.cmd"), "w") as f:
+        with open(os.path.join(other, "claude.cmd"), "w", encoding="utf-8") as f:
             f.write('@node "%~dp0\\node_modules\\some-relay-cli\\bin\\claude.js" %*\r\n')
         os.chmod(os.path.join(other, "claude.cmd"), 0o755)
         with mock.patch.object(cam, "IS_WIN", True), mock.patch.dict(os.environ, {"PATH": os.pathsep.join([link, real])}):
@@ -4755,7 +4755,7 @@ foreach ($dark in @($false, $true)) {{
                  "EOF",
                  "ANTHROPIC_MODEL=glm-4.6 claude -p hi",                               # 14 前缀命令：只提示
                  "export ANTHROPIC_AUTH_TOKEN=SECRET-g  # 中转"]                        # 15 顶格带注释：自动改
-        with open(rc, "w") as f:
+        with open(rc, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         got = {(n, k): simple for n, k, _, simple in cam.shell_env_lines(rc, cam.OVERRIDE_ENV + cam.MODEL_ENV)}
         self.assertEqual(got, {(1, "ANTHROPIC_BASE_URL"): True, (2, "ANTHROPIC_AUTH_TOKEN"): False, (4, "ANTHROPIC_AUTH_TOKEN"): False,
@@ -4779,7 +4779,7 @@ foreach ($dark in @($false, $true)) {{
         raw = _rb(ps)
         self.assertTrue(raw.startswith(b"\xef\xbb\xbf# [cam env fix "), raw[:40])  # BOM 还在最前面
         self.assertIn("中文注释".encode("utf-8"), raw)
-        with open(rc) as f:
+        with open(rc, encoding="utf-8") as f:
             out = f.read().split("\n")
         self.assertTrue(out[0].startswith("# [cam env fix ") and out[14].startswith("# [cam env fix "))
         self.assertEqual(out[1:14], lines[1:14])  # 别的行一个字都没动
@@ -4793,15 +4793,15 @@ foreach ($dark in @($false, $true)) {{
             os.chmod(files["bashrc"], 0o644)
         res = cam.env_fix_apply(cam.Store(), cam.env_fix_plan(None, with_cache=False))
         self.assertEqual(res["failed"], [])
-        with open(files["settings"]) as f:
+        with open(files["settings"], encoding="utf-8") as f:
             st = json.load(f)
         st["permissions"] = {"allow": ["Bash(ls)"]}  # 清理后又改了
-        with open(files["settings"], "w") as f:
+        with open(files["settings"], "w", encoding="utf-8") as f:
             json.dump(st, f)
         bash_after = _rb(files["bashrc"])
         r = cam.env_fix_undo(cam.Store())
         self.assertEqual(r["failed"], [])
-        with open(files["settings"]) as f:
+        with open(files["settings"], encoding="utf-8") as f:
             back = json.load(f)
         self.assertEqual(back["permissions"], {"allow": ["Bash(ls)"]})  # 后来的改动还在
         self.assertEqual(back["env"]["ANTHROPIC_AUTH_TOKEN"], "SECRET-1")  # 去掉的放回来了
@@ -4833,7 +4833,7 @@ foreach ($dark in @($false, $true)) {{
         fake = {"path": os.path.join(self.tmp, "old", "bin", "claude"), "keep": os.path.join(self.tmp, "keep-claude")}
         os.makedirs(os.path.dirname(fake["path"]))
         for p in fake.values():
-            with open(p, "w") as f:
+            with open(p, "w", encoding="utf-8") as f:
                 f.write("x")
 
         def run(cmd, **kw):
@@ -4849,13 +4849,13 @@ foreach ($dark in @($false, $true)) {{
         self.assertEqual(res["failed"], [])
         self.assertEqual(calls[0], ["/x/npm", "uninstall", "-g", "--prefix", item["prefix"], "@anthropic-ai/claude-code"])
         # 卸完要留的那份运行不了（比如它其实是指向刚卸掉那份的包装）：报失败
-        with open(fake["path"], "w") as f:
+        with open(fake["path"], "w", encoding="utf-8") as f:
             f.write("x")
         with mock.patch.object(cam.subprocess, "run", run), mock.patch.object(cam, "claude_version", lambda p: None):
             res = cam.env_fix_apply(cam.Store(), plan)
         self.assertIn("运行不了", res["failed"][0]["error"])
         # npm 说成功了但那份还在（卸到别处去了）：报失败
-        with open(fake["path"], "w") as f:
+        with open(fake["path"], "w", encoding="utf-8") as f:
             f.write("x")
         with mock.patch.object(cam.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")):
             res = cam.env_fix_apply(cam.Store(), plan)
@@ -4872,7 +4872,7 @@ foreach ($dark in @($false, $true)) {{
         cam = self.cam
         lb = os.path.join(self.tmp, ".local", "bin")
         os.makedirs(lb)
-        with open(os.path.join(lb, "claude"), "w") as f:
+        with open(os.path.join(lb, "claude"), "w", encoding="utf-8") as f:
             f.write("#!/bin/sh\nexec relay-tool \"$@\"\n")
         self.assertEqual(cam.install_kind(os.path.join(lb, "claude")), "其它")
         self.assertEqual(cam.install_kind("/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"), "npm")
@@ -4882,7 +4882,7 @@ foreach ($dark in @($false, $true)) {{
                   "global.anthropic.claude-opus-4-1", "claude-sonnet-4@20250514", "opusplan"):
             self.assertTrue(cam.is_claude_model(m), m)
         self.assertFalse(cam.is_claude_model("glm-4.6"))
-        with open(os.path.join(self.tmp, ".claude", "settings.json"), "w") as f:
+        with open(os.path.join(self.tmp, ".claude", "settings.json"), "w", encoding="utf-8") as f:
             json.dump({"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": "my-deployment"}, "model": "my-deployment"}, f)
         with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
             plan = cam.env_fix_plan(None, with_cache=False)
@@ -4890,7 +4890,7 @@ foreach ($dark in @($false, $true)) {{
         self.assertEqual(len(plan["optional"]), 3)  # 开关本身、模型变量、settings 的 model：都默认不动
         bdir = os.path.join(self.tmp, ".claude-accounts", "env-backups", "20260101-000000-000000-fix")
         os.makedirs(bdir)
-        with open(os.path.join(bdir, "manifest.json"), "w") as f:
+        with open(os.path.join(bdir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump({"at": "x", "items": [{"type": "launchctl", "key": "ANTHROPIC_AUTH_TOKEN", "value": "SECRET-z"}]}, f)
         with mock.patch.object(cam.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b"denied " + cmd[-1].encode())):
             r = cam.env_fix_undo(cam.Store())
@@ -4907,9 +4907,9 @@ foreach ($dark in @($false, $true)) {{
         cfg = os.path.join(self.tmp, ".claude")
         hook = os.path.join(self.tmp, "hooks", "ok.sh")
         os.makedirs(os.path.dirname(hook))
-        with open(hook, "w") as f:
+        with open(hook, "w", encoding="utf-8") as f:
             f.write("#!/bin/sh\n")
-        with open(os.path.join(cfg, "settings.json"), "w") as f:
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
             json.dump({"env": {"NODE_TLS_REJECT_UNAUTHORIZED": "0", "DISABLE_AUTOUPDATER": "1",
                                "NODE_EXTRA_CA_CERTS": os.path.join(self.tmp, "gone.pem")},
                        "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"bash {hook}"},
@@ -4918,14 +4918,14 @@ foreach ($dark in @($false, $true)) {{
                        "statusLine": {"type": "command", "command": "~/.claude/missing-statusline.sh"}}, f)
         proj = os.path.join(self.tmp, "work", "p1")
         os.makedirs(proj)
-        with open(os.path.join(proj, ".mcp.json"), "w") as f:
+        with open(os.path.join(proj, ".mcp.json"), "w", encoding="utf-8") as f:
             f.write("{not json")
-        with open(self.cj_path) as f:
+        with open(self.cj_path, encoding="utf-8") as f:
             cj = json.load(f)
         cj["mcpServers"] = {"gone": {"command": "definitely-not-a-real-cmd-xyz"}, "web": {"type": "http", "url": "https://x"},
                             "fine": {"command": "sh", "args": ["-c", "true"]}}
         cj["projects"] = {proj: {"mcpServers": {"local": {"command": os.path.join(self.tmp, "no", "server")}}}}
-        with open(self.cj_path, "w") as f:
+        with open(self.cj_path, "w", encoding="utf-8") as f:
             json.dump(cj, f)
         with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
             plan = cam.env_fix_plan(None, with_cache=False)
@@ -4947,7 +4947,7 @@ foreach ($dark in @($false, $true)) {{
         # 一键清理只去掉关证书校验那一项，自动更新（可选）和别的设置照旧
         res = cam.env_fix_apply(cam.Store(), plan)
         self.assertEqual(res["failed"], [])
-        with open(os.path.join(cfg, "settings.json")) as f:
+        with open(os.path.join(cfg, "settings.json"), encoding="utf-8") as f:
             st = json.load(f)
         self.assertNotIn("NODE_TLS_REJECT_UNAUTHORIZED", st["env"])
         self.assertEqual(st["env"]["DISABLE_AUTOUPDATER"], "1")
@@ -4970,7 +4970,7 @@ foreach ($dark in @($false, $true)) {{
         备份只删撤销完了的；面板的指纹不跟着缓存大小变。"""
         cam = self.cam
         rc = os.path.join(self.tmp, ".bashrc")
-        with open(rc, "w") as f:
+        with open(rc, "w", encoding="utf-8") as f:
             f.write("relay() {  # 中转\n"
                     "export ANTHROPIC_AUTH_TOKEN=SECRET-1\n"          # 2 函数里唯一的一句：不自动改
                     "}\n"
@@ -4982,7 +4982,7 @@ foreach ($dark in @($false, $true)) {{
         # 链接过去的 fish 配置：按原来的名字认语法
         real_fish = os.path.join(self.tmp, "dotfiles", "fish-config")
         os.makedirs(os.path.dirname(real_fish))
-        with open(real_fish, "w") as f:
+        with open(real_fish, "w", encoding="utf-8") as f:
             f.write("set -gx ANTHROPIC_BASE_URL https://r2.example\n")
         os.makedirs(os.path.join(self.tmp, ".config", "fish"))
         os.symlink(real_fish, os.path.join(self.tmp, ".config", "fish", "config.fish"))
@@ -4990,23 +4990,23 @@ foreach ($dark in @($false, $true)) {{
             plan = cam.env_fix_plan(None, with_cache=False)
         res = cam.env_fix_apply(cam.Store(), plan)
         self.assertEqual(res["failed"], [])
-        with open(real_fish) as f:
+        with open(real_fish, encoding="utf-8") as f:
             self.assertTrue(f.read().startswith("# [cam env fix "))
         # 部分撤销：同一天别的清理加了标记的行不跟着去掉
         mark = cam.ENV_FIX_MARK.format(date=dt.date.today().isoformat())
-        with open(rc, "a") as f:
+        with open(rc, "a", encoding="utf-8") as f:
             f.write(mark + "export UNRELATED=1\n")  # 文件又改过；还多了一行同样标记的（不是这次加的）
         cam.env_fix_undo(cam.Store())
-        with open(rc) as f:
+        with open(rc, encoding="utf-8") as f:
             after = f.read()
         self.assertIn("\nexport ANTHROPIC_BASE_URL=https://r.example\n", after)
         self.assertIn(mark + "export UNRELATED=1", after)
         # 那次没改成的文件（没有改后的指纹）：撤销时不拿旧备份盖掉
         bdir = os.path.join(self.tmp, ".claude-accounts", "env-backups", "20250101-000000-000000-fix")
         os.makedirs(bdir)
-        with open(os.path.join(bdir, "file-0"), "w") as f:
+        with open(os.path.join(bdir, "file-0"), "w", encoding="utf-8") as f:
             f.write("OLD")
-        with open(os.path.join(bdir, "manifest.json"), "w") as f:
+        with open(os.path.join(bdir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump({"at": "x", "items": [{"type": "file", "path": rc, "saved": "file-0", "before": "x"}]}, f)
         cur = _rb(rc)
         r = cam.env_fix_undo(cam.Store())
@@ -5015,7 +5015,7 @@ foreach ($dark in @($false, $true)) {{
         # ~/.local/bin 里提到官方包的包装脚本：不算 npm（旁边没有装好的包）
         lb = os.path.join(self.tmp, ".local", "bin")
         os.makedirs(lb, exist_ok=True)
-        with open(os.path.join(lb, "claude"), "w") as f:
+        with open(os.path.join(lb, "claude"), "w", encoding="utf-8") as f:
             f.write("#!/bin/sh\nexec node ~/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js \"$@\"\n")
         self.assertEqual(cam.install_kind(os.path.join(lb, "claude")), "其它")
         # 备份：超过 ENV_FIX_KEEP 次以后只删撤销完了的和只记了卸载 / 升级的
@@ -5024,7 +5024,7 @@ foreach ($dark in @($false, $true)) {{
             d = os.path.join(root, f"2024010{i % 10}-00000{i // 10}-{i:06d}-fix")
             os.makedirs(d, exist_ok=True)
             items = [{"type": "note", "text": "升级"}] if i % 2 else [{"type": "file", "path": rc, "saved": "f", "after": "a"}]
-            with open(os.path.join(d, "manifest.json"), "w") as f:
+            with open(os.path.join(d, "manifest.json"), "w", encoding="utf-8") as f:
                 json.dump({"at": "x", "items": items}, f)
         cam.prune_env_fix_backups(cam.Store())
         left = [m for _, m in cam.env_fix_backups(cam.Store())]
@@ -5034,7 +5034,7 @@ foreach ($dark in @($false, $true)) {{
         os.makedirs(os.path.join(cfg, "statsig"), exist_ok=True)
         with mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
             d1 = cam.env_fix_plan(None)
-            with open(os.path.join(cfg, "statsig", "big"), "w") as f:
+            with open(os.path.join(cfg, "statsig", "big"), "w", encoding="utf-8") as f:
                 f.write("x" * 50000)
             d2 = cam.env_fix_plan(None)
         self.assertEqual((d1["digest"], d1["digest_optional"]), (d2["digest"], d2["digest_optional"]))
