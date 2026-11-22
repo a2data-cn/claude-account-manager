@@ -277,6 +277,9 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 | GET | `/api/checkup` | 全面体检，同 `cam doctor --json`（格式见“全面体检”），要十几秒；`?offline=1` 不联网；`?probe=1` 只回 `{"ok": true}`，面板据此显示按钮。只有脚本版有，桌面版返回 404 |
 | GET | `/api/claude-version` | 面板的 Claude Code 版本卡片：`installed`（`path`、`kind`、`version`，实际运行的那份）、`latest`（`channel`、`version`、`checked_at`）、`outdated`、`can_update`、`advice`。装的版本按程序文件修改时间缓存，最新版本 6 小时查一次（`?refresh=1` 现查），存在 `claude-version.json`。只有脚本版有 |
 | POST | `/api/claude-update` | 对实际运行的那份跑 `claude update`（只认官方安装器和 npm 装的），返回 `message` 加同 GET 的字段 |
+| GET | `/api/claude-uninstall` | 卸载前给人看的：`targets` 每一份的 `path`、`kind`、`how`（怎么卸）、`auto`（cam 能不能替你卸） |
+| POST | `/api/claude-uninstall` | `{"reinstall"?}`：同 `cam env uninstall --apply`（有 claude 在运行或看不出来时拒绝），reinstall 时卸完用官方安装器装一份；返回 `done`、`failed`、`manual`、`left`、`installed_ok`、`version` |
+| POST | `/api/claude-install` | 没装时用官方安装器装一份，返回 `message`、`version` |
 | GET | `/api/env-purge` | 彻底清理前给人看的：`move`（会移走的路径和大小）、`keychain`、`restore_at`（有能恢复的上一次）、`running` |
 | POST | `/api/env-purge` | `{"purge": true, "confirm": "彻底清理"}`：同 `cam env clean --purge`（有 claude 在运行或看不出来时拒绝），返回 `backup`；`{"restore": true}`：同 `cam env clean --restore`，返回 `restored`、`kept` |
 | GET | `/api/env-fix` | 一键清理要改什么（同 `cam env fix --json`）：`fix` / `optional`（官方支持的用法，勾上才改）/ `manual` 每条 `level`、`text`、`advice`、`slow`（有 claude 在跑时先跳过的）；`running`、`undo_at`（有能撤销的上一次清理）。只提示，不打分。`?probe=1` 只回 `{"ok": true}`；只有脚本版有，桌面版 404，面板据此隐藏按钮 |

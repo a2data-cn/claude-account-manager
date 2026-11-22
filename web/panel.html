@@ -452,6 +452,18 @@ details.src[open] summary::before { content: "▾"; }
 .ecard .purge-box { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--hot); border-radius: var(--radius); background: color-mix(in srgb, var(--hot) 6%, transparent); }
 .ecard .purge-box h4 { margin: 0 0 6px; color: var(--hot); }
 .ecard .purge-box p, .ecard .purge-box ul { margin: 6px 0; font-size: 13px; }
+.cmds summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; font-size: 13.5px; font-weight: 650; list-style: none; }
+.cmds summary::-webkit-details-marker { display: none; }
+.cmds summary::after { content: "展开"; margin-left: auto; font-size: 12px; font-weight: 400; color: var(--muted); }
+.cmds[open] summary::after { content: "收起"; }
+.cmds summary .hint { font-weight: 400; font-size: 12px; }
+.cmds h4 { margin: 14px 0 6px; font-size: 12.5px; color: var(--muted); }
+.cmd-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.cmd-list li { display: grid; grid-template-columns: minmax(0, 15em) minmax(0, 1fr); gap: 4px 12px; align-items: baseline; font-size: 13px; }
+.cmd-list .v { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cmd-list code { cursor: copy; overflow-wrap: anywhere; }
+.cmd-list small { color: var(--muted); font-size: 11.5px; }
+@media (max-width: 560px) { .cmd-list li { grid-template-columns: 1fr; } }
 .ecard .fix-all { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12.5px; color: var(--muted); cursor: pointer; }
 .eico { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); flex: none; }
 .eico svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -1575,7 +1587,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   // 彻底清理（同 cam env clean --purge）：整个 Claude Code 配置移进备份目录，相当于重装；能恢复。放在一键清理卡片里，要再确认一次
   let purge = null, purgeAsk = false, purgeBusy = false, purgeRes = null;
   // Claude Code 版本（GET /api/claude-version，只有脚本版有）：环境页一张卡片，有新版本时账号页顶上也提示一句
-  let ccVer = null, ccVerBusy = false;
+  let ccVer = null, ccVerBusy = false, cmdsOpen = false;  // cmdsOpen：“常用命令”展开着没有（页面定时重画时保持）
+  document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("cmds")) cmdsOpen = e.target.open; }, true);
   const ENV_FIX_TIP = "查本机 Claude Code 里第三方中转、API Key 这类设置（settings.json、环境变量、shell 配置文件）、多装的几份、旧版本和缓存，先列出来给你看，确认了才改。改之前都备份，能撤销。";
   const CHECKUP_TIP = "逐项检查每个账号的登录还能不能续（不在用的号快过期了会替它续一次，当前登录不碰）、到期日和用量，Claude 服务和官方状态页，本机 Claude Code 的版本和正在运行的会话，cam 的后台任务、更新和文件校验，装了的话还有聊天机器人。要等十几秒。";
   function envButton(label) {
@@ -1667,16 +1680,71 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const rows = i
       ? `<li class="${v.outdated ? "warn" : "ok"}"><span class="mark">${v.outdated ? "注意" : "正常"}</span><span class="v">现在是 <b>${esc(i.version || "版本未知")}</b>（${esc(i.kind)}，${esc(i.path)}）${l ? `；最新 <b>${esc(l.version)}</b>（${esc(l.channel)} 渠道，${esc(ago(l.checked_at))}查的）` : "；最新版本还没查到"}${v.advice ? `<span class="advice">→ ${esc(v.advice)}</span>` : ""}</span></li>`
       : `<li class="bad"><span class="mark">异常</span><span class="v">没找到 Claude Code（看的是面板服务的 PATH）<span class="advice">→ 终端里运行 cam env install 用官方安装器安装</span></span></li>`;
-    const up = v.can_update ? `<button class="btn primary" data-act="cc-update"${dis}>${ccVerBusy ? "正在升级，要一两分钟…" : `升级到 ${esc(l.version)}`}</button>` : "";
+    const up = v.can_update ? `<button class="btn primary" data-act="cc-update"${dis}>${ccVerBusy ? "正在处理，要一两分钟…" : `升级到 ${esc(l.version)}`}</button>` : "";
+    // 没装：官方安装器装一份；装了：卸载、重新安装（npm / Node 出问题时换成官方安装器装的，不依赖 Node）
+    const more = !i ? `<button class="btn primary" data-act="cc-install"${dis}>${ccVerBusy ? "正在安装，要一两分钟…" : "安装（官方安装器）"}</button>`
+      : `<button class="btn quiet danger" data-act="cc-uninstall"${dis} title="卸载本机的 Claude Code（每一份按各自的装法卸），配置不动">卸载…</button>`
+        + `<button class="btn quiet" data-act="cc-reinstall"${dis} title="卸掉现在的，再用官方安装器装一份（不依赖 Node.js），配置不动">重新安装（官方）</button>`;
     return `<div class="cards"><div class="panel ecard wide" id="cc-ver"><h3><span class="eico"><svg><use href="#i-terminal"/></svg></span>Claude Code 版本 ${chip}</h3>
       <ul class="checks">${rows}</ul><p class="hint">看的是实际运行的那份（PATH 里第一个）。最新版本几个小时查一次；升级就是运行 claude update，正在跑的 claude 重开后用新版本。</p>
-      <div class="sec-acts"><button class="btn quiet" data-act="cc-recheck"${dis}>重新检查</button>${up}</div></div></div>`;
+      <div class="sec-acts"><button class="btn quiet" data-act="cc-recheck"${dis}>重新检查</button>${more}${up}</div></div></div>${cmdsHtml()}`;
+  }
+  // 常用命令（折叠起来）：cam 和 Claude Code 的安装、升级、卸载、清理，按这台电脑的系统给；点一下命令就复制
+  function cmdsHtml() {
+    const sys = (state && state.platform) || "", win = sys === "Windows", mac = sys === "Darwin";
+    const row = (what, cmd, note) => `<li><span class="k">${esc(what)}</span><span class="v"><code>${esc(cmd)}</code>${note ? `<small>${esc(note)}</small>` : ""}</span></li>`;
+    const nativeRm = win ? 'Remove-Item "$env:USERPROFILE\\.local\\bin\\claude.exe" -Force; Remove-Item "$env:USERPROFILE\\.local\\share\\claude" -Recurse -Force'
+      : "rm -f ~/.local/bin/claude && rm -rf ~/.local/share/claude";
+    const groups = [
+      ["cam", [
+        ["安装", win ? "双击 安装.cmd" : mac ? "双击 安装.command（或 bash install.sh）" : "bash install.sh", "在 cam 的代码目录里；加 --yes（Windows 是 -Yes）全部按默认"],
+        ["看有没有新版本", "cam update --check"], ["升级", "cam update"],
+        ["卸载", win ? "安装.cmd -Uninstall" : "bash install.sh --uninstall", "账号数据（~/.claude-accounts）和 Claude Code 的配置都不动"],
+        ["全面体检", "cam doctor", "只看不改：cam doctor --offline"]]],
+      ["Claude Code", [
+        ["安装（官方安装器，不依赖 Node）", "cam env install"], ["用 npm 安装", "cam env install --npm"],
+        ["升级", "claude update", mac ? "Homebrew 装的：brew upgrade claude-code" : ""],
+        ["卸载（每一份按各自的装法卸，配置不动）", "cam env uninstall"],
+        ["卸掉再用官方安装器装一份", "cam env uninstall --reinstall", "npm、Node 出问题时用这个"],
+        ["手动卸载：官方安装器装的", nativeRm], ["手动卸载：npm 装的", "npm uninstall -g @anthropic-ai/claude-code"]].concat(mac ? [["手动卸载：Homebrew 装的", "brew uninstall --cask claude-code"]] : [])],
+      ["Claude Code 官方命令（不经过 cam，Anthropic 文档里的写法）", [
+        ["官方安装器安装", win ? "irm https://claude.ai/install.ps1 | iex" : "curl -fsSL https://claude.ai/install.sh | bash", win ? "在 PowerShell 里运行；不依赖 Node.js" : "不依赖 Node.js"],
+        ["npm 安装", "npm install -g @anthropic-ai/claude-code", "要 Node.js 18 以上"]].concat(mac ? [["Homebrew 安装", "brew install --cask claude-code"]] : []).concat([
+        ["升级", "claude update"], ["看版本", "claude --version"], ["自检（装得对不对、更新状态）", "claude doctor"]])],
+      ["清理", [
+        ["一键清理（第三方中转、多装的几份…）", "cam env fix", "先列出来再问；--all 连官方支持的用法一起清"],
+        ["撤销上一次一键清理", "cam env fix --undo"], ["清缓存", "cam env clean --apply"],
+        ["彻底清理（相当于重装，配置移到备份）", "cam env clean --purge --apply"], ["恢复彻底清理前的样子", "cam env clean --restore"]]]];
+    return `<details class="panel ecard wide cmds"${cmdsOpen ? " open" : ""}><summary><span class="eico"><svg><use href="#i-terminal"/></svg></span>常用命令<span class="hint">安装、升级、卸载、清理；点一下命令就复制${sys ? `（按这台电脑：${win ? "Windows" : mac ? "macOS" : "Linux"}）` : ""}</span></summary>
+      ${groups.map(([name, rows]) => `<h4>${esc(name)}</h4><ul class="cmd-list">${rows.map((r) => row(...r)).join("")}</ul>`).join("")}</details>`;
   }
   async function loadCcVer(refresh) {
     if (ccVerBusy) return;
     ccVerBusy = !!refresh; if (refresh) render();
     try { ccVer = await api("GET", "/api/claude-version" + (refresh ? "?refresh=1" : "")); } catch (_) { if (!refresh) ccVer = null; }
     finally { ccVerBusy = false; if (state) render(); }
+  }
+  async function runCcAction(path, body, done) {
+    if (ccVerBusy) return;
+    ccVerBusy = true; render();
+    try {
+      const r = await api("POST", path, body);
+      if (r.version) ccVer = r.version;
+      const bad = (r.failed || []).map((x) => `${x.path}：${x.error}`), man = r.manual || [];
+      if (bad.length) toast("有没卸掉的：" + bad.join("；"), true);
+      else if (r.installed_ok === false) toast(`卸掉了，但重新安装没成功：${r.install_message || ""}；稍后在终端运行 cam env install`, true);
+      else toast(done + (man.length ? `（还有 ${man.length} 份要你自己处理，见版本卡片）` : ""));
+    } catch (err) { toast(err.message, true); }
+    finally { ccVerBusy = false; render(); }
+  }
+  async function askCcUninstall(reinstall) {
+    let t = [];
+    try { t = (await api("GET", "/api/claude-uninstall")).targets || []; } catch (err) { toast(err.message, true); return; }
+    const lines = t.map((x) => `· ${x.path}（${x.kind}）\n   ${x.auto ? "→ " : "→ 不替你卸："}${x.how}`).join("\n");
+    const ok = await askConfirm({ title: reinstall ? "重新安装 Claude Code" : "卸载 Claude Code", ok: reinstall ? "卸载并重新安装" : "卸载", danger: true,
+      body: `${lines || "没找到 Claude Code"}\n\n配置（~/.claude：会话记录、设置、登录）不动。先退出所有 claude。`
+        + (reinstall ? "\n卸完会用官方安装器装一份（不依赖 Node.js），要一两分钟。" : "") });
+    if (ok) runCcAction("/api/claude-uninstall", { reinstall }, reinstall ? "已卸载并重新安装" : "已卸载");
   }
   async function runCcUpdate() {
     if (ccVerBusy) return;
@@ -3014,6 +3082,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (e.target.closest("[data-act=purge-done]")) { purgeRes = null; render(); return; }
     if (e.target.closest("[data-act=cc-recheck]")) { loadCcVer(true); return; }
     if (e.target.closest("[data-act=cc-update]")) { runCcUpdate(); return; }
+    if (e.target.closest("[data-act=cc-uninstall]")) { askCcUninstall(false); return; }
+    if (e.target.closest("[data-act=cc-reinstall]")) { askCcUninstall(true); return; }
+    if (e.target.closest("[data-act=cc-install]")) {
+      askConfirm({ title: "安装 Claude Code", ok: "安装", body: "用 Anthropic 官方安装器装一份（不依赖 Node.js），要一两分钟。装好后在终端运行 claude 登录。" })
+        .then((ok) => ok && runCcAction("/api/claude-install", {}, "已安装"));
+      return;
+    }
     const pb = e.target.closest("button[data-pref]");
     if (pb) { setPref(pb.dataset.pref, pb.dataset.pref === "mask" ? !pref.mask : pb.dataset.v === "1"); render(); renderLocal(); return; }
     const b = e.target.closest("button[data-act]");

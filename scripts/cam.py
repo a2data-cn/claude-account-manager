@@ -5607,6 +5607,23 @@ def make_handler(store, token):
                     return self._send(200, claude_version_info(store, refresh=bool((q.get("refresh") or [""])[0])))
                 if method == "POST" and parts == ["claude-update"]:
                     return self._send(200, claude_update_run(store))
+                if method == "GET" and parts == ["claude-uninstall"]:  # 卸载前给人看的：每一份在哪、怎么卸
+                    return self._send(200, {"targets": [{k: (short_path(v) if k == "path" else v) for k, v in t.items() if k in ("path", "kind", "how", "auto")}
+                                                        for t in uninstall_targets()]})
+                if method == "POST" and parts == ["claude-uninstall"]:  # {"reinstall"?}：卸载（配置不动），reinstall 时卸完用官方安装器装一份
+                    b = self._body()
+                    res = env_uninstall()
+                    if b.get("reinstall") is True and not res["failed"]:
+                        ok, msg = env_native_install()
+                        res["installed_ok"], res["install_message"] = ok, msg
+                    return self._send(200, {**res, "version": claude_version_info(store, refresh=True)})
+                if method == "POST" and parts == ["claude-install"]:  # 没装时用官方安装器装一份
+                    if claude_installs():
+                        raise CamError("已经装了 Claude Code；要重装用“重新安装”")
+                    ok, msg = env_native_install()
+                    if not ok:
+                        raise CamError(f"安装没成功：{msg}")
+                    return self._send(200, {"message": msg or "安装完成", "version": claude_version_info(store, refresh=True)})
                 if method == "GET" and parts == ["env-purge"]:  # 彻底清理要先给人看的：移走哪些、能不能恢复
                     return self._send(200, env_purge_view(store))
                 if method == "POST" and parts == ["env-purge"]:
@@ -7242,7 +7259,11 @@ def claude_installs():
     nvm 这类用链接指过去的目录按真实路径去重。"""
     names = ("claude.exe", "claude.cmd", "claude") if IS_WIN else ("claude",)
     seen, out = set(), []
-    for d in os.environ.get("PATH", "").split(os.pathsep):
+    dirs = os.environ.get("PATH", "").split(os.pathsep)
+    native_bin = os.path.join(home(), ".local", "bin")  # 官方安装器装在这里；菜单栏 / 托盘起的面板服务 PATH 可能没有它，排在最后也看一眼
+    if native_bin not in dirs:
+        dirs.append(native_bin)
+    for d in dirs:
         if not d:
             continue
         for n in names:
@@ -7773,6 +7794,126 @@ def keychain_delete():
         raise CamError(f"无法调用 security：{e}")
 
 
+def native_install_cmd():
+    """官方原生安装器的命令：(命令, 显示给人看的那一行)。不依赖 Node.js。"""
+    if IS_WIN:
+        shown = f"irm {NATIVE_INSTALL_PS1} | iex"
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", shown], shown
+    if not shutil.which("curl"):
+        raise CamError("没找到 curl，请先安装 curl，或加 --npm 用 npm 安装")
+    shown = f"curl -fsSL {NATIVE_INSTALL_SH} | bash"
+    return ["bash", "-c", shown], shown
+
+
+def uninstall_targets():
+    """本机每一份 Claude Code 怎么卸：[{"path", "kind", "how", "cmd"（要跑的命令）或 "remove"（要删的路径），"auto"}]。
+    官方原生的删程序和 ~/.local/share/claude（官方文档的卸载方法）；npm 的用 npm uninstall --prefix 指明是哪一份；Homebrew 的 brew uninstall；
+    第三方包装和看不出怎么装的不替人卸（auto=False），说怎么办。配置（~/.claude）都不动。"""
+    out = []
+    share = os.path.join(home(), ".local", "share", "claude")
+    native_bin = os.path.join(home(), ".local", "bin", "claude.exe" if IS_WIN else "claude")
+    for p, real, kind in claude_installs():
+        t = {"path": p, "kind": kind, "auto": False}
+        if kind == "原生":
+            rm = [x for x in (p if (os.path.islink(p) or os.path.normcase(p) == os.path.normcase(native_bin)) else None,
+                              share if os.path.isdir(share) else None) if x]
+            if rm:
+                t.update(remove=rm, auto=True, how="删掉 " + "、".join(short_path(x) for x in rm))
+        elif kind == "npm":
+            n = npm_next_to(p)
+            if n:
+                t.update(cmd=[n[0], "uninstall", "-g", "--prefix", n[1], "@anthropic-ai/claude-code"], auto=True,
+                         how=f"npm uninstall -g --prefix {short_path(n[1])} @anthropic-ai/claude-code")
+        elif kind == "Homebrew" and shutil.which("brew"):
+            t.update(cmd=[shutil.which("brew"), "uninstall", "--cask", "claude-code"], auto=True, how="brew uninstall --cask claude-code")
+        if not t["auto"]:
+            t["how"] = ("不是官方装的（或者看不出怎么装的），cam 不替你卸：确认它是什么之后手动删掉 " + short_path(p))
+        out.append(t)
+    return out
+
+
+def env_uninstall(force=False):
+    """卸载本机能自动卸的每一份 Claude Code（见 uninstall_targets），配置不动。有 claude 在运行（或者看不出来）时拒绝（force 照做）。
+    返回 {"done": [说明], "failed": [{"path", "error"}], "manual": [说明], "left": 卸完还剩的 claude 路径}。"""
+    if claude_may_be_running() and not force:
+        raise CamError("有 claude 在运行（或者看不出来）：先退出所有 claude 再卸载，不然文件正被占用、会卸不干净")
+    done, failed, manual = [], [], []
+    for t in uninstall_targets():
+        if not t["auto"]:
+            manual.append(t["how"])
+            continue
+        try:
+            if t.get("cmd"):
+                r = subprocess.run(t["cmd"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                                   stdin=subprocess.DEVNULL, **NO_WINDOW)
+                if r.returncode != 0:
+                    raise CamError(last_line_of(r.stderr, r.stdout) or f"退出码 {r.returncode}")
+            for x in t.get("remove") or []:
+                if os.path.lexists(x):
+                    remove_path(x)
+            if os.path.lexists(t["path"]) and t["kind"] != "Homebrew":
+                raise CamError(f"跑完了，但 {short_path(t['path'])} 还在")
+            done.append(f"{short_path(t['path'])}（{t['kind']}）：{t['how']}")
+        except subprocess.TimeoutExpired:
+            failed.append({"path": short_path(t["path"]), "error": "超时了"})
+        except (OSError, CamError) as e:
+            failed.append({"path": short_path(t["path"]), "error": str(e) or type(e).__name__})
+    return {"done": done, "failed": failed, "manual": manual, "left": [short_path(p) for p, _, _ in claude_installs()]}
+
+
+def env_native_install(capture=True):
+    """用官方原生安装器装一份（不依赖 Node.js）。capture=False 时输出直接打到终端。返回 (成功, 最后一行输出)。"""
+    cmd, _ = native_install_cmd()
+    try:
+        if not capture:
+            return subprocess.call(cmd) == 0, ""
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+                           stdin=subprocess.DEVNULL, **NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return False, "安装超过 15 分钟还没完成，网络可能太慢"
+    except OSError as e:
+        return False, str(e)
+    return r.returncode == 0, last_line_of(r.stdout, r.stderr)
+
+
+def cmd_env_uninstall(store, args):
+    """cam env uninstall [--reinstall]：先列出每一份怎么卸，确认后卸；--reinstall 卸完再用官方安装器装一份。配置（~/.claude）不动。"""
+    targets = uninstall_targets()
+    if not targets:
+        print("没找到 Claude Code，不用卸载" + ("；用官方安装器装一份：" if args.reinstall else ""))
+        if not args.reinstall:
+            return 0
+    else:
+        print(color("本机的 Claude Code：", "b"))
+        for t in targets:
+            print(f"  · {short_path(t['path'])}（{t['kind']}）")
+            print(color(f"     → {t['how']}", "d" if t["auto"] else "y"))
+        print(color("配置（~/.claude：会话记录、设置、登录）不动；要连配置一起清，另外运行 cam env clean --purge --apply", "d"))
+    if args.reinstall:
+        print(f"卸完再运行 Anthropic 官方安装命令（不依赖 Node.js）：{native_install_cmd()[1]}")
+    if not args.apply and not confirm("\n继续？"):
+        print(color("没有改任何东西。要卸载就加 --apply（或 -y）", "y"))
+        return 0
+    if targets:
+        r = env_uninstall(force=args.force)
+        for x in r["done"]:
+            print(color("✓ 卸掉了：", "g") + x)
+        for x in r["failed"]:
+            print(color("✗ ", "r") + f"{x['path']}：{x['error']}")
+        for x in r["manual"]:
+            print(color("· ", "y") + x)
+        if r["failed"]:
+            return 1
+    if args.reinstall:
+        ok, _ = env_native_install(capture=False)
+        if not ok:
+            raise CamError("安装命令没成功，见上面的输出；网络不好时稍后再运行 cam env install")
+        found = claude_installs()
+        print(color("✓ ", "g") + (f"已安装：{found[0][0]}（{claude_version(found[0][0]) or '版本未知'}）" if found else "安装命令跑完了，但 PATH 里还没找到 claude：重开终端再看"))
+        print("下一步：运行 claude 登录（原来的登录如果还在就不用），然后运行 cam")
+    return 0
+
+
 def cmd_env_install(store, args):
     ok = color("✓", "g")
     found = claude_installs()
@@ -7786,14 +7927,8 @@ def cmd_env_install(store, args):
         if not npm:
             raise CamError("没找到 npm。请先装 Node.js 18 以上，或去掉 --npm 改用官方原生安装器")
         cmd, shown = [npm, "install", "-g", "@anthropic-ai/claude-code"], "npm install -g @anthropic-ai/claude-code"
-    elif IS_WIN:
-        shown = f"irm {NATIVE_INSTALL_PS1} | iex"
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", shown]
     else:
-        if not shutil.which("curl"):
-            raise CamError("没找到 curl，请先安装 curl，或加 --npm 用 npm 安装")
-        shown = f"curl -fsSL {NATIVE_INSTALL_SH} | bash"
-        cmd = ["bash", "-c", shown]
+        cmd, shown = native_install_cmd()
     print(f"将运行 Anthropic 官方安装命令：{shown}")
     if not args.yes:
         if not sys.stdin.isatty():
@@ -11430,6 +11565,10 @@ def main(argv=None):
     e.add_argument("--npm", action="store_true", help="改用 npm 全局安装")
     e.add_argument("--force", action="store_true", help="已经装了也重新安装（可用来升级）")
     e.add_argument("-y", "--yes", action="store_true", help="不再确认")
+    e = esub.add_parser("uninstall", help="卸载本机的 Claude Code（每一份按各自的装法卸，配置不动；先列出来再确认）")
+    e.add_argument("--apply", "-y", "--yes", dest="apply", action="store_true", help="不问，直接卸")
+    e.add_argument("--reinstall", action="store_true", help="卸完再用官方安装器装一份（不依赖 Node.js）")
+    e.add_argument("--force", action="store_true", help="有 claude 正在运行时也卸")
     e = esub.add_parser("clean", help="清理 Claude Code 环境（默认只预演，不改任何东西）")
     e.add_argument("--logout", action="store_true", help="同时退出登录（凭据先存进 cam，随时能切回来）")
     e.add_argument("--purge", action="store_true",
@@ -11586,6 +11725,8 @@ def main(argv=None):
             cmd_env_install(store, args)
         elif c == "env" and args.env_cmd == "clean":
             cmd_env_clean(store, args)
+        elif c == "env" and args.env_cmd == "uninstall":
+            return cmd_env_uninstall(store, args)
         elif c == "env" and args.env_cmd == "fix":
             return cmd_env_fix(store, args)
         elif c == "rule":

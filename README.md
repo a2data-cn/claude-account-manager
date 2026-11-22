@@ -308,6 +308,15 @@ python.org 装的 Python（macOS 上常见）默认不带根证书，https 请�
 桌面版和手机面板的环境卡上点"重新检测"会展开同样的检测结果；`cam serve` 提供的面板旁边还有"全面体检"按钮，展开的是 `cam doctor` 的完整五节（桌面版内置的面板没有这个按钮）。另外桌面版、`cam serve`、菜单栏插件会随用量刷新每隔几分钟记一次出口地区、WARP、时钟偏差和官方状态页，面板和桌面版顶部常显"出口 US ✓"和据缓存算的"环境 92"徽章（越高越安全）（实测的分数以 `cam doctor` 为准）。这三样都没在运行时缓存不会更新：上次检测超过一小时，从它算出来的每条提醒后面会标上“N 小时前 / N 天前检测的”，那次查到的官方故障不再提，并多一条说明怎么重新检测（`cam doctor` 或面板里的“重新检测”）。某一次检测没连上（网络断了一下、代理在换节点）不会把上一次查到的结果抹掉：出口卡照旧显示上一次的，标着“最近一次没连上”；那份结果还在一小时内就只说一声、不扣分，超过一小时才按“出口地区现在查不到”提醒。后台 1 分钟后自动重试，连着失败就隔 2 分钟、4 分钟、8 分钟……再试（最长不超过定时刷新的间隔），连上了提示自己消失。本机换了网络（换 Wi-Fi、插拔网线、开关接管整机流量的 VPN）后台一分钟内会发现并马上重测，不等下一轮；代理换节点在本机看不出来，那种靠定时检测。上面这些风险点里级别为"提醒"或"故障"的（出口不在名单、出口变化、时区指向不支持地区、时钟偏差、官方故障、账号多地区）会常显在页面顶部、菜单栏和 `cam` 列表里，`cam switch` 和面板切换前也会再提醒一次，但照样切。
 
 ```bash
+cam env uninstall          # 卸载本机的 Claude Code：先列出每一份（官方原生 / npm / Homebrew）和怎么卸，确认后卸；配置（~/.claude）不动
+cam env uninstall --reinstall   # 卸完再用官方安装器装一份（不依赖 Node.js；npm、Node 出问题时用这个）
+```
+
+- 官方安装器装的：删掉 `~/.local/bin/claude` 和 `~/.local/share/claude`（Windows 上是 `%USERPROFILE%\.local\bin\claude.exe` 和 `%USERPROFILE%\.local\share\claude`）；npm 装的：用 `npm uninstall -g --prefix <那一份的目录>` 指明是哪一份；Homebrew 装的：`brew uninstall --cask claude-code`；第三方包装和看不出怎么装的不替你卸，说在哪
+- 有 `claude` 在运行时不卸（`--force` 照做）。管理面板环境页的“Claude Code 版本”卡片上也有“卸载…”“重新安装（官方）”（没装时是“安装”），点了先列出来再确认
+- 环境页最下面有“常用命令”折叠栏：cam 和 Claude Code 的安装、升级、卸载、清理命令，还有一组 Anthropic 官方的写法（不经过 cam：`curl -fsSL https://claude.ai/install.sh | bash` / Windows 的 `irm https://claude.ai/install.ps1 | iex`、npm、Homebrew、`claude update`、`claude doctor`），按这台电脑的系统给，点一下就复制
+
+```bash
 cam env install            # 没装就用官方原生安装器装（curl -fsSL https://claude.ai/install.sh | bash，Windows 用 Anthropic 官方的 install.ps1）
 cam env install --npm      # 改用 npm install -g @anthropic-ai/claude-code
 cam env install --force    # 已经装了也重装，可用来升级

@@ -5077,6 +5077,61 @@ foreach ($dark in @($false, $true)) {{
             with self.assertRaises(cam.CamError):
                 cam.claude_update_run(store)
 
+    @unittest.skipIf(os.name == "nt", "假的 claude / npm 是 shell 脚本，官方安装器的位置按 macOS / Linux 摆")
+    def test_env_uninstall_and_reinstall(self):
+        """卸载：官方安装器装的删程序和 ~/.local/share/claude，npm 装的用 npm uninstall --prefix 指明那一份，第三方的不替人卸；
+        配置（~/.claude）不动；有 claude 在运行时拒绝。重新安装：卸完用官方安装器装一份。PATH 里没有 ~/.local/bin 也找得到官方装的。"""
+        cam = self.cam
+        share = os.path.join(self.tmp, ".local", "share", "claude", "versions")
+        bindir = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(share)
+        os.makedirs(bindir)
+        with open(os.path.join(share, "2.1.0"), "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\necho '2.1.0 (Claude Code)'\n")
+        os.chmod(os.path.join(share, "2.1.0"), 0o755)
+        os.symlink(os.path.join(share, "2.1.0"), os.path.join(bindir, "claude"))
+        prefix = os.path.join(self.tmp, "npm-global")  # npm 装的一份：前缀/bin/claude → 前缀/lib/node_modules/@anthropic-ai/claude-code/cli.js
+        pkg = os.path.join(prefix, "lib", "node_modules", "@anthropic-ai", "claude-code")
+        os.makedirs(pkg)
+        os.makedirs(os.path.join(prefix, "bin"))
+        with open(os.path.join(pkg, "cli.js"), "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\necho '2.0.9 (Claude Code)'\n")
+        os.chmod(os.path.join(pkg, "cli.js"), 0o755)
+        os.symlink(os.path.join(pkg, "cli.js"), os.path.join(prefix, "bin", "claude"))
+        log = os.path.join(self.tmp, "npm.log")
+        with open(os.path.join(prefix, "bin", "npm"), "w", encoding="utf-8") as f:  # 假的 npm：记下参数，真去删那一份
+            f.write(f"#!/bin/sh\necho \"$@\" >> '{log}'\nrm -f '{os.path.join(prefix, 'bin', 'claude')}'\n")
+        os.chmod(os.path.join(prefix, "bin", "npm"), 0o755)
+        relay = os.path.join(self.tmp, "relay-bin")
+        stub(relay, "claude", 'echo "relay 1.0"')
+        path = os.pathsep.join([relay, os.path.join(prefix, "bin"), "/usr/bin", "/bin"])  # 故意不带 ~/.local/bin
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            ts = {t["kind"]: t for t in cam.uninstall_targets()}
+            self.assertEqual(set(ts), {"其它", "npm", "原生"})
+            self.assertFalse(ts["其它"]["auto"])
+            self.assertEqual(ts["npm"]["cmd"][-4:], ["-g", "--prefix", prefix, "@anthropic-ai/claude-code"])
+            self.assertEqual(sorted(ts["原生"]["remove"]), sorted([os.path.join(bindir, "claude"), os.path.dirname(share)]))
+            with mock.patch.object(cam, "running_claude_processes", lambda: [(1, "claude")]):
+                with self.assertRaises(cam.CamError):
+                    cam.env_uninstall()
+            r = cam.env_uninstall()
+            self.assertEqual(r["failed"], [])
+            self.assertEqual(len(r["done"]), 2)
+            self.assertEqual(len(r["manual"]), 1)
+            self.assertFalse(os.path.lexists(os.path.join(bindir, "claude")))
+            self.assertFalse(os.path.exists(os.path.dirname(share)))
+            with open(log, encoding="utf-8") as f:
+                self.assertIn(f"uninstall -g --prefix {prefix} @anthropic-ai/claude-code", f.read())
+            self.assertTrue(os.path.isdir(os.path.join(self.tmp, ".claude")))  # 配置不动
+            # 重新安装：卸完用官方安装器装一份（这里换成一个假的安装命令）
+            fake = ["sh", "-c", f"mkdir -p '{share}' && printf '#!/bin/sh\\necho \"2.1.9 (Claude Code)\"\\n' > '{share}/2.1.9' && "
+                                f"chmod +x '{share}/2.1.9' && ln -sf '{share}/2.1.9' '{bindir}/claude' && echo 'Claude Code installed'"]
+            with mock.patch.object(cam, "native_install_cmd", lambda: (fake, "curl … | bash")):
+                ok, msg = cam.env_native_install()
+            self.assertTrue(ok, msg)
+            self.assertIn("原生", [k for _, _, k in cam.claude_installs()])  # 第三方那份还在 PATH 最前面（没替人卸），官方的装回来了
+            self.assertIn("2.1.9", cam.claude_version(os.path.join(bindir, "claude")))
+
     def test_env_purge_and_restore(self):
         """彻底清理：整个 Claude Code 配置移进备份目录（相当于重装），当前登录先存进 cam；恢复时放回去，清理后新生成的那份改名留着。"""
         cam = self.cam

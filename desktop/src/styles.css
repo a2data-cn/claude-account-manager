@@ -439,6 +439,18 @@ details.src[open] summary::before { content: "▾"; }
 .ecard .purge-box { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--hot); border-radius: var(--radius); background: color-mix(in srgb, var(--hot) 6%, transparent); }
 .ecard .purge-box h4 { margin: 0 0 6px; color: var(--hot); }
 .ecard .purge-box p, .ecard .purge-box ul { margin: 6px 0; font-size: 13px; }
+.cmds summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; font-size: 13.5px; font-weight: 650; list-style: none; }
+.cmds summary::-webkit-details-marker { display: none; }
+.cmds summary::after { content: "展开"; margin-left: auto; font-size: 12px; font-weight: 400; color: var(--muted); }
+.cmds[open] summary::after { content: "收起"; }
+.cmds summary .hint { font-weight: 400; font-size: 12px; }
+.cmds h4 { margin: 14px 0 6px; font-size: 12.5px; color: var(--muted); }
+.cmd-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.cmd-list li { display: grid; grid-template-columns: minmax(0, 15em) minmax(0, 1fr); gap: 4px 12px; align-items: baseline; font-size: 13px; }
+.cmd-list .v { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cmd-list code { cursor: copy; overflow-wrap: anywhere; }
+.cmd-list small { color: var(--muted); font-size: 11.5px; }
+@media (max-width: 560px) { .cmd-list li { grid-template-columns: 1fr; } }
 .ecard .fix-all { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12.5px; color: var(--muted); cursor: pointer; }
 .eico { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); flex: none; }
 .eico svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
