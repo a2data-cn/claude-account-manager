@@ -176,6 +176,8 @@ bash extras/swiftbar/install.sh    # 一键安装时选了装菜单栏小工具�
 
 - 看不到图标：点任务栏右下角的 ^ 展开，可以把图标拖到任务栏上常驻
 - 菜单最下面“退出托盘小工具”只退出这一次，下次登录 Windows 还会运行；不要了就运行 `安装.cmd -Uninstall`
+- 菜单里会开终端窗口的项（一键清理环境、在终端看完整体检结果这些）跑完显示“请按任意键继续”，按一下窗口就关
+- 一键清理删掉的环境变量：托盘和后台的面板服务是之前启动的，身上还带着旧值，它们会自己去掉系统里已经没有的那几个（不用重启）；已经开着的终端新开一个就没了
 - `cam update` 更新代码后，托盘小工具一分钟内自己换成新版本
 - 只需要 Python（一键安装会帮你装），图标和菜单用的是 Windows 自带的 PowerShell，不用另装别的程序
 - 以前隔一会儿闪一下蓝色（PowerShell）窗口：是后台的 `cam serve` 查会话时弹出来的，已经修好。`cam update` 后一分钟内托盘换成新版本，后台的 `cam serve` 也会自动重启（弹一条“面板已更新”），之后就不再闪
@@ -333,7 +335,7 @@ cam env clean --purge --apply      # 把整个 Claude Code 配置移到备份目
 
 - 默认只删一份固定名单里的缓存。会话记录（`projects/`）、`settings.json`、`CLAUDE.md`、commands / agents / skills / plugins、`~/.claude.json` 里的项目配置、cam 自己的数据目录都不动
 - `--logout` 退出前先把当前账号的最新凭据存进 cam，之后 `cam switch` 能切回来；退出前的登录状态另外备份在 `backups/`
-- `--purge` 不删除，而是把 `~/.claude/`、`~/.claude.json`（macOS 还有钥匙串里的登录）移到 `~/.claude-accounts/env-backups/<时间>-purge/`，要恢复运行 `cam env clean --restore`（现在那份改名留着，加 `.before-restore-时间`）。这一步会带走会话记录和设置，所以会再确认一次（`-y` 跳过）
+- `--purge` 不删除，而是把 `~/.claude/`、`~/.claude.json`（macOS 还有钥匙串里的登录）整个移到 `~/.claude-accounts/env-backups/<时间>-purge/`。要么整个搬走、要么一点不动：先改名（失败隔一秒再试几次），Windows 上目录里有文件开着改不了名时，先完整复制一份再删原来的（git 的只读文件去掉只读再删）；删到一半碰到真被锁住的文件（Claude 桌面版、编辑器插件、杀毒软件开着），就把删掉的补回去、原样恢复，告诉你是哪个文件，要恢复运行 `cam env clean --restore`（现在那份改名留着，加 `.before-restore-时间`；挪不开时把备份复制回去，不删东西）。这一步会带走会话记录和设置，所以会再确认一次（`-y` 跳过）
 - 有 `claude` 正在运行时拒绝执行，先退出它们，或加 `--force`
 
 #### 一键清理：第三方中转、API Key 这类设置（cam env fix）

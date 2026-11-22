@@ -228,6 +228,10 @@ function ConvertTo-Arg([string]$a) {
   return $s + ('\' * (2 * $bs)) + '"'
 }
 
+# 中转、API Key 这类变量（和 cam.py 的 SCAN_ENV 一致）：托盘是开机时启动的，身上带着那时候的环境变量。一键清理从系统里删掉以后，
+# 起 Python 时把系统里（用户、系统环境变量）已经没有的去掉，托盘这边就不会一直带着旧值
+$RelayEnv = @("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "NODE_TLS_REJECT_UNAUTHORIZED", "DISABLE_AUTOUPDATER")
+
 $script:jobs = @()
 function Start-TrayPy([string[]]$argv, [string]$kind, [bool]$refresh) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -242,6 +246,10 @@ function Start-TrayPy([string[]]$argv, [string]$kind, [bool]$refresh) {
   $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
   $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
   $psi.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
+  foreach ($k in $RelayEnv) {
+    if ($psi.EnvironmentVariables.ContainsKey($k) -and -not [Environment]::GetEnvironmentVariable($k, "User") -and
+        -not [Environment]::GetEnvironmentVariable($k, "Machine")) { $psi.EnvironmentVariables.Remove($k) }
+  }
   try {
     $p = [System.Diagnostics.Process]::Start($psi)
   } catch {

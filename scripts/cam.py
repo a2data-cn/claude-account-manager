@@ -5971,7 +5971,12 @@ def save_serve_state(store, st, refresh_min):
         pass
 
 
+PROC_ROLE = "cli"  # 这个进程是什么：cli（命令行）或 serve（后台的面板服务，见 serve）
+
+
 def serve(store, host, port, auto_refresh_min):
+    global PROC_ROLE
+    PROC_ROLE = "serve"
     token = server_token(store)
     srv = ThreadingServer((host, port), make_handler(store, token))
     if not _SESSION_CACHE[0]:  # 先在后台把 claude 会话数数好：卡片第一次打开时 /api/state 不用等 ps
@@ -7221,6 +7226,18 @@ def env_findings():
             where.setdefault(k, v)
     out += claude_json_findings()
     live = [k for k in SCAN_ENV if os.environ.get(k) and env_value_matters(k, os.environ.get(k))]
+    reg = set(win_env_values()) | set(win_env_values(True)) if IS_WIN else set()
+    for k in list(live):
+        if k not in where and IS_WIN and k.upper() not in reg:
+            # Windows 系统里已经没有了（比如刚一键清理掉）：这个进程是删之前启动的，身上带着旧值。面板服务直接把它从自己身上去掉
+            # （它起的 claude、跑的检查都不会再带上）；终端里只提示，新开一个就没了
+            if PROC_ROLE == "serve":
+                os.environ.pop(k, None)
+                live.remove(k)
+                continue
+            out.append(_finding("info", f"环境变量 {k} 在 Windows 系统里已经删掉了，但这个终端是删之前打开的，还带着旧值",
+                                "新开一个终端就没了（托盘和面板服务会自己去掉）"))
+            where[k] = "旧进程"
     for k in live:
         if k not in where:
             f = _env_finding(k, f"环境变量 {env_shown(k, os.environ.get(k))} 只在当前这个终端里有：{ENV_WHAT[k]}", "", None, cloud_on())
@@ -7979,15 +7996,121 @@ def _env_purge_move(store, kc=None):
         os.chmod(dest, 0o700)
     write_json_atomic(os.path.join(dest, "purge.json"), {"at": now_iso(), "config_dir": cfg, "claude_json": cj, "keychain": bool(kc)},
                       private=True)
-    if kc:
+    # 要么整个搬走，要么一点不动（见 _move_whole）。不用 shutil.move：它改名失败时先复制再删，Windows 上删到只读或被占用的文件
+    # （插件目录里的 git 文件）就停在半路，原来的配置只剩一部分
+    moved = []
+    try:
+        for src, name in ((cfg, "claude-config"), (cj, "claude.json")):
+            if os.path.lexists(src):
+                _move_whole(src, os.path.join(dest, name))
+                moved.append((src, os.path.join(dest, name)))
+    except CamError:
+        for src, dst in reversed(moved):  # 已经搬走的放回去
+            with contextlib.suppress(OSError, CamError):
+                _move_whole(dst, src)
+        _rmtree_quiet(dest)
+        raise
+    if kc:  # 文件都搬好了再动钥匙串
         write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
         keychain_delete()
-    if os.path.lexists(cfg):
-        shutil.move(cfg, os.path.join(dest, "claude-config"))
-    if os.path.lexists(cj):
-        shutil.move(cj, os.path.join(dest, "claude.json"))
     mark_logged_out(store)
     return dest
+
+
+PURGE_RENAME_TRIES = 3  # 整个改名失败时隔一秒再试几次（杀毒软件、索引服务扫描时的临时占用一般一两秒就过去）
+
+
+def _force_rm(func, path, *_):
+    """删只读文件：Windows 不让删只读文件（git 的对象文件就是只读的），去掉只读再删一次。"""
+    with contextlib.suppress(OSError):
+        os.chmod(path, os.stat(path).st_mode | 0o200)
+    func(path)
+
+
+def _rmtree_quiet(path):
+    """删 cam 自己复制出来的那份（半截的备份）：目录先改成可写，只读文件去掉只读再删，还删不掉的就算了。"""
+    if not os.path.isdir(path) or os.path.islink(path):
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        return
+    for root, dirs, _ in os.walk(path):
+        for n in dirs:
+            with contextlib.suppress(OSError):
+                os.chmod(os.path.join(root, n), 0o700)
+
+    def quiet(func, p, *_):
+        with contextlib.suppress(OSError):
+            _force_rm(func, p)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=quiet)
+    else:
+        shutil.rmtree(path, onerror=quiet)
+
+
+def _move_whole(src, dst):
+    """把 src（文件或目录）整个搬到 dst，要么成功、要么 src 原样不动：
+    1. 改名（同一个盘上就是一步），失败了隔一秒再试，一共 PURGE_RENAME_TRIES 次；
+    2. 还不行（Windows 上目录里有文件开着就改不了名）：先完整复制到 dst，再删 src，只读的去掉只读再删；
+    3. 删到一半删不动（文件真被锁住）：把 dst 里的复制回 src，补回删掉的，src 恢复原样，dst 删掉，报是哪个文件。"""
+    last = None
+    for i in range(PURGE_RENAME_TRIES):
+        try:
+            os.rename(src, dst)
+            return
+        except OSError as e:
+            last = e
+            if getattr(e, "errno", None) == 18:  # 不在同一个盘：重试也没用，直接复制
+                break
+            if i + 1 < PURGE_RENAME_TRIES:
+                time.sleep(1)
+    try:
+        if os.path.isdir(src) and not os.path.islink(src):
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
+    except (OSError, shutil.Error) as e:
+        if os.path.lexists(dst):
+            _rmtree_quiet(dst)
+        raise CamError(purge_busy_message(src, last or e))
+    try:
+        if os.path.isdir(src) and not os.path.islink(src):
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(src, onexc=_force_rm)
+            else:
+                shutil.rmtree(src, onerror=_force_rm)
+        else:
+            _force_rm(os.unlink, src)
+    except OSError as e:
+        stuck = getattr(e, "filename", None) or src
+        try:
+            _copy_over(dst, src)  # 补回已经删掉的
+        except (OSError, shutil.Error):
+            raise CamError(f"删 {short_path(stuck)} 时被拒绝（{e.strerror or e}），已经删掉的没能全补回去：完整的一份在 {dst}，"
+                           f"把里面的复制回 {short_path(src)} 就行（缺的补上）")
+        _rmtree_quiet(dst)
+        raise CamError(f"{short_path(stuck)} 被别的程序锁着，删不掉（{e.strerror or e}）。已经把删掉的补回去了，原来的配置原样没动。"
+                       "多半是 Claude 桌面版、编辑器里的 Claude 插件（VS Code / JetBrains）、正在跑的 claude，或者杀毒软件：先把它们都退出，"
+                       "等一两分钟再试；还不行就重启电脑后先做这一步")
+
+
+def purge_busy_message(src, e):
+    if getattr(e, "errno", None) == 18:  # EXDEV：不在同一个盘
+        return (f"没法把 {short_path(src)} 整个搬走：cam 的数据目录和它不在同一个盘上。这次什么都没改；"
+                f"要彻底清理的话自己把它挪到别处（相当于重装）")
+    return (f"没法把 {short_path(src)} 整个搬走（{e.strerror or e}）：多半是有程序正开着里面的文件——Claude 桌面版、"
+            f"编辑器里的 Claude 插件（VS Code / JetBrains）、正在跑的 claude，或者杀毒软件正在扫描。先把它们都退出再试。这次什么都没改")
+
+
+def _copy_over(src, dst):
+    """把 src 复制到 dst（文件或整个目录），已有的同名文件用 src 的盖掉（只读的先去掉只读），dst 里别的东西不删。"""
+    def one(s, d):
+        if os.path.exists(d) and not os.access(d, os.W_OK):
+            os.chmod(d, os.stat(d).st_mode | 0o600)
+        return shutil.copy2(s, d)
+    if os.path.isdir(src):
+        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True, copy_function=one)
+    else:
+        one(src, dst)
 
 
 def env_purge_view(store):
@@ -8048,12 +8171,23 @@ def env_purge_restore(store, force=False):
                      (os.path.join(d, "claude.json"), m.get("claude_json") or claude_json_file())):
         if not os.path.lexists(src):
             continue
+        # 同样只用改名；现在那份挪不开（有文件被占用），或者备份搬不回去，就把备份里的复制回去：缺的补上、同名的用备份盖掉，
+        # 不删任何东西，备份留着
         if os.path.lexists(dst):
             aside = f"{dst}.before-restore-{stamp}"
-            shutil.move(dst, aside)
-            kept.append(short_path(aside))
-        shutil.move(src, dst)
-        restored.append(short_path(dst))
+            try:
+                os.rename(dst, aside)
+                kept.append(short_path(aside))
+            except OSError:
+                _copy_over(src, dst)
+                restored.append(f"{short_path(dst)}（有文件被占用，没法整个换：把备份里的复制回去了，备份留着）")
+                continue
+        try:
+            os.rename(src, dst)
+            restored.append(short_path(dst))
+        except OSError:
+            _copy_over(src, dst)
+            restored.append(f"{short_path(dst)}（复制回去的，备份留着）")
     kc = _read_json_quiet(os.path.join(d, "keychain.json"))
     if kc and use_keychain():
         cur = keychain_read()

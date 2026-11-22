@@ -394,12 +394,12 @@ def run_cam(args, notes):
 
 
 def open_terminal(args):
-    """新开一个终端窗口运行 cam，看完不自动关。
+    """新开一个终端窗口运行 cam：跑完显示“请按任意键继续”，按一下（回车也行）窗口就关，不用手动点叉。
 
-    cmd /k 后面整串再包一层引号：cmd 会去掉最外面那一对，里面带空格的路径才保得住。
+    cmd /s /c 后面整串包一层引号：/s 让 cmd 只去掉最外面那一对，里面带空格的路径（加了引号的）才保得住。
     """
     line = " ".join(subprocess.list2cmdline([a]) for a in (sys.executable, cam_menu.CAM_PY, *args))
-    subprocess.Popen(f'cmd.exe /k "{line}"', creationflags=CREATE_NEW_CONSOLE, close_fds=True)
+    subprocess.Popen(f'cmd.exe /s /c "{line} & echo. & pause"', creationflags=CREATE_NEW_CONSOLE, close_fds=True)
 
 
 def do(store, kind, args, notes):

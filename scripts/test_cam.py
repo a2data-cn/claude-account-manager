@@ -2304,7 +2304,7 @@ class CamTest(unittest.TestCase):
         with mock.patch.object(tray.subprocess, "Popen") as popen:
             self.assertEqual(tray.do(store, "terminal", ["doctor"], notes), 0)
         line = popen.call_args[0][0]
-        self.assertTrue(line.startswith('cmd.exe /k "') and line.endswith(' doctor"'), line)
+        self.assertTrue(line.startswith('cmd.exe /s /c "') and line.endswith(' doctor & echo. & pause"'), line)  # 跑完按任意键关窗口
         self.assertEqual(popen.call_args[1]["creationflags"], tray.CREATE_NEW_CONSOLE)
         # 命令行入口：输出一行 JSON
         buf = io.StringIO()
@@ -5076,6 +5076,81 @@ foreach ($dark in @($false, $true)) {{
             self.assertIn("cam env install", v["advice"])
             with self.assertRaises(cam.CamError):
                 cam.claude_update_run(store)
+
+    def test_env_purge_never_leaves_half_moved_config(self):
+        """彻底清理要么整个搬走、要么一点不动：改名失败（Windows 上目录里有文件开着）就先完整复制、再删原来的（只读的去掉只读再删）；
+        删到一半碰到真被锁住的文件，就把删掉的补回去、原样恢复，报是哪个文件。恢复时现在那份挪不开，就把备份复制回去，不删东西。"""
+        cam = self.cam
+        cfg = os.path.join(self.tmp, ".claude")
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+            json.dump({"theme": "dark"}, f)
+        os.makedirs(os.path.join(cfg, "plugins", "pack"))
+        with open(os.path.join(cfg, "plugins", "pack", "a.idx"), "w", encoding="utf-8") as f:
+            f.write("git")
+        os.chmod(os.path.join(cfg, "plugins", "pack", "a.idx"), 0o444)  # 只读的（git 的对象文件就是这样）
+        store = cam.Store()
+        real_rename = os.rename
+
+        def no_rename(a, b):
+            if os.path.abspath(a) in (os.path.abspath(cfg), os.path.abspath(self.cj_path)):
+                raise PermissionError(13, "拒绝访问")
+            return real_rename(a, b)
+        with mock.patch.object(cam.os, "rename", no_rename), mock.patch.object(cam.time, "sleep", lambda s: None):
+            # 1. 有一个子目录里的文件删不掉（真被锁住）：删掉的补回去，原样恢复，不留备份
+            locked = os.path.join(cfg, "zz-locked")
+            os.makedirs(locked)
+            with open(os.path.join(locked, "busy.log"), "w", encoding="utf-8") as f:
+                f.write("x")
+            os.chmod(locked, 0o500)
+            try:
+                if os.name != "nt" and os.geteuid() != 0:
+                    with self.assertRaises(cam.CamError) as e:
+                        cam.env_purge(store)
+                    self.assertIn("锁着", str(e.exception))
+                    self.assertIn("原样没动", str(e.exception))
+                    with open(os.path.join(cfg, "settings.json"), encoding="utf-8") as f:
+                        self.assertEqual(json.load(f), {"theme": "dark"})  # 删掉的补回来了
+                    self.assertTrue(os.path.isfile(os.path.join(cfg, "plugins", "pack", "a.idx")))
+                    self.assertTrue(os.path.isfile(self.cj_path))
+                    self.assertEqual(cam.env_purge_backups(store), [])
+            finally:
+                os.chmod(locked, 0o700)
+            # 2. 改名不行但都删得掉（只读的也删）：复制过去再删，清理成功
+            dest = cam.env_purge(store)
+        self.assertFalse(os.path.exists(cfg))
+        self.assertFalse(os.path.exists(self.cj_path))
+        with open(os.path.join(dest, "claude-config", "settings.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"theme": "dark"})
+        self.assertTrue(os.path.isfile(os.path.join(dest, "claude-config", "plugins", "pack", "a.idx")))
+        # 3. 恢复时现在那份挪不开：把备份复制回去，缺的补上，备份留着
+        os.makedirs(os.path.join(cfg, "projects"))
+        with mock.patch.object(cam.os, "rename", lambda a, b: (_ for _ in ()).throw(PermissionError(13, "拒绝访问"))
+                               if os.path.abspath(a) == os.path.abspath(cfg) else real_rename(a, b)):
+            r = cam.env_purge_restore(store)
+        self.assertTrue(any("复制回去" in x for x in r["restored"]), r)
+        with open(os.path.join(cfg, "settings.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"theme": "dark"})
+        self.assertTrue(os.path.isdir(os.path.join(dest, "claude-config")))
+
+    def test_stale_env_left_in_old_processes(self):
+        """Windows：变量已经从系统里删掉（一键清理过），但进程是删之前启动的还带着旧值。终端里只提示“新开一个就没了”，
+        面板服务直接把它从自己身上去掉；托盘起 Python 时也去掉（cam-tray.ps1 的变量名单和 SCAN_ENV 一致）。"""
+        cam = self.cam
+        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "SECRET-old", "CAM_MANAGED_SETTINGS": ""}), \
+                mock.patch.object(cam, "IS_WIN", True), mock.patch.object(cam, "win_env_values", lambda system=False: {}):
+            items, live = cam.env_findings()
+            f = next(i for i in items if "ANTHROPIC_AUTH_TOKEN" in i["text"])
+            self.assertEqual(f["level"], "info")
+            self.assertIn("删之前打开的", f["text"])
+            self.assertNotIn("SECRET", json.dumps(items, ensure_ascii=False))
+            with mock.patch.object(cam, "PROC_ROLE", "serve"):
+                items, live = cam.env_findings()
+                self.assertFalse(any("ANTHROPIC_AUTH_TOKEN" in i["text"] for i in items))
+                self.assertNotIn("ANTHROPIC_AUTH_TOKEN", os.environ)
+        with open(os.path.join(HERE, "..", "extras", "windows-tray", "cam-tray.ps1"), encoding="utf-8-sig") as f:
+            ps = f.read()
+        names = re.search(r"\$RelayEnv = @\(([^)]*)\)", ps).group(1)
+        self.assertEqual(re.findall(r'"([A-Z_]+)"', names), list(cam.SCAN_ENV))
 
     @unittest.skipIf(os.name == "nt", "假的 claude / npm 是 shell 脚本，官方安装器的位置按 macOS / Linux 摆")
     def test_env_uninstall_and_reinstall(self):
