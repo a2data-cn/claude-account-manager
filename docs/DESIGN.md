@@ -19,7 +19,7 @@
 ├── browser-profiles/<id>/ # 网页版账号各自独立的浏览器 Profile（Cookie 随会话有效期保留）
 ├── desktop-profiles/<id>/ # Claude 桌面版账号各自的用户数据目录（登录 Cookie 和 oauth 缓存）
 ├── backups/<时间戳>/      # 每次切换前的现场备份，保留最近 30 份
-├── env-backups/<时间戳>/  # cam env clean --purge 移走的整个 Claude Code 配置
+├── env-backups/<时间戳>-purge/  # cam env clean --purge（面板的“彻底清理”）移走的整个配置 + purge.json（从哪移来的、恢复过没有），--restore 放回去
 ├── env-backups/<时间戳>-fix/  # cam env fix 改之前的文件原样（file-N）和 manifest.json（每个文件改前 / 改后的指纹和改了哪几处、环境变量原值；每步写一次，只有自己能读；留最近 10 次），--undo 据它改回去：文件没再动过整份放回，动过只改回那几处
 ├── accounts.lock          # 数据锁，见“并发与锁”
 ├── background.lock        # 后台任务锁，见“并发与锁”
@@ -275,6 +275,10 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
 | GET | `/api/menubar` | 菜单栏小工具的设置（卡片小面板和管理面板的“设置”用；只有 Python 版有，桌面版没有菜单栏小工具）：`available`（macOS 或设了 `CAM_SWIFTBAR_DIR`）、`tray`（Windows：设置页显示“托盘图标”，只有样式能选；测试用 `CAM_TRAY_TEST=1`）、`installed`、`mode`（classic / stream）、`icon`、`text`、`confirm_switch`、`hooks`、`plugin` |
 | PUT | `/api/menubar` | body 可带 `icon`（bars / lamp / ring / rings / twobar，Windows 托盘还有 badge）、`text`（列表，只能是 name / five / seven / sessions，按 `MENU_TEXT` 的顺序存，可以是空列表）、`confirm_switch`、`hooks`、`mode`（重跑 `extras/swiftbar/install.sh` 并重开 SwiftBar），返回同 GET 加 `ok`、`restarting` |
 | GET | `/api/checkup` | 全面体检，同 `cam doctor --json`（格式见“全面体检”），要十几秒；`?offline=1` 不联网；`?probe=1` 只回 `{"ok": true}`，面板据此显示按钮。只有脚本版有，桌面版返回 404 |
+| GET | `/api/claude-version` | 面板的 Claude Code 版本卡片：`installed`（`path`、`kind`、`version`，实际运行的那份）、`latest`（`channel`、`version`、`checked_at`）、`outdated`、`can_update`、`advice`。装的版本按程序文件修改时间缓存，最新版本 6 小时查一次（`?refresh=1` 现查），存在 `claude-version.json`。只有脚本版有 |
+| POST | `/api/claude-update` | 对实际运行的那份跑 `claude update`（只认官方安装器和 npm 装的），返回 `message` 加同 GET 的字段 |
+| GET | `/api/env-purge` | 彻底清理前给人看的：`move`（会移走的路径和大小）、`keychain`、`restore_at`（有能恢复的上一次）、`running` |
+| POST | `/api/env-purge` | `{"purge": true, "confirm": "彻底清理"}`：同 `cam env clean --purge`（有 claude 在运行或看不出来时拒绝），返回 `backup`；`{"restore": true}`：同 `cam env clean --restore`，返回 `restored`、`kept` |
 | GET | `/api/env-fix` | 一键清理要改什么（同 `cam env fix --json`）：`fix` / `optional`（官方支持的用法，勾上才改）/ `manual` 每条 `level`、`text`、`advice`、`slow`（有 claude 在跑时先跳过的）；`running`、`undo_at`（有能撤销的上一次清理）。只提示，不打分。`?probe=1` 只回 `{"ok": true}`；只有脚本版有，桌面版 404，面板据此隐藏按钮 |
 | POST | `/api/env-fix` | `{"apply": true, "force"?, "optional"?}`：当场重新算一遍再改（不信请求里的清单），返回 `done`、`failed`、`skipped`、`backup`、`next`；`{"undo": true}`：撤销上一次，返回 `restored`、`failed`、`notes` |
 | GET | `/api/service-check` | `{"items": [{"kind", "level": "ok"|"bad"|"warn"|"info", "text", "advice"}]}`：第一项是总体结论（`summary`，带 `score`、`grade`），然后是 `dns`、`region`（对照 Anthropic 官方支持名单）、`api`、`web`（429 / 529 单独说是官方限流 / 过载）、`auth`（续登录的地址 `TOKEN_URLS` 各 GET 一次，`auth_item` 汇总：都连得上 ok，有的连不上 warn，都连不上 bad）、`tls_chain` / `tls_intercept`（`peer_issuer` 只握手看 api.anthropic.com 的证书颁发者，有 http 代理时用 CONNECT 打通道，`der_issuer` 从 DER 里读组织名和通用名，`tls_issuer_item` 对照 `PUBLIC_CA_WORDS`；不是公共证书机构就是网络里有设备在解密 HTTPS，不扣分）、`proxy`（环境变量 + 系统代理）、`vpn`（默认路由是否走隧道）、`proxy_down` / `proxy_up`（`proxy_endpoints` 从代理设置里取主机和端口，最多 4 个，`port_open` 各连一下；连不上的记下 `host`、`port`，后台 `check_region` 的 `proxies_back` 再连上了就把它从 `service_status` 清掉），再加上据缓存算出的风险项 `region_change`、`warp`、`clock`、`status`（官方状态页）、`timezone`、`account_regions`、`accounts`，每项带建议；同 `cam doctor` 的服务检查，要几秒钟，并会顺便刷新 `region` / `status_page` 缓存。解析域名、出口地区、api.anthropic.com、claude.ai、续登录的地址、证书、代理端口同时做，各有时限（解析 `SERVICE_DNS_SECS` = 5 秒，连接 `SERVICE_PROBE_SECS` = 10 秒，证书每次连接 `TLS_PROBE_SECS` = 6 秒，代理端口 `PROXY_PROBE_SECS` = 3 秒），`proxy_endpoints`、`auth_item`、`der_issuer`、`tls_issuer_item` 和新条目的扣分两边按 `tests/shared/service.json` 跑；`api`、`web`、`dns`、`tls`、`auth`、`proxy_down`、`tls_intercept` 有问题的记进 `service_status`（`SERVICE_STATUS_KINDS`），顶部环境卡一起列；哪件卡住了都不拖着别的，到点没答的写“超过 N 秒没有回应”；出口这次没连上而以前查到过时，`region` 那行照旧给上一次的并注明“这次没连上，这是…查到的”，后面跟一条 `env_failed` 或 `region_unknown`（和 `/api/state` 的 `risks` 同一条，两边分数一致）。只检测和提示，不干预任何操作 |

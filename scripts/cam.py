@@ -5602,6 +5602,21 @@ def make_handler(store, token):
                         raise CamError("要改的东西和你刚才看到的不一样了（比如刚查到新版本、有人改了配置），重新点一次“一键清理”看清单")
                     res = env_fix_apply(store, plan, force=bool(b.get("force")), optional=b.get("optional") is True)
                     return self._send(200, res)
+                if method == "GET" and parts == ["claude-version"]:  # 面板的 Claude Code 版本卡片。只有脚本版有：桌面版 404，面板不显示
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    return self._send(200, claude_version_info(store, refresh=bool((q.get("refresh") or [""])[0])))
+                if method == "POST" and parts == ["claude-update"]:
+                    return self._send(200, claude_update_run(store))
+                if method == "GET" and parts == ["env-purge"]:  # 彻底清理要先给人看的：移走哪些、能不能恢复
+                    return self._send(200, env_purge_view(store))
+                if method == "POST" and parts == ["env-purge"]:
+                    # {"purge": true, "confirm": "彻底清理"}：移走整个 Claude Code 配置（要带上这四个字，免得误点）；{"restore": true}：放回去
+                    b = self._body()
+                    if b.get("restore") is True:
+                        return self._send(200, env_purge_restore(store))
+                    if b.get("purge") is not True or b.get("confirm") != "彻底清理":
+                        raise CamError("要彻底清理请带 purge: true 和 confirm: “彻底清理”")
+                    return self._send(200, {"backup": env_purge(store)})
                 if method == "GET" and parts == ["update"]:  # 只有脚本版有：桌面版的服务返回 404，面板据此隐藏“检查更新”
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     if (q.get("saved") or [""])[0]:
@@ -7819,6 +7834,171 @@ def mark_logged_out(store):
         store.save(data)
 
 
+def _env_purge_move(store, kc=None):
+    """彻底清理的搬家这一步（调用方已经确认过、存好了当前登录）：~/.claude、~/.claude.json 移进 env-backups/<时间>-purge/，
+    macOS 钥匙串里的登录先存进去再删；记一份 purge.json（移的是哪儿，恢复时按它放回去）。返回备份目录。"""
+    cfg, cj = claude_config_dir(), claude_json_file()
+    dest = os.path.join(store.root, "env-backups", dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-purge")
+    os.makedirs(dest)
+    if not IS_WIN:
+        os.chmod(dest, 0o700)
+    write_json_atomic(os.path.join(dest, "purge.json"), {"at": now_iso(), "config_dir": cfg, "claude_json": cj, "keychain": bool(kc)},
+                      private=True)
+    if kc:
+        write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
+        keychain_delete()
+    if os.path.lexists(cfg):
+        shutil.move(cfg, os.path.join(dest, "claude-config"))
+    if os.path.lexists(cj):
+        shutil.move(cj, os.path.join(dest, "claude.json"))
+    mark_logged_out(store)
+    return dest
+
+
+def env_purge_view(store):
+    """面板“彻底清理”要先给人看的：会移走哪些（多大），有没有能恢复的上一次，有没有 claude 在跑。"""
+    move = [{"path": short_path(p), "size": human_size(path_size(p))} for p in (claude_config_dir(), claude_json_file()) if os.path.lexists(p)]
+    last = next(((d, m) for d, m in env_purge_backups(store) if not m.get("restored_at")), None)
+    procs = running_claude_processes()
+    return {"move": move, "keychain": use_keychain() and keychain_exists(), "restore_at": last[1].get("at") if last else None,
+            "running": None if isinstance(procs, ProcsUnknown) else len(procs)}
+
+
+def env_purge(store, force=False):
+    """彻底清理（面板用，同 cam env clean --purge --apply -y）：先把当前登录存进 cam，再把整个 Claude Code 配置移进备份目录。返回备份目录。"""
+    if claude_may_be_running() and not force:
+        raise CamError("有 claude 在运行（或者看不出来）：先退出所有 claude 再彻底清理，不然它们会把配置又写回来")
+    kc = None
+    if use_keychain():
+        kc = keychain_read()
+        if not kc and keychain_exists():
+            raise CamError("钥匙串里有 Claude Code 的登录，但读取失败（被拒绝或超时）。为了不丢掉最新的登录，这次什么都没改")
+    with store.lock():
+        data = store.load()
+        snapshot_live(store, data)  # 先把当前账号的最新 token 存好，以后 cam switch 能切回来
+        store.save(data)
+    return _env_purge_move(store, kc)
+
+
+def env_purge_backups(store):
+    """彻底清理留下的备份，新的在前：[(目录, 记录)]。老版本留下的（目录名只有时间、没有 purge.json）也认。"""
+    root = os.path.join(store.root, "env-backups")
+    out = []
+    try:
+        names = sorted(os.listdir(root), reverse=True)
+    except OSError:
+        return out
+    for n in names:
+        d = os.path.join(root, n)
+        if n.endswith("-fix") or not os.path.isdir(d):
+            continue
+        m = _read_json_quiet(os.path.join(d, "purge.json"))
+        if m or os.path.lexists(os.path.join(d, "claude-config")) or os.path.lexists(os.path.join(d, "claude.json")):
+            out.append((d, m))
+    return out
+
+
+def env_purge_restore(store, force=False):
+    """把最近一次彻底清理移走的配置放回去。现在那份（清理后新生成的）不删，改名留着（加 .before-restore-时间）。
+    返回 {"restored": [...], "kept": [...], "backup"}。"""
+    if claude_may_be_running() and not force:
+        raise CamError("有 claude 在运行（或者看不出来）：先退出所有 claude 再恢复")
+    last = next(((d, m) for d, m in env_purge_backups(store) if not m.get("restored_at")), None)
+    if not last:
+        raise CamError("没有可以恢复的彻底清理（cam env clean --purge 移走的配置都在 cam 数据目录的 env-backups 里）")
+    d, m = last
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    restored, kept = [], []
+    for src, dst in ((os.path.join(d, "claude-config"), m.get("config_dir") or claude_config_dir()),
+                     (os.path.join(d, "claude.json"), m.get("claude_json") or claude_json_file())):
+        if not os.path.lexists(src):
+            continue
+        if os.path.lexists(dst):
+            aside = f"{dst}.before-restore-{stamp}"
+            shutil.move(dst, aside)
+            kept.append(short_path(aside))
+        shutil.move(src, dst)
+        restored.append(short_path(dst))
+    kc = _read_json_quiet(os.path.join(d, "keychain.json"))
+    if kc and use_keychain():
+        cur = keychain_read()
+        if cur:
+            write_json_atomic(os.path.join(d, f"keychain-before-restore-{stamp}.json"), cur, private=True)
+        keychain_write(kc)
+        restored.append("钥匙串里的 Claude Code 登录")
+    m = dict(m or {"at": None}, restored_at=now_iso())
+    write_json_atomic(os.path.join(d, "purge.json"), m, private=True)
+    return {"restored": restored, "kept": kept, "backup": d}
+
+
+# ---- 面板的 Claude Code 版本卡片：装的哪份、什么版本，官方最新版本（几个小时查一次）；一键 claude update
+
+CLAUDE_VER_FILE = "claude-version.json"
+CLAUDE_VER_TTL = 6 * 3600
+
+
+def claude_version_info(store, refresh=False):
+    """{"installed": {"path", "kind", "version"} 或 None, "latest": {"channel", "version", "checked_at"} 或 None, "outdated",
+    "can_update", "advice"}。装的版本按程序文件的修改时间缓存（不用每次都跑 claude --version）；最新版本 CLAUDE_VER_TTL 内查过就不再联网
+    （refresh 时现查），查不到就用上次的。只看实际运行的那份（PATH 里第一个）。"""
+    path = os.path.join(store.root, CLAUDE_VER_FILE)
+    cache = _read_json_quiet(path)
+    found = claude_installs()
+    inst = None
+    if found:
+        p, real, kind = found[0]
+        try:
+            mt = os.path.getmtime(real)
+        except OSError:
+            mt = 0
+        old = cache.get("installed") or {}
+        if old.get("real") == real and old.get("mtime") == mt and old.get("version"):
+            ver = old["version"]
+        else:
+            m = re.search(r"\d+\.\d+\.\d+", claude_version(p) or "")
+            ver = m.group(0) if m else None
+        inst = {"path": p, "real": real, "kind": kind, "version": ver, "mtime": mt}
+    latest = cache.get("latest")
+    if refresh or not latest or time.time() - float(latest.get("checked_ts") or 0) > CLAUDE_VER_TTL:
+        got = _quiet(latest_claude_version)[0]
+        if got:
+            latest = {"channel": got[0], "version": got[1], "checked_at": now_iso(), "checked_ts": time.time()}
+    with contextlib.suppress(OSError):
+        write_json_atomic(path, {"installed": inst, "latest": latest})
+    v_in = _version_key((inst or {}).get("version"))
+    v_new = _version_key((latest or {}).get("version"))
+    outdated = bool(v_in and v_new and v_new > v_in)
+    can = bool(inst and inst["kind"] in ("原生", "npm", "npm（本地）"))
+    advice = ""
+    if outdated and not can:
+        advice = ("brew upgrade claude-code" if inst["kind"] == "Homebrew"
+                  else "这份 claude 不是官方安装器或 npm 装的，先确认它是什么；要装官方的运行 cam env install")
+    return {"installed": {k: inst[k] for k in ("path", "kind", "version")} if inst else None,
+            "latest": {k: latest[k] for k in ("channel", "version", "checked_at")} if latest else None,
+            "outdated": outdated, "can_update": outdated and can, "advice": advice}
+
+
+def claude_update_run(store):
+    """面板的“升级”：对实际运行的那份跑 claude update（官方安装器和 npm 装的都认这个命令）。返回 {"message", **claude_version_info}。"""
+    info = claude_version_info(store)
+    inst = info["installed"]
+    if not inst:
+        raise CamError("没找到 Claude Code：运行 cam env install 用官方安装器安装")
+    if inst["kind"] not in ("原生", "npm", "npm（本地）"):
+        raise CamError(info["advice"] or "这份 claude 不是官方安装器或 npm 装的，没法自动升级")
+    try:
+        r = subprocess.run([inst["path"], "update"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=600, stdin=subprocess.DEVNULL, **NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise CamError("claude update 十分钟还没完成，网络可能太慢，稍后再试")
+    except OSError as e:
+        raise CamError(f"运行不了 {short_path(inst['path'])}：{e}")
+    msg = last_line_of(r.stdout, r.stderr)
+    if r.returncode != 0:
+        raise CamError(f"claude update 没成功：{msg or f'退出码 {r.returncode}'}")
+    return {"message": msg or "升级完成", **claude_version_info(store)}
+
+
 def print_env_plan(plan):
     print(color("本机 Claude Code 的配置和安装：第三方中转、API Key 这类设置在哪、装了几份、版本、缓存（只提示，不打分）", "d"))
     if plan["fix"]:
@@ -7904,6 +8084,14 @@ def env_plan_view(store, plan):
 
 def cmd_env_clean(store, args):
     """分层清理。默认只预演；--apply 才执行。会话记录、设置、CLAUDE.md、插件和 cam 自己的数据永远不动（--purge 除外）。"""
+    if args.restore:
+        r = env_purge_restore(store, force=args.force)
+        for x in r["restored"]:
+            print(color("✓ ", "g") + f"放回去了：{x}")
+        for x in r["kept"]:
+            print(color("· ", "d") + f"清理后新生成的那份改名留着：{x}")
+        print("新开一个终端再用 claude；当前登录是彻底清理前的那个号")
+        return
     cfg = claude_config_dir()
     cache = [os.path.join(cfg, n) for n in CACHE_ITEMS if os.path.lexists(os.path.join(cfg, n))]
     if args.purge:
@@ -7951,21 +8139,9 @@ def cmd_env_clean(store, args):
             snapshot_live(store, data)  # 先把当前账号的最新 token 存好
             store.save(data)
     if args.purge:
-        dest = os.path.join(store.root, "env-backups", dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
-        os.makedirs(dest)
-        if not IS_WIN:
-            os.chmod(dest, 0o700)
-        if kc:
-            write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
-            keychain_delete()
-        cj = claude_json_file()
-        if os.path.lexists(cfg):
-            shutil.move(cfg, os.path.join(dest, "claude-config"))
-        if os.path.lexists(cj):
-            shutil.move(cj, os.path.join(dest, "claude.json"))
-        mark_logged_out(store)
+        dest = _env_purge_move(store, kc)
         print(color(f"✓ 已移到 {dest}", "g"))
-        print("  需要恢复时，把里面的 claude-config 移回 " + cfg + "，claude.json 移回 " + cj)
+        print("  要恢复：cam env clean --restore（或者自己把里面的 claude-config 移回 " + cfg + "，claude.json 移回 " + claude_json_file() + "）")
         return
     for p in cache:
         remove_path(p)
@@ -10780,6 +10956,59 @@ def git(root, *args, timeout=30):
         raise CamError(f"git {args[0]} 超过 {timeout} 秒没完成，检查网络后重试")
 
 
+FETCH_TRIES, FETCH_RETRY_WAIT = 3, 3  # 连代码仓库偶尔会失败（网络抖一下）：隔几秒再试，一共试 3 次；超时的最多试 2 次（每次就要等一分钟）
+# 网络问题（值得重试）：域名解析不了、连不上、被重置、TLS 握手失败、传到一半断了
+FETCH_NET_ERRORS = ("could not resolve", "failed to connect", "couldn't connect", "connection timed out", "connection reset",
+                    "connection refused", "operation timed out", "unable to access", "ssl", "tls", "gnutls", "schannel",
+                    "early eof", "rpc failed", "recv failure", "remote end hung up", "network is unreachable",
+                    "could not read from remote repository")
+FETCH_AUTH_ERRORS = ("authentication failed", "permission denied", "could not read username", "repository not found",
+                     "terminal prompts disabled", "host key verification failed")
+
+
+def remote_host(root, upstream):
+    """上游分支（origin/main）对应的远程仓库在哪台主机：https://github.com/… 或 git@github.com:… 都取出 github.com。"""
+    url = git_out(root, "remote", "get-url", (upstream or "origin").split("/", 1)[0]) if upstream else ""
+    if "://" in url:
+        return urllib.parse.urlparse(url).hostname or url
+    m = re.match(r"(?:[^@/]+@)?([^:/]+):", url)
+    return m.group(1) if m else (url or "代码仓库")
+
+
+def git_fetch(root, upstream=None):
+    """git fetch，网络问题时隔几秒重试（一共 FETCH_TRIES 次，超时的最多 2 次）。都不行抛 CamError，说清是连不上、超时还是要登录、该怎么办。"""
+    last, kind, timeouts = "", "other", 0
+    for i in range(FETCH_TRIES):
+        if i:
+            time.sleep(FETCH_RETRY_WAIT * i)
+        try:
+            r = git(root, "fetch", "--quiet", timeout=FETCH_TIMEOUT)
+        except CamError as e:
+            if "没找到 git" in str(e):
+                raise
+            kind, timeouts = "timeout", timeouts + 1
+            if timeouts >= 2:
+                break
+            continue
+        if r.returncode == 0:
+            return i + 1
+        last = r.stderr or r.stdout
+        low = last.lower()
+        kind = "auth" if any(w in low for w in FETCH_AUTH_ERRORS) else "net" if any(w in low for w in FETCH_NET_ERRORS) else "other"
+        if kind != "net":  # 要登录、仓库不对这类重试也没用
+            break
+    host = remote_host(root, upstream)
+    tries = f"试了 {i + 1} 次"
+    if kind == "timeout":
+        raise CamError(f"连 {host} 一直超时（{tries}，每次等 {FETCH_TIMEOUT} 秒）：网络太慢或者连不上。稍后再试；"
+                       f"一直不行的话，看看这台电脑的浏览器能不能打开 {host}")
+    if kind == "net":
+        raise CamError(f"连不上 {host}（{tries}）：{brief(last)}。多半是网络抖了一下，稍后再试；一直不行的话，看看这台电脑的浏览器能不能打开 {host}")
+    if kind == "auth":
+        raise CamError(f"{host} 上的代码仓库要登录才能拉（{brief(last)}）：在代码目录 {root} 里运行一次 git fetch，按提示登录好再试")
+    raise CamError(f"git fetch 失败：{brief(last)}")
+
+
 def git_out(root, *args, timeout=30):
     r = git(root, *args, timeout=timeout)
     if r.returncode != 0:
@@ -10848,9 +11077,7 @@ def update_check(root=None):
     if r.returncode != 0:
         raise CamError("当前分支没有对应的远程分支，没法检查更新。在代码目录运行 git branch -u origin/main 设好后再试")
     res["upstream"] = r.stdout.strip()
-    r = git(root, "fetch", "--quiet", timeout=FETCH_TIMEOUT)
-    if r.returncode != 0:
-        raise CamError(f"git fetch 失败，没连上代码仓库：{brief(r.stderr or r.stdout)}")
+    git_fetch(root, res["upstream"])
     res["head"] = git_out(root, "rev-parse", "HEAD")
     res["behind"] = int(git_out(root, "rev-list", "--count", "HEAD..@{u}") or 0)
     res["ahead"] = int(git_out(root, "rev-list", "--count", "@{u}..HEAD") or 0)
@@ -11210,6 +11437,7 @@ def main(argv=None):
     e.add_argument("--apply", action="store_true", help="真正执行；不加只显示将要做什么")
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也执行")
     e.add_argument("-y", "--yes", action="store_true", help="--purge 时不再确认")
+    e.add_argument("--restore", action="store_true", help="把最近一次 --purge 移走的配置放回去（现在那份改名留着）")
     e = esub.add_parser("fix", help="一键清理：第三方中转、API Key 这类设置，多装的几份，旧版本，缓存（先列出来，确认了才改）")
     e.add_argument("--apply", "-y", "--yes", dest="apply", action="store_true", help="不问，直接改")
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也卸载、升级、清缓存")

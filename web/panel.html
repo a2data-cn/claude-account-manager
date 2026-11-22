@@ -447,6 +447,10 @@ details.src[open] summary::before { content: "▾"; }
 .ecard h3 .chip { font-weight: 600; }
 .ecard h4 { margin: 14px 0 4px; font-size: 12.5px; font-weight: 650; color: var(--muted); }  /* 一键清理：可以一键清理的 / 要你自己处理的 */
 .ecard > .sec-acts { margin-top: 12px; gap: 8px; }
+.ecard .purge-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-right: auto; }  /* 彻底清理、恢复：放左边，和“确认清理”分开 */
+.ecard .purge-box { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--hot); border-radius: var(--radius); background: color-mix(in srgb, var(--hot) 6%, transparent); }
+.ecard .purge-box h4 { margin: 0 0 6px; color: var(--hot); }
+.ecard .purge-box p, .ecard .purge-box ul { margin: 6px 0; font-size: 13px; }
 .ecard .fix-all { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12.5px; color: var(--muted); cursor: pointer; }
 .eico { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); flex: none; }
 .eico svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -721,6 +725,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false"><defs>
 <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-3.2 3-3.2 15 0 18M12 3c3.2 3 3.2 15 0 18"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7.5 9.5l3 2.5-3 2.5"/><path d="M13 15h3.5"/></symbol>
 <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 2.8v5.4c0 4.4-3 8.2-7 9.8-4-1.6-7-5.4-7-9.8V5.8L12 3z"/><path d="M9 12l2 2 4-4"/></symbol>
 <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M5 17.5a8.5 8.5 0 1 1 14 0"/><path d="M12 12.7l3.3-3.8"/><circle cx="12" cy="12.7" r="1.1"/></symbol>
 <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20.5c.5-4 3.6-6.3 7.5-6.3s7 2.3 7.5 6.3"/></symbol>
@@ -1555,6 +1560,10 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   let checkup = null, checkupBusy = false, checkupAvail = false, checkupProbed = false;
   // “一键清理”（同 cam env fix）也只有脚本版有：先列出要改什么，点“确认清理”才改；改之前都备份，能撤销。只提示，不打分
   let envFix = null, envFixRes = null, envFixBusy = false, envFixAvail = false, envFixAll = false;
+  // 彻底清理（同 cam env clean --purge）：整个 Claude Code 配置移进备份目录，相当于重装；能恢复。放在一键清理卡片里，要再确认一次
+  let purge = null, purgeAsk = false, purgeBusy = false, purgeRes = null;
+  // Claude Code 版本（GET /api/claude-version，只有脚本版有）：环境页一张卡片，有新版本时账号页顶上也提示一句
+  let ccVer = null, ccVerBusy = false;
   const ENV_FIX_TIP = "查本机 Claude Code 里第三方中转、API Key 这类设置（settings.json、环境变量、shell 配置文件）、多装的几份、旧版本和缓存，先列出来给你看，确认了才改。改之前都备份，能撤销。";
   const CHECKUP_TIP = "逐项检查每个账号的登录还能不能续（不在用的号快过期了会替它续一次，当前登录不碰）、到期日和用量，Claude 服务和官方状态页，本机 Claude Code 的版本和正在运行的会话，cam 的后台任务、更新和文件校验，装了的话还有聊天机器人。要等十几秒。";
   function envButton(label) {
@@ -1582,7 +1591,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     : envChecks ? `<div class="cards check-groups">${renderChecks(envChecks)}</div>` : "");
   // 一键清理的卡：能一键改的、官方支持的用法（勾上才改）、要自己处理的；改完换成结果
   function envFixHtml() {
-    if (!envFix && !envFixRes) return "";
+    if (!envFix && !envFixRes) return purgeRes ? `<div class="cards check-groups"><div class="panel ecard wide"><h3>彻底清理</h3>${purgeHtml()}
+      <div class="sec-acts"><button class="btn quiet" data-act="purge-done">收起</button></div></div></div>` : "";
     const rows = (xs) => `<ul class="checks">${xs.map((f) => `<li class="${esc(f.level)}"><span class="mark">${CHECK_MARK[f.level] || "说明"}</span><span class="v">${esc(mail(f.text))}${f.advice ? `<span class="advice">→ ${esc(f.advice)}</span>` : ""}</span></li>`).join("")}</ul>`;
     const dis = envFixBusy ? " disabled" : "";
     const undo = envFix && envFix.undo_at ? `<button class="btn quiet" data-act="env-fix-undo"${dis} title="把上一次一键清理改过的文件、环境变量原样放回去">撤销上次清理（${esc(ago(envFix.undo_at))}）</button>` : "";
@@ -1596,7 +1606,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         ...(r.restored || []).map((t) => ({ level: "ok", text: "改回去了：" + t })),
         ...(r.notes || []).map((t) => ({ level: "info", text: t }))];
       const head = r.restored ? "已撤销上次清理" : "一键清理完成";
-      return `<div class="cards check-groups"><div class="panel ecard wide"><h3>${esc(head)}</h3>${rows(lines)}
+      return `<div class="cards check-groups"><div class="panel ecard wide"><h3>${esc(head)}</h3>${rows(lines)}${purgeHtml()}
         ${r.backup && !r.restored ? `<p class="hint">改之前的样子备份在 ${esc(r.backup)}，点“撤销上次清理”或运行 cam env fix --undo 改回去。</p>` : ""}
         <div class="sec-acts">${close}</div></div></div>`;
     }
@@ -1612,11 +1622,77 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       ${f.fix.length ? `<h4>可以一键清理的（${f.fix.length} 项）</h4>${rows(f.fix)}` : `<p>✓ 没有第三方中转这类要清理的。</p>`}
       ${optHtml}
       ${f.manual.length ? `<h4>要你自己处理的（${f.manual.length} 项）</h4>${rows(f.manual)}` : ""}${slow}
-      <div class="sec-acts">${close}${undo}${go}</div></div></div>`;
+      <div class="sec-acts"><span class="purge-acts">${purge ? `<button class="btn quiet danger" data-act="purge-ask"${dis} title="把整个 Claude Code 配置移到备份目录，相当于重装；会先列出来再确认">彻底清理…</button>` : ""}${purge && purge.restore_at ? `<button class="btn quiet" data-act="purge-restore"${dis} title="把上一次彻底清理移走的配置放回去">恢复彻底清理前的样子（${esc(ago(purge.restore_at))}）</button>` : ""}</span>${close}${undo}${go}</div>${purgeHtml()}</div></div>`;
+  }
+  // 页面底部一行：后端版本、Claude Code 版本（有新版本时带个“去升级”）、数据更新时间
+  function renderFooter() {
+    if (!state) return;
+    const i = ccVer && ccVer.installed;
+    const cc = !i ? "" : `，Claude Code ${esc(i.version || "版本未知")}${ccVer.outdated ? `（有新版本 ${esc(ccVer.latest.version)}，<a href="#env">去升级</a>）` : ""}`;
+    $("#footer").innerHTML = `后端：${esc(state.backend)} ${esc(state.version)}${cc}，数据更新于 ${esc(fmtTime(state.generated_at))}`;
+  }
+  function ccVerHtml() {
+    if (!ccVer) return "";
+    const v = ccVer, i = v.installed, l = v.latest, dis = ccVerBusy ? " disabled" : "";
+    const chip = !i ? `<span class="chip st-bad">没找到</span>` : v.outdated ? `<span class="chip st-warn">有新版本</span>` : l ? `<span class="chip st-ok">已是最新</span>` : "";
+    const rows = i
+      ? `<li class="${v.outdated ? "warn" : "ok"}"><span class="mark">${v.outdated ? "注意" : "正常"}</span><span class="v">现在是 <b>${esc(i.version || "版本未知")}</b>（${esc(i.kind)}，${esc(i.path)}）${l ? `；最新 <b>${esc(l.version)}</b>（${esc(l.channel)} 渠道，${esc(ago(l.checked_at))}查的）` : "；最新版本还没查到"}${v.advice ? `<span class="advice">→ ${esc(v.advice)}</span>` : ""}</span></li>`
+      : `<li class="bad"><span class="mark">异常</span><span class="v">没找到 Claude Code（看的是面板服务的 PATH）<span class="advice">→ 终端里运行 cam env install 用官方安装器安装</span></span></li>`;
+    const up = v.can_update ? `<button class="btn primary" data-act="cc-update"${dis}>${ccVerBusy ? "正在升级，要一两分钟…" : `升级到 ${esc(l.version)}`}</button>` : "";
+    return `<div class="cards"><div class="panel ecard wide" id="cc-ver"><h3><span class="eico"><svg><use href="#i-terminal"/></svg></span>Claude Code 版本 ${chip}</h3>
+      <ul class="checks">${rows}</ul><p class="hint">看的是实际运行的那份（PATH 里第一个）。最新版本几个小时查一次；升级就是运行 claude update，正在跑的 claude 重开后用新版本。</p>
+      <div class="sec-acts"><button class="btn quiet" data-act="cc-recheck"${dis}>重新检查</button>${up}</div></div></div>`;
+  }
+  async function loadCcVer(refresh) {
+    if (ccVerBusy) return;
+    ccVerBusy = !!refresh; if (refresh) render();
+    try { ccVer = await api("GET", "/api/claude-version" + (refresh ? "?refresh=1" : "")); } catch (_) { if (!refresh) ccVer = null; }
+    finally { ccVerBusy = false; if (state) render(); }
+  }
+  async function runCcUpdate() {
+    if (ccVerBusy) return;
+    ccVerBusy = true; render();
+    try { const r = await api("POST", "/api/claude-update", {}); ccVer = r; toast(`已升级：${r.message}`); }
+    catch (err) { toast(err.message, true); }
+    finally { ccVerBusy = false; render(); }
+  }
+  // 彻底清理：先列出会移走什么，再要人点一次“确认彻底清理”
+  function purgeHtml() {
+    const dis = purgeBusy ? " disabled" : "";
+    if (purgeRes) {
+      const r = purgeRes;
+      const lines = r.backup && !r.restored ? [`已经把整个 Claude Code 配置移到 ${r.backup}，相当于重装。终端里运行 claude 重新登录，或者在这里点一个号“切换到这个账号”`]
+        : [...(r.restored || []).map((t) => "放回去了：" + t), ...(r.kept || []).map((t) => "清理后新生成的那份改名留着：" + t)];
+      return `<div class="purge-box">${lines.map((t) => `<p>${esc(t)}</p>`).join("")}</div>`;
+    }
+    if (!purgeAsk || !purge) return "";
+    const run = purge.running == null || purge.running ? `<p class="hint">${purge.running == null ? "看不出有没有 claude 在运行" : `有 ${purge.running} 个 claude 在运行`}：先退出所有 claude 再彻底清理。</p>` : "";
+    return `<div class="purge-box"><h4>彻底清理（相当于重装 Claude Code）</h4>
+      <p>会把下面这些整个移到 cam 的备份目录（不删，能恢复）：</p>
+      <ul>${purge.move.map((m) => `<li>${esc(m.path)}（${esc(m.size)}）</li>`).join("")}${purge.keychain ? "<li>钥匙串里的 Claude Code 登录</li>" : ""}</ul>
+      <p>包括会话记录、设置、CLAUDE.md、插件、MCP 配置。当前登录会先存进 cam，之后在这里点“切换到这个账号”或者运行 claude 重新登录就行。</p>${run}
+      <div class="sec-acts"><button class="btn quiet" data-act="purge-cancel"${dis}>取消</button><button class="btn danger-fill" data-act="purge-go"${dis || (run ? " disabled" : "")}>${purgeBusy ? "正在搬…" : "确认彻底清理"}</button></div></div>`;
+  }
+  async function loadPurge() {
+    try { purge = await api("GET", "/api/env-purge"); } catch (_) { purge = null; }
+    render();
+  }
+  async function runPurge(body) {
+    if (purgeBusy) return;
+    purgeBusy = true; render();
+    try {
+      purgeRes = await api("POST", "/api/env-purge", body);
+      purgeAsk = false;
+      toast(body.restore ? "已恢复彻底清理前的样子" : "已彻底清理");
+      envFix = null; checkup = null;
+      load();
+    } catch (err) { toast(err.message, true); }
+    finally { purgeBusy = false; render(); }
   }
   async function loadEnvFix() {
     if (envFixBusy) return;
-    envFixBusy = true; envFixRes = null; envFixAll = false; render();
+    envFixBusy = true; envFixRes = null; envFixAll = false; purgeAsk = false; purgeRes = null; render();
+    loadPurge();
     try { envFix = await api("GET", "/api/env-fix"); } catch (err) { toast(err.message, true); }
     finally { envFixBusy = false; render(); }
   }
@@ -1645,6 +1721,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     checkupProbed = true;
     try { await api("GET", "/api/checkup?probe=1"); checkupAvail = true; } catch (_) { checkupAvail = false; }
     try { await api("GET", "/api/env-fix?probe=1"); envFixAvail = true; } catch (_) { envFixAvail = false; }  // 桌面版、老版本的 cam serve 没有
+    if (envFixAvail) loadCcVer(false);
     if ((checkupAvail || envFixAvail) && state) render();
   }
   async function runEnvCheck() {
@@ -1743,6 +1820,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     return `<section class="block" id="env" aria-label="环境状态">
       <div class="sec-head"><h2>环境</h2><span class="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>${envButton(ready ? "重新检测" : "立即检测")}</div>
       <div class="cards env">${exitCard(reg)}${scoreCard(st)}</div>
+      ${ccVerHtml()}
       ${envChecksHtml()}
     </section>`;
   }
@@ -1808,7 +1886,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   // ---- 渲染
   let state = null, accountBusy = false;
   function syncAccountBusy() {
-    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="checkup"]):not([data-act="env-fold"]):not([data-act^="env-fix"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
+    document.querySelectorAll('button[data-act]:not([data-act="select"]):not([data-act="recheck"]):not([data-act="checkup"]):not([data-act="env-fold"]):not([data-act^="env-fix"]):not([data-act^="purge-"]):not([data-act^="cc-"]):not([data-act="rule-rm"]), #btn-refresh, #btn-add-ok, #btn-delete')
       .forEach((button) => { button.disabled = accountBusy; });
   }
   // 标题旁的红绿灯：规则和卡片小面板、菜单栏图标一致。只显示最要紧的一条，其余在悬停提示里
@@ -1934,7 +2012,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const sc = state.risk_score;
     const scTxt = sc && reg.status ? `<span class="risk ${esc(sc.grade)}" title="环境评分（越高越安全）：${esc(sc.label)}。${esc(sc.advice)}">环境 ${esc(sc.score)}</span>` : "";
     $("#host").innerHTML = `${esc(state.host)}（${esc(state.platform)}）${regTxt}${scTxt}`;
-    $("#footer").textContent = `后端：${state.backend} ${state.version}，数据更新于 ${fmtTime(state.generated_at)}`;
+    renderFooter();
     const p = state.pending_switch;
     const risky = state.risk_score && (state.region || {}).status && state.risk_score.grade !== "low";
     $("#env-wrap").innerHTML = envCard(state);  // 环境单独一页
@@ -1944,6 +2022,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const brief = risky ? `<div class="notice env-brief ${esc(state.risk_score.grade)}" role="status"><span class="n-text">环境评分 <b>${esc(state.risk_score.score)}/100</b>：${esc(state.risk_score.label)}${firstRisk ? ` · ${esc(firstRisk)}` : ""}</span><a class="btn quiet" href="#env">查看详情</a></div>` : "";
     const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
       + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "")
+      + (ccVer && ccVer.outdated ? `<div class="notice" role="status"><span class="n-text">Claude Code 有新版本 ${esc(ccVer.latest.version)}（现在是 ${esc(ccVer.installed.version)}）</span><a class="btn quiet" href="#env">去升级</a></div>` : "")
       + brief;
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
@@ -2892,12 +2971,19 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const re = e.target.closest("[data-act=recheck]");
     if (re) { runEnvCheck(); return; }
     if (e.target.closest("[data-act=checkup]")) { runCheckup(); return; }
-    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; checkup = null; envFix = null; envFixRes = null; render(); return; }
+    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; checkup = null; envFix = null; envFixRes = null; purgeAsk = false; purgeRes = null; render(); return; }
     if (e.target.closest("[data-act=env-fix]")) { loadEnvFix(); return; }
-    if (e.target.closest("[data-act=env-fix-close]")) { envFix = null; envFixRes = null; render(); return; }
+    if (e.target.closest("[data-act=env-fix-close]")) { envFix = null; envFixRes = null; purgeAsk = false; purgeRes = null; render(); return; }
     if (e.target.closest("[data-act=env-fix-go]")) { runEnvFix({ apply: true, optional: envFixAll, digest: envFix && envFix.digest, digest_optional: envFix && envFix.digest_optional }); return; }
     if (e.target.closest("[data-act=env-fix-all]")) { envFixAll = e.target.closest("[data-act=env-fix-all]").checked; render(); return; }
     if (e.target.closest("[data-act=env-fix-undo]")) { runEnvFix({ undo: true }); return; }
+    if (e.target.closest("[data-act=purge-ask]")) { purgeAsk = true; purgeRes = null; loadPurge(); return; }
+    if (e.target.closest("[data-act=purge-cancel]")) { purgeAsk = false; render(); return; }
+    if (e.target.closest("[data-act=purge-go]")) { runPurge({ purge: true, confirm: "彻底清理" }); return; }
+    if (e.target.closest("[data-act=purge-restore]")) { runPurge({ restore: true }); return; }
+    if (e.target.closest("[data-act=purge-done]")) { purgeRes = null; render(); return; }
+    if (e.target.closest("[data-act=cc-recheck]")) { loadCcVer(true); return; }
+    if (e.target.closest("[data-act=cc-update]")) { runCcUpdate(); return; }
     const pb = e.target.closest("button[data-pref]");
     if (pb) { setPref(pb.dataset.pref, pb.dataset.pref === "mask" ? !pref.mask : pb.dataset.v === "1"); render(); renderLocal(); return; }
     const b = e.target.closest("button[data-act]");

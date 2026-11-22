@@ -5039,6 +5039,82 @@ foreach ($dark in @($false, $true)) {{
             d2 = cam.env_fix_plan(None)
         self.assertEqual((d1["digest"], d1["digest_optional"]), (d2["digest"], d2["digest_optional"]))
 
+    @unittest.skipIf(os.name == "nt", "假的 claude 是 shell 脚本")
+    def test_claude_version_card_and_update(self):
+        """面板的 Claude Code 版本卡片：装的哪份、什么版本、最新版本（存起来，几个小时内不再联网）；官方装的能一键 claude update。"""
+        cam = self.cam
+        vers = os.path.join(self.tmp, ".local", "share", "claude", "versions")
+        bindir = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(vers)
+        os.makedirs(bindir)
+        new = os.path.join(vers, "2.1.5")
+        with open(os.path.join(vers, "2.1.0"), "w", encoding="utf-8") as f:  # 升级时像官方安装器那样：放一个新版本，把链接指过去
+            f.write("#!/bin/sh\nif [ \"$1\" = update ]; then\n"
+                    f"  printf '#!/bin/sh\\necho \"2.1.5 (Claude Code)\"\\n' > '{new}'; chmod +x '{new}'\n"
+                    f"  ln -sf '{new}' '{os.path.join(bindir, 'claude')}'\n"
+                    "  echo 'Successfully updated from 2.1.0 to version 2.1.5'\nelse echo '2.1.0 (Claude Code)'; fi\n")
+        os.chmod(os.path.join(vers, "2.1.0"), 0o755)
+        os.symlink(os.path.join(vers, "2.1.0"), os.path.join(bindir, "claude"))
+        MockAnthropic.release_latest = "2.1.5"
+        store = cam.Store()
+        with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([bindir, "/usr/bin", "/bin"])}):
+            v = cam.claude_version_info(store)
+            self.assertEqual((v["installed"]["version"], v["installed"]["kind"], v["latest"]["version"]), ("2.1.0", "原生", "2.1.5"))
+            self.assertTrue(v["outdated"] and v["can_update"])
+            MockAnthropic.release_latest = "2.1.9"  # 几个小时内不再联网：还是上次查到的
+            self.assertEqual(cam.claude_version_info(store)["latest"]["version"], "2.1.5")
+            MockAnthropic.release_latest = "2.1.5"
+            r = cam.claude_update_run(store)
+            self.assertIn("2.1.5", r["message"])
+            self.assertEqual((r["installed"]["version"], r["outdated"]), ("2.1.5", False))
+        # 不是官方装的：不自动升级，给说法
+        other = os.path.join(self.tmp, "other-bin")
+        stub(other, "claude", 'echo "2.0.0 (Claude Code)"')
+        with mock.patch.dict(os.environ, {"PATH": os.pathsep.join([other, "/usr/bin", "/bin"])}):
+            v = cam.claude_version_info(store)
+            self.assertTrue(v["outdated"] and not v["can_update"])
+            self.assertIn("cam env install", v["advice"])
+            with self.assertRaises(cam.CamError):
+                cam.claude_update_run(store)
+
+    def test_env_purge_and_restore(self):
+        """彻底清理：整个 Claude Code 配置移进备份目录（相当于重装），当前登录先存进 cam；恢复时放回去，清理后新生成的那份改名留着。"""
+        cam = self.cam
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.assertEqual(self.run_cam("import", "--label", "A"), 0)
+        cfg = os.path.join(self.tmp, ".claude")
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+            json.dump({"theme": "dark"}, f)
+        store = cam.Store()
+        view = cam.env_purge_view(store)
+        self.assertTrue(any(m["path"].endswith(".claude") for m in view["move"]))
+        self.assertIsNone(view["restore_at"])
+        with mock.patch.object(cam, "running_claude_processes", lambda: [(1, "claude")]):
+            with self.assertRaises(cam.CamError):
+                cam.env_purge(store)
+        dest = cam.env_purge(store)
+        self.assertFalse(os.path.exists(cfg))
+        self.assertFalse(os.path.exists(self.cj_path))
+        self.assertTrue(os.path.isfile(os.path.join(dest, "claude-config", "settings.json")))
+        self.assertIsNone(self.data()["active"]["claude_code"])  # 退出了登录；账号还在 cam 里，能切回来
+        self.assertTrue(any(a["label"] == "A" for a in self.data()["accounts"]))
+        os.makedirs(cfg)  # 之后又运行了 claude：生成了一份新的
+        with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        self.assertTrue(cam.env_purge_view(store)["restore_at"])
+        r = cam.env_purge_restore(store)
+        with open(os.path.join(cfg, "settings.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"theme": "dark"})
+        self.assertTrue(os.path.exists(self.cj_path))
+        self.assertTrue(r["kept"] and os.path.isdir(os.path.join(self.tmp, os.path.basename(r["kept"][0]))))
+        with self.assertRaises(cam.CamError):
+            cam.env_purge_restore(store)  # 恢复过了
+        # 命令行：--purge 之后 --restore
+        self.assertEqual(self.run_cam("env", "clean", "--purge", "--apply", "-y"), 0)
+        self.assertFalse(os.path.exists(cfg))
+        self.assertEqual(self.run_cam("env", "clean", "--restore"), 0)
+        self.assertTrue(os.path.isfile(os.path.join(cfg, "settings.json")))
+
     def test_env_fix_http_api(self):
         files = self._relay_setup()
         before = _rb(files["settings"])
@@ -5080,6 +5156,14 @@ foreach ($dark in @($false, $true)) {{
             st, res = call("POST", "/api/env-fix", {"undo": True})
             self.assertEqual((st, res["failed"]), (200, []))
             self.assertEqual(_rb(files["settings"]), before)
+            self.assertEqual(call("POST", "/api/env-purge", {"purge": True})[0], 400)  # 没带“彻底清理”四个字：不动
+            self.assertTrue(os.path.isdir(os.path.join(self.tmp, ".claude")))
+            st, v = call("GET", "/api/env-purge")
+            self.assertEqual(st, 200)
+            self.assertTrue(v["move"])
+            st, v = call("GET", "/api/claude-version")
+            self.assertEqual(st, 200)
+            self.assertIn("outdated", v)
         finally:
             srv.shutdown()
             srv.server_close()
@@ -6688,6 +6772,45 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(self.cam.saved_update_check(self.clone)["behind"], 0)
         # 另一份代码目录的检查结果不拿来用
         self.assertIsNone(self.cam.saved_update_check(self.dev))
+
+    def test_update_fetch_retries_and_explains(self):
+        """检查更新时连代码仓库偶尔失败：网络问题隔几秒重试（一共 3 次，超时的最多 2 次）；要登录的不重试；
+        失败的话说清是连不上、超时还是要登录，带上仓库在哪台主机。"""
+        cam = self.cam
+        calls, sleeps = [], []
+        outcomes = []
+
+        def fake_git(root, *args, timeout=30):
+            if args[:2] == ("remote", "get-url"):
+                return subprocess.CompletedProcess(args, 0, "https://github.com/a2data-cn/claude-account-manager.git\n", "")
+            calls.append(args[0])
+            o = outcomes.pop(0)
+            if o == "timeout":
+                raise cam.CamError("git fetch 超过 60 秒没完成，检查网络后重试")
+            return subprocess.CompletedProcess(args, 0 if o == "ok" else 128, "", o if o != "ok" else "")
+
+        with mock.patch.object(cam, "git", fake_git), mock.patch.object(cam.time, "sleep", sleeps.append):
+            outcomes[:] = ["fatal: unable to access 'https://github.com/x/': Failed to connect to github.com port 443", "ok"]
+            self.assertEqual(cam.git_fetch("/r", "origin/main"), 2)  # 第二次就好了
+            self.assertEqual(sleeps, [3])
+            calls.clear()
+            outcomes[:] = ["fatal: unable to access: Could not resolve host: github.com"] * 3
+            with self.assertRaises(cam.CamError) as e:
+                cam.git_fetch("/r", "origin/main")
+            self.assertEqual(len(calls), 3)
+            self.assertIn("连不上 github.com（试了 3 次）", str(e.exception))
+            calls.clear()
+            outcomes[:] = ["timeout", "timeout", "ok"]
+            with self.assertRaises(cam.CamError) as e:
+                cam.git_fetch("/r", "origin/main")
+            self.assertEqual(len(calls), 2)  # 超时的最多试 2 次
+            self.assertIn("一直超时", str(e.exception))
+            calls.clear()
+            outcomes[:] = ["remote: Repository not found.\nfatal: Authentication failed for 'https://github.com/x/'"]
+            with self.assertRaises(cam.CamError) as e:
+                cam.git_fetch("/r", "origin/main")
+            self.assertEqual(len(calls), 1)  # 要登录：重试也没用
+            self.assertIn("要登录", str(e.exception))
 
     def test_update_fast_forwards(self):
         old = self.head()
