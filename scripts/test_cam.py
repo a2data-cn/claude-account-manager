@@ -5138,6 +5138,13 @@ foreach ($dark in @($false, $true)) {{
         cam = self.cam
         with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "SECRET-old", "CAM_MANAGED_SETTINGS": ""}), \
                 mock.patch.object(cam, "IS_WIN", True), mock.patch.object(cam, "win_env_values", lambda system=False: {}):
+            # 没被 cam env fix 删过的（可能是这个终端里自己 set 的）：照旧说“只在当前这个终端里有”
+            items, live = cam.env_findings()
+            self.assertTrue(any("只在当前这个终端里有" in i["text"] for i in items if "ANTHROPIC_AUTH_TOKEN" in i["text"]))
+            bdir = os.path.join(self.tmp, ".claude-accounts", "env-backups", "20260101-000000-000000-fix")
+            os.makedirs(bdir)
+            with open(os.path.join(bdir, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump({"at": "x", "items": [{"type": "win_env", "key": "ANTHROPIC_AUTH_TOKEN", "value": "SECRET-old", "kind": 1}]}, f)
             items, live = cam.env_findings()
             f = next(i for i in items if "ANTHROPIC_AUTH_TOKEN" in i["text"])
             self.assertEqual(f["level"], "info")

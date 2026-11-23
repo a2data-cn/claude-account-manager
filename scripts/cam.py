@@ -7209,6 +7209,16 @@ def owner_findings():
                      f"sudo chown -R {getpass.getuser()} {shlex.quote(cfg)} {shlex.quote(claude_json_file())}")]
 
 
+def env_removed_by_fix():
+    """一键清理从 Windows 用户环境变量里删掉过（还没撤销）的变量名：进程身上还有它们，就是删之前启动、带着的旧值。"""
+    keys = set()
+    for _, m in env_fix_backups(Store()):
+        for it in m.get("items") or []:
+            if it.get("type") == "win_env" and not it.get("undone") and not m.get("undone_at"):
+                keys.add(it.get("key"))
+    return keys
+
+
 def override_findings():
     """会让 Claude Code 不用订阅登录的设置，一句一条（cam doctor、cam env install 用）。"""
     return [f["text"] for f in env_findings()[0] if f["fix"] is not None or f["level"] != "info"]
@@ -7227,8 +7237,10 @@ def env_findings():
     out += claude_json_findings()
     live = [k for k in SCAN_ENV if os.environ.get(k) and env_value_matters(k, os.environ.get(k))]
     reg = set(win_env_values()) | set(win_env_values(True)) if IS_WIN else set()
+    removed = env_removed_by_fix() if IS_WIN else set()
     for k in list(live):
-        if k not in where and IS_WIN and k.upper() not in reg:
+        # 只认 cam env fix 从 Windows 用户环境变量里删掉过的：没删过的可能是这个终端里自己 set 的，照旧提示
+        if k not in where and IS_WIN and k.upper() not in reg and k in removed:
             # Windows 系统里已经没有了（比如刚一键清理掉）：这个进程是删之前启动的，身上带着旧值。面板服务直接把它从自己身上去掉
             # （它起的 claude、跑的检查都不会再带上）；终端里只提示，新开一个就没了
             if PROC_ROLE == "serve":
