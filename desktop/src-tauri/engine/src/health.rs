@@ -613,6 +613,262 @@ pub fn parse_trace(txt: &str, t0: Instant) -> Value {
     })
 }
 
+// ---------------------------------------------------------------- 检测进度
+
+/// “重新检测”要走的步骤（界面上进度卡的每一行）：键 → 写给人看的名字，顺序就是显示的顺序。
+/// 与 cam.py 的 SERVICE_STEPS 一致（tests/shared/progress.json）
+pub const SERVICE_STEPS: &[(&str, &str)] = &[
+    ("local", "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"),
+    ("dns", "解析 Claude 的域名"),
+    ("exit", "出口 IP 和地区"),
+    ("isp", "运营商、IP 类型、注册国"),
+    ("stack", "IPv4 / IPv6 出口"),
+    ("plain", "没加密的网页有没有被改动"),
+    ("api", "连接 api.anthropic.com"),
+    ("web", "连接 claude.ai"),
+    ("auth", "续登录的地址"),
+    ("tls", "HTTPS 证书是谁签的"),
+    ("proxy", "本机设的代理在不在运行"),
+    ("status", "Anthropic 官方状态页"),
+    ("score", "汇总结果，算环境评分"),
+];
+/// “外部 IP 查询”关掉时不做的几步
+const LOOKUP_STEPS: &[&str] = &["isp", "stack", "plain"];
+/// check_region 里做的几步
+const REGION_STEPS: &[&str] = &["local", "exit", "isp", "stack", "plain", "status"];
+/// 留着最近几次检测的进度
+const PROGRESS_KEEP: usize = 6;
+
+/// 这次“重新检测”要走哪几步：外部 IP 查询关了就没有问第三方的那几步，没设代理就没有代理那一步。
+pub fn service_steps(lookup_off: bool, has_proxy: bool) -> Vec<(&'static str, &'static str)> {
+    SERVICE_STEPS
+        .iter()
+        .filter(|(k, _)| !(lookup_off && LOOKUP_STEPS.contains(k)) && (has_proxy || *k != "proxy"))
+        .copied()
+        .collect()
+}
+
+struct ProgStep {
+    key: String,
+    label: String,
+    state: &'static str,
+    ms: Option<u64>,
+    note: String,
+    rank: i64,
+    t0: Option<Instant>,
+    pending: i64,
+    ok: bool,
+}
+
+struct ProgInner {
+    t0: Instant,
+    steps: Vec<ProgStep>,
+    total: Option<u64>,
+}
+
+/// 一次检测的进度，给界面的进度卡用：每一步是在等（wait）、在做（run）、做完了（ok，带用了多少毫秒）、
+/// 没连上 / 没查到（fail）、超过时限没等到（timeout），还是这次不用做（skip）。只有步骤名和状态，不带任何检测到的内容。
+/// 一步里可以有几件事同时做（start 几次、finish 几次），全做完才算完，有一件没成就是 fail；
+/// 已经有了结论的步骤，晚到的 finish 不再改它。没人看进度时用 Progress::none()，什么都不记。对应 cam.py 的 CheckProgress。
+#[derive(Clone, Default)]
+pub struct Progress(Option<std::sync::Arc<std::sync::Mutex<ProgInner>>>);
+
+impl Progress {
+    pub fn new() -> Self {
+        Progress(Some(std::sync::Arc::new(std::sync::Mutex::new(
+            ProgInner {
+                t0: Instant::now(),
+                steps: Vec::new(),
+                total: None,
+            },
+        ))))
+    }
+
+    pub fn none() -> Self {
+        Progress(None)
+    }
+
+    /// 真的在记（不是 none 那种空壳）
+    pub fn live(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn with<T>(&self, f: impl FnOnce(&mut ProgInner) -> T) -> Option<T> {
+        let inner = self.0.as_ref()?;
+        let mut g = inner.lock().unwrap_or_else(|e| e.into_inner());
+        Some(f(&mut g))
+    }
+
+    /// 登记一步；已经有了就不动。rank 小的排前面，一样的按登记的先后。
+    pub fn add(&self, key: &str, label: &str, rank: i64) {
+        self.with(|p| {
+            if !p.steps.iter().any(|s| s.key == key) {
+                p.steps.push(ProgStep {
+                    key: key.to_string(),
+                    label: label.to_string(),
+                    state: "wait",
+                    ms: None,
+                    note: String::new(),
+                    rank,
+                    t0: None,
+                    pending: 0,
+                    ok: true,
+                });
+            }
+        });
+    }
+
+    pub fn start(&self, key: &str) {
+        self.with(|p| {
+            if let Some(s) = p.steps.iter_mut().find(|s| s.key == key) {
+                if s.state == "wait" {
+                    s.state = "run";
+                    s.t0 = Some(Instant::now());
+                }
+                if s.state == "run" {
+                    s.pending += 1;
+                }
+            }
+        });
+    }
+
+    /// 这一步里的一件事做完了；ok 为假时 note 写一句是怎么没成的（“没连上”“解析失败”）。
+    pub fn finish(&self, key: &str, ok: bool, note: &str) {
+        self.with(|p| {
+            if let Some(s) = p
+                .steps
+                .iter_mut()
+                .find(|s| s.key == key && s.state == "run")
+            {
+                s.pending -= 1;
+                if !ok {
+                    s.ok = false;
+                    if !note.is_empty() {
+                        s.note = note.to_string();
+                    }
+                }
+                if s.pending <= 0 {
+                    s.state = if s.ok { "ok" } else { "fail" };
+                    s.ms = s.t0.map(|t| t.elapsed().as_millis() as u64);
+                }
+            }
+        });
+    }
+
+    /// 这一步这次不用做（还没开始的才算）。
+    pub fn skip(&self, key: &str, note: &str) {
+        self.with(|p| {
+            if let Some(s) = p
+                .steps
+                .iter_mut()
+                .find(|s| s.key == key && s.state == "wait")
+            {
+                s.state = "skip";
+                s.note = note.to_string();
+            }
+        });
+    }
+
+    /// 到时限了：这几步里还在做的记成没等到。
+    pub fn expire(&self, keys: &[&str]) {
+        self.with(|p| {
+            for s in p.steps.iter_mut() {
+                if s.state == "run" && keys.contains(&s.key.as_str()) {
+                    s.state = "timeout";
+                    s.ms = s.t0.map(|t| t.elapsed().as_millis() as u64);
+                }
+            }
+        });
+    }
+
+    /// 整次检测结束：还在做的记成没等到，没轮到的记成没做。
+    pub fn close(&self) {
+        self.with(|p| {
+            for s in p.steps.iter_mut() {
+                if s.state == "run" {
+                    s.state = "timeout";
+                    s.ms = s.t0.map(|t| t.elapsed().as_millis() as u64);
+                } else if s.state == "wait" {
+                    s.state = "skip";
+                }
+            }
+            if p.total.is_none() {
+                p.total = Some(p.t0.elapsed().as_millis() as u64);
+            }
+        });
+    }
+
+    /// {"steps": [{"key", "label", "state", "ms", "note"}], "done", "ms"}，ms 是到现在（或到结束）一共用了多久。
+    pub fn view(&self) -> Value {
+        self.with(|p| {
+            let mut rows: Vec<&ProgStep> = p.steps.iter().collect();
+            rows.sort_by_key(|s| s.rank); // 稳定排序：rank 一样的保持登记的先后
+            let steps: Vec<Value> = rows
+                .iter()
+                .map(|s| json!({"key": s.key, "label": s.label, "state": s.state, "ms": s.ms, "note": s.note}))
+                .collect();
+            json!({
+                "steps": steps,
+                "done": p.total.is_some(),
+                "ms": p.total.unwrap_or_else(|| p.t0.elapsed().as_millis() as u64)
+            })
+        })
+        .unwrap_or_else(|| json!({"steps": [], "done": false, "ms": 0}))
+    }
+}
+
+fn progress_runs() -> &'static std::sync::Mutex<Vec<(String, Progress)>> {
+    static RUNS: std::sync::OnceLock<std::sync::Mutex<Vec<(String, Progress)>>> =
+        std::sync::OnceLock::new();
+    RUNS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 给一次检测开一份进度记录。run 是界面自己生成的随机串（字母数字、_、-，4–40 位），没给或者不合规矩就不记。
+pub fn progress_open(run: Option<&str>) -> Progress {
+    let Some(run) = run.filter(|r| {
+        (4..=40).contains(&r.len())
+            && r.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }) else {
+        return Progress::none();
+    };
+    let prog = Progress::new();
+    let mut runs = progress_runs().lock().unwrap_or_else(|e| e.into_inner());
+    runs.retain(|(r, _)| r != run);
+    runs.push((run.to_string(), prog.clone()));
+    while runs.len() > PROGRESS_KEEP {
+        runs.remove(0);
+    }
+    prog
+}
+
+/// GET /api/progress?run=…：那次检测现在做到哪了。没有这次（还没开始、太久以前的）返回空的步骤表。
+pub fn progress_view(run: &str) -> Value {
+    let runs = progress_runs().lock().unwrap_or_else(|e| e.into_inner());
+    runs.iter()
+        .find(|(r, _)| r == run)
+        .map(|(_, p)| p.clone())
+        .unwrap_or_default()
+        .view()
+}
+
+/// spawn_job 外面包一层记进度：现在就算开始，做完时按 good(结果) 记成做完还是没成（note 写怎么没成的）。
+fn tracked<T: Send + 'static>(
+    prog: &Progress,
+    key: &'static str,
+    note: &'static str,
+    good: impl Fn(&T) -> bool + Send + 'static,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> mpsc::Receiver<T> {
+    prog.start(key);
+    let prog = prog.clone();
+    spawn_job(move || {
+        let res = f();
+        prog.finish(key, good(&res), note);
+        res
+    })
+}
+
 /// 在另一个线程里做一件事，结果用 wait_job 收。线程不 join（不用 thread::scope）：
 /// 卡在连不上的网络里的那件（域名解析没有超时可设）不拖着调用方。对应 cam.py 的 run_parallel。
 fn spawn_job<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> mpsc::Receiver<T> {
@@ -685,8 +941,21 @@ pub fn exit_trace(timeout: Duration, fallback: bool) -> Option<Value> {
 /// 最多等 6 + META_BUDGET_SECS 秒：第三方那几项到时限还没答的当作查不到，不拖着出口地区。
 /// 与 cam.py 的 detect_region 一致。
 pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
+    detect_region_prog(cfg, prev, &Progress::none())
+}
+
+/// detect_region_with 的本体；prog 给了就把 exit / isp / stack 这几步做到哪了记进去。
+fn detect_region_prog(cfg: &LookupConfig, prev: &Value, prog: &Progress) -> Option<Value> {
     let off = cfg.mode == "off";
-    let mut out = exit_trace(Duration::from_secs(6), !off)?;
+    prog.start("exit");
+    let traced = exit_trace(Duration::from_secs(6), !off);
+    prog.finish("exit", traced.is_some(), "没查到");
+    let Some(mut out) = traced else {
+        for k in ["isp", "stack"] {
+            prog.skip(k, "出口没查到，这一步没做");
+        }
+        return None;
+    };
     for k in META_FIELDS.iter().chain(STACK_FIELDS) {
         out[*k] = Value::Null;
     }
@@ -706,21 +975,51 @@ pub fn detect_region_with(cfg: &LookupConfig, prev: &Value) -> Option<Value> {
     let need_rdap = !reuse && cfg.ipapi_key.is_empty(); // 带 key 的 ipapi.is 自己会给注册国
     let budget = meta_budget();
     let t0 = Instant::now();
-    let j4 = spawn_job(|| trace_only(&cf_trace4_url()));
-    let j6 = spawn_job(|| trace_only(&cf_trace6_url()));
+    // 没有 IPv6 的网络很常见，IPv6 那一问答不上来不算这一步没成
+    let j4 = tracked(
+        prog,
+        "stack",
+        "没查到",
+        |v: &Option<(Option<String>, Option<String>)>| v.is_some(),
+        || trace_only(&cf_trace4_url()),
+    );
+    let j6 = tracked(
+        prog,
+        "stack",
+        "",
+        |_: &Option<(Option<String>, Option<String>)>| true,
+        || trace_only(&cf_trace6_url()),
+    );
+    if reuse {
+        prog.skip("isp", "出口 IP 没变，沿用上次查到的");
+    }
     let jm = (!reuse).then(|| {
         let cfg = cfg.clone();
-        spawn_job(move || fetch_exit_meta(&cfg))
+        tracked(
+            prog,
+            "isp",
+            "没查到",
+            |v: &Option<Value>| v.is_some(),
+            move || fetch_exit_meta(&cfg),
+        )
     });
+    // 注册国常常查不到，不算没成
     let jr = need_rdap.then(|| {
         let ip = ip.clone();
-        spawn_job(move || fetch_ip_registration(&ip, Duration::from_secs(5)))
+        tracked(
+            prog,
+            "isp",
+            "",
+            |_: &Option<String>| true,
+            move || fetch_ip_registration(&ip, Duration::from_secs(5)),
+        )
     });
     let end = t0 + budget;
     let v4 = wait_job(&j4, end).flatten();
     let v6 = wait_job(&j6, end).flatten();
     let meta = jm.and_then(|j| wait_job(&j, end)).flatten();
     let rdap = jr.and_then(|j| wait_job(&j, end)).flatten();
+    prog.expire(&["isp", "stack"]);
     if reuse {
         for k in META_FIELDS {
             out[*k] = prev.get(*k).cloned().unwrap_or(Value::Null);
@@ -2132,12 +2431,12 @@ pub fn region_recheck_due_at(
 /// 本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。最多等 REGION_CHECK_BUDGET 秒。只记录，不干预任何操作。
 /// 与 cam.py 的 check_region 一致。
 pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
-    check_region_with(store, max_age, true)
+    check_region_with(store, max_age, true, &Progress::none())
 }
 
 /// check_region 的本体。做完后评分变了就记一笔（note_risk）；note 为 false 不记：服务检测先调这里、自己还要接着测别的，
-/// 等它全做完一起记，不然一次检测记成两笔。
-fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
+/// 等它全做完一起记，不然一次检测记成两笔。prog 给了就把 REGION_STEPS 这几步做到哪了记进去。
+fn check_region_with(store: &Store, max_age: i64, note: bool, prog: &Progress) -> R<Value> {
     let data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
     let fp = net_fingerprint();
@@ -2149,6 +2448,9 @@ fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
         max_age,
         moved,
     ) {
+        for k in REGION_STEPS {
+            prog.skip(k, "刚测过，沿用上次的结果");
+        }
         if note {
             note_risk(store); // 这次没重测，分数也可能变了（出口变化的观察期过了、切了账号）
         }
@@ -2159,18 +2461,32 @@ fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
     let t0 = Instant::now();
     let within = |secs: u64| t0 + Duration::from_secs(secs.min(REGION_CHECK_BUDGET));
     let jr = {
-        let (cfg, old) = (cfg.clone(), old.clone());
-        spawn_job(move || detect_region_with(&cfg, &old))
+        let (cfg, old, prog) = (cfg.clone(), old.clone(), prog.clone());
+        spawn_job(move || detect_region_prog(&cfg, &old, &prog))
     };
-    let je = spawn_job(local_env);
-    let js = spawn_job(fetch_status_page);
+    let je = tracked(prog, "local", "", |_: &Value| true, local_env);
+    let js = tracked(
+        prog,
+        "status",
+        "没查到",
+        |v: &Option<Value>| v.is_some(),
+        fetch_status_page,
+    );
     let jn = spawn_job(net_fingerprint);
     let jp = {
         let data = data.clone();
         spawn_job(move || proxies_back(&data))
     };
     // 明文网页有没有被改：要访问一个 Anthropic 以外的地址，“外部 IP 查询”关掉时不做
-    let jh = (cfg.mode != "off").then(|| spawn_job(plain_http_check));
+    let jh = (cfg.mode != "off").then(|| {
+        tracked(
+            prog,
+            "plain",
+            "没连上",
+            |v: &Option<Value>| v.is_some(),
+            plain_http_check,
+        )
+    });
     let r = wait_job(&jr, within(REGION_CHECK_BUDGET))
         .flatten()
         .unwrap_or_else(|| json!({}));
@@ -2182,6 +2498,7 @@ fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
         .as_ref()
         .and_then(|j| wait_job(j, within(PLAIN_HTTP_SECS + 1)))
         .flatten();
+    prog.expire(REGION_STEPS);
     let _g = store.lock()?;
     let mut data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
@@ -3920,6 +4237,11 @@ pub fn tls_issuer_item(host: &str, issuer: &Value, verified: bool) -> Value {
 /// 返回 [{kind, level, text, advice}]，级别为 ok / bad / warn / info，第一项是总体结论。不包含任何密钥。
 /// 会顺便刷新界面常显的缓存和账号的地区记录。
 pub fn service_check(store: &Store) -> Vec<Value> {
+    service_check_prog(store, &Progress::none())
+}
+
+/// service_check 的本体；prog 给了就把每一步做到哪了记进去（界面的进度卡），结束时不替调用方 close。
+pub fn service_check_prog(store: &Store, prog: &Progress) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut add = |kind: &str, level: &str, text: String, advice: &str| {
         let mut item = json!({"kind": kind, "level": level, "text": text, "advice": advice});
@@ -3955,66 +4277,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         .ok()
         .and_then(|(c, _)| c)
         .and_then(|c| s(&oauth_block(&c), "accessToken").map(String::from));
-    // 解析域名、出口地区、api.anthropic.com、claude.ai 这几件事同时做，各有各的时限：哪件卡住了都不拖着别的
-    let t0 = Instant::now();
-    let within = |secs: u64| t0 + Duration::from_secs(secs);
-    let j_dns: Vec<_> = hosts
-        .iter()
-        .map(|h| {
-            let h = h.clone();
-            spawn_job(move || {
-                let t = Instant::now();
-                (resolve_host(&h), t.elapsed().as_millis())
-            })
-        })
-        .collect();
-    let j_region = {
-        let store = Store {
-            root: store.root.clone(),
-        };
-        // 顺便更新界面常显的缓存和账号的地区记录
-        // 评分的变化等下面全测完一起记
-        spawn_job(move || check_region_with(&store, 0, false).is_ok())
-    };
-    let j_api = {
-        let at = at.clone();
-        spawn_job(move || {
-            let t0 = Instant::now();
-            let (st, body) = match &at {
-                Some(t) => get_oauth(t, "/api/oauth/profile", SERVICE_PROBE_SECS),
-                None => http_json_timeout(
-                    "GET",
-                    &format!("{}/api/oauth/usage", api_base()),
-                    &[],
-                    None,
-                    SERVICE_PROBE_SECS,
-                ),
-            };
-            (st, body, t0.elapsed().as_millis())
-        })
-    };
-    let j_web = spawn_job(|| {
-        let t0 = Instant::now();
-        let (code, body) = get_with_in(
-            &format!("{}/api/organizations", web_base()),
-            &[("Cookie".to_string(), "sessionKey=".to_string())],
-            Duration::from_secs(SERVICE_PROBE_SECS),
-        );
-        (code, body, t0.elapsed().as_millis())
-    });
-    // 续登录的地址、证书、本机设的代理也同时测
-    let auth_urls = token_urls();
-    let j_auth: Vec<_> = auth_urls
-        .iter()
-        .map(|u| {
-            let u = u.clone();
-            spawn_job(move || {
-                let t0 = Instant::now();
-                let (st, txt) = http_text_in(&u, Duration::from_secs(SERVICE_PROBE_SECS));
-                (st, txt, t0.elapsed().as_millis())
-            })
-        })
-        .collect();
+    // 本机设的代理（环境变量和系统设置里的）：下面看它在不在运行，也决定进度卡上有没有“代理”那一步
     let mut proxy_entries = proxies.clone();
     proxy_entries.extend(
         system_proxy()
@@ -4022,11 +4285,107 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             .map(|p| ("系统设置".to_string(), p)),
     );
     let proxy_eps = proxy_endpoints(&proxy_entries);
+    let lookup_off = ip_lookup_config(Some(store)).mode == "off";
+    for (k, label) in service_steps(lookup_off, !proxy_eps.is_empty()) {
+        prog.add(k, label, 10);
+    }
+    // 解析域名、出口地区、api.anthropic.com、claude.ai 这几件事同时做，各有各的时限：哪件卡住了都不拖着别的
+    let t0 = Instant::now();
+    let within = |secs: u64| t0 + Duration::from_secs(secs);
+    let j_dns: Vec<_> = hosts
+        .iter()
+        .map(|h| {
+            let h = h.clone();
+            tracked(
+                prog,
+                "dns",
+                "解析失败",
+                |v: &(Result<Vec<String>, String>, u128)| matches!(&v.0, Ok(ips) if !ips.is_empty()),
+                move || {
+                    let t = Instant::now();
+                    (resolve_host(&h), t.elapsed().as_millis())
+                },
+            )
+        })
+        .collect();
+    let j_region = {
+        let store = Store {
+            root: store.root.clone(),
+        };
+        let prog = prog.clone();
+        // 顺便更新界面常显的缓存和账号的地区记录
+        // 评分的变化等下面全测完一起记
+        spawn_job(move || check_region_with(&store, 0, false, &prog).is_ok())
+    };
+    // 有回应（哪怕是 4xx / 5xx）就算这一步做完了，结果在下面的清单里说
+    let j_api = {
+        let at = at.clone();
+        tracked(
+            prog,
+            "api",
+            "没连上",
+            |v: &(u16, Value, u128)| v.0 != 0,
+            move || {
+                let t0 = Instant::now();
+                let (st, body) = match &at {
+                    Some(t) => get_oauth(t, "/api/oauth/profile", SERVICE_PROBE_SECS),
+                    None => http_json_timeout(
+                        "GET",
+                        &format!("{}/api/oauth/usage", api_base()),
+                        &[],
+                        None,
+                        SERVICE_PROBE_SECS,
+                    ),
+                };
+                (st, body, t0.elapsed().as_millis())
+            },
+        )
+    };
+    let j_web = tracked(
+        prog,
+        "web",
+        "没连上",
+        |v: &(u16, Value, u128)| v.0 != 0,
+        || {
+            let t0 = Instant::now();
+            let (code, body) = get_with_in(
+                &format!("{}/api/organizations", web_base()),
+                &[("Cookie".to_string(), "sessionKey=".to_string())],
+                Duration::from_secs(SERVICE_PROBE_SECS),
+            );
+            (code, body, t0.elapsed().as_millis())
+        },
+    );
+    // 续登录的地址、证书、本机设的代理也同时测
+    let auth_urls = token_urls();
+    let j_auth: Vec<_> = auth_urls
+        .iter()
+        .map(|u| {
+            let u = u.clone();
+            tracked(
+                prog,
+                "auth",
+                "没连上",
+                |v: &(u16, String, u128)| v.0 != 0,
+                move || {
+                    let t0 = Instant::now();
+                    let (st, txt) = http_text_in(&u, Duration::from_secs(SERVICE_PROBE_SECS));
+                    (st, txt, t0.elapsed().as_millis())
+                },
+            )
+        })
+        .collect();
     let j_proxy: Vec<_> = proxy_eps
         .iter()
         .map(|(_, h, p)| {
             let (h, p) = (h.clone(), *p);
-            spawn_job(move || port_open(&h, p, Duration::from_secs(PROXY_PROBE_SECS)))
+            tracked(
+                prog,
+                "proxy",
+                "连不上",
+                |v: &String| v.is_empty(),
+                move || port_open(&h, p, Duration::from_secs(PROXY_PROBE_SECS)),
+            )
         })
         .collect();
     // 没走代理时再直连一下这两个地址的端口（只建 TCP 连接）：连不上的时候好说清楚卡在解析、TCP、TLS 还是等回应（stuck_stage）
@@ -4047,14 +4406,18 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         .collect();
     let j_tls = {
         let h = api_host.clone();
-        let https = api_base().starts_with("https://");
-        spawn_job(move || {
-            if https {
-                peer_issuer(&h, 443, Duration::from_secs(TLS_PROBE_SECS))
-            } else {
-                None
-            }
-        })
+        if api_base().starts_with("https://") {
+            tracked(
+                prog,
+                "tls",
+                "没取到证书",
+                |v: &Option<(Value, bool)>| v.is_some(),
+                move || peer_issuer(&h, 443, Duration::from_secs(TLS_PROBE_SECS)),
+            )
+        } else {
+            prog.skip("tls", "不是 HTTPS 地址");
+            spawn_job(|| None)
+        }
     };
     // 先等时限最长的那件（见 wait_job）
     let _ = wait_job(&j_region, within(REGION_CHECK_BUDGET + 2));
@@ -4086,6 +4449,18 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             })
         })
         .collect();
+    let dns_got: Vec<_> = j_dns
+        .iter()
+        .map(|j| wait_job(j, within(SERVICE_DNS_SECS)))
+        .collect();
+    // 该等的都等过了：还没回来的记成没等到，接下来是整理结果
+    let waited: Vec<&str> = SERVICE_STEPS
+        .iter()
+        .map(|(k, _)| *k)
+        .filter(|k| *k != "score")
+        .collect();
+    prog.expire(&waited);
+    prog.start("score");
     let mut dns_ok: Vec<bool> = Vec::new(); // 和 hosts 一一对应：本机解析得出来没有
     let dns_advice = if proxies.is_empty() {
         "检查本机 DNS 或代理设置"
@@ -4095,9 +4470,8 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     // 本机解析不了、但这个域名实际连得上（请求走的是代理，域名由代理解析）：不是问题，只说明一下
     let api_up = api.as_ref().is_some_and(|a| a.0 != 0);
     let web_up = web.as_ref().is_some_and(|w| w.0 != 0);
-    for (host, job) in hosts.iter().zip(&j_dns) {
+    for (host, got) in hosts.iter().zip(dns_got) {
         let up = (*host == api_host && api_up) || (*host == web_host && web_up);
-        let got = wait_job(job, within(SERVICE_DNS_SECS));
         dns_ok.push(matches!(&got, Some((Ok(ips), _)) if !ips.is_empty()));
         let why = match got {
             Some((Ok(ips), ms)) if !ips.is_empty() => {
@@ -4562,6 +4936,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             let _ = store.save(&mut d);
         }
     }
+    prog.finish("score", true, "");
     out
 }
 

@@ -518,6 +518,34 @@ details.src[open] summary::before { content: "▾"; }
 .score-ring.none .rf { stroke: transparent; } .score-ring.none text { fill: var(--muted); } .score-ring.none .lab { fill: var(--muted); }
 /* 完整检测 / 全面体检：每组一张卡，每条前面一个“正常 / 注意 / 异常 / 说明”的小标 */
 .check-groups { margin-top: 12px; }
+/* 检测进度：点了“重新检测”“全面体检”后出现在环境页顶上，每一步一行；做完收成结果上面的一行，点开还能看 */
+.pg { margin-bottom: 12px; }
+.pg h3 { margin-bottom: 10px; }
+.pg h3 .pg-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.pg-bar { height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-bottom: 12px; }
+.pg-bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width .25s ease; }
+.pg-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 6px 22px; font-size: 13px; }
+.pg-step { display: flex; align-items: center; gap: 8px; min-width: 0; line-height: 1.5; }
+.pg-ico { flex: none; width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; display: grid; place-items: center; font-size: 9px; font-weight: 700; line-height: 1; }
+.pg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-st { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pg-step.wait .pg-ico { border: 1.5px solid var(--line); }
+.pg-step.wait .pg-name { color: var(--muted); }
+.pg-step.run .pg-ico { border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: pg-spin .8s linear infinite; }
+.pg-step.run .pg-st { color: var(--accent); }
+.pg-step.ok .pg-ico { background: var(--live-soft); color: var(--live); }
+.pg-step.ok .pg-ico::before { content: "✓"; }
+.pg-step.fail .pg-ico, .pg-step.timeout .pg-ico { background: var(--warn-soft); color: var(--warn); }
+.pg-step.fail .pg-ico::before, .pg-step.timeout .pg-ico::before { content: "!"; }
+.pg-step.fail .pg-st, .pg-step.timeout .pg-st { color: var(--warn); }
+.pg-step.skip .pg-ico::before { content: "–"; color: var(--muted); }
+.pg-step.skip .pg-name { color: var(--muted); }
+@keyframes pg-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pg-step.run .pg-ico { animation: none; } .pg-bar i { transition: none; } }
+details.pg-kept { margin-top: 12px; font-size: 13px; }
+details.pg-kept > summary { cursor: pointer; color: var(--muted); }
+details.pg-kept[open] > summary { margin-bottom: 10px; }
+@media (max-width: 760px) { .pg-steps { grid-template-columns: 1fr; } .pg-step { align-items: flex-start; } .pg-ico { margin-top: 3px; } .pg-name { white-space: normal; } }
 .check-col { display: grid; gap: 12px; align-content: start; min-width: 0; }  /* 检测结果的一列：里面的卡各按自己的高度 */
 .checks { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 7px; }
 .checks li { display: flex; gap: 10px; align-items: flex-start; overflow-wrap: anywhere; line-height: 1.45; }

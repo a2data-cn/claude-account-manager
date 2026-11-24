@@ -15,6 +15,7 @@ use cam_engine::health::{
     parse_airport_json, parse_netsh_wlan, parse_nmcli_wifi, region_view, wifi_security_class,
 };
 use cam_engine::health::{parse_windows_env, parse_windows_processes};
+use cam_engine::health::{progress_open, service_steps, Progress};
 use cam_engine::local_report::{report_event, usage_report};
 use cam_engine::pace::{note_usage_samples, pace_series, usage_pace};
 use cam_engine::rules::{match_time_rule, validate};
@@ -602,6 +603,73 @@ fn hosts_cases() {
         );
         assert_eq!(risk_score(&items)["score"], want["score"], "{}", c["name"]);
     }
+}
+
+/// 检测进度（界面的进度卡）：“重新检测”有哪几步、一份进度按顺序操作后是什么样、认哪些 run。
+#[test]
+fn progress_cases() {
+    let fx = fixture("progress.json");
+    for c in cases(&fx, "steps") {
+        let got: Vec<Value> = service_steps(
+            c["lookup_off"].as_bool().unwrap(),
+            c["has_proxy"].as_bool().unwrap(),
+        )
+        .into_iter()
+        .map(|(k, label)| json!([k, label]))
+        .collect();
+        assert_eq!(
+            json!(got),
+            c["want"],
+            "steps {} {}",
+            c["lookup_off"],
+            c["has_proxy"]
+        );
+    }
+    let text = |v: &Value| v.as_str().unwrap().to_string();
+    for c in cases(&fx, "machine") {
+        let p = Progress::new();
+        for op in c["ops"].as_array().unwrap() {
+            match op[0].as_str().unwrap() {
+                "add" => p.add(&text(&op[1]), &text(&op[2]), op[3].as_i64().unwrap()),
+                "start" => p.start(&text(&op[1])),
+                "finish" => p.finish(&text(&op[1]), op[2].as_bool().unwrap(), &text(&op[3])),
+                "skip" => p.skip(&text(&op[1]), &text(&op[2])),
+                "expire" => {
+                    let keys: Vec<String> = op[1].as_array().unwrap().iter().map(text).collect();
+                    p.expire(&keys.iter().map(String::as_str).collect::<Vec<_>>())
+                }
+                "close" => p.close(),
+                other => panic!("没见过的操作 {other}"),
+            }
+        }
+        let v = p.view();
+        let got: Vec<Value> = v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| json!({"key": s["key"], "label": s["label"], "state": s["state"], "note": s["note"]}))
+            .collect();
+        assert_eq!(json!(got), c["want"], "{}", c["name"]);
+        assert_eq!(v["done"], c["done"], "{}", c["name"]);
+        // 做完的、没等到的步骤带用时，其它的没有
+        for s in v["steps"].as_array().unwrap() {
+            let timed = matches!(s["state"].as_str(), Some("ok" | "fail" | "timeout"));
+            assert_eq!(s["ms"].is_u64(), timed, "{}：{}", c["name"], s);
+        }
+    }
+    for c in cases(&fx, "runs") {
+        assert_eq!(
+            progress_open(c["run"].as_str()).live(),
+            c["ok"].as_bool().unwrap(),
+            "run {}",
+            c["run"]
+        );
+    }
+    // 没人看进度时的空壳：什么都不记，view 是空的
+    let none = Progress::none();
+    none.add("a", "甲", 0);
+    none.start("a");
+    assert_eq!(none.view(), json!({"steps": [], "done": false, "ms": 0}));
 }
 
 /// 连着的 Wi-Fi 加没加密：三个系统各自的输出怎么读、加密方式怎么归类、开放网络和 WEP 在环境里怎么提醒。

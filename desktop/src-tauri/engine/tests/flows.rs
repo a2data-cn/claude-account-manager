@@ -1938,6 +1938,99 @@ fn by_kind<'a>(items: &'a [Value], kind: &str) -> Option<&'a Value> {
     items.iter().find(|i| i["kind"] == kind)
 }
 
+/// “重新检测”的进度：带着 run 检测，做完后 /api/progress 里每一步都有了结论；关了外部 IP 查询就没有问第三方的那几步。
+#[test]
+fn service_check_reports_progress() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    let steps_of = |run: &str| {
+        let (code, v) = route(
+            &store,
+            "GET",
+            &format!("/api/progress?run={run}"),
+            &json!({}),
+        );
+        assert_eq!(code, 200);
+        v
+    };
+    // 没有这次检测（还没开始、太久以前的）：空的步骤表
+    assert_eq!(
+        steps_of("nothing-yet"),
+        json!({"steps": [], "done": false, "ms": 0})
+    );
+    let (code, res) = route(
+        &store,
+        "GET",
+        "/api/service-check?run=flow-run-1",
+        &json!({}),
+    );
+    assert_eq!(code, 200);
+    assert!(res["items"].as_array().is_some_and(|a| !a.is_empty()));
+    let v = steps_of("flow-run-1");
+    assert_eq!(v["done"], true);
+    let state: Vec<(String, String)> = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["key"].as_str().unwrap().into(),
+                s["state"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let want = [
+        ("local", "ok"),
+        ("dns", "ok"),
+        ("exit", "ok"),
+        ("isp", "ok"),
+        ("stack", "ok"),
+        ("plain", "ok"),
+        ("api", "ok"),
+        ("web", "ok"),
+        ("auth", "ok"),
+        ("tls", "skip"), // 测试里的假接口不是 HTTPS
+        ("status", "ok"),
+        ("score", "ok"),
+    ];
+    assert_eq!(
+        state,
+        want.map(|(k, st)| (k.to_string(), st.to_string())).to_vec()
+    );
+    // 步骤里只有名字和状态，不带检测到的内容
+    for s in v["steps"].as_array().unwrap() {
+        let mut keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["key", "label", "ms", "note", "state"]);
+    }
+    // 不带 run、run 不合规矩：照常检测，只是不记进度
+    let (code, _) = route(&store, "GET", "/api/service-check", &json!({}));
+    assert_eq!(code, 200);
+    let (code, _) = route(&store, "GET", "/api/service-check?run=a b", &json!({}));
+    assert_eq!(code, 200);
+    assert_eq!(steps_of("a b")["steps"], json!([]));
+    // 关掉外部 IP 查询：没有问第三方的那几步
+    save_privacy(&store, &json!({"ip_lookup": "off"})).unwrap();
+    route(
+        &store,
+        "GET",
+        "/api/service-check?run=flow-run-2",
+        &json!({}),
+    );
+    let v = steps_of("flow-run-2");
+    let keys: Vec<&str> = v["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        keys,
+        ["local", "dns", "exit", "api", "web", "auth", "tls", "status", "score"]
+    );
+}
+
 /// 明文网页有没有被中途改动：被带去登录页、被塞了内容就标“注意”、扣 10 分；原样就没有这一条；“外部 IP 查询”关掉时不测。
 #[test]
 fn plain_http_tampering_is_flagged() {

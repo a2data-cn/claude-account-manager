@@ -364,3 +364,18 @@ export interface ServerInfo {
 }
 
 export type WindowKey = "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet";
+
+/** 检测进度里的一步（GET /api/progress?run=…）：只有步骤名和状态，不带检测到的内容 */
+export interface CheckStep {
+  key: string;
+  label: string;
+  /** wait 在等 / run 在做 / ok 做完 / fail 没连上、没查到 / timeout 超过时限没等到 / skip 这次不用做 */
+  state: "wait" | "run" | "ok" | "fail" | "timeout" | "skip";
+  ms: number | null;
+  note: string;
+}
+export interface CheckProgress {
+  steps: CheckStep[];
+  done: boolean;
+  ms: number;
+}

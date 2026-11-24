@@ -588,6 +588,11 @@ function Set-Menu($items) {
   foreach ($o in $old) { $o.Dispose() }
   Add-MenuItems $script:menu.Items $items
   [void]$script:menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+  $again = New-Object System.Windows.Forms.ToolStripMenuItem("重启托盘小工具")
+  $again.ToolTipText = "退出再重新打开：显示不对、点了没反应时用"
+  $again.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
+  $again.Add_Click({ try { Restart-Tray } catch { Add-Note "托盘小工具没能重启" $_.Exception.Message } })
+  [void]$script:menu.Items.Add($again)
   $quit = New-Object System.Windows.Forms.ToolStripMenuItem("退出托盘小工具")
   $quit.ToolTipText = "只退出这一次，下次登录 Windows 时还会自动运行"
   $quit.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
@@ -602,11 +607,8 @@ function Stop-Tray {
   [System.Windows.Forms.Application]::Exit()
 }
 
-# 这个文件被 cam update 换成新版本后，自己重启一次。重启了返回 $true
-function Restart-IfUpdated {
-  # 文件暂时不在（cam update 正在替换）就当没变；Get-Item 找不到文件默认只是提醒、进不了 catch，要加 -ErrorAction Stop
-  try { $t = (Get-Item -LiteralPath $Self -ErrorAction Stop).LastWriteTimeUtc } catch { return $false }
-  if ($t -eq $SelfTime) { return $false }
+# 自己退出、再起一个新的：菜单里的“重启托盘小工具”，还有这个文件更新以后。先放开“只许一个在运行”的锁，新的那个才起得来
+function Restart-Tray {
   $Mutex.ReleaseMutex()
   $Mutex.Dispose()
   $conhost = Join-Path $env:WINDIR "System32\conhost.exe"
@@ -614,6 +616,14 @@ function Restart-IfUpdated {
   Start-Process -FilePath $conhost -WindowStyle Hidden -ArgumentList @(
     "--headless", (ConvertTo-Arg $ps), "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", (ConvertTo-Arg $Self))
   Stop-Tray
+}
+
+# 这个文件被 cam update 换成新版本后，自己重启一次。重启了返回 $true
+function Restart-IfUpdated {
+  # 文件暂时不在（cam update 正在替换）就当没变；Get-Item 找不到文件默认只是提醒、进不了 catch，要加 -ErrorAction Stop
+  try { $t = (Get-Item -LiteralPath $Self -ErrorAction Stop).LastWriteTimeUtc } catch { return $false }
+  if ($t -eq $SelfTime) { return $false }
+  Restart-Tray
   return $true
 }
 

@@ -1,0 +1,886 @@
+{
+ "_说明": "检测进度（界面的进度卡）：两个版本一致。steps 是 service_steps(外部 IP 查询关着没有, 设了代理没有) 应该给出的步骤表 [键, 名字]；machine 是按 ops 依次操作一份进度后 view 里 steps 应该的样子（不比用时 ms）和 done；ops 的写法：[\"add\", 键, 名字, rank]、[\"start\", 键]、[\"finish\", 键, 成没成, 怎么没成的]、[\"skip\", 键, 原因]、[\"expire\", [键…]]、[\"close\"]；runs 是 progress_open 认不认这个 run（界面自己生成的随机串：字母、数字、_、-，4–40 位）。",
+ "steps": [
+  {
+   "lookup_off": false,
+   "has_proxy": false,
+   "want": [
+    [
+     "local",
+     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+    ],
+    [
+     "dns",
+     "解析 Claude 的域名"
+    ],
+    [
+     "exit",
+     "出口 IP 和地区"
+    ],
+    [
+     "isp",
+     "运营商、IP 类型、注册国"
+    ],
+    [
+     "stack",
+     "IPv4 / IPv6 出口"
+    ],
+    [
+     "plain",
+     "没加密的网页有没有被改动"
+    ],
+    [
+     "api",
+     "连接 api.anthropic.com"
+    ],
+    [
+     "web",
+     "连接 claude.ai"
+    ],
+    [
+     "auth",
+     "续登录的地址"
+    ],
+    [
+     "tls",
+     "HTTPS 证书是谁签的"
+    ],
+    [
+     "status",
+     "Anthropic 官方状态页"
+    ],
+    [
+     "score",
+     "汇总结果，算环境评分"
+    ]
+   ]
+  },
+  {
+   "lookup_off": false,
+   "has_proxy": true,
+   "want": [
+    [
+     "local",
+     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+    ],
+    [
+     "dns",
+     "解析 Claude 的域名"
+    ],
+    [
+     "exit",
+     "出口 IP 和地区"
+    ],
+    [
+     "isp",
+     "运营商、IP 类型、注册国"
+    ],
+    [
+     "stack",
+     "IPv4 / IPv6 出口"
+    ],
+    [
+     "plain",
+     "没加密的网页有没有被改动"
+    ],
+    [
+     "api",
+     "连接 api.anthropic.com"
+    ],
+    [
+     "web",
+     "连接 claude.ai"
+    ],
+    [
+     "auth",
+     "续登录的地址"
+    ],
+    [
+     "tls",
+     "HTTPS 证书是谁签的"
+    ],
+    [
+     "proxy",
+     "本机设的代理在不在运行"
+    ],
+    [
+     "status",
+     "Anthropic 官方状态页"
+    ],
+    [
+     "score",
+     "汇总结果，算环境评分"
+    ]
+   ]
+  },
+  {
+   "lookup_off": true,
+   "has_proxy": false,
+   "want": [
+    [
+     "local",
+     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+    ],
+    [
+     "dns",
+     "解析 Claude 的域名"
+    ],
+    [
+     "exit",
+     "出口 IP 和地区"
+    ],
+    [
+     "api",
+     "连接 api.anthropic.com"
+    ],
+    [
+     "web",
+     "连接 claude.ai"
+    ],
+    [
+     "auth",
+     "续登录的地址"
+    ],
+    [
+     "tls",
+     "HTTPS 证书是谁签的"
+    ],
+    [
+     "status",
+     "Anthropic 官方状态页"
+    ],
+    [
+     "score",
+     "汇总结果，算环境评分"
+    ]
+   ]
+  },
+  {
+   "lookup_off": true,
+   "has_proxy": true,
+   "want": [
+    [
+     "local",
+     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+    ],
+    [
+     "dns",
+     "解析 Claude 的域名"
+    ],
+    [
+     "exit",
+     "出口 IP 和地区"
+    ],
+    [
+     "api",
+     "连接 api.anthropic.com"
+    ],
+    [
+     "web",
+     "连接 claude.ai"
+    ],
+    [
+     "auth",
+     "续登录的地址"
+    ],
+    [
+     "tls",
+     "HTTPS 证书是谁签的"
+    ],
+    [
+     "proxy",
+     "本机设的代理在不在运行"
+    ],
+    [
+     "status",
+     "Anthropic 官方状态页"
+    ],
+    [
+     "score",
+     "汇总结果，算环境评分"
+    ]
+   ]
+  }
+ ],
+ "machine": [
+  {
+   "name": "登记了还没开始：都在等",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "add",
+     "b",
+     "乙",
+     0
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "wait",
+     "note": ""
+    },
+    {
+     "key": "b",
+     "label": "乙",
+     "state": "wait",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "开始了一步，另一步还在等",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "add",
+     "b",
+     "乙",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "run",
+     "note": ""
+    },
+    {
+     "key": "b",
+     "label": "乙",
+     "state": "wait",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "做完一步",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "ok",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "一步里两件事：做完一件还算在做",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "run",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "一步里两件事：都做完才算完",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "ok",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "一步里两件事：有一件没成就是没成，带上怎么没成的",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     false,
+     "没连上"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "fail",
+     "note": "没连上"
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "没成但没写原因：note 是空的",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     false,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "fail",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "到时限还没回来：没等到；之后才回来的不再改它",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "expire",
+     [
+      "a"
+     ]
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "timeout",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "到时限时已经做完的、还没开始的都不动",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "add",
+     "b",
+     "乙",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ],
+    [
+     "expire",
+     [
+      "a",
+      "b"
+     ]
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "ok",
+     "note": ""
+    },
+    {
+     "key": "b",
+     "label": "乙",
+     "state": "wait",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "这次不用做：带上原因",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "skip",
+     "a",
+     "刚测过，沿用上次的结果"
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "skip",
+     "note": "刚测过，沿用上次的结果"
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "已经开始的不能再算成不用做",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "skip",
+     "a",
+     "不用做"
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "run",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "不用做的那步之后再开始、再结束都不算数",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "skip",
+     "a",
+     "不用做"
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "skip",
+     "note": "不用做"
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "没登记的步骤：开始、结束、跳过都当没发生",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "x"
+    ],
+    [
+     "finish",
+     "x",
+     true,
+     ""
+    ],
+    [
+     "skip",
+     "x",
+     ""
+    ],
+    [
+     "expire",
+     [
+      "x"
+     ]
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "wait",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "同一个键登记两次：只留第一次的",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "add",
+     "a",
+     "又一个",
+     5
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "wait",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "rank 小的排前面，一样的按登记的先后",
+   "ops": [
+    [
+     "add",
+     "c",
+     "丙",
+     30
+    ],
+    [
+     "add",
+     "a",
+     "甲",
+     10
+    ],
+    [
+     "add",
+     "b",
+     "乙",
+     10
+    ],
+    [
+     "add",
+     "z",
+     "最前",
+     0
+    ]
+   ],
+   "want": [
+    {
+     "key": "z",
+     "label": "最前",
+     "state": "wait",
+     "note": ""
+    },
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "wait",
+     "note": ""
+    },
+    {
+     "key": "b",
+     "label": "乙",
+     "state": "wait",
+     "note": ""
+    },
+    {
+     "key": "c",
+     "label": "丙",
+     "state": "wait",
+     "note": ""
+    }
+   ],
+   "done": false
+  },
+  {
+   "name": "整次结束：还在做的记成没等到，没轮到的记成没做，做完的不动",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "add",
+     "b",
+     "乙",
+     0
+    ],
+    [
+     "add",
+     "c",
+     "丙",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "start",
+     "b"
+    ],
+    [
+     "finish",
+     "b",
+     true,
+     ""
+    ],
+    [
+     "close"
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "timeout",
+     "note": ""
+    },
+    {
+     "key": "b",
+     "label": "乙",
+     "state": "ok",
+     "note": ""
+    },
+    {
+     "key": "c",
+     "label": "丙",
+     "state": "skip",
+     "note": ""
+    }
+   ],
+   "done": true
+  },
+  {
+   "name": "结束以后再来的都不算数",
+   "ops": [
+    [
+     "add",
+     "a",
+     "甲",
+     0
+    ],
+    [
+     "start",
+     "a"
+    ],
+    [
+     "close"
+    ],
+    [
+     "finish",
+     "a",
+     true,
+     ""
+    ],
+    [
+     "start",
+     "a"
+    ]
+   ],
+   "want": [
+    {
+     "key": "a",
+     "label": "甲",
+     "state": "timeout",
+     "note": ""
+    }
+   ],
+   "done": true
+  }
+ ],
+ "runs": [
+  {
+   "run": "abcd",
+   "ok": true
+  },
+  {
+   "run": "a1B2-c3_D4",
+   "ok": true
+  },
+  {
+   "run": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "ok": true
+  },
+  {
+   "run": "abc",
+   "ok": false
+  },
+  {
+   "run": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "ok": false
+  },
+  {
+   "run": "",
+   "ok": false
+  },
+  {
+   "run": "has space",
+   "ok": false
+  },
+  {
+   "run": "汉字汉字",
+   "ok": false
+  },
+  {
+   "run": "a/b/c/d",
+   "ok": false
+  },
+  {
+   "run": "abcd?x=1",
+   "ok": false
+  }
+ ]
+}

@@ -866,7 +866,19 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
             cancel_pending_switch(store)?;
             Ok(public_state(store, &store.load()?))
         }
-        ("GET", ["service-check"]) => Ok(json!({"items": super::health::service_check(store)})),
+        // ?run=随机串：界面拿它到 /api/progress 问做到哪一步了
+        ("GET", ["service-check"]) => {
+            let run = query.split('&').find_map(|kv| kv.strip_prefix("run="));
+            let prog = super::health::progress_open(run);
+            let items = super::health::service_check_prog(store, &prog);
+            prog.close();
+            Ok(json!({"items": items}))
+        }
+        // “重新检测”做到哪一步了：只有步骤名和状态
+        ("GET", ["progress"]) => {
+            let run = query.split('&').find_map(|kv| kv.strip_prefix("run="));
+            Ok(super::health::progress_view(run.unwrap_or("")))
+        }
         ("POST", ["accounts", id, "open"]) => {
             let d = store.load()?;
             let i = find_index(&d, id)?;

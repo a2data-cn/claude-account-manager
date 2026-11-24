@@ -2525,6 +2525,23 @@ class CamTest(unittest.TestCase):
                 store.save(data)
             self.assertEqual(self.cam.menubar_settings(store)["icon"], "badge")
 
+    def test_windows_tray_menu_can_restart_itself(self):
+        """托盘右键菜单最下面有“重启托盘小工具”和“退出托盘小工具”。重启：先放开“只许一个在运行”的锁、起一个新的，再退出自己；
+        文件更新后自己重启走的是同一条路。文件存成带 BOM 的 UTF-8（Windows PowerShell 5.1 读不带 BOM 的会把中文读乱）。"""
+        with open(os.path.join(HERE, "..", "extras", "windows-tray", "cam-tray.ps1"), "rb") as f:
+            raw = f.read()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        text = raw.decode("utf-8-sig")
+        self.assertLess(text.index('ToolStripMenuItem("重启托盘小工具")'), text.index('ToolStripMenuItem("退出托盘小工具")'))
+        self.assertIn("$again.Add_Click({ try { Restart-Tray } catch {", text)
+        restart = text[text.index("function Restart-Tray {"):text.index("function Restart-IfUpdated {")]
+        self.assertLess(restart.index("$Mutex.ReleaseMutex()"), restart.index("Start-Process"))
+        self.assertLess(restart.index("Start-Process"), restart.index("Stop-Tray"))
+        updated = text[text.index("function Restart-IfUpdated {"):]
+        updated = updated[:updated.index("\n}\n")]
+        self.assertIn("Restart-Tray", updated)
+        self.assertNotIn("Start-Process", updated)
+
     @unittest.skipUnless(os.name == "nt", "只在 Windows 上用 PowerShell 真跑")
     def test_windows_tray_powershell_draws_icons(self):
         """PowerShell 脚本的语法（install.ps1、cam-tray.ps1），再把 cam-tray.ps1 里画图标的几个函数取出来真跑一遍：
@@ -5738,6 +5755,68 @@ foreach ($dark in @($false, $true)) {{
         cam.check_region(store, max_age=0)  # 测试里默认：没连 Wi-Fi
         self.assertIsNone(cam.public_state(store, self.data())["region"]["wifi"])
 
+    def test_service_check_reports_progress(self):
+        """“重新检测”的进度：带着 run 检测时，/api/progress 说得出每一步在做还是做完了；做完后每一步都有结论。
+        只有步骤名和状态，不带检测到的内容；关了外部 IP 查询就没有问第三方的那几步。"""
+        cam = self.cam
+        self._two_accounts()
+        store = cam.Store()
+        token = cam.server_token(store)
+        srv = cam.ThreadingServer(("127.0.0.1", 0), cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def get(path):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", headers={"Authorization": f"Bearer {token}"})
+            with opener.open(req, timeout=60) as resp:
+                return json.load(resp)
+
+        def states(run):
+            v = get(f"/api/progress?run={run}")
+            return v, {s["key"]: s["state"] for s in v["steps"]}
+
+        # 没有这次检测（还没开始、太久以前的）：空的步骤表
+        self.assertEqual(get("/api/progress?run=nothing-yet"), {"steps": [], "done": False, "ms": 0})
+        # 官方状态页卡住：别的步骤都做完了，它还在做，汇总评分那一步还没轮到
+        MockAnthropic.slow = {"/summary.json": 30}
+        res = {}
+        th = threading.Thread(target=lambda: res.update(v=get("/api/service-check?run=flow-run-1")), daemon=True)
+        th.start()
+        quick = ("local", "dns", "exit", "isp", "stack", "plain", "api", "web", "auth")
+        v, st = {}, {}
+        end = time.time() + 15
+        while time.time() < end:
+            v, st = states("flow-run-1")
+            if st and all(st[k] == "ok" for k in quick):
+                break
+            time.sleep(0.05)
+        self.assertEqual({k: st.get(k) for k in quick}, dict.fromkeys(quick, "ok"))
+        self.assertEqual((st["status"], st["score"], st["tls"], v["done"]), ("run", "wait", "skip", False))
+        MockAnthropic.hold.set()  # 放行
+        th.join(30)
+        self.assertTrue(res["v"]["items"])
+        v, st = states("flow-run-1")
+        self.assertTrue(v["done"])
+        want = [(k, "skip" if k == "tls" else "ok") for k, _ in cam.service_steps(False, False)]  # 测试里的假接口不是 HTTPS
+        self.assertEqual([(s["key"], s["state"]) for s in v["steps"]], want)
+        self.assertEqual([s["label"] for s in v["steps"]], [label for _, label in cam.service_steps(False, False)])
+        for s in v["steps"]:
+            self.assertEqual(sorted(s), ["key", "label", "ms", "note", "state"])
+            self.assertEqual(isinstance(s["ms"], int), s["state"] == "ok", s)
+        self.assertNotIn("1.2.3.4", json.dumps(v))  # 出口 IP 这类检测到的内容不在进度里
+        # 不带 run、run 不合规矩：照常检测，只是不记进度
+        self.assertTrue(get("/api/service-check")["items"])
+        self.assertTrue(get("/api/service-check?run=a%20b")["items"])
+        self.assertEqual(get("/api/progress?run=a%20b")["steps"], [])
+        # 关掉外部 IP 查询：没有问第三方的那几步
+        self.assertEqual(self.run_cam("risk", "--ip-lookup", "off"), 0)
+        get("/api/service-check?run=flow-run-2")
+        v, st = states("flow-run-2")
+        self.assertEqual(list(st), ["local", "dns", "exit", "api", "web", "auth", "tls", "status", "score"])
+        self.assertTrue(v["done"])
+
     def test_plain_http_tampering_is_flagged(self):
         """明文网页有没有被中途改动：取一个本该是空 204 的地址，被带去登录页、被塞了内容就标“注意”、扣 10 分；
         原样就没有这一条；“外部 IP 查询”关掉时不测。"""
@@ -6024,6 +6103,27 @@ foreach ($dark in @($false, $true)) {{
             write(os.path.join(root, "uptime"), "100000.00 50.00\n")
             fields = ["S"] + ["0"] * 18 + [str(int((100000 - age) * ticks)), "0", "0"]
             write(os.path.join(d, "stat"), f"{pid} (claude code) " + " ".join(fields) + "\n")
+
+    def test_checkup_reports_progress(self):
+        """“全面体检”的进度：刷新用量、服务检测的那些步骤、查新版本、整理报告，一步一行，做完后每一步都有结论；
+        不联网的体检只有整理报告那几步。"""
+        cam = self.cam
+        self._two_accounts()
+        self._stub_claude()
+        prog = cam.CheckProgress()
+        res = cam.full_checkup(cam.Store(), prog=prog)
+        prog.close()
+        self.assertEqual([s["key"] for s in res["sections"]][:4], ["accounts", "service", "claude_code", "cam"])
+        v = prog.view()
+        self.assertTrue(v["done"])
+        self.assertEqual([s["key"] for s in v["steps"]],
+                         ["usage"] + [k for k, _ in cam.service_steps(False, False)] + ["release", "accounts", "claude_code", "cam"])
+        self.assertEqual({s["key"]: s["state"] for s in v["steps"] if s["state"] != "ok"}, {"tls": "skip"})
+        self.assertEqual(len({s["label"] for s in v["steps"]}), len(v["steps"]))  # 没有两行同名的
+        prog = cam.CheckProgress()
+        cam.full_checkup(cam.Store(), offline=True, prog=prog)
+        prog.close()
+        self.assertEqual([(s["key"], s["state"]) for s in prog.view()["steps"]], [("accounts", "ok"), ("claude_code", "ok"), ("cam", "ok")])
 
     def test_checkup_renews_saved_login_but_never_the_live_one(self):
         a_id, b_id = self._two_accounts(a_expires=self._expired_ms())  # A 不在用，保存的 access token 过期了；B 是当前登录
@@ -7294,6 +7394,48 @@ class SharedFixtureTest(unittest.TestCase):
         """连不上时卡在哪一层：走代理、解析、TCP、TLS、等回应。"""
         for c in shared("service.json")["stuck_stage"]:
             self.assertEqual(self.cam.stuck_stage(c["host"], c["proxied"], c["dns_ok"], c["tcp_why"], c["tls_ok"]), c["expect"], c["name"])
+
+    def test_progress(self):
+        """检测进度（界面的进度卡）：“重新检测”有哪几步、一份进度按顺序操作后是什么样、认哪些 run、只留最近几次。"""
+        cam = self.cam
+        fx = shared("progress.json")
+        for c in fx["steps"]:
+            self.assertEqual([list(x) for x in cam.service_steps(c["lookup_off"], c["has_proxy"])], c["want"], c)
+        for c in fx["machine"]:
+            prog = cam.CheckProgress()
+            for op in c["ops"]:
+                getattr(prog, op[0])(*op[1:])
+            v = prog.view()
+            self.assertEqual([{k: s[k] for k in ("key", "label", "state", "note")} for s in v["steps"]], c["want"], c["name"])
+            self.assertEqual(v["done"], c["done"], c["name"])
+            for s in v["steps"]:  # 做完的、没等到的步骤带用时，其它的没有
+                self.assertEqual(isinstance(s["ms"], int), s["state"] in ("ok", "fail", "timeout"), (c["name"], s))
+        for c in fx["runs"]:
+            self.assertEqual(cam.progress_open(c["run"]) is not None, c["ok"], c["run"])
+        self.assertIsNone(cam.progress_open(None))
+        self.assertIsNone(cam.progress_open("abcd\n"))
+        # 只留最近 PROGRESS_KEEP 次；同一个 run 再开一次是新的一份
+        first = cam.progress_open("keep-0")
+        first.add("a", "甲")
+        self.assertEqual(len(cam.progress_view("keep-0")["steps"]), 1)
+        self.assertEqual(cam.progress_open("keep-0").view()["steps"], [])
+        cam.progress_open("keep-0").add("a", "甲")
+        for i in range(1, cam.PROGRESS_KEEP + 1):
+            cam.progress_open(f"keep-{i}").add("a", "甲")
+        self.assertEqual(cam.progress_view("keep-0"), {"steps": [], "done": False, "ms": 0})
+        self.assertEqual(len(cam.progress_view(f"keep-{cam.PROGRESS_KEEP}")["steps"]), 1)
+        self.assertEqual(cam.progress_view(None)["steps"], [])
+        # 没人看进度时的空壳：什么都不记，不出错
+        for call in (lambda p: p.add("a", "甲"), lambda p: p.start("a"), lambda p: p.finish("a", False, "x"), lambda p: p.skip("a"),
+                     lambda p: p.expire(["a"]), lambda p: p.close()):
+            call(cam.NO_PROGRESS)
+        # tracked：做完按 good(结果) 记，抛错也算没成，错照样抛出来
+        prog = cam.CheckProgress([("a", "甲"), ("b", "乙"), ("c", "丙")])
+        self.assertEqual(cam.tracked(prog, "a", lambda: 7)(), 7)
+        self.assertEqual(cam.tracked(prog, "b", lambda: None, bool, "没查到")(), None)
+        with self.assertRaises(ZeroDivisionError):
+            cam.tracked(prog, "c", lambda: 1 // 0, None, "出错了")()
+        self.assertEqual([(s["state"], s["note"]) for s in prog.view()["steps"]], [("ok", ""), ("fail", "没查到"), ("fail", "出错了")])
 
     def test_risk_rules(self):
         """给人看的扣分规则和实际扣的分是同一张表；关注项（Anthropic 那边的状况）、说明项不扣分。"""

@@ -23,7 +23,7 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
 import { StatusLight } from "./components/StatusLight";
-import type { Account, RegionInfo, RiskChange, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
+import type { Account, CheckProgress, CheckStep, RegionInfo, RiskChange, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
 
 /** 页签：账号 / 用量 / 会话 / 环境 / 设置，和网页面板一样；“账号资料与邮箱”是标题栏右边的按钮，打开后占整页 */
 type Tab = "accounts" | "usage" | "sessions" | "env" | "settings";
@@ -108,21 +108,117 @@ function CheckList({ items }: { items: ServiceCheckItem[] }) {
   );
 }
 
+// ---- 检测进度：“重新检测”进行时，拿自己生成的 run 每 300 毫秒问一次 GET /api/progress?run=…（只有步骤名和状态），
+// 画成环境页顶上的进度卡；做完后留一份收在结果上面（“检测过程”），点开还能看哪一步慢。和网页面板一致
+const newRun = () => {
+  const a = new Uint8Array(12);
+  crypto.getRandomValues(a);
+  return Array.from(a, (b) => (b % 36).toString(36)).join("");
+};
+const fmtMs = (ms: number) => (ms < 1 ? "不到 1 毫秒" : ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`);
+const stepOpen = (s: CheckStep) => s.state === "wait" || s.state === "run";
+/** 一步右边的那几个字 */
+function stepStatus(s: CheckStep) {
+  if (s.state === "ok") return fmtMs(s.ms || 0);
+  if (s.state === "fail") return `${s.note || "没成"} · ${fmtMs(s.ms || 0)}`;
+  if (s.state === "timeout") return `等了 ${fmtMs(s.ms || 0)}，没回应`;
+  if (s.state === "skip") return s.note || "这次不用做";
+  return s.state === "run" ? "正在测…" : "排队中";
+}
+function ProgressSteps({ p }: { p: CheckProgress }) {
+  return (
+    <ul className="pg-steps">
+      {p.steps.map((s) => (
+        <li key={s.key} className={`pg-step ${s.state}`}>
+          <span className="pg-ico" />
+          <span className="pg-name" title={s.label}>
+            {s.label}
+          </span>
+          <span className="pg-st">{stepStatus(s)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+/** 检测进行时的进度卡 */
+function ProgressCard({ title, p }: { title: string; p: CheckProgress }) {
+  const fin = p.steps.filter((s) => !stepOpen(s)).length;
+  return (
+    <div className="panel ecard pg" role="status" aria-live="polite">
+      <h3>
+        <Ico name="signal" />
+        {title}
+        <span className="chip pg-count">{p.steps.length ? `${fin} / ${p.steps.length} 步 · ${(p.ms / 1000).toFixed(1)} 秒` : "正在开始…"}</span>
+      </h3>
+      <div className="pg-bar">
+        <i style={{ width: `${p.steps.length ? Math.round((fin / p.steps.length) * 100) : 0}%` }} />
+      </div>
+      <ProgressSteps p={p} />
+    </div>
+  );
+}
+/** 做完以后收成一行，放在结果上面 */
+function ProgressKept({ title, p }: { title: string; p: CheckProgress }) {
+  const odd = p.steps.filter((s) => s.state === "fail" || s.state === "timeout").length;
+  return (
+    <details className="panel ecard pg pg-kept">
+      <summary>
+        {title}过程：{p.steps.length} 步，用了 {(p.ms / 1000).toFixed(1)} 秒{odd ? `，${odd} 步没连上或没等到` : ""}（点开看每一步）
+      </summary>
+      <ProgressSteps p={p} />
+    </details>
+  );
+}
+
 function useServiceCheck(toast: (m: string, bad?: boolean) => void, after?: () => void) {
   const [items, setItems] = useState<ServiceCheckItem[] | null>(null);
   const [checking, setChecking] = useState(false);
+  const [progress, setProgress] = useState<CheckProgress | null>(null); // 正在检测时的进度
+  const [kept, setKept] = useState<CheckProgress | null>(null); // 上一次检测的过程
   const check = async () => {
+    const run = newRun();
+    const ask = () => api<CheckProgress>("GET", `/api/progress?run=${run}`);
     setChecking(true);
+    setKept(null);
+    setProgress({ steps: [], done: false, ms: 0 });
+    let live = true;
+    const tick = () => {
+      // 问不到就算了，检测照常进行
+      ask()
+        .then((p) => {
+          if (live && p.steps.length) setProgress(p);
+        })
+        .catch(() => {});
+    };
+    const timer = window.setInterval(tick, 300);
+    window.setTimeout(tick, 60);
+    let ok = false;
     try {
-      setItems((await api<{ items: ServiceCheckItem[] }>("GET", "/api/service-check")).items);
+      setItems((await api<{ items: ServiceCheckItem[] }>("GET", `/api/service-check?run=${run}`)).items);
+      ok = true;
       after?.(); // 检测会刷新后台缓存，顶部的分数跟着更新
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
+      live = false;
+      window.clearInterval(timer);
+      const last = ok ? await ask().catch(() => null) : null;
+      setKept(last && last.steps.length ? last : null);
+      setProgress(null);
       setChecking(false);
     }
   };
-  return { items, checking, check, reset: () => setItems(null) };
+  return {
+    items,
+    checking,
+    progress,
+    kept,
+    check,
+    reset: () => {
+      setItems(null);
+      setKept(null);
+    },
+  };
 }
 
 type ServiceCheckState = ReturnType<typeof useServiceCheck>;
@@ -502,12 +598,14 @@ function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
         <span className="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>
         <EnvActs label={ready ? "重新检测" : "立即检测"} sc={sc} />
       </div>
+      {sc.progress && <ProgressCard title="环境检测" p={sc.progress} />}
       <div className={`cards env${hasLog ? "" : " nolog"}`}>
         <ExitCard reg={state.region} />
         <ScoreCard state={state} />
         {hasLog && <ScoreLogCard state={state} />}
       </div>
       <div id="env-result" ref={result}>
+        {sc.items && sc.kept && <ProgressKept title="环境检测" p={sc.kept} />}
         {sc.items && <CheckList items={sc.items} />}
       </div>
     </section>

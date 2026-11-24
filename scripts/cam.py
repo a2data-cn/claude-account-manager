@@ -5757,13 +5757,27 @@ def make_handler(store, token):
                 if method == "DELETE" and parts == ["pending-switch"]:
                     cancel_pending_switch(store)
                     return self._send(200, public_state(store, store.load()))
-                if method == "GET" and parts == ["service-check"]:
-                    return self._send(200, {"items": service_check(store)})
+                if method == "GET" and parts == ["service-check"]:  # ?run=随机串：界面拿它到 /api/progress 问做到哪一步了
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    prog = progress_open((q.get("run") or [None])[0])
+                    try:
+                        return self._send(200, {"items": service_check(store, prog)})
+                    finally:
+                        if prog:
+                            prog.close()
+                if method == "GET" and parts == ["progress"]:  # “重新检测”“全面体检”做到哪一步了：只有步骤名和状态
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    return self._send(200, progress_view((q.get("run") or [None])[0]))
                 if method == "GET" and parts == ["checkup"]:  # 全面体检，同 cam doctor --json。只有脚本版有：桌面版返回 404，面板据此隐藏按钮
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     if (q.get("probe") or [""])[0]:
                         return self._send(200, {"ok": True})
-                    return self._send(200, full_checkup(store, offline=bool((q.get("offline") or [""])[0])))
+                    prog = progress_open((q.get("run") or [None])[0])  # ?run=随机串：进度到 /api/progress 问
+                    try:
+                        return self._send(200, full_checkup(store, offline=bool((q.get("offline") or [""])[0]), prog=prog))
+                    finally:
+                        if prog:
+                            prog.close()
                 if method == "GET" and parts == ["env-fix"]:  # 一键清理要改什么。只有脚本版有：桌面版返回 404，面板据此隐藏按钮
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     if (q.get("probe") or [""])[0]:
@@ -9636,6 +9650,159 @@ def _age_secs(iso):
     return (dt.datetime.now(dt.timezone.utc) - t).total_seconds() if t else None
 
 
+# --------------------------------------------------------------------------- 检测进度
+# “重新检测”要走的步骤（界面上进度卡的每一行）：键 → 写给人看的名字，顺序就是显示的顺序。两个版本一致（tests/shared/progress.json）
+SERVICE_STEPS = (
+    ("local", "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"),
+    ("dns", "解析 Claude 的域名"),
+    ("exit", "出口 IP 和地区"),
+    ("isp", "运营商、IP 类型、注册国"),
+    ("stack", "IPv4 / IPv6 出口"),
+    ("plain", "没加密的网页有没有被改动"),
+    ("api", "连接 api.anthropic.com"),
+    ("web", "连接 claude.ai"),
+    ("auth", "续登录的地址"),
+    ("tls", "HTTPS 证书是谁签的"),
+    ("proxy", "本机设的代理在不在运行"),
+    ("status", "Anthropic 官方状态页"),
+    ("score", "汇总结果，算环境评分"),
+)
+LOOKUP_STEPS = ("isp", "stack", "plain")  # “外部 IP 查询”关掉时不做的几步
+REGION_STEPS = ("local", "exit", "isp", "stack", "plain", "status")  # check_region 里做的几步
+PROGRESS_KEEP = 6  # 留着最近几次检测的进度
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,40}$")
+
+
+def service_steps(lookup_off=False, has_proxy=False):
+    """这次“重新检测”要走哪几步 [(键, 名字)]：外部 IP 查询关了就没有问第三方的那几步，没设代理就没有代理那一步。"""
+    return [(k, v) for k, v in SERVICE_STEPS if not (lookup_off and k in LOOKUP_STEPS) and (has_proxy or k != "proxy")]
+
+
+class CheckProgress:
+    """一次检测的进度，给界面的进度卡用：每一步是在等（wait）、在做（run）、做完了（ok，带用了多少毫秒）、
+    没连上 / 没查到（fail）、超过时限没等到（timeout），还是这次不用做（skip）。
+    只有步骤名和状态，不带任何检测到的内容。一步里可以有几件事同时做（start 几次、finish 几次），全做完才算完，有一件没成就是 fail。
+    几件事在不同线程里做，所以带锁；已经有了结论的步骤，晚到的 finish 不再改它（超时以后才回来的那件）。"""
+
+    def __init__(self, steps=()):
+        self._lock = threading.Lock()
+        self._t0 = time.monotonic()
+        self._steps = {}
+        self._total = None
+        for key, label in steps:
+            self.add(key, label)
+
+    def add(self, key, label, rank=0):
+        """登记一步；已经有了就不动。rank 小的排前面，一样的按登记的先后。"""
+        with self._lock:
+            if key not in self._steps:
+                self._steps[key] = {"label": label, "state": "wait", "ms": None, "note": "", "rank": rank,
+                                    "seq": len(self._steps), "t0": None, "pending": 0, "ok": True}
+
+    def start(self, key):
+        with self._lock:
+            s = self._steps.get(key)
+            if not s or s["state"] not in ("wait", "run"):
+                return
+            if s["state"] == "wait":
+                s.update(state="run", t0=time.monotonic())
+            s["pending"] += 1
+
+    def finish(self, key, ok=True, note=""):
+        """这一步里的一件事做完了；ok 为假时 note 写一句是怎么没成的（“没连上”“解析失败”）。"""
+        with self._lock:
+            s = self._steps.get(key)
+            if not s or s["state"] != "run":
+                return
+            s["pending"] -= 1
+            if not ok:
+                s["ok"], s["note"] = False, note or s["note"]
+            if s["pending"] <= 0:
+                s.update(state="ok" if s["ok"] else "fail", ms=int((time.monotonic() - s["t0"]) * 1000))
+
+    def skip(self, key, note=""):
+        """这一步这次不用做（还没开始的才算）。"""
+        with self._lock:
+            s = self._steps.get(key)
+            if s and s["state"] == "wait":
+                s.update(state="skip", note=note)
+
+    def expire(self, keys):
+        """到时限了：这几步里还在做的记成没等到。"""
+        with self._lock:
+            for key in keys:
+                s = self._steps.get(key)
+                if s and s["state"] == "run":
+                    s.update(state="timeout", ms=int((time.monotonic() - s["t0"]) * 1000))
+
+    def close(self):
+        """整次检测结束：还在做的记成没等到，没轮到的记成没做。"""
+        self.expire(list(self._steps))
+        with self._lock:
+            for s in self._steps.values():
+                if s["state"] == "wait":
+                    s["state"] = "skip"
+            if self._total is None:
+                self._total = int((time.monotonic() - self._t0) * 1000)
+
+    def view(self):
+        """{"steps": [{"key", "label", "state", "ms", "note"}], "done", "ms"}，ms 是到现在（或到结束）一共用了多久。"""
+        with self._lock:
+            rows = sorted(self._steps.items(), key=lambda kv: (kv[1]["rank"], kv[1]["seq"]))
+            return {"steps": [{"key": k, "label": s["label"], "state": s["state"], "ms": s["ms"], "note": s["note"]} for k, s in rows],
+                    "done": self._total is not None,
+                    "ms": self._total if self._total is not None else int((time.monotonic() - self._t0) * 1000)}
+
+
+class _NoProgress:
+    """没人看进度时用的空壳：一样的方法，什么都不记。"""
+
+    def add(self, *a, **k):
+        pass
+
+    start = finish = skip = expire = close = add
+
+
+NO_PROGRESS = _NoProgress()
+_PROGRESS = {}  # 界面生成的 run → CheckProgress，只留最近 PROGRESS_KEEP 次
+_PROGRESS_LOCK = threading.Lock()
+
+
+def progress_open(run):
+    """给一次检测开一份进度记录。run 是界面自己生成的随机串（字母数字 4–40 位），没给或者不合规矩就不记，返回 None。"""
+    if not isinstance(run, str) or not RUN_ID_RE.fullmatch(run):
+        return None
+    prog = CheckProgress()
+    with _PROGRESS_LOCK:
+        _PROGRESS.pop(run, None)
+        _PROGRESS[run] = prog
+        while len(_PROGRESS) > PROGRESS_KEEP:
+            _PROGRESS.pop(next(iter(_PROGRESS)))
+    return prog
+
+
+def progress_view(run):
+    """GET /api/progress?run=…：那次检测现在做到哪了。没有这次（还没开始、太久以前的）返回空的步骤表。"""
+    with _PROGRESS_LOCK:
+        prog = _PROGRESS.get(run) if isinstance(run, str) else None
+    return prog.view() if prog else {"steps": [], "done": False, "ms": 0}
+
+
+def tracked(prog, key, fn, good=None, note=""):
+    """把一件事包一层记进度：现在就算开始，做完时按 good(结果) 记成做完还是没成（note 写怎么没成的）；抛错也算没成。"""
+    prog.start(key)
+
+    def run():
+        try:
+            res = fn()
+        except Exception:
+            prog.finish(key, False, note)
+            raise
+        prog.finish(key, good(res) if good else True, note)
+        return res
+    return run
+
+
 def run_parallel(jobs, budget, limits=None):
     """同时做几件互不相干的事（{名字: 无参函数}），总共最多等 budget 秒；limits 可以给其中某件定更短的时限。
     返回 {名字: 结果}，没等到的那件是 None；哪件抛了错，等其它的收齐后原样抛出。
@@ -9705,15 +9872,21 @@ def exit_trace(timeout=6, fallback=True):
             return None
 
 
-def detect_region(timeout=6, cfg=None, prev=None):
+def detect_region(timeout=6, cfg=None, prev=None, prog=None):
     """从 Cloudflare 看出口地区（claude.ai 在它后面，它看到的就是 claude.ai 看到的），再并行查运营商 / 类型 / 注册国 /
     IPv4 / IPv6 出口。出口 IP 和数据源都没变、且 META_TTL 内查过时，运营商那几项直接沿用 prev，不再问第三方。
     设置为 off 时只查 claude.ai。返回 dict 或 None（claude.ai 和 Cloudflare 都没回音）。
-    最多等 timeout + META_BUDGET_SECS 秒：第三方那几项到时限还没答的当作查不到，不拖着出口地区。"""
+    最多等 timeout + META_BUDGET_SECS 秒：第三方那几项到时限还没答的当作查不到，不拖着出口地区。
+    prog（CheckProgress）给了就把 exit / isp / stack 这几步做到哪了记进去。"""
     cfg = cfg or ip_lookup_config()
     off = cfg["mode"] == "off"
+    prog = prog or NO_PROGRESS
+    prog.start("exit")
     out = exit_trace(timeout, fallback=not off)
+    prog.finish("exit", bool(out), "没查到")
     if not out:
+        for k in ("isp", "stack"):
+            prog.skip(k, "出口没查到，这一步没做")
         return None
     out.update({k: None for k in META_FIELDS + STACK_FIELDS})
     out["lookup_mode"] = cfg["mode"]
@@ -9724,12 +9897,19 @@ def detect_region(timeout=6, cfg=None, prev=None):
     reuse = (bool(out["ip"]) and prev.get("ip") == out["ip"] and prev.get("lookup_mode") == cfg["mode"]
              and age is not None and age < META_TTL)
     t0 = time.monotonic()
-    jobs = {"v4": lambda: trace_only(CF_TRACE4_URL), "v6": lambda: trace_only(CF_TRACE6_URL)}
+    # 没有 IPv6 的网络很常见，IPv6 那一问答不上来不算这一步没成
+    jobs = {"v4": tracked(prog, "stack", lambda: trace_only(CF_TRACE4_URL), bool, "没查到"),
+            "v6": tracked(prog, "stack", lambda: trace_only(CF_TRACE6_URL))}
     if not reuse:
-        jobs["meta"] = lambda: fetch_exit_meta(cfg)
+        jobs["meta"] = tracked(prog, "isp", lambda: fetch_exit_meta(cfg), bool, "没查到")
         if not cfg["ipapi_key"]:  # 带 key 的 ipapi.is 自己会给注册国
-            jobs["rdap"] = lambda: fetch_ip_registration(out["ip"])
-    res = run_parallel(jobs, META_BUDGET_SECS)
+            jobs["rdap"] = tracked(prog, "isp", lambda: fetch_ip_registration(out["ip"]))  # 注册国常常查不到，不算没成
+    else:
+        prog.skip("isp", "出口 IP 没变，沿用上次查到的")
+    try:
+        res = run_parallel(jobs, META_BUDGET_SECS)
+    finally:
+        prog.expire(("isp", "stack"))
     if reuse:
         out.update({k: prev.get(k) for k in META_FIELDS})
     else:
@@ -10584,7 +10764,7 @@ def region_recheck_due(data, st, refresh_min, now=None):
     return False
 
 
-def check_region(store, max_age=300, note=True):
+def check_region(store, max_age=300, note=True, prog=None):
     """后台定时调用：检测出口地区（连带 WARP、时钟偏差）和 Anthropic 官方状态页，记到 data["region"] / data["status_page"]，
     并给当前账号记一笔地区。max_age 秒内查到过就跳过（本机换了网络的不跳）；上次没连上的话 REGION_RETRY_SECS 秒内不重试
     （max_age 更短就按它）。
@@ -10592,22 +10772,29 @@ def check_region(store, max_age=300, note=True):
     这次没连上、以前查到过：出口那一份留着不动（checked_at 还是查到那次的时间），只记 failed_at / fail_count，
     界面据此说“最近一次没连上，先用上一次的结果”；连上了就清掉。从没查到过的还是记成查不到。
     本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。只记录，不干预任何操作。
-    做完后评分变了就记一笔（note_risk）；note=False 不记：服务检测先调这里、自己还要接着测别的，等它全做完一起记，不然一次检测记成两笔。"""
+    做完后评分变了就记一笔（note_risk）；note=False 不记：服务检测先调这里、自己还要接着测别的，等它全做完一起记，不然一次检测记成两笔。
+    prog（CheckProgress）给了就把 REGION_STEPS 这几步做到哪了记进去。"""
+    prog = prog or NO_PROGRESS
     data = store.load()
     old = data.get("region") or {}
     fp = net_fingerprint()
     moved = bool(fp and old.get("net") and fp != old["net"])  # 本机换了网络：上次查到的是另一张网的，没到 max_age 也重测
     if region_check_fresh(_age_secs(old.get("checked_at")), _age_secs(old.get("failed_at")), max_age, moved):
+        for k in REGION_STEPS:
+            prog.skip(k, "刚测过，沿用上次的结果")
         if note:
             note_risk(store)  # 这次没重测，分数也可能变了（出口变化的观察期过了、切了账号）
         return region_view(data)
     cfg = ip_lookup_config(store)
     # 出口、状态页、本机设置几件事并行，互不等待
-    jobs = {"r": lambda: detect_region(6, cfg, old), "sp": fetch_status_page, "env": local_env, "net": net_fingerprint,
-            "proxy": lambda: proxies_back(data)}
+    jobs = {"r": lambda: detect_region(6, cfg, old, prog), "sp": tracked(prog, "status", fetch_status_page, bool, "没查到"),
+            "env": tracked(prog, "local", local_env), "net": net_fingerprint, "proxy": lambda: proxies_back(data)}
     if cfg["mode"] != "off":  # 明文网页有没有被改：要访问一个 Anthropic 以外的地址，“外部 IP 查询”关掉时不做
-        jobs["plain"] = plain_http_check
-    res = run_parallel(jobs, REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2, "proxy": PROXY_PROBE_SECS + 1, "plain": PLAIN_HTTP_SECS + 1})
+        jobs["plain"] = tracked(prog, "plain", plain_http_check, lambda v: v is not None, "没连上")
+    try:
+        res = run_parallel(jobs, REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2, "proxy": PROXY_PROBE_SECS + 1, "plain": PLAIN_HTTP_SECS + 1})
+    finally:
+        prog.expire(REGION_STEPS)
     r, sp, env, back = res["r"] or {}, res["sp"], res["env"], res["proxy"] or set()
     with store.lock():
         data = store.load()
@@ -11211,14 +11398,16 @@ def tls_issuer_item(host, issuer, verified):
             "advice": TLS_INTERCEPT_ADVICE}
 
 
-def service_check(store=None):
+def service_check(store=None, prog=None):
     """检测 Claude 相关服务和使用环境：DNS、出口地区、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书是谁签的、
     代理（设了的话它在不在运行）、VPN，再加上 risk_items 的各项（出口变化、时钟、官方状态页、时区、账号地区）。
 
     返回 [{"kind", "level", "text", "advice"}]，级别为 ok / bad / warn / info，第一项是总体结论。
     不打印任何密钥，不干预任何操作。传了 store 会顺便刷新界面常显的缓存。
+    prog（CheckProgress）给了就把每一步做到哪了记进去（界面的进度卡）；结束时不替调用方 close。
     """
     out = []
+    prog = prog or NO_PROGRESS
 
     def add(kind, level, text, advice="", notice=False):
         out.append({"kind": kind, "level": level, "text": text, "advice": advice})
@@ -11243,8 +11432,8 @@ def service_check(store=None):
 
     def region():
         if store is None:
-            return detect_region(cfg=ip_lookup_config()) or {}
-        check_region(store, max_age=0, note=False)  # 顺便更新界面常显的缓存和账号的地区记录；评分的变化等下面全测完一起记
+            return detect_region(cfg=ip_lookup_config(), prog=prog) or {}
+        check_region(store, max_age=0, note=False, prog=prog)  # 顺便更新界面常显的缓存和账号的地区记录；评分的变化等下面全测完一起记
         return {}
 
     def probe_api():
@@ -11271,11 +11460,24 @@ def service_check(store=None):
                                 + [("系统设置", p) for p in system_proxy()])
     auth_keys = [f"auth:{u}" for u in TOKEN_URLS]
     proxy_keys = [f"proxy:{h}:{p}" for _, h, p in proxy_eps]
-    jobs = {f"dns:{h}": (lambda h=h: resolve(h)) for h in hosts}
-    jobs.update(region=region, api=probe_api, web=probe_web,
-                tls=lambda: peer_issuer(api_host) if API_BASE.startswith("https://") else None)
-    jobs.update({k: (lambda u=u: probe_url(u)) for k, u in zip(auth_keys, TOKEN_URLS)})
-    jobs.update({k: (lambda h=h, p=p: port_open(h, p, PROXY_PROBE_SECS)) for k, (_, h, p) in zip(proxy_keys, proxy_eps)})
+    lookup_off = (ip_lookup_config(store)["mode"] == "off") if store is not None else False
+    for k, label in service_steps(lookup_off, bool(proxy_eps)):
+        prog.add(k, label, 10)
+
+    def answered(v):  # 有回应（哪怕是 4xx / 5xx）就算这一步做完了，结果在下面的清单里说
+        return bool(v[0])
+
+    jobs = {f"dns:{h}": tracked(prog, "dns", lambda h=h: resolve(h), answered, "解析失败") for h in hosts}
+    jobs.update(region=region, api=tracked(prog, "api", probe_api, answered, "没连上"),
+                web=tracked(prog, "web", probe_web, answered, "没连上"))
+    if API_BASE.startswith("https://"):
+        jobs["tls"] = tracked(prog, "tls", lambda: peer_issuer(api_host), lambda v: v is not None, "没取到证书")
+    else:
+        prog.skip("tls", "不是 HTTPS 地址")
+        jobs["tls"] = lambda: None
+    jobs.update({k: tracked(prog, "auth", lambda u=u: probe_url(u), answered, "没连上") for k, u in zip(auth_keys, TOKEN_URLS)})
+    jobs.update({k: tracked(prog, "proxy", lambda h=h, p=p: port_open(h, p, PROXY_PROBE_SECS), lambda v: v == "", "连不上")
+                 for k, (_, h, p) in zip(proxy_keys, proxy_eps)})
     # 没走代理时再直连一下这两个地址的端口（只建 TCP 连接）：连不上的时候好说清楚卡在解析、TCP、TLS 还是等回应（stuck_stage）
     proxied = bool(proxies or proxy_eps)
     ports = {}
@@ -11290,7 +11492,11 @@ def service_check(store=None):
     limits.update(dict.fromkeys(auth_keys, SERVICE_PROBE_SECS + 1))
     limits.update(dict.fromkeys(proxy_keys, PROXY_PROBE_SECS + 1))
     limits.update(dict.fromkeys((f"tcp:{h}" for h in hosts), TCP_PROBE_SECS + 1))
-    res = run_parallel(jobs, REGION_CHECK_BUDGET + 2, limits)
+    try:
+        res = run_parallel(jobs, REGION_CHECK_BUDGET + 2, limits)
+    finally:
+        prog.expire([k for k, _ in SERVICE_STEPS if k != "score"])
+    prog.start("score")
     dns_ok = {h: bool((res[f"dns:{h}"] or (None,))[0]) for h in hosts}
 
     def stage(host, tls_ok=None):  # 连不上 host 时接在后面的那一句
@@ -11476,6 +11682,7 @@ def service_check(store=None):
                 d.pop("service_status", None)
             store.save(d)
         note_risk(store)
+    prog.finish("score")
     return out
 
 
@@ -12394,28 +12601,50 @@ def _quiet(fn, *args):
         return None, f"{type(e).__name__}: {e}" if not isinstance(e, CamError) else str(e)
 
 
-def full_checkup(store, offline=False):
+# “全面体检”在“重新检测”那些步骤之外的几步（进度卡上的名字）：联网的几件事同时做，最后几步是整理报告
+CHECKUP_STEPS = {
+    "usage": "刷新各账号的用量，看登录还能不能续",
+    "release": "查 Claude Code 的最新版本",
+    "bots": "聊天机器人自检",
+    "accounts": "整理：账号",
+    "claude_code": "整理：本机 Claude Code 和正在运行的会话",
+    "cam": "整理：cam 自己（后台任务、更新、文件校验）",
+}
+
+
+def full_checkup(store, offline=False, prog=None):
     """cam doctor：全面体检。返回 {"version", "generated_at", "offline", "header", "sections": [{"key", "title", "items"}],
     "summary": {"bad", "warn", "text", "first"}}，每条 {"level", "text", "advice"}（账号的条目多一个 "group"）。不含任何密钥。
 
     联网时（不加 --offline）几件事并行：刷新所有账号的用量（和 cam usage 一样，不在用的 Claude Code 号 access token
     快过期了就用它自己的 refresh token 续一次，续不上就是登录失效了；当前登录从不替它续，交给 Claude Code）、
     实测 Claude 服务、官方状态页、查 Claude Code 新版本、运行聊天机器人的自检。
+    prog（CheckProgress）给了就把每一步做到哪了记进去（界面的进度卡）；结束时不替调用方 close。
     """
+    prog = prog or NO_PROGRESS
     before = store.load()  # 体检之前的样子：看后台有没有在刷新、哪个号是这次续的
     active = before["active"].get("claude_code")
     before_exp = {a["id"]: ((_quiet(store.load_secret, a["id"])[0] or {}).get("claudeAiOauth") or {}).get("expiresAt") or 0
                   for a in before["accounts"] if a["kind"] == "claude_code" and a["id"] != active}
     svc = summary = latest = refresh_error = None
     bot_results = {}
+    bots = [] if offline else installed_bots()
+    # 步骤先按顺序登记好：刷新用量（0）→ 服务检测自己的那些步骤（10，它开始时登记）→ 新版本、机器人（20）→ 整理报告（30）。
+    # 状态页的摘要和服务检测里“官方状态页”那一步问的是同一个地址，进度卡上不另列一行
+    for rank, keys in ((0, () if offline else ("usage",)), (20, () if offline else ("release",) + (("bots",) if bots else ())),
+                       (30, ("accounts", "claude_code", "cam"))):
+        for k in keys:
+            prog.add(k, CHECKUP_STEPS[k], rank)
     if not offline:
-        bots = installed_bots()
+        def ok(v):  # _quiet 的结果 (值, 出错原因)
+            return v[1] is None
+
         with ThreadPoolExecutor(max_workers=4 + len(bots)) as ex:
-            f_ref = ex.submit(_quiet, refresh_usage, store)
-            f_svc = ex.submit(_quiet, service_check, store)
+            f_ref = ex.submit(tracked(prog, "usage", lambda: _quiet(refresh_usage, store), ok, "没刷新成"))
+            f_svc = ex.submit(_quiet, service_check, store, prog)
             f_sum = ex.submit(_quiet, fetch_status_summary)
-            f_rel = ex.submit(_quiet, latest_claude_version)
-            f_bots = {cli: ex.submit(run_bot_doctor, path) for cli, _, path in bots}
+            f_rel = ex.submit(tracked(prog, "release", lambda: _quiet(latest_claude_version), lambda v: bool(v[0]), "没查到"))
+            f_bots = {cli: ex.submit(tracked(prog, "bots", lambda path=path: run_bot_doctor(path))) for cli, _, path in bots}
             refresh_error = f_ref.result()[1]
             svc, svc_err = f_svc.result()
             if svc_err:
@@ -12424,7 +12653,9 @@ def full_checkup(store, offline=False):
             bot_results = {cli: f.result() for cli, f in f_bots.items()}
 
     def section(key, title, fn, *args):  # 一节出错只影响这一节
+        prog.start(key)
         items, err = _quiet(fn, *args)
+        prog.finish(key, err is None, "没查完")
         return {"key": key, "title": title, "items": items if err is None else [ck("bad", f"这一节没查完：{err}", "把这一行发给作者")]}
 
     sections = [section("accounts", "账号", checkup_accounts, store, before_exp, offline, refresh_error),

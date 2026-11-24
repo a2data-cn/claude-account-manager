@@ -531,6 +531,34 @@ details.src[open] summary::before { content: "▾"; }
 .score-ring.none .rf { stroke: transparent; } .score-ring.none text { fill: var(--muted); } .score-ring.none .lab { fill: var(--muted); }
 /* 完整检测 / 全面体检：每组一张卡，每条前面一个“正常 / 注意 / 异常 / 说明”的小标 */
 .check-groups { margin-top: 12px; }
+/* 检测进度：点了“重新检测”“全面体检”后出现在环境页顶上，每一步一行；做完收成结果上面的一行，点开还能看 */
+.pg { margin-bottom: 12px; }
+.pg h3 { margin-bottom: 10px; }
+.pg h3 .pg-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+.pg-bar { height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; margin-bottom: 12px; }
+.pg-bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); transition: width .25s ease; }
+.pg-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 6px 22px; font-size: 13px; }
+.pg-step { display: flex; align-items: center; gap: 8px; min-width: 0; line-height: 1.5; }
+.pg-ico { flex: none; width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; display: grid; place-items: center; font-size: 9px; font-weight: 700; line-height: 1; }
+.pg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-st { flex: none; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pg-step.wait .pg-ico { border: 1.5px solid var(--line); }
+.pg-step.wait .pg-name { color: var(--muted); }
+.pg-step.run .pg-ico { border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: pg-spin .8s linear infinite; }
+.pg-step.run .pg-st { color: var(--accent); }
+.pg-step.ok .pg-ico { background: var(--live-soft); color: var(--live); }
+.pg-step.ok .pg-ico::before { content: "✓"; }
+.pg-step.fail .pg-ico, .pg-step.timeout .pg-ico { background: var(--warn-soft); color: var(--warn); }
+.pg-step.fail .pg-ico::before, .pg-step.timeout .pg-ico::before { content: "!"; }
+.pg-step.fail .pg-st, .pg-step.timeout .pg-st { color: var(--warn); }
+.pg-step.skip .pg-ico::before { content: "–"; color: var(--muted); }
+.pg-step.skip .pg-name { color: var(--muted); }
+@keyframes pg-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pg-step.run .pg-ico { animation: none; } .pg-bar i { transition: none; } }
+details.pg-kept { margin-top: 12px; font-size: 13px; }
+details.pg-kept > summary { cursor: pointer; color: var(--muted); }
+details.pg-kept[open] > summary { margin-bottom: 10px; }
+@media (max-width: 760px) { .pg-steps { grid-template-columns: 1fr; } .pg-step { align-items: flex-start; } .pg-ico { margin-top: 3px; } .pg-name { white-space: normal; } }
 .check-col { display: grid; gap: 12px; align-content: start; min-width: 0; }  /* 检测结果的一列：里面的卡各按自己的高度 */
 .checks { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 7px; }
 .checks li { display: flex; gap: 10px; align-items: flex-start; overflow-wrap: anywhere; line-height: 1.45; }
@@ -1625,6 +1653,72 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   // “重新检测”的完整结果直接展开在环境区块里（和桌面版一样），重绘时保留
   let envChecks = null, envChecking = false;
+  // ---- 检测进度：“重新检测”“全面体检”进行时，拿自己生成的 run 每 300 毫秒问一次 GET /api/progress?run=…（只有步骤名和状态），
+  // 画成环境页顶上的进度卡；做完后留一份收在结果上面（“检测过程”），点开还能看哪一步慢。老的服务没有这个接口：问不到就只显示“正在开始”
+  let envProg = null, envProgTitle = "", envProgTimer = null, envProgKept = null;
+  const newRun = () => {
+    const a = new Uint8Array(12);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(a); else a.forEach((_, i) => { a[i] = Math.random() * 256; });
+    return Array.from(a, (b) => (b % 36).toString(36)).join("");
+  };
+  const fmtMs = (ms) => ms < 1 ? "不到 1 毫秒" : ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`;
+  const progOpen = (s) => s.state === "wait" || s.state === "run";
+  function progStatus(s) {  // 一步右边的那几个字
+    if (s.state === "ok") return fmtMs(s.ms || 0);
+    if (s.state === "fail") return `${s.note || "没成"} · ${fmtMs(s.ms || 0)}`;
+    if (s.state === "timeout") return `等了 ${fmtMs(s.ms || 0)}，没回应`;
+    if (s.state === "skip") return s.note || "这次不用做";
+    return s.state === "run" ? "正在测…" : "排队中";
+  }
+  const progCount = (p) => p.steps.length ? `${p.steps.filter((s) => !progOpen(s)).length} / ${p.steps.length} 步 · ${(p.ms / 1000).toFixed(1)} 秒` : "正在开始…";
+  const progPct = (p) => p.steps.length ? Math.round(p.steps.filter((s) => !progOpen(s)).length / p.steps.length * 100) : 0;
+  const progStep = (s) => `<li class="pg-step ${esc(s.state)}" data-k="${esc(s.key)}"><span class="pg-ico"></span><span class="pg-name" title="${esc(s.label)}">${esc(s.label)}</span><span class="pg-st">${esc(progStatus(s))}</span></li>`;
+  const progSteps = (p) => `<ul class="pg-steps">${p.steps.map(progStep).join("")}</ul>`;
+  const progHtml = () => !envProg ? "" : `<div class="panel ecard pg" id="env-prog" role="status" aria-live="polite">
+      <h3><span class="eico"><svg><use href="#i-signal"/></svg></span>${esc(envProgTitle)}<span class="chip pg-count">${esc(progCount(envProg))}</span></h3>
+      <div class="pg-bar"><i style="width:${progPct(envProg)}%"></i></div>${progSteps(envProg)}</div>`;
+  function progKeptHtml() {  // 做完以后收成一行，放在结果上面
+    const p = envProgKept;
+    if (!p) return "";
+    const odd = p.steps.filter((s) => s.state === "fail" || s.state === "timeout").length;
+    return `<details class="panel ecard pg pg-kept"><summary>${esc(p.title)}过程：${p.steps.length} 步，用了 ${(p.ms / 1000).toFixed(1)} 秒${odd ? `，${odd} 步没连上或没等到` : ""}（点开看每一步）</summary>${progSteps(p)}</details>`;
+  }
+  function paintProg() {  // 进度变了只改这张卡里变了的地方：整块重画的话转圈的动画会一顿一顿
+    const card = $("#env-prog"), p = envProg;
+    if (!card || !p) { if (p && tab === "env") render(); return; }
+    card.querySelector(".pg-count").textContent = progCount(p);
+    card.querySelector(".pg-bar i").style.width = progPct(p) + "%";
+    const ul = card.querySelector(".pg-steps"), rows = ul.querySelectorAll(".pg-step");
+    if (rows.length !== p.steps.length || p.steps.some((s, i) => rows[i].dataset.k !== s.key)) { ul.innerHTML = p.steps.map(progStep).join(""); return; }
+    p.steps.forEach((s, i) => {
+      const cls = "pg-step " + s.state, text = progStatus(s);
+      if (rows[i].className !== cls) rows[i].className = cls;
+      const st = rows[i].querySelector(".pg-st");
+      if (st.textContent !== text) st.textContent = text;
+    });
+  }
+  function progStart(title) {  // 开始记一次检测的进度，返回这次的 run（带在检测请求的 ?run= 里）
+    const run = newRun();
+    clearInterval(envProgTimer);
+    envProg = { steps: [], done: false, ms: 0 }; envProgTitle = title; envProgKept = null;
+    const tick = async () => {
+      if (!envProg || envProg.run !== run) return;
+      try {
+        const p = await api("GET", "/api/progress?run=" + run, undefined, 4000);
+        if (envProg && envProg.run === run && p && p.steps && p.steps.length) { envProg = { ...p, run }; paintProg(); }
+      } catch (_) { /* 问不到就算了，检测照常进行 */ }
+    };
+    envProg.run = run;
+    envProgTimer = setInterval(tick, 300);
+    setTimeout(tick, 60);
+    return run;
+  }
+  async function progStop(run, keep) {  // 检测结束：停下来；keep 为真再问最后一次，留作“检测过程”
+    clearInterval(envProgTimer); envProgTimer = null;
+    let last = null;
+    if (keep) { try { last = await api("GET", "/api/progress?run=" + run, undefined, 4000); } catch (_) { last = null; } }
+    if (envProg && envProg.run === run) { envProgKept = last && last.steps && last.steps.length ? { ...last, title: envProgTitle } : null; envProg = null; }
+  }
   const CHECK_TIP = "完整检测 DNS、出口地区（对照 Anthropic 官方名单）、IP 类型、IPv4 / IPv6、api.anthropic.com、claude.ai、续登录的地址、HTTPS 证书、代理 / VPN（设了代理的话看它在不在运行）、时区、时钟、官方状态页和账号使用地区，要等几秒钟。只提醒，不拦任何操作。";
   // “全面体检”（同 cam doctor）只有脚本版 cam serve 有：桌面版内置的服务返回 404，按钮不显示。结果展开在同一个位置
   let checkup = null, checkupBusy = false, checkupAvail = false, checkupProbed = false;
@@ -1672,7 +1766,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       if (top < 0 || top > window.innerHeight * 0.6) el.scrollIntoView({ block: "start", behavior: "smooth" });
     });
   }
-  const envChecksHtml = () => envFixHtml() + (checkup ? `<div class="cards check-groups">${renderCheckup(checkup)}</div>`
+  const envChecksHtml = () => envFixHtml() + (checkup || envChecks ? progKeptHtml() : "") + (checkup ? `<div class="cards check-groups">${renderCheckup(checkup)}</div>`
     : envChecks ? `<div class="cards check-groups">${renderChecks(envChecks)}</div>` : "");
   // 一键清理的卡：能一键改的、官方支持的用法（勾上才改）、要自己处理的；改完换成结果
   function envFixHtml() {
@@ -1908,10 +2002,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   async function runCheckup() {
     if (checkupBusy) return;
-    checkupBusy = true; render();
-    try { checkup = await api("GET", "/api/checkup"); envChecks = null; }
+    checkupBusy = true;
+    const run = progStart("全面体检");
+    render();
+    let ok = false;
+    try { checkup = await api("GET", "/api/checkup?run=" + run); envChecks = null; ok = true; }
     catch (err) { toast(err.message, true); }
-    finally { checkupBusy = false; }
+    finally { await progStop(run, ok); checkupBusy = false; }
     if (state) render();  // 结果先画出来
     await load();  // 体检会续登录、刷新用量和环境缓存
     revealEnvResult();  // 等上面几张卡按新数据画完再滚，不然卡片高度一变就滚歪了
@@ -1925,10 +2022,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   async function runEnvCheck() {
     if (envChecking) return;
-    envChecking = true; render();
-    try { envChecks = (await api("GET", "/api/service-check")).items || []; checkup = null; }
+    envChecking = true;
+    const run = progStart("环境检测");
+    render();
+    let ok = false;
+    try { envChecks = (await api("GET", "/api/service-check?run=" + run)).items || []; checkup = null; ok = true; }
     catch (err) { toast(err.message, true); }
-    finally { envChecking = false; }
+    finally { await progStop(run, ok); envChecking = false; }
     if (state) render();  // 结果先画出来
     await load();  // 检测会刷新后台缓存，分数跟着更新
     revealEnvResult();
@@ -2070,7 +2170,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const log = ready ? scoreLogCard(st) : "";  // 检测过才有分数可记
     return `<section class="block" id="env" aria-label="环境状态">
       <div class="sec-head"><h2>环境</h2><span class="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>${envButton(ready ? "重新检测" : "立即检测")}</div>
-      <div class="cards env${log ? "" : " nolog"}">${exitCard(reg)}${scoreCard(st)}${log}</div>
+      ${progHtml()}<div class="cards env${log ? "" : " nolog"}">${exitCard(reg)}${scoreCard(st)}${log}</div>
       <div id="env-result">${envChecksHtml()}</div>
       ${ccVerHtml()}
     </section>`;
@@ -3280,7 +3380,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const re = e.target.closest("[data-act=recheck]");
     if (re) { runEnvCheck(); return; }
     if (e.target.closest("[data-act=checkup]")) { runCheckup(); return; }
-    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; checkup = null; envFix = null; envFixRes = null; purgeAsk = false; purgeRes = null; render(); return; }
+    if (e.target.closest("[data-act=env-fold]")) { envChecks = null; checkup = null; envProgKept = null; envFix = null; envFixRes = null; purgeAsk = false; purgeRes = null; render(); return; }
     if (e.target.closest("[data-act=env-fix]")) { loadEnvFix(); return; }
     if (e.target.closest("[data-act=env-fix-close]")) { envFix = null; envFixRes = null; purgeAsk = false; purgeRes = null; render(); return; }
     if (e.target.closest("[data-act=env-fix-go]")) { runEnvFix({ apply: true, optional: envFixAll, digest: envFix && envFix.digest, digest_optional: envFix && envFix.digest_optional }); return; }
