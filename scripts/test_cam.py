@@ -7785,31 +7785,39 @@ class ServeRestartTest(unittest.TestCase):
         shutil.copytree(os.path.join(ROOT, "web"), os.path.join(code, "web"))
         port = free_port()
         env = dict(os.environ, CAM_CODE_WATCH_SEC="0.2", HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
-                   NO_PROXY="127.0.0.1,localhost", PYTHONDONTWRITEBYTECODE="1")
-        proc = subprocess.Popen([sys.executable, os.path.join(code, "scripts", "cam.py"), "serve", "--port", str(port)],
-                                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                   NO_PROXY="127.0.0.1,localhost", PYTHONDONTWRITEBYTECODE="1", PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        log_path = os.path.join(self.tmp, "serve.log")
+        log = open(log_path, "w", encoding="utf-8")
+        self.addCleanup(log.close)
+        # 用量不用刷（--refresh-every 0）：这里只看代码换了会不会重启
+        proc = subprocess.Popen([sys.executable, os.path.join(code, "scripts", "cam.py"), "serve", "--port", str(port), "--refresh-every", "0"],
+                                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         self.addCleanup(proc.wait, 10)
         self.addCleanup(proc.kill)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        last = []  # 最近一次没问到的原因（没等到时报出来）
 
         def state():
             try:
                 with open(os.path.join(os.environ["CAM_HOME"], "server-token")) as f:
                     tok = f.read().strip()
                 req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + tok})
-                with opener.open(req, timeout=5) as r:
+                with opener.open(req, timeout=15) as r:
                     return json.load(r)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                last[:] = [f"{type(e).__name__}: {e}"]
                 return None
 
-        def wait(cond, secs=30):
+        def wait(cond, secs=90):
             deadline = time.monotonic() + secs
             while time.monotonic() < deadline:
                 st = state()
                 if st and cond(st):
                     return st
                 time.sleep(0.1)
-            self.fail("等不到 cam serve")
+            with open(log_path, encoding="utf-8", errors="replace") as f:
+                out = "\n".join(line for line in f.read().splitlines() if "?t=" not in line)[-1500:]  # 带令牌的那几行不打
+            self.fail(f"等不到 cam serve（退出码 {proc.poll()}，最后一次：{last}）。它打出来的：\n{out}")
         first = wait(lambda st: True)
         self.assertTrue(first["code_watch"])
         new = int(time.time()) + 100

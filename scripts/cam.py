@@ -7174,6 +7174,12 @@ def _norm(p):
     return os.path.normcase(os.path.abspath(p))
 
 
+def _real(p):
+    """比较“是不是同一个文件”用：先解开符号链接和 Windows 的短文件名（C:\\Users\\RUNNER~1\\…），再按 _norm 的规矩比。
+    一键清理记下的是文件的真实路径（real），拿它去对名单时名单那边也要解开，不然 macOS 的 /var → /private/var 这类就对不上。"""
+    return os.path.normcase(os.path.realpath(p))
+
+
 def documents_dirs():
     """“文档”文件夹在哪：注册表里记的真实位置（可能挪到了别的盘、被 OneDrive 接管），再加上常见的几处：
     ~/Documents、个人版 ~/OneDrive/Documents、公司版 ~/OneDrive - 公司名/Documents。测试（CAM_TEST_PS_PROFILES）不读注册表。"""
@@ -7791,7 +7797,7 @@ def _admin_do(ops, workdir):
     {"op": "reg_del" | "reg_set", "key", "value"?, "kind"?}：系统环境变量，只认 cam 查的那几个名字；
     {"op": "write", "path", "src", "expect"}：把 workdir 里准备好的 src 换上去，只认 admin_files 里的文件，
     文件现在的指纹得是 expect（不是就说明刚被别人改过，不动）。返回每项的结果：None 是做成了，不然是原因。"""
-    allowed = {_norm(p) for p in admin_files()}
+    allowed = {_real(p) for p in admin_files()}
     out = []
     for op in ops:
         try:
@@ -7808,9 +7814,9 @@ def _admin_do(ops, workdir):
                         winreg.SetValueEx(key, op["key"], 0, int(op["kind"]), op["value"])
             elif kind == "write":
                 path, data = op.get("path") or "", op.get("src") or ""
-                if _norm(path) not in allowed:
+                if _real(path) not in allowed:
                     raise CamError("不是 cam 会改的文件，没动")
-                if os.path.dirname(_norm(data)) != _norm(workdir):
+                if os.path.dirname(_real(data)) != _real(workdir):
                     raise CamError("要换上的内容不在这次的备份目录里，没动")
                 if _sha(read_bytes(path)) != op.get("expect"):
                     raise CamError("文件刚被别的程序改过，没动（重新清理一次）")
