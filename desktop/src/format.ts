@@ -47,6 +47,14 @@ export function resetText(iso: string | null | undefined): string {
 /** 接口没给重置时间时写什么：0% 是这个窗口还没开始（第一条消息才开始计时），不是不知道。和手机面板、卡片小面板同一个说法 */
 export const noReset = (pct: number) => (pct === 0 ? "还没开始用，不计时" : "重置时间未知");
 
+/** 2026-10-28 23:33：不用浏览器 locale 的写法（和网页面板的 fmtTime 一样），时间看不懂返回空字符串 */
+export function fmtTime(iso: string | null | undefined): string {
+  const t = iso ? new Date(iso) : null;
+  if (!t || isNaN(t.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
+}
+
 export function ago(iso: string | null | undefined): string {
   if (!iso) return "从未";
   const s = (Date.now() - new Date(iso).getTime()) / 1000;

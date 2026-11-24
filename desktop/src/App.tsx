@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import { Ico } from "./components/Icon";
 import { api, command, inTauri, onEvent } from "./api";
 import { copyText } from "./clipboard";
-import { ago } from "./format";
+import { ago, fmtTime } from "./format";
 import { AccountDetail, AccountTile } from "./components/AccountCard";
 import { SummaryBar, type Points } from "./components/Pace";
 import {
@@ -23,7 +23,7 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
 import { StatusLight } from "./components/StatusLight";
-import type { Account, RegionInfo, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
+import type { Account, RegionInfo, RiskChange, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
 
 /** 页签：账号 / 用量 / 会话 / 环境 / 设置，和网页面板一样；“账号资料与邮箱”是标题栏右边的按钮，打开后占整页 */
 type Tab = "accounts" | "usage" | "sessions" | "env" | "settings";
@@ -48,7 +48,6 @@ const CHECK_GROUPS: [string, string[]][] = [
   ["本机", ["clock", "timezone", "locale", "device"]],
   ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
   ["账号", ["account_regions", "accounts"]],
-  ["说明", ["scope"]],
 ];
 const IP_TYPE: Record<string, string> = { residential: "家庭 / 公司宽带", hosting: "机房 / 云服务器", proxy: "代理 / VPN 出口", tor: "Tor 出口节点", mobile: "手机网络" };
 
@@ -64,32 +63,44 @@ function CheckRow({ it, cls }: { it: ServiceCheckItem; cls?: string }) {
   );
 }
 
-/** 服务检测结果：总体结论一张通栏的卡，其余按网络 / 本机 / 服务 / 账号每组一张卡 */
+/** 服务检测结果：总体结论一张通栏的卡（检测范围接在它下面），其余分两列：“网络”项最多，单独占左边；别的几组叠在右边 */
 function CheckList({ items }: { items: ServiceCheckItem[] }) {
+  const summary = items.filter((i) => i.kind === "summary");
   const rest = items.filter((i) => i.kind !== "summary");
-  const used = new Set<ServiceCheckItem>();
+  const scope = summary.length ? rest.find((i) => i.kind === "scope") : undefined;
+  const used = new Set<ServiceCheckItem>(scope ? [scope] : []);
   const groups = CHECK_GROUPS.map(([name, kinds]) => {
     const rows = rest.filter((i) => kinds.includes(i.kind || ""));
     rows.forEach((i) => used.add(i));
     return [name, rows] as [string, ServiceCheckItem[]];
   }).filter(([, rows]) => rows.length);
   const other = rest.filter((i) => !used.has(i));
-  const summary = items.filter((i) => i.kind === "summary");
+  if (other.length) groups.push(["其它", other]);
+  const cols = [groups.filter(([name]) => name === "网络"), groups.filter(([name]) => name !== "网络")].filter((c) => c.length);
   return (
-    <div className="check-groups">
+    <div className="cards check-groups">
       {summary.length > 0 && (
-        <div className="panel ecard summary-card">
+        <div className="panel ecard wide">
           <ul className="checks">
             {summary.map((it, i) => <CheckRow key={`s${i}`} it={it} cls="summary" />)}
           </ul>
+          {scope && (
+            <p className="hint">
+              {scope.text}。{scope.advice}
+            </p>
+          )}
         </div>
       )}
-      {[...groups, ...(other.length ? [["其它", other] as [string, ServiceCheckItem[]]] : [])].map(([name, rows]) => (
-        <div className="panel ecard" key={name}>
-          <h3>{name}</h3>
-          <ul className="checks">
-            {rows.map((it, i) => <CheckRow key={`${name}${i}`} it={it} />)}
-          </ul>
+      {cols.map((col, n) => (
+        <div className="check-col" key={n}>
+          {col.map(([name, rows]) => (
+            <div className="panel ecard" key={name}>
+              <h3>{name}</h3>
+              <ul className="checks">
+                {rows.map((it, i) => <CheckRow key={`${name}${i}`} it={it} />)}
+              </ul>
+            </div>
+          ))}
         </div>
       ))}
     </div>
@@ -179,7 +190,7 @@ function ExitCard({ reg }: { reg: RegionInfo | null | undefined }) {
   );
   if (!reg?.status) {
     return (
-      <div className="panel ecard">
+      <div className="panel ecard c-exit">
         {head()}
         <p className="hint" style={{ margin: 0 }}>
           还没有检测过。后台每隔几分钟自动检测一次出口地区和环境风险，也可以点“立即检测”现在就测。
@@ -266,7 +277,7 @@ function ExitCard({ reg }: { reg: RegionInfo | null | undefined }) {
     ["检测", when],
   ];
   return (
-    <div className="panel ecard">
+    <div className="panel ecard c-exit">
       {head(status)}
       <dl className="kv">
         {rows
@@ -311,12 +322,16 @@ function ScoreCard({ state }: { state: State }) {
   });
   const other = risks.filter((x) => !used.has(x));
   if (other.length) rows.push({ title: "其它", hits: other, ok: "" });
+  // 圆环下面一句合计：共扣几分、几项
+  const lost = risks.filter((x) => (x.points ?? 0) > 0);
+  const total = lost.reduce((n, x) => n + (x.points ?? 0), 0);
   return (
-    <div className="panel ecard">
+    <div className="panel ecard c-score">
       <h3>
         <Ico name="shield" />环境评分 <span className="chip">只提醒，不拦任何操作</span>
       </h3>
       <div className="score-row">
+        <div className="score-side">
         <div className={`score-ring ${has && sc ? sc.grade : "none"}`}>
           <svg viewBox="0 0 92 92" aria-hidden="true">
             <circle className="rt" cx="46" cy="46" r={r} />
@@ -328,6 +343,14 @@ function ScoreCard({ state }: { state: State }) {
               {has && sc ? sc.label.split("，")[0] : "还没检测"}
             </text>
           </svg>
+        </div>
+        {has && sc && state.risk_log && (
+          <div className="score-sum">
+            <b>{total ? `共扣 ${total} 分` : "没有扣分项"}</b>
+            {total ? `${lost.length} 项` : ""}
+            <span className="lbl">{sc.label}</span>
+          </div>
+        )}
         </div>
         {has ? (
           <dl className="kv">
@@ -343,6 +366,7 @@ function ScoreCard({ state }: { state: State }) {
                         ? hits.map((x, i) => (
                             <div key={i}>
                               {x.text}
+                              {!!x.points && <span className={`chip ${x.points >= 20 ? "st-error" : "st-warn"}`}>−{x.points} 分</span>}
                               {x.advice && <span className="advice">{x.advice}</span>}
                             </div>
                           ))
@@ -360,9 +384,70 @@ function ScoreCard({ state }: { state: State }) {
         )}
       </div>
       <p className="hint">
-        100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、切换到不支持地区的出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70
-        以下高风险。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。{has && sc ? sc.advice : ""}
+        100 分起扣，每条后面标着扣几分；90 以上低风险，70–89 有风险，70 以下高风险。{has && sc ? sc.advice : ""}
       </p>
+    </div>
+  );
+}
+
+/** 最近几次直接列出来，更早的收起来 */
+const SCORE_LOG_OPEN = 3;
+/** 一次分数变化：什么时候从几分变到几分，多了 / 没有了哪一条扣分，那两次之间出口换没换 */
+function ScoreChange({ c }: { c: RiskChange }) {
+  const cls = c.score < c.prev ? "down" : c.score > c.prev ? "up" : "";
+  return (
+    <li>
+      {c.at ? (
+        <span className="when" title={fmtTime(c.at)}>
+          {ago(c.at)}
+        </span>
+      ) : (
+        <span className="when">现在</span>
+      )}
+      <span className={`delta ${cls}`}>{c.score === c.prev ? `还是 ${c.score} 分，扣分的换了一条` : `${c.prev} → ${c.score}`}</span>
+      {c.added.map((i, n) => (
+        <div className="why" key={`a${n}`}>
+          多了：<b>{i.text}</b>（−{i.points}）
+        </div>
+      ))}
+      {c.removed.map((i, n) => (
+        <div className="why" key={`r${n}`}>
+          没有了：<b>{i.text}</b>（+{i.points}）
+        </div>
+      ))}
+      {c.exit_note && <div className="why">{c.exit_note}</div>}
+    </li>
+  );
+}
+
+/** “分数变化”卡：后台每次环境检测后分数变了就记一笔（state.risk_log） */
+function ScoreLogCard({ state }: { state: State }) {
+  const log = state.risk_log;
+  if (!log) return null;
+  const ch = log.changes || [];
+  const head = ch.slice(0, SCORE_LOG_OPEN);
+  const more = ch.slice(SCORE_LOG_OPEN);
+  const how = "分数一变，这里就列出从几分变到几分、多了或少了哪一条。";
+  const note = !log.since
+    ? "还没开始记录：下一次环境检测之后开始记。" + how
+    : ch.length
+      ? `从 ${fmtTime(log.since)} 开始记录，最多留 30 次。`
+      : `从 ${fmtTime(log.since)} 开始记录，之后分数没变过。${how}`;
+  return (
+    <div className="panel ecard c-log">
+      <h3>
+        <Ico name="clock" />分数变化
+      </h3>
+      <div className="score-log">
+        {head.length > 0 && <ol>{head.map((c, i) => <ScoreChange key={i} c={c} />)}</ol>}
+        {more.length > 0 && (
+          <details className="sl-more">
+            <summary>更早的 {more.length} 次</summary>
+            <ol>{more.map((c, i) => <ScoreChange key={i} c={c} />)}</ol>
+          </details>
+        )}
+        <p className="hint">{note}</p>
+      </div>
     </div>
   );
 }
@@ -378,6 +463,19 @@ function Loading() {
 /** 环境区块：出口 IP 一张卡、环境评分一张卡（每个信号一行），点“重新检测”在下面展开完整检测结果。只提醒，不拦 */
 function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
   const ready = !!(state.region?.status && state.risk_score);
+  const hasLog = ready && !!state.risk_log; // 检测过才有分数可记
+  // 点了“重新检测”之后结果出来时滚到它那里：结果在三张卡下面，停在页面顶上的话看不出来它出来了
+  const result = useRef<HTMLDivElement>(null);
+  const shown = !!sc.items;
+  const wasChecking = useRef(false);
+  useEffect(() => {
+    if (wasChecking.current && !sc.checking && shown) {
+      const el = result.current;
+      const top = el ? el.getBoundingClientRect().top : 0;
+      if (el && (top < 0 || top > window.innerHeight * 0.6)) el.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
+    wasChecking.current = sc.checking;
+  }, [sc.checking, shown]);
   return (
     <section className="block" id="env" aria-label="环境状态">
       <div className="sec-head">
@@ -385,11 +483,14 @@ function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
         <span className="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>
         <EnvActs label={ready ? "重新检测" : "立即检测"} sc={sc} />
       </div>
-      <div className="env-grid">
+      <div className={`cards env${hasLog ? "" : " nolog"}`}>
         <ExitCard reg={state.region} />
         <ScoreCard state={state} />
+        {hasLog && <ScoreLogCard state={state} />}
       </div>
-      {sc.items && <CheckList items={sc.items} />}
+      <div id="env-result" ref={result}>
+        {sc.items && <CheckList items={sc.items} />}
+      </div>
     </section>
   );
 }
@@ -560,6 +661,12 @@ export default function App() {
   // 环境有风险时把环境状态卡放到最上面，没风险时放到账号详情下面
   const risky = !!(state?.risk_score && state.region?.status && state.risk_score.grade !== "low");
   const firstRisk = (state?.risks ?? []).find((x) => x.level === "bad" || x.level === "warn")?.text;
+  // 一天之内刚降下来的：说一声是从几分降的，原因在环境页的“分数变化”里
+  const lastCh = state?.risk_log?.changes?.[0];
+  const scoreDrop =
+    lastCh && lastCh.score < lastCh.prev && (!lastCh.at || Date.now() - new Date(lastCh.at).getTime() < 86400e3)
+      ? `（${lastCh.at ? ago(lastCh.at) : "刚刚"}从 ${lastCh.prev} 分降下来）`
+      : "";
   // 选中的卡不在可见范围时，把账号条滑到它
   useEffect(() => {
     const strip = document.querySelector<HTMLElement>(".strip");
@@ -780,6 +887,7 @@ export default function App() {
             <div className={`notice env-brief ${state.risk_score.grade}`} role="status">
               <span className="n-text">
                 环境评分 <b>{state.risk_score.score}/100</b>：{state.risk_score.label}
+                {scoreDrop}
                 {firstRisk ? ` · ${firstRisk}` : ""}
               </span>
               <button type="button" className="btn quiet" onClick={() => setTab("env")}>

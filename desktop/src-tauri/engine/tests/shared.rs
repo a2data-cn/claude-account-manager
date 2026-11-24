@@ -5,9 +5,10 @@ use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::desktop_app::{login_state, version_from_path};
 use cam_engine::health::{
-    auth_item, der_issuer, net_fingerprint_of, parse_status_summary, proxy_endpoints,
-    proxy_vpn_items, region_check_fresh, region_fail_item, region_retry_wait, risk_items,
-    risk_score, status_relevant, status_risk, tls_issuer_item,
+    auth_item, der_issuer, exit_note, net_fingerprint_of, note_risk_in, parse_status_summary,
+    proxy_endpoints, proxy_vpn_items, region_check_fresh, region_fail_item, region_retry_wait,
+    risk_items, risk_log_view, risk_points, risk_score, status_relevant, status_risk, strip_ago,
+    tls_issuer_item, RISK_LOG_SHOWN,
 };
 use cam_engine::health::{parse_windows_env, parse_windows_processes};
 use cam_engine::local_report::{report_event, usage_report};
@@ -547,6 +548,99 @@ fn environment_risk_cases() {
                         .contains(part.as_str().unwrap()),
                     "{}",
                     c["name"]
+                );
+            }
+        }
+    }
+}
+
+/// 环境评分：每条扣几分、分数变了记一笔、界面上的“分数变化”。
+#[test]
+fn risk_log_cases() {
+    let raw = fixture("risk_log.json").to_string();
+    let fx: Value =
+        serde_json::from_str(&raw.replace("$now", &chrono::Utc::now().to_rfc3339())).unwrap();
+    for c in cases(&fx, "points") {
+        assert_eq!(json!(risk_points(c)), c["points"], "{}", c);
+    }
+    for c in cases(&fx, "strip_ago") {
+        assert_eq!(json!(strip_ago(c["text"].as_str().unwrap())), c["expect"]);
+    }
+    for c in cases(&fx, "exit_note") {
+        assert_eq!(
+            json!(exit_note(&c["prev"], &c["cur"])),
+            c["expect"],
+            "{}",
+            c
+        );
+    }
+    let pairs = |items: &Value| -> Vec<Value> {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| json!([i["kind"], i["points"]]))
+            .collect()
+    };
+    for seq in cases(&fx, "sequences") {
+        let mut data = json!({});
+        for (n, step) in seq["steps"].as_array().unwrap().iter().enumerate() {
+            let name = format!("{}（第 {} 步）", seq["name"], n);
+            for (k, v) in step["set"].as_object().unwrap() {
+                data[k] = v.clone();
+            }
+            if step["note"].as_bool().unwrap_or(true) {
+                let at = format!("2026-01-01T00:00:{:02}+00:00", n);
+                assert_eq!(
+                    json!(note_risk_in(&mut data, Some(&at))),
+                    step["expect_noted"],
+                    "{}",
+                    name
+                );
+            }
+            let log = data["risk_log"].as_array().cloned().unwrap_or_default();
+            let got: Vec<Value> = log
+                .iter()
+                .map(|e| {
+                    let kinds: Vec<&Value> = e["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|i| &i["kind"])
+                        .collect();
+                    json!({"score": e["score"], "kinds": kinds})
+                })
+                .collect();
+            assert_eq!(json!(got), step["expect_log"], "{}", name);
+            let text: String = log
+                .iter()
+                .flat_map(|e| e["items"].as_array().unwrap().iter())
+                .map(|i| i["text"].as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ");
+            for part in step["text_excludes"].as_array().into_iter().flatten() {
+                assert!(!text.contains(part.as_str().unwrap()), "{}：{}", name, text);
+            }
+            for part in step["text_includes"].as_array().into_iter().flatten() {
+                assert!(text.contains(part.as_str().unwrap()), "{}：{}", name, text);
+            }
+            if !step["expect_view"].is_null() {
+                let v = risk_log_view(&data, RISK_LOG_SHOWN);
+                let changes: Vec<Value> = v["changes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| {
+                        json!({"at": !c["at"].is_null(), "prev": c["prev"], "score": c["score"],
+                               "grade": c["grade"], "added": pairs(&c["added"]),
+                               "removed": pairs(&c["removed"]), "exit_note": c["exit_note"]})
+                    })
+                    .collect();
+                assert_eq!(
+                    json!({"since": !v["since"].is_null(), "changes": changes}),
+                    step["expect_view"],
+                    "{}",
+                    name
                 );
             }
         }

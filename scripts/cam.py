@@ -277,6 +277,7 @@ import threading
 import unicodedata
 import urllib.error
 import urllib.parse
+import warnings
 
 # http.client、http.server、socketserver、ssl、urllib.request、concurrent.futures 不在这里加载：它们连带的 email、logging 等
 # 要多花五十毫秒左右，而 cam ls / switch / json 这些命令不联网、也不开线程池。用到它们的函数在开头自己 import。
@@ -294,7 +295,33 @@ else:
     import fcntl
 
 VERSION = "1.3.1"
-CODE_STAMP = str(int(os.path.getmtime(os.path.realpath(__file__))))  # 这份代码的修改时间：菜单栏插件用它认出后台跑的 cam serve 是不是旧代码
+
+
+def code_files():
+    """后台 cam serve 运行时从磁盘读的代码：cam.py、它用到时才加载的几个模块、面板和卡片的页面（每次请求都从磁盘读）。"""
+    here = os.path.dirname(os.path.realpath(__file__))
+    pages = [os.path.join(d, n) for d in (os.path.join(here, "..", "web"), here) for n in ("panel.html", "mini.html")]
+    return [os.path.realpath(__file__), *sorted(glob.glob(os.path.join(here, "cam_*.py"))), *pages]
+
+
+def code_stamp_now():
+    """这份代码现在的修改时间：code_files() 里最新的一个（秒）。cam.py 暂时不在（git 正在替换）是 None。"""
+    files = code_files()
+    try:
+        stamps = [int(os.path.getmtime(files[0]))]
+    except OSError:
+        return None
+    for path in files[1:]:
+        try:
+            stamps.append(int(os.path.getmtime(path)))
+        except OSError:
+            pass
+    return str(max(stamps))
+
+
+# 启动时这份代码的修改时间：菜单栏 / 托盘用它认出后台跑的 cam serve 是不是旧代码，后台的 cam serve 用它发现自己的代码换了（watch_code），
+# 面板页面看到它变了就整页刷新
+CODE_STAMP = code_stamp_now()
 
 # --------------------------------------------------------------------------- 路径
 
@@ -2982,11 +3009,12 @@ def save_privacy(store, body):
 
 
 def clear_region_history(store):
-    """清掉缓存的出口信息和每个账号的使用地区记录。"""
+    """清掉缓存的出口信息、环境评分的变化记录和每个账号的使用地区记录。"""
     with store.lock():
         data = store.load()
         data.pop("region", None)
         data.pop("status_page", None)
+        data.pop("risk_log", None)  # 分数变化的说明里带着出口地区，一起清
         for a in data["accounts"]:
             a.pop("regions", None)
         store.save(data)
@@ -3021,9 +3049,10 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
         return True
     print(color(f"[cam] 环境评分 {sc['score']}/100：{sc['label']}", "r" if tier == "strong" else "y"), file=err)
     for r in risks:
-        if r["level"] in ("warn", "bad"):
-            print(color(f"[cam]   ! {r['text']}。{r['advice']}", "y"), file=err)
-    print(color("[cam]   cam doctor 查看完整的服务检查；cam risk 调整提醒阈值", "d"), file=err)
+        if r["level"] in ("warn", "bad") or risk_points(r):
+            pts = f"（−{risk_points(r)} 分）" if risk_points(r) else ""
+            print(color(f"[cam]   ! {r['text']}{pts}。{r['advice']}", "y"), file=err)
+    print(color("[cam]   cam doctor 查看完整的服务检查；cam risk 看每条扣几分、分数什么时候变的，调整提醒阈值", "d"), file=err)
     if tier == "remind":
         return True
     if interactive is None:
@@ -4037,7 +4066,7 @@ def _shown_usage(a):
 
 
 def public_state(store, data):
-    risks = risk_items(data)
+    risks = [dict(r, points=risk_points(r)) for r in risk_items(data)]  # points：这一条从环境评分里扣几分
     accs = []
     samples = load_usage_samples(store)["accounts"]
     now = time.time()
@@ -4081,11 +4110,12 @@ def public_state(store, data):
         if a["kind"] == "claude_web":
             p["has_session_key"] = bool(store.load_secret(a["id"]).get("session_key"))
         accs.append(p)
-    return {"version": VERSION, "backend": "python", "code_stamp": CODE_STAMP, "host": socket.gethostname(),
+    # code_stamp：页面看到它变了（后台用新代码重启了）就自己刷新；code_watch：后台会不会自己换新代码，老版本没有这一项
+    return {"version": VERSION, "backend": "python", "code_stamp": CODE_STAMP, "code_watch": code_watch_on(), "host": socket.gethostname(),
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "sessions": sessions_brief(),
+            "risk_score": risk_score(risks), "risk_log": risk_log_view(data), "sessions": sessions_brief(),
             "desktop_app": desk_app, "attention": attention_view(), "generated_at": now_iso()}
 
 
@@ -5102,7 +5132,8 @@ def account_diagnostic(store, data, key):
     return {"generated_at": now_iso(), "cam_version": VERSION, "host": socket.gethostname(), "platform": platform.platform(),
             "account": pub, "incidents": acc.get("incidents") or [], "regions": acc.get("regions") or [],
             "region": region_view(data), "env": (data.get("region") or {}).get("env") or {},
-            "risks": [r for r in risks if r.get("kind") != "summary"], "risk_score": risk_score(risks),
+            "risks": [dict(r, points=risk_points(r)) for r in risks if r.get("kind") != "summary"], "risk_score": risk_score(risks),
+            "risk_log": risk_log_view(data, RISK_LOG_KEEP),
             "status_page": data.get("status_page"), "sessions": session_count(), "pending_switch": pending_switch_view(data),
             "switches": [{"at": e["at"], "to": names.get(e["id"], e["id"]), "this": e["id"] == acc["id"]}
                          for e in data.get("switch_log", [])[-30:] if e.get("at")]}
@@ -5180,7 +5211,13 @@ def diagnostic_text(rep):
     L.append(f"- {env_line(env)}")
     L.append(f"- 环境评分 {sc['score']}/100（{sc['label']}）")
     L += [f"- [{ {'bad': '风险', 'warn': '注意', 'info': '提示', 'ok': '正常'}.get(r['level'], r['level'])}] {r['text']}"
+          + (f" −{r['points']} 分" if r.get("points") else "")
           + (f"（{r['advice']}）" if r.get("advice") else "") for r in rep["risks"]]
+    rl = rep.get("risk_log") or {}
+    if rl.get("changes"):
+        L += ["", "## 环境评分的变化"]
+        L += [f"- {_when(c['at']) if c.get('at') else '现在'}：{risk_change_line(c)}" for c in rl["changes"]]
+        L.append(f"- 从 {_when(rl['since'])} 开始记录")
     sp = rep.get("status_page") or {}
     if sp.get("text") or sp.get("description"):
         L.append(f"- Anthropic 状态页：{sp.get('text') or sp.get('description')}")
@@ -5633,14 +5670,18 @@ def make_handler(store, token):
                         return self._send(200, env_purge_restore(store))
                     if b.get("purge") is not True or b.get("confirm") != "彻底清理":
                         raise CamError("要彻底清理请带 purge: true 和 confirm: “彻底清理”")
-                    return self._send(200, {"backup": env_purge(store)})
+                    dest = env_purge(store)
+                    return self._send(200, {"backup": dest, **purge_env_result(dest)})
                 if method == "GET" and parts == ["update"]:  # 只有脚本版有：桌面版的服务返回 404，面板据此隐藏“检查更新”
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     if (q.get("saved") or [""])[0]:
                         return self._send(200, saved_update_check() or {"checked_at": None, "version": VERSION})
                     return self._send(200, update_check())
                 if method == "POST" and parts == ["update"]:
-                    return self._send(200, apply_update(restart_later=True))
+                    res = apply_update(restart_later=True)
+                    # 更新了：这个服务几秒内自己用新代码重启（watch_code），页面等它回来就刷新
+                    return self._send(200, dict(res, restarting=bool(res.get("updated")) and code_watch_on()
+                                                and code_stamp_now() != CODE_STAMP))
                 if method == "GET" and parts == ["privacy"]:
                     return self._send(200, privacy_view(store))
                 if method == "PUT" and parts == ["privacy"]:
@@ -5686,19 +5727,24 @@ def make_handler(store, token):
                 return self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
         def do_GET(self):
-            self._route("GET")
+            with SERVE_BUSY.hold():  # 用新代码重启前等手上的请求做完
+                self._route("GET")
 
         def do_POST(self):
-            self._route("POST")
+            with SERVE_BUSY.hold():
+                self._route("POST")
 
         def do_PATCH(self):
-            self._route("PATCH")
+            with SERVE_BUSY.hold():
+                self._route("PATCH")
 
         def do_DELETE(self):
-            self._route("DELETE")
+            with SERVE_BUSY.hold():
+                self._route("DELETE")
 
         def do_PUT(self):
-            self._route("PUT")
+            with SERVE_BUSY.hold():
+                self._route("PUT")
 
     return H
 
@@ -6016,7 +6062,8 @@ def serve(store, host, port, auto_refresh_min):
                     told = False
                     print("[后台] 已接手后台任务")
                 fp = live_fingerprint()
-                background_round(store, st, auto_refresh_min, tell, import_live=fp != last_fp)
+                with SERVE_BUSY.hold():  # 续登录、写数据的半路上不让“代码换了”的重启把进程换掉
+                    background_round(store, st, auto_refresh_min, tell, import_live=fp != last_fp)
                 last_fp = fp
                 if time.time() - beat >= 60 or (st.get("last_refresh"), st.get("last_error")) != beat_key:
                     beat, beat_key = time.time(), (st.get("last_refresh"), st.get("last_error"))
@@ -6030,10 +6077,150 @@ def serve(store, host, port, auto_refresh_min):
             time.sleep(30 if use_keychain() else 5)
 
     threading.Thread(target=watch, daemon=True).start()
+    restart = threading.Event()
+    if code_watch_on():
+        threading.Thread(target=watch_code, args=(lambda: (restart.set(), srv.shutdown()),), daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    if restart.is_set():
+        SERVE_BUSY.close(RESTART_WAIT)  # 已经不收新请求了；后台那一轮也不再开始，等手上的做完
+        srv.server_close()
+        relaunch_serve()
+
+
+# ---- 代码换了新版本（面板里点的更新、cam update、git pull）：后台的 cam serve 用新代码重启自己。
+# 不重启的话页面每次都从磁盘读最新的 panel.html，刷新后就是新页面配旧后端：新页面要的接口旧后端没有（404），整块不显示或报错
+CODE_WATCH_SEC = float(os.environ.get("CAM_CODE_WATCH_SEC") or 3)  # 多久看一次自己的代码有没有换（测试里调短）
+RESTART_WAIT = 90  # 重启前最多等正在处理的请求、后台那一轮做完多少秒
+
+
+class ServeBusy:
+    """面板服务手上正在做的事（处理中的请求、后台那一轮）：用新代码重启前等它们做完，不在续登录、写数据的半路上换掉进程。"""
+
+    def __init__(self):
+        self.n = 0
+        self.closed = False
+        self.cv = threading.Condition()
+
+    @contextlib.contextmanager
+    def hold(self):
+        with self.cv:
+            while self.closed:  # 正在换新代码：新的活不开始了，等着进程被换掉（请求那边就是连不上，页面会重试）
+                self.cv.wait()
+            self.n += 1
+        try:
+            yield
+        finally:
+            with self.cv:
+                self.n -= 1
+                self.cv.notify_all()
+
+    def wait_idle(self, timeout):
+        with self.cv:
+            return self.cv.wait_for(lambda: self.n == 0, timeout)
+
+    def close(self, timeout):
+        """不再开始新的活，等手上的做完（最多 timeout 秒）。返回是不是都做完了。"""
+        with self.cv:
+            self.closed = True
+            return self.cv.wait_for(lambda: self.n == 0, timeout)
+
+
+SERVE_BUSY = ServeBusy()
+
+
+def code_watch_on():
+    return os.environ.get("CAM_NO_CODE_WATCH") != "1"
+
+
+def update_running():
+    """有 cam update 正在进行（拿着 update.lock）：快进、自检、不过就退回，这中间代码会变来变去，先别重启。"""
+    lock = FileLock(os.path.join(cam_home(), "update.lock"))
+    try:
+        if not lock.try_acquire():
+            return True
+    except OSError:
+        return False
+    lock.release()
+    return False
+
+
+def new_code_problem():
+    """磁盘上的新代码起不起得来：用它跑一次 cam --help。起得来返回 None，起不来返回原因（这时不重启，接着用旧代码）。"""
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", CAM_NO_BG_CHECK="1", CAM_NO_NOTIFY="1")
+    try:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--help"], env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60, stdin=subprocess.DEVNULL, **NO_WINDOW)
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+    return None if r.returncode == 0 else brief(r.stderr or r.stdout, last=True) or f"退出码 {r.returncode}"
+
+
+def watch_code(restart, interval=CODE_WATCH_SEC, rounds=None):
+    """后台：代码换了（code_stamp_now() 和启动时的 CODE_STAMP 不一样）就调 restart() 用新代码重启。
+
+    要连着两轮看到同一个新版本（git 写完了）、没有 cam update 正在进行（自检没过会退回），
+    再用新代码跑一次 cam --help 起得来，才重启；起不来就接着用旧代码服务，免得面板直接没了，文件再变时再试。
+    rounds 只给测试用：看几轮就返回。返回有没有调 restart。
+    """
+    seen = bad = None
+    n = 0
+    while rounds is None or n < rounds:
+        n += 1
+        time.sleep(interval)
+        st = code_stamp_now()
+        if st is None or st == CODE_STAMP or st == bad:
+            seen = None
+            continue
+        if st != seen or update_running():
+            seen = st
+            continue
+        problem = new_code_problem()
+        if problem:
+            bad = st
+            print(f"[面板] 代码换了，但新代码起不来，先接着用现在的：{problem}", file=sys.stderr, flush=True)
+            continue
+        print("[面板] 代码换了新版本，用新代码重启", flush=True)
+        restart()
+        return True
+    return False
+
+
+def serve_relaunch_args():
+    """重启自己用的命令行：同一个 Python、同样的解释器选项（-X utf8 这类）和参数，脚本换成绝对路径。"""
+    orig = list(getattr(sys, "orig_argv", None) or [])  # Python 3.10+：[解释器, 选项…, 脚本, 参数…]
+    flags = orig[1:len(orig) - len(sys.argv)] if len(orig) > len(sys.argv) else []
+    return [sys.executable, *flags, os.path.abspath(__file__), *sys.argv[1:]]
+
+
+def relaunch_serve():
+    """用磁盘上的新代码重新起这个 cam serve：同样的参数、同一个端口。调用前已经关掉监听的端口。
+
+    macOS / Linux：exec 换掉自己，进程号不变（systemd 的服务、终端里开的都还是它，锁跟着旧的文件句柄一起释放）。
+    Windows 没有真正的 exec：起一个新的再退出自己；在终端里开的，新的接着往同一个窗口里输出。
+    """
+    args = serve_relaunch_args()
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    if not IS_WIN:
+        try:
+            os.execv(sys.executable, args)
+        except OSError as e:  # 换不过去：和 Windows 一样起一个新的再退出
+            print(f"[面板] 没能原地换成新代码（{e}），另起一个", file=sys.stderr, flush=True)
+    try:
+        tty = sys.stdout.isatty()
+    except (AttributeError, OSError, ValueError):
+        tty = False
+    kw = {"stdin": subprocess.DEVNULL, "close_fds": True}
+    if not tty:  # 托盘、cam panel 在后台起的：和 ensure_panel 起的一样，不给它开窗口
+        kw.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=BG_FLAGS)
+    subprocess.Popen(args, **kw)
+    os._exit(0)
 
 
 def _panel_get(port, path, token=None, timeout=2):
@@ -6073,7 +6260,15 @@ def panel_running(port, token):
 
 
 def port_free(port):
+    """本机 port 上能不能起 cam serve。
+
+    macOS / Linux 带上 SO_REUSEADDR，和 cam serve 自己绑端口时一样：刚结束的服务留下的 TIME_WAIT 连接（开着的页面连过它）
+    不算占用。不带的话，结束旧代码的 cam serve 之后要等一分钟才认为端口空了，这期间托盘 / cam panel 起不了新的，页面一直连不上。
+    Windows 上这个选项的意思不一样（能绑上别人正在听的端口），不加。
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        if not IS_WIN:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return True
@@ -6086,13 +6281,17 @@ def ensure_panel(store, port=8787, need_mini=False):
 
     没有就在后台起一个只监听 127.0.0.1 的 cam serve，它一直运行到注销或重启。端口被别的程序占了就往后找。
     need_mini：要的是有卡片小面板页（/mini）的面板——在跑的是桌面版的服务时跳过它，在下一个空端口起一个 cam serve。
+    在跑的是旧代码的 cam serve（代码更新了它没换）：结束它，在同一个端口起新的。
     """
     token = server_token(store)
     for p in range(port, port + 10):
         if panel_running(p, token):
-            if need_mini and not mini_available(p, token):
+            if serve_outdated(p, token) and restart_stale_serve(store, p, token):
+                pass  # 跑的是旧代码的 cam serve（更新前开的，那时还不会自己换新代码）：结束了，下面在同一个端口起新的
+            elif need_mini and not mini_available(p, token):
                 continue
-            return p, token
+            else:
+                return p, token
         if not port_free(p):
             continue
         kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
@@ -6117,13 +6316,19 @@ def mini_available(port, token):
 
 def serve_outdated(port, token):
     """本机 port 上跑的脚本版 cam serve 用的是不是旧代码（git pull / cam update 之后没重启）。
-    桌面版的服务、连不上、回答里没有 code_stamp 的老版本：桌面版和连不上算“不是”，老版本算“是”。"""
+    桌面版的服务、连不上、回答里没有 code_stamp 的老版本：桌面版和连不上算“不是”，老版本算“是”。
+
+    和磁盘上现在的代码比（code_stamp_now），不和问的这个进程启动时的比：常驻的菜单栏插件只在 cam.py 和它自己变了时
+    才重新加载，只换了面板页面时它记的还是旧时间，拿它比会把刚用新代码重启好的 cam serve 当成旧的，每分钟结束一次。"""
+    now = code_stamp_now()
+    if now is None:  # 代码正在被替换：这一轮不算
+        return False
     code, txt = _panel_get(port, "/api/state", token, timeout=3)
     try:
         st = json.loads(txt) if code == 200 else None
     except ValueError:
         st = None
-    return isinstance(st, dict) and st.get("backend") == "python" and st.get("code_stamp") != CODE_STAMP
+    return isinstance(st, dict) and st.get("backend") == "python" and st.get("code_stamp") != now
 
 
 def restart_stale_serve(store, port, token):
@@ -6314,7 +6519,8 @@ def print_accounts(store, data):
         print("\n" + color(f"⏳ {pend['message']}（cam switch --cancel-wait 取消{tail}）", "c"))
     risks = [r for r in st.get("risks") or [] if r["level"] in ("warn", "bad")]
     for i, r in enumerate(risks):
-        print(("\n" if i == 0 else "") + color(f"! {r['text']}。{r['advice']}", "y"))
+        pts = f"（−{r['points']} 分）" if r.get("points") else ""
+        print(("\n" if i == 0 else "") + color(f"! {r['text']}{pts}。{r['advice']}", "y"))
     sc = st.get("risk_score") or {}
     if sc and (st.get("region") or {}).get("status"):  # 后台检测过才有意义
         c = {"low": "g", "medium": "y", "high": "r"}[sc["grade"]]
@@ -6597,7 +6803,7 @@ def cmd_risk(store, args):
         print("已保存外部 IP 查询设置。")
     if args.clear_history:
         clear_region_history(store)
-        print("已清除出口信息和账号使用地区记录。")
+        print("已清除出口信息、环境评分的变化记录和账号使用地区记录。")
     data = store.load()
     p = risk_prefs(data)
     sc = risk_score(risk_items(data))
@@ -6614,6 +6820,20 @@ def cmd_risk(store, args):
             print(f"  最近一次检测没连上（{fmt_ago(reg['failed_at'])}），上面是上一次查到的结果")
         if not cached_region_loc(data):
             print("  " + ENV_STALE_ADVICE)
+        lost = [(risk_points(r), r) for r in risk_items(data) if risk_points(r)]
+        for pts, r in lost:
+            print(f"  −{pts:<3} {r['text']}")
+        if not lost:
+            print("  没有扣分的项")
+        rl = risk_log_view(data)
+        if rl["changes"]:
+            print("最近的分数变化（新的在前）：")
+            for c in rl["changes"]:
+                print(f"  {_when(c['at']) if c['at'] else '现在':<16}  {risk_change_line(c)}")
+        elif rl["since"]:
+            print(f"分数变化：从 {_when(rl['since'])} 开始记录，之后没变过")
+        else:
+            print("分数变化：还没开始记录（开着 cam serve、桌面版或菜单栏 / 托盘小工具时，每次环境检测后分数变了就记一笔）")
     else:
         print("当前：还没有检测过，运行 cam doctor 或 cam claude 时会检测")
     pv = privacy_view(store)
@@ -6809,11 +7029,16 @@ def _env_finding(k, text, default_advice, fix, cloud=False):
                     fix, sup)
 
 
+MANAGED_ADVICE = ("系统级托管设置，可能是公司 IT 统一下发的，所以默认不动；是你自己或中转教程加的就勾上一起清理，"
+                  "清理时 Windows 会弹窗要管理员确认，点“是”")
+
+
 def settings_findings():
     """settings.json / settings.local.json：写坏了、env 里的中转设置、apiKeyHelper、强制用 API 登录、非 Claude 的模型名；
-    系统级托管设置里的同样几项只提醒（要管理员改）。返回 (发现, {变量名: 在哪设的})。"""
+    系统级托管设置里的同样几项：Windows 上能一键清理（弹窗要管理员确认），但可能是公司 IT 下发的，归到默认不动的那组；
+    别的系统上只提醒（要 sudo 改）。返回 (发现, {变量名: 在哪设的})。"""
     out, where = [], {}
-    cloud = cloud_on()
+    cloud, admin = cloud_on(), admin_fix_ok()
     files = [(p, False) for p in (os.path.join(claude_config_dir(), n) for n in ("settings.json", "settings.local.json"))]
     files += [(p, True) for p in managed_settings_paths()]
     for path, managed in files:
@@ -6828,28 +7053,38 @@ def settings_findings():
         if not isinstance(s, dict):
             continue
         who = f"系统级托管设置 {path}" if managed else short_path(path)
-        manual = f"这是管理员下发的设置，要管理员权限才能改：{path}" if managed else ""
+        manual = f"这是管理员下发的设置，要管理员权限才能改：{path}" if managed and not admin else ""
+
+        def fx(key, env=False, path=path, managed=managed):  # 托管设置：Windows 上走管理员确认，别的系统只提示
+            if managed and not admin:
+                return None
+            return dict({"type": "json_key", "path": path, "env": env, "key": key}, **({"admin": True} if managed else {}))
+        mine = []
         env = s.get("env") if isinstance(s.get("env"), dict) else {}
         for k in SCAN_ENV:
             if k in env and env_value_matters(k, env[k]):
                 where.setdefault(k, who)
                 f = _env_finding(k, f"{who} 的 env 里设置了 {env_shown(k, env[k])}：{ENV_WHAT[k]}", "不用第三方中转的话去掉它",
-                                 None if managed else {"type": "json_key", "path": path, "env": True, "key": k}, cloud)
+                                 fx(k, True), cloud)
                 if manual:
                     f["advice"] = manual
-                out.append(f)
+                mine.append(f)
         if s.get("apiKeyHelper"):
-            out.append(_finding("info", f"{who} 里设置了 apiKeyHelper：用脚本给出的 Key 代替订阅登录", manual or SUPPORTED_ADVICE,
-                                None if managed else {"type": "json_key", "path": path, "env": False, "key": "apiKeyHelper"}, True))
+            mine.append(_finding("info", f"{who} 里设置了 apiKeyHelper：用脚本给出的 Key 代替订阅登录", manual or SUPPORTED_ADVICE,
+                                 fx("apiKeyHelper"), True))
         if s.get("forceLoginMethod") == "console":
-            out.append(_finding("info", f"{who} 里设置了 forceLoginMethod=console：只能用 API 账号登录，订阅登录不了", manual or SUPPORTED_ADVICE,
-                                None if managed else {"type": "json_key", "path": path, "env": False, "key": "forceLoginMethod"}, True))
+            mine.append(_finding("info", f"{who} 里设置了 forceLoginMethod=console：只能用 API 账号登录，订阅登录不了", manual or SUPPORTED_ADVICE,
+                                 fx("forceLoginMethod"), True))
         if isinstance(s.get("model"), str) and s["model"] and not is_claude_model(s["model"]):
-            out.append(_finding("info" if cloud else "warn",
-                                f"{who} 里的 model={s['model']} 不是 Claude 的模型名" + ("（开着云厂商，可能是那边的写法）" if cloud else
-                                                                                   "（第三方中转的设置），用订阅登录时会出错"),
-                                manual or (SUPPORTED_ADVICE if cloud else "去掉它，或者改成 sonnet / opus"),
-                                None if managed else {"type": "json_key", "path": path, "env": False, "key": "model"}, cloud))
+            mine.append(_finding("info" if cloud else "warn",
+                                 f"{who} 里的 model={s['model']} 不是 Claude 的模型名" + ("（开着云厂商，可能是那边的写法）" if cloud else
+                                                                                    "（第三方中转的设置），用订阅登录时会出错"),
+                                 manual or (SUPPORTED_ADVICE if cloud else "去掉它，或者改成 sonnet / opus"),
+                                 fx("model"), cloud))
+        if managed and admin:  # 可能是公司 IT 下发的：能清，但默认不动
+            for f in mine:
+                f["optional"], f["advice"] = True, MANAGED_ADVICE
+        out += mine
     return out, where
 
 
@@ -6930,14 +7165,57 @@ def shell_env_lines(path, names, text=None, syntax=None):
     return out
 
 
-def powershell_profiles():
-    """Windows PowerShell 5.1 和 PowerShell 7 的个人配置文件（“文档”可能被 OneDrive 接管，两处都看）。"""
+PS_PROFILE_NAMES = ("Microsoft.PowerShell_profile.ps1", "profile.ps1", "Microsoft.VSCode_profile.ps1",
+                    "Microsoft.PowerShellISE_profile.ps1")
+
+
+def _norm(p):
+    """比较路径用：绝对路径，Windows 上不分大小写。"""
+    return os.path.normcase(os.path.abspath(p))
+
+
+def documents_dirs():
+    """“文档”文件夹在哪：注册表里记的真实位置（可能挪到了别的盘、被 OneDrive 接管），再加上常见的几处：
+    ~/Documents、个人版 ~/OneDrive/Documents、公司版 ~/OneDrive - 公司名/Documents。测试（CAM_TEST_PS_PROFILES）不读注册表。"""
     out = []
-    for docs in (os.path.join(home(), "Documents"), os.path.join(home(), "OneDrive", "Documents")):
-        for sub in ("WindowsPowerShell", "PowerShell"):
-            for name in ("Microsoft.PowerShell_profile.ps1", "profile.ps1"):
-                out.append(os.path.join(docs, sub, name))
-    return out
+    if IS_WIN and not os.environ.get("CAM_TEST_PS_PROFILES"):
+        try:
+            import winreg  # noqa: PLC0415
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+                v = winreg.QueryValueEx(key, "Personal")[0]
+            if v:
+                out.append(os.path.expandvars(str(v)))
+        except (ImportError, OSError):
+            pass
+    out += [os.path.join(home(), "Documents"), os.path.join(home(), "OneDrive", "Documents")]
+    with contextlib.suppress(OSError):
+        out += [os.path.join(home(), n, "Documents") for n in sorted(os.listdir(home())) if n.startswith("OneDrive - ")]
+    seen, uniq = set(), []
+    for d in out:
+        if _norm(d) not in seen:
+            seen.add(_norm(d))
+            uniq.append(d)
+    return uniq
+
+
+def powershell_profiles():
+    """Windows PowerShell 5.1 和 PowerShell 7 的个人配置文件（包括 VS Code、ISE 里用的），“文档”可能在好几处，都看。"""
+    return [os.path.join(docs, sub, name) for docs in documents_dirs() for sub in ("WindowsPowerShell", "PowerShell")
+            for name in PS_PROFILE_NAMES]
+
+
+def powershell_system_profiles():
+    """所有用户共用的 PowerShell 配置（改要管理员权限）：Windows PowerShell 5.1 的在 System32 下面，PowerShell 7 的在 Program Files 下面。
+    测试用 CAM_TEST_PS_SYSTEM 指过去；只设了 CAM_TEST_PS_PROFILES 时不看本机真的。"""
+    t = os.environ.get("CAM_TEST_PS_SYSTEM")
+    if t is not None:
+        return [p for p in t.split(os.pathsep) if p]
+    if not IS_WIN or os.environ.get("CAM_TEST_PS_PROFILES"):
+        return []
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    pf = os.environ.get("ProgramFiles") or r"C:\Program Files"
+    return [os.path.join(d, n) for d in (os.path.join(root, "System32", "WindowsPowerShell", "v1.0"), os.path.join(pf, "PowerShell", "7"))
+            for n in ("profile.ps1", "Microsoft.PowerShell_profile.ps1")]
 
 
 def shell_findings():
@@ -6947,8 +7225,11 @@ def shell_findings():
     files = [os.path.expanduser(p) for p in SHELL_FILES]
     if IS_WIN or os.environ.get("CAM_TEST_PS_PROFILES"):
         files += powershell_profiles()
+    shared = powershell_system_profiles()  # 所有用户共用的：要管理员权限才能改
+    files += shared
+    shared = {_norm(p) for p in shared}
     names = SCAN_ENV
-    cloud, seen = cloud_on(), set()
+    cloud, seen, admin = cloud_on(), set(), admin_fix_ok()
     for path in files:
         real = os.path.realpath(path)
         if not os.path.isfile(path) or real in seen:  # 两个名字指向同一个文件（链接）只查一次
@@ -6958,10 +7239,20 @@ def shell_findings():
             if not env_value_matters(k, v):
                 continue
             where.setdefault(k, f"{short_path(path)} 第 {n} 行")
-            text = f"{short_path(path)} 第 {n} 行设置了 {env_shown(k, v)}：{ENV_WHAT[k]}"
-            if simple:
-                out.append(_env_finding(k, text, "不用第三方中转的话把这一行注释掉",
-                                        {"type": "comment", "path": real, "line": n, "key": k, "syntax": shell_syntax(path)}, cloud))
+            common = _norm(path) in shared
+            text = ("所有用户共用的 PowerShell 配置 " if common else "") + f"{short_path(path)} 第 {n} 行设置了 {env_shown(k, v)}：{ENV_WHAT[k]}"
+            if simple and common and not admin:
+                f = _env_finding(k, text, "", None, cloud)
+                f["advice"] = f"要管理员权限：用管理员身份打开记事本编辑 {path}，把第 {n} 行删掉，或者在行首加 #"
+                out.append(f)
+            elif simple:
+                fix = {"type": "comment", "path": real, "line": n, "key": k, "syntax": shell_syntax(path)}
+                if common:
+                    fix["admin"] = True
+                f = _env_finding(k, text, "不用第三方中转的话把这一行注释掉", fix, cloud)
+                if common:
+                    f["advice"] += "（所有用户共用的配置：清理时 Windows 会弹窗要管理员确认，点“是”）"
+                out.append(f)
             else:
                 f = _env_finding(k, text, "", None, cloud)
                 f["advice"] = (f"这一行还有别的内容（或者在函数、if 里面），cam 不替你改：打开 {short_path(path)}，"
@@ -6998,19 +7289,60 @@ def win_env_values(system=False):
 
 
 def win_env_findings():
+    """Windows 注册表里的用户、系统环境变量。系统的（setx /M、“编辑系统环境变量”里加的，所有用户都带）要管理员权限才能删：
+    一键清理时弹一次 Windows 的管理员确认（admin_ops_run）。"""
     out, where = [], {}
-    cloud = cloud_on()
+    cloud, admin = cloud_on(), admin_fix_ok()
     for system in (False, True):
         vals = win_env_values(system)
         for k in SCAN_ENV:
             if k in vals and env_value_matters(k, vals[k][0]):
                 scope = "系统环境变量" if system else "用户环境变量"
                 where.setdefault(k, scope)
+                fix = {"type": "win_env", "key": k, "system": True} if system else {"type": "win_env", "key": k}
                 f = _env_finding(k, f"Windows {scope}里设置了 {env_shown(k, vals[k][0])}：{ENV_WHAT[k]}", "不用第三方中转的话删掉它",
-                                 None if system else {"type": "win_env", "key": k}, cloud)
+                                 fix if admin or not system else None, cloud)
                 if system:
-                    f["advice"] = "要管理员权限：开始菜单搜“编辑系统环境变量” → 环境变量 → 下面的“系统变量”里删掉它"
+                    f["advice"] = (f"{f['advice']}。这是系统变量：清理时 Windows 会弹窗要管理员确认，点“是”" if admin else
+                                   "要管理员权限：开始菜单搜“编辑系统环境变量” → 环境变量 → 下面的“系统变量”里删掉它")
                 out.append(f)
+    return out, where
+
+
+def cmd_autorun_findings():
+    """cmd 每次打开都会先运行的命令（注册表 Command Processor 的 AutoRun，当前用户和所有用户的）：命令里直接 set 的变量，
+    或者它调用的 .bat / .cmd 里 set 的。只提示在哪，不替你改。"""
+    out, where = [], {}
+    try:
+        import winreg  # noqa: PLC0415
+    except ImportError:
+        return out, where
+    cloud = None
+    for root, scope in ((winreg.HKEY_CURRENT_USER, "当前用户"), (winreg.HKEY_LOCAL_MACHINE, "所有用户")):
+        try:
+            with winreg.OpenKey(root, r"Software\Microsoft\Command Processor") as key:
+                cmd = str(winreg.QueryValueEx(key, "AutoRun")[0] or "")
+        except OSError:
+            continue
+        sources = [(f"cmd 的自动运行命令（{scope}，注册表 Command Processor 的 AutoRun）", cmd, False)]
+        for m in re.finditer(r'"?([A-Za-z]:\\[^"&|<>]*?\.(?:bat|cmd))\b"?', os.path.expandvars(cmd), re.I):
+            text = read_text_file(m.group(1))[0]
+            if text:
+                sources.append((f"cmd 自动运行的 {short_path(m.group(1))}", text, True))
+        for who, text, is_file in sources:
+            for n, line in enumerate(text.splitlines(), 1):
+                for part in re.split(r"&&|\|\||&", line):
+                    sm = re.match(r'\s*@?set\s+"?([A-Za-z_]\w*)=([^"]*?)"?\s*$', part, re.I)
+                    k = sm.group(1).upper() if sm else ""
+                    if k not in SCAN_ENV or not env_value_matters(k, sm.group(2)):
+                        continue
+                    cloud = cloud_on() if cloud is None else cloud
+                    where.setdefault(k, who)
+                    f = _env_finding(k, f"{who}{f' 第 {n} 行' if is_file else ''}设置了 {env_shown(k, sm.group(2))}：{ENV_WHAT[k]}",
+                                     "", None, cloud)
+                    f["advice"] = ("cmd 每次打开都会运行它：不用第三方中转的话把这一句删掉（批处理文件里也可以在行首加 REM）"
+                                   + ("" if is_file else "；在注册表编辑器里改 Command Processor 的 AutoRun"))
+                    out.append(f)
     return out, where
 
 
@@ -7229,7 +7561,7 @@ def env_findings():
     Windows 注册表、macOS launchctl、~/.claude.json，最后是只在当前进程里有的（这次手动 export 的，或者启动它的程序带的）。
     返回 (发现, 当前进程里还带着的变量名)。"""
     out, where = [], {}
-    for fn in (settings_findings, shell_findings, win_env_findings, launchctl_findings):
+    for fn in (settings_findings, shell_findings, win_env_findings, cmd_autorun_findings, launchctl_findings):
         items, w = fn()
         out += items
         for k, v in w.items():
@@ -7428,6 +7760,156 @@ def _win_env_set(name, value, kind):
         winreg.SetValueEx(key, name, 0, kind, value)
 
 
+# ---- 要管理员权限的几项：Windows 系统环境变量、系统级托管设置、所有用户共用的 PowerShell 配置。
+# 一键清理（和撤销）时攒到最后一起做，弹一次 Windows 的管理员确认（UAC）；点“否”就只是这几项没做，别的照常
+
+def admin_fix_ok():
+    """要管理员权限的几项能不能一键清理：Windows 上能（弹窗确认），别的系统上只提示怎么用 sudo 改。测试里换掉它。"""
+    return IS_WIN
+
+
+def win_is_admin():
+    """这个进程是不是已经有管理员权限（用管理员身份打开的终端）：是的话直接做，不用再弹窗。"""
+    try:
+        import ctypes  # noqa: PLC0415
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (ImportError, AttributeError, OSError):
+        return False
+
+
+def admin_files():
+    """管理员那一步只肯改这几个文件。"""
+    return managed_settings_paths() + powershell_system_profiles()
+
+
+ADMIN_JOB, ADMIN_RESULT = "admin-job.json", "admin-result.json"
+ADMIN_TIMEOUT = 300  # 等弹窗、等它做完最多几秒
+
+
+def _admin_do(ops, workdir):
+    """真正动手的那一步（已经有管理员权限）。ops 每项是
+    {"op": "reg_del" | "reg_set", "key", "value"?, "kind"?}：系统环境变量，只认 cam 查的那几个名字；
+    {"op": "write", "path", "src", "expect"}：把 workdir 里准备好的 src 换上去，只认 admin_files 里的文件，
+    文件现在的指纹得是 expect（不是就说明刚被别人改过，不动）。返回每项的结果：None 是做成了，不然是原因。"""
+    allowed = {_norm(p) for p in admin_files()}
+    out = []
+    for op in ops:
+        try:
+            kind = op.get("op")
+            if kind in ("reg_del", "reg_set"):
+                if op.get("key") not in SCAN_ENV:
+                    raise CamError("不是 cam 会清理的变量，没动")
+                import winreg  # noqa: PLC0415
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WIN_SYSTEM_ENV, 0, winreg.KEY_SET_VALUE) as key:
+                    if kind == "reg_del":
+                        with contextlib.suppress(FileNotFoundError):
+                            winreg.DeleteValue(key, op["key"])
+                    else:
+                        winreg.SetValueEx(key, op["key"], 0, int(op["kind"]), op["value"])
+            elif kind == "write":
+                path, data = op.get("path") or "", op.get("src") or ""
+                if _norm(path) not in allowed:
+                    raise CamError("不是 cam 会改的文件，没动")
+                if os.path.dirname(_norm(data)) != _norm(workdir):
+                    raise CamError("要换上的内容不在这次的备份目录里，没动")
+                if _sha(read_bytes(path)) != op.get("expect"):
+                    raise CamError("文件刚被别的程序改过，没动（重新清理一次）")
+                with open(data, "rb") as f:
+                    write_bytes_atomic(path, f.read())
+            else:
+                raise CamError("不认识的操作")
+            out.append(None)
+        except ImportError:
+            out.append("这台电脑不是 Windows")
+        except PermissionError:
+            out.append("没有管理员权限，改不了")
+        except (OSError, CamError, KeyError, TypeError, ValueError) as e:
+            out.append(str(e) or type(e).__name__)
+    return out
+
+
+def _run_elevated(args, timeout):
+    """Windows：用管理员权限运行 args（弹 UAC 确认，窗口不显示），等它结束，返回退出码；弹窗里点了“否”返回 None。"""
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", ctypes.c_ulong), ("hwnd", wintypes.HWND),
+                    ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p), ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+    shell32.ShellExecuteExW.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x00000040  # SEE_MASK_NOCLOSEPROCESS：拿到进程句柄，等它做完
+    info.lpVerb, info.lpFile, info.lpParameters, info.nShow = "runas", args[0], subprocess.list2cmdline(args[1:]), 0
+    if not shell32.ShellExecuteExW(ctypes.byref(info)):
+        err = ctypes.get_last_error()
+        if err == 1223:  # ERROR_CANCELLED：弹窗里点了“否”
+            return None
+        raise CamError(f"没能用管理员权限启动（Windows 错误 {err}）")
+    if not info.hProcess:
+        raise CamError("没能用管理员权限启动")
+    try:
+        if kernel32.WaitForSingleObject(info.hProcess, int(timeout * 1000)) != 0:
+            raise CamError("管理员那一步太久没做完")
+        code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+        return code.value
+    finally:
+        kernel32.CloseHandle(info.hProcess)
+
+
+def admin_ops_run(ops, workdir):
+    """要管理员权限的几项一起做。已经是管理员就直接做；不是就把要做的写进 workdir 里的 admin-job.json，弹一次 UAC，
+    起一个看不见的管理员进程（cam env admin-job）做完、写回结果。点了“否”、超时这类，每项都记成没做成。返回每项的结果（同 _admin_do）。"""
+    if not ops:
+        return []
+    if win_is_admin():
+        return _admin_do(ops, workdir)
+    job, res = os.path.join(workdir, ADMIN_JOB), os.path.join(workdir, ADMIN_RESULT)
+    write_json_atomic(job, {"ops": ops}, private=True)
+    with contextlib.suppress(OSError):
+        os.unlink(res)
+    try:
+        code = _run_elevated([sys.executable, os.path.abspath(__file__), "env", "admin-job", job], ADMIN_TIMEOUT)
+        if code is None:
+            out = ["没给管理员权限（Windows 弹窗里点了“否”）"] * len(ops)
+        else:
+            got = (_read_json_quiet(res) or {}).get("results")
+            out = got if isinstance(got, list) and len(got) == len(ops) else [f"管理员那一步没做完（退出码 {code}）"] * len(ops)
+    except CamError as e:
+        out = [str(e)] * len(ops)
+    except (OSError, ImportError, AttributeError, ValueError):
+        out = ["没能用管理员权限启动"] * len(ops)
+    finally:
+        for p in (job, res):  # 撤销时 job 里有原值，用完就删
+            with contextlib.suppress(OSError):
+                os.unlink(p)
+    return out
+
+
+def cmd_env_admin_job(path):
+    """cam env admin-job：admin_ops_run 弹 UAC 起的管理员进程。做 admin-job.json 里的事，结果写到旁边的 admin-result.json。"""
+    job = os.path.abspath(path)
+    if os.path.basename(job) != ADMIN_JOB:
+        return 2
+    try:
+        ops = (read_json(job, {}) or {}).get("ops") or []
+    except CamError:
+        return 2
+    write_json_atomic(os.path.join(os.path.dirname(job), ADMIN_RESULT), {"results": _admin_do(ops, os.path.dirname(job))}, private=True)
+    return 0
+
+
 ENV_FIX_SLOW = ("npm_uninstall", "update", "cache")  # 有 claude 在跑时先不做的（文件正被占用、会话会出错）
 
 
@@ -7482,10 +7964,35 @@ def write_bytes_atomic(path, data):
         raise
 
 
+def _encode_text(text, fmt):
+    bom, codec = fmt
+    return bom + text.encode(codec, errors="surrogateescape" if codec == "utf-8" else "strict")
+
+
 def write_text_file(path, text, fmt):
     """按 read_text_file 读出来的格式写回去：同样的 BOM 和编码。"""
-    bom, codec = fmt
-    write_bytes_atomic(path, bom + text.encode(codec, errors="surrogateescape" if codec == "utf-8" else "strict"))
+    write_bytes_atomic(path, _encode_text(text, fmt))
+
+
+def _json_obj(raw, path):
+    """JSON 文件的内容（字节）解析成对象；空的当 {}，不是对象的也当 {}。"""
+    try:
+        obj = json.loads(raw) if raw and raw.strip() else {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise CamError(f"文件损坏，无法解析：{path}（{e}）")
+    return obj if isinstance(obj, dict) else {}
+
+
+def _json_bytes(obj):
+    """和 write_json_atomic 写出来的一样。"""
+    return json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _write_private(path, data):
+    with open(path, "wb") as f:
+        f.write(data or b"")
+    if not IS_WIN:
+        os.chmod(path, 0o600)
 
 
 def _sha(data):
@@ -7545,7 +8052,9 @@ def _env_fix_apply(store, plan, force, optional):
         if f["fix"]["type"] in ("json_key", "comment"):
             real = os.path.realpath(f["fix"]["path"])
             by_file.setdefault((f["fix"]["type"], real), []).append(f)
+    admin_ops, admin_items = [], []  # 要管理员权限的几项：攒到最后一起做，只弹一次确认。[(清单里那一项, 这几条发现)]
     for (t, real), fs in by_file.items():
+        admin = any(f["fix"].get("admin") for f in fs)
         try:
             item = backup_file(real)
             if t == "json_key":
@@ -7562,7 +8071,12 @@ def _env_fix_apply(store, plan, force, optional):
                         obj.pop("env")
                     return lambda now: all(k not in ((now.get("env") or {}) if e else now) for e, k in
                                            ((f["fix"]["env"], f["fix"]["key"]) for f in fs))
-                update_json_file(real, mutate)
+                if admin:  # 要管理员权限的文件：这里只算好改完的内容，最后由管理员那一步换上去
+                    obj = _json_obj(read_bytes(real), real)
+                    mutate(obj)
+                    new = _json_bytes(obj)
+                else:
+                    update_json_file(real, mutate)
                 item["changes"] = {"kind": "json", "removed": removed}
             else:
                 text, fmt = read_text_file(real)
@@ -7579,8 +8093,17 @@ def _env_fix_apply(store, plan, force, optional):
                         orig.append([n, lines[n - 1].rstrip("\r\n")])
                         lines[n - 1] = mark + lines[n - 1]
                         hit.append(n)
-                write_text_file(real, "".join(lines), fmt)
+                new = _encode_text("".join(lines), fmt)
+                if not admin:
+                    write_bytes_atomic(real, new)
                 item["changes"] = {"kind": "comment", "marker": mark, "lines": hit, "orig": orig}
+            if admin:
+                item["admin"], item["new"] = True, f"new-{len(manifest['items'])}"
+                _write_private(os.path.join(bdir, item["new"]), new)
+                save()
+                admin_ops.append({"op": "write", "path": real, "src": os.path.join(bdir, item["new"]), "expect": item["before"]})
+                admin_items.append((item, fs))
+                continue
             item["after"] = _sha(read_bytes(real))
             save()
             done += [f["text"] for f in fs]
@@ -7594,6 +8117,16 @@ def _env_fix_apply(store, plan, force, optional):
             skipped.append(f["text"])
             continue
         try:
+            if t == "win_env" and fx.get("system"):  # 系统环境变量：先记下原值，删要管理员权限，攒到最后
+                import winreg  # noqa: PLC0415
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WIN_SYSTEM_ENV) as key:
+                    value, kind = winreg.QueryValueEx(key, fx["key"])
+                it = {"type": "win_env", "key": fx["key"], "value": value, "kind": kind, "system": True}
+                manifest["items"].append(it)
+                save()
+                admin_ops.append({"op": "reg_del", "key": fx["key"]})
+                admin_items.append((it, [f]))
+                continue
             if t == "win_env":
                 import winreg  # noqa: PLC0415
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WIN_USER_ENV, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
@@ -7644,6 +8177,23 @@ def _env_fix_apply(store, plan, force, optional):
             failed.append({"text": f["text"], "error": "超时了"})
         except (OSError, CamError, subprocess.SubprocessError) as e:
             failed.append({"text": f["text"], "error": str(e) or type(e).__name__})
+    if admin_ops:
+        for (it, fs), err in zip(admin_items, admin_ops_run(admin_ops, bdir)):
+            new = os.path.join(bdir, it.pop("new")) if it.get("new") else None
+            if err is None:
+                if new:  # 换上去的就是准备好的那份
+                    it["after"] = _sha(read_bytes(new))
+                done += [f["text"] for f in fs]
+            else:  # 没做成：原样没动，没有要撤销的
+                manifest["items"].remove(it)
+                if it.get("saved"):
+                    with contextlib.suppress(OSError):
+                        os.unlink(os.path.join(bdir, it["saved"]))
+                failed += [{"text": f["text"], "error": err} for f in fs]
+            if new:
+                with contextlib.suppress(OSError):
+                    os.unlink(new)
+        save()
     if any(i["type"] == "win_env" for i in manifest["items"]):
         _broadcast_env_change()
     if not manifest["items"]:
@@ -7691,26 +8241,44 @@ def env_fix_backups(store):
     return out
 
 
-def env_fix_undo(store):
-    """把最近一次还没撤销完的一键清理改回去。文件：清理后没再动过就整份放回（权限照现在的），动过就只把改的那几处改回来
-    （去掉的键放回去、加了标记的行去掉标记），不盖掉之后的改动；环境变量：现在没有才设回原值。卸载、升级、清缓存改不回去，照清单说一声。
+def env_fix_undo(store, which=None):
+    """把最近一次还没撤销完的一键清理改回去（which：指定是哪一次的备份目录，恢复彻底清理时用）。文件：清理后没再动过就整份放回
+    （权限照现在的），动过就只把改的那几处改回来（去掉的键放回去、加了标记的行去掉标记），不盖掉之后的改动；环境变量：现在没有才设回原值。
+    要管理员权限的几项（系统环境变量、托管设置、共用的 PowerShell 配置）攒到最后一起做，弹一次确认。卸载、升级、清缓存改不回去，照清单说一声。
     每一项撤销完就记下，有失败的下次再撤销时只做剩下的。返回 {"restored", "failed", "notes", "backup"}；没有可撤销的抛 CamError。"""
     lock = FileLock(os.path.join(store.root, "env-fix.lock"), timeout=0)
     if not lock.try_acquire():
         raise CamError("一键清理正在进行，等它做完再撤销")
     try:
-        todo = next(((d, m) for d, m in env_fix_backups(store) if not m.get("undone_at")), None)
+        todo = next(((d, m) for d, m in env_fix_backups(store) if not m.get("undone_at") and (not which or _norm(d) == _norm(which))), None)
         if not todo:
             raise CamError("没有可以撤销的一键清理（cam env fix 改过的东西都在 cam 数据目录的 env-backups 里）")
         bdir, m = todo
         restored, failed, notes = [], [], []
         win = False
+        admin_ops, admin_items = [], []
         for it in reversed(m.get("items") or []):
             if it.get("undone"):
                 continue
             try:
-                if it["type"] == "file":
+                if it["type"] == "file" and it.get("admin"):
+                    data, desc = _undo_file(bdir, it, collect=True)
+                    if data is not None:
+                        src = os.path.join(bdir, f"undo-{len(admin_ops)}")
+                        _write_private(src, data)
+                        admin_ops.append({"op": "write", "path": it["path"], "src": src, "expect": _sha(read_bytes(it["path"]))})
+                        admin_items.append((it, desc))
+                        continue
+                    restored.append(desc)
+                elif it["type"] == "file":
                     restored.append(_undo_file(bdir, it))
+                elif it["type"] == "win_env" and it.get("system"):
+                    if it["key"].upper() in win_env_values(True):
+                        notes.append(f"系统环境变量 {it['key']} 现在又有值了，没动它")
+                    else:
+                        admin_ops.append({"op": "reg_set", "key": it["key"], "value": it["value"], "kind": it["kind"]})
+                        admin_items.append((it, f"系统环境变量 {it['key']}"))
+                        continue
                 elif it["type"] == "win_env":
                     if it["key"].upper() in win_env_values():
                         notes.append(f"用户环境变量 {it['key']} 现在又有值了，没动它")
@@ -7731,6 +8299,19 @@ def env_fix_undo(store):
             except (OSError, KeyError, CamError, UnicodeError, ImportError) as e:
                 failed.append({"text": short_path(it.get("path") or "") or it.get("key") or it["type"], "error": str(e) or type(e).__name__})
             write_json_atomic(os.path.join(bdir, "manifest.json"), m, private=True)
+        if admin_ops:
+            for (it, desc), err in zip(admin_items, admin_ops_run(admin_ops, bdir)):
+                if err is None:
+                    it["undone"] = True
+                    restored.append(desc)
+                    win = win or it["type"] == "win_env"
+                else:
+                    failed.append({"text": desc, "error": err})
+            for op in admin_ops:
+                if op["op"] == "write":
+                    with contextlib.suppress(OSError):
+                        os.unlink(op["src"])
+            write_json_atomic(os.path.join(bdir, "manifest.json"), m, private=True)
         if win:
             _broadcast_env_change()
         if all(i.get("undone") for i in m.get("items") or []):
@@ -7741,25 +8322,37 @@ def env_fix_undo(store):
         lock.release()
 
 
-def _undo_file(bdir, it):
-    """撤销一个文件的改动，返回说明。"""
+def _undo_file(bdir, it, collect=False):
+    """撤销一个文件的改动，返回说明。collect：不自己写（文件要管理员权限才能改），返回 (要换上的内容或 None, 说明)。"""
     path, saved = it["path"], os.path.join(bdir, it["saved"])
     cur = read_bytes(path)
     ch = it.get("changes") or {}
+
+    def put(data, desc):
+        if collect:
+            return data, desc
+        if data is not None:
+            write_bytes_atomic(path, data)
+        return desc
     if not it.get("after"):  # 那次这个文件没改成（中途出错）：没东西要撤销，也不能拿旧备份盖掉现在的内容
-        return f"{short_path(path)}（那次没改成，不用撤销）"
+        return put(None, f"{short_path(path)}（那次没改成，不用撤销）")
     if cur is None or _sha(cur) == it["after"]:
         with open(saved, "rb") as f:
-            write_bytes_atomic(path, f.read())
-        return short_path(path)
+            return put(f.read(), short_path(path))
     if ch.get("kind") == "json":
+        desc = f"{short_path(path)}（文件清理后又改过：只把去掉的几项放回去，你后来的改动留着）"
+
         def mutate(obj):
             for r in ch.get("removed") or []:
                 box = obj.setdefault("env", {}) if r["env"] else obj
                 if isinstance(box, dict) and r["key"] not in box:
                     box[r["key"]] = r["value"]
+        if collect:
+            obj = _json_obj(cur, path)
+            mutate(obj)
+            return put(_json_bytes(obj), desc)
         update_json_file(path, mutate)
-        return f"{short_path(path)}（文件清理后又改过：只把去掉的几项放回去，你后来的改动留着）"
+        return desc
     if ch.get("kind") == "comment":
         text, fmt = read_text_file(path)
         if text is None:
@@ -7772,12 +8365,10 @@ def _undo_file(bdir, it):
                 next((i for i, ln in enumerate(new) if ln.rstrip("\r\n") == want), None)
             if idx is not None:
                 new[idx] = new[idx][len(marker):]
-        if new != lines:
-            write_text_file(path, "".join(new), fmt)
-        return f"{short_path(path)}（文件清理后又改过：只去掉 cam 加的注释标记，你后来的改动留着）"
+        return put(_encode_text("".join(new), fmt) if new != lines else None,
+                   f"{short_path(path)}（文件清理后又改过：只去掉 cam 加的注释标记，你后来的改动留着）")
     with open(saved, "rb") as f:
-        write_bytes_atomic(path, f.read())
-    return short_path(path)
+        return put(f.read(), short_path(path))
 
 
 def path_size(p):
@@ -7998,21 +8589,81 @@ def mark_logged_out(store):
         store.save(data)
 
 
-def _env_purge_move(store, kc=None):
-    """彻底清理的搬家这一步（调用方已经确认过、存好了当前登录）：~/.claude、~/.claude.json 移进 env-backups/<时间>-purge/，
-    macOS 钥匙串里的登录先存进去再删；记一份 purge.json（移的是哪儿，恢复时按它放回去）。返回备份目录。"""
+def claude_cache_dir():
+    """Claude Code 放在系统缓存目录里的东西（MCP 服务器的日志这类），文件夹叫 claude-cli-nodejs：Windows 在 AppData\\Local 下面，
+    macOS 在 ~/Library/Caches 下面，Linux 在 ~/.cache（设了 XDG_CACHE_HOME 就是它）下面。"""
+    if IS_WIN:
+        base = os.path.join(home(), "AppData", "Local")
+    elif IS_MAC:
+        base = os.path.join(home(), "Library", "Caches")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(home(), ".cache")
+    return os.path.join(base, "claude-cli-nodejs")
+
+
+def purge_targets():
+    """彻底清理整个搬走的：[(原来的位置, 备份里叫什么)]，现在有的才算。~/.claude、~/.claude.json，
+    老版本留在它旁边的 .claude.json.backup 这类，系统缓存目录里的 claude-cli-nodejs。"""
     cfg, cj = claude_config_dir(), claude_json_file()
+    out = [(cfg, "claude-config"), (cj, "claude.json")]
+    side = os.path.basename(cj) + ".backup"
+    with contextlib.suppress(OSError):
+        out += [(os.path.join(os.path.dirname(cj), n), n.lstrip(".")) for n in sorted(os.listdir(os.path.dirname(cj)))
+                if n.startswith(side)]
+    out.append((claude_cache_dir(), "claude-cli-nodejs"))
+    return [(p, n) for p, n in out if os.path.lexists(p)]
+
+
+def _under(p, roots):
+    p = os.path.normcase(os.path.realpath(p))
+    return any(p == r or p.startswith(r.rstrip(os.sep) + os.sep) for r in (os.path.normcase(os.path.realpath(x)) for x in roots))
+
+
+def purge_env_items():
+    """彻底清理第二步会清掉的（先给人看）：一键清理的清单，连默认不动的一起，去掉在整个搬走的文件里的那些。"""
+    plan = env_fix_plan(None, with_cache=False, auto_install=False)
+    gone = [p for p, _ in purge_targets()]
+    return [f for f in plan["fix"] + plan["optional"] if not ((f["fix"] or {}).get("path") and _under(f["fix"]["path"], gone))]
+
+
+def _purge_env(store):
+    """彻底清理的第二步（配置已经搬走了）：别处还留着的中转设置也清掉，环境变量（Windows 的用户和系统的、macOS 的 launchctl）、
+    shell / PowerShell 配置文件、托管设置，包括一键清理默认不动的那几项；走一键清理那一套，先备份，要管理员权限的弹一次确认。
+    返回 {"done", "failed", "backup"}。"""
+    try:
+        plan = env_fix_plan(None, with_cache=False, auto_install=False)
+        if not plan["fix"] and not plan["optional"]:
+            return {"done": [], "failed": [], "backup": None}
+        r = env_fix_apply(store, plan, force=True, optional=True)
+    except CamError as e:
+        return {"done": [], "failed": [{"text": "别处的中转设置（环境变量、配置文件）", "error": str(e)}], "backup": None}
+    return {"done": r["done"], "failed": r["failed"], "backup": r["backup"]}
+
+
+def purge_env_result(dest):
+    """彻底清理第二步的结果（记在 purge.json 里）：{"done", "failed"}。"""
+    env = (_read_json_quiet(os.path.join(dest, "purge.json")) or {}).get("env") or {}
+    return {"done": env.get("done") or [], "failed": env.get("failed") or []}
+
+
+def _env_purge_move(store, kc=None):
+    """彻底清理（调用方已经确认过、存好了当前登录）：
+    1. purge_targets 里的整个移进 env-backups/<时间>-purge/（要么都搬走、要么一点不动），macOS 钥匙串里的登录先存进去再删；
+    2. 再把别处还留着的中转设置清掉（_purge_env）。
+    purge.json 记移的是哪儿、第二步的备份在哪，恢复时都按它放回去。返回备份目录。"""
+    cfg, cj = claude_config_dir(), claude_json_file()
+    targets = purge_targets()
     dest = os.path.join(store.root, "env-backups", dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "-purge")
     os.makedirs(dest)
     if not IS_WIN:
         os.chmod(dest, 0o700)
-    write_json_atomic(os.path.join(dest, "purge.json"), {"at": now_iso(), "config_dir": cfg, "claude_json": cj, "keychain": bool(kc)},
-                      private=True)
+    meta = {"at": now_iso(), "config_dir": cfg, "claude_json": cj, "keychain": bool(kc), "moved": [[p, n] for p, n in targets]}
+    write_json_atomic(os.path.join(dest, "purge.json"), meta, private=True)
     # 要么整个搬走，要么一点不动（见 _move_whole）。不用 shutil.move：它改名失败时先复制再删，Windows 上删到只读或被占用的文件
     # （插件目录里的 git 文件）就停在半路，原来的配置只剩一部分
     moved = []
     try:
-        for src, name in ((cfg, "claude-config"), (cj, "claude.json")):
+        for src, name in targets:
             if os.path.lexists(src):
                 _move_whole(src, os.path.join(dest, name))
                 moved.append((src, os.path.join(dest, name)))
@@ -8026,6 +8677,9 @@ def _env_purge_move(store, kc=None):
         write_json_atomic(os.path.join(dest, "keychain.json"), kc, private=True)
         keychain_delete()
     mark_logged_out(store)
+    env = _purge_env(store)
+    meta["fix_backup"], meta["env"] = env.pop("backup"), env
+    write_json_atomic(os.path.join(dest, "purge.json"), meta, private=True)
     return dest
 
 
@@ -8126,11 +8780,13 @@ def _copy_over(src, dst):
 
 
 def env_purge_view(store):
-    """面板“彻底清理”要先给人看的：会移走哪些（多大），有没有能恢复的上一次，有没有 claude 在跑。"""
-    move = [{"path": short_path(p), "size": human_size(path_size(p))} for p in (claude_config_dir(), claude_json_file()) if os.path.lexists(p)]
+    """面板“彻底清理”要先给人看的：会移走哪些（多大），还会清掉别处的哪些中转设置（哪几项要管理员确认），
+    有没有能恢复的上一次，有没有 claude 在跑。"""
+    move = [{"path": short_path(p), "size": human_size(path_size(p))} for p, _ in purge_targets()]
+    env = [{"text": f["text"], "admin": needs_admin(f)} for f in purge_env_items()]
     last = next(((d, m) for d, m in env_purge_backups(store) if not m.get("restored_at")), None)
     procs = running_claude_processes()
-    return {"move": move, "keychain": use_keychain() and keychain_exists(), "restore_at": last[1].get("at") if last else None,
+    return {"move": move, "env": env, "keychain": use_keychain() and keychain_exists(), "restore_at": last[1].get("at") if last else None,
             "running": None if isinstance(procs, ProcsUnknown) else len(procs)}
 
 
@@ -8169,8 +8825,8 @@ def env_purge_backups(store):
 
 
 def env_purge_restore(store, force=False):
-    """把最近一次彻底清理移走的配置放回去。现在那份（清理后新生成的）不删，改名留着（加 .before-restore-时间）。
-    返回 {"restored": [...], "kept": [...], "backup"}。"""
+    """把最近一次彻底清理移走的放回去，第二步清掉的中转设置也改回去（env_fix_undo 那一次）。现在那份（清理后新生成的）不删，
+    改名留着（加 .before-restore-时间）。返回 {"restored": [...], "kept": [...], "failed": [...], "notes": [...], "backup"}。"""
     if claude_may_be_running() and not force:
         raise CamError("有 claude 在运行（或者看不出来）：先退出所有 claude 再恢复")
     last = next(((d, m) for d, m in env_purge_backups(store) if not m.get("restored_at")), None)
@@ -8179,8 +8835,10 @@ def env_purge_restore(store, force=False):
     d, m = last
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     restored, kept = [], []
-    for src, dst in ((os.path.join(d, "claude-config"), m.get("config_dir") or claude_config_dir()),
-                     (os.path.join(d, "claude.json"), m.get("claude_json") or claude_json_file())):
+    pairs = [(os.path.join(d, n), p) for p, n in (m or {}).get("moved") or []] or [  # 老版本的 purge.json 只记了这两样
+        (os.path.join(d, "claude-config"), (m or {}).get("config_dir") or claude_config_dir()),
+        (os.path.join(d, "claude.json"), (m or {}).get("claude_json") or claude_json_file())]
+    for src, dst in pairs:
         if not os.path.lexists(src):
             continue
         # 同样只用改名；现在那份挪不开（有文件被占用），或者备份搬不回去，就把备份里的复制回去：缺的补上、同名的用备份盖掉，
@@ -8207,9 +8865,20 @@ def env_purge_restore(store, force=False):
             write_json_atomic(os.path.join(d, f"keychain-before-restore-{stamp}.json"), cur, private=True)
         keychain_write(kc)
         restored.append("钥匙串里的 Claude Code 登录")
+    failed, notes = [], []
+    fb = (m or {}).get("fix_backup")
+    if fb and os.path.isdir(fb):  # 第二步清掉的中转设置也改回去
+        try:
+            r = env_fix_undo(store, fb)
+            restored += r["restored"]
+            failed, notes = r["failed"], r["notes"]
+        except CamError:
+            pass  # 已经撤销过了（点过“撤销上次清理”）
+        if failed:
+            notes.append("没改回去的几项可以再点“撤销上次清理”（cam env fix --undo）")
     m = dict(m or {"at": None}, restored_at=now_iso())
     write_json_atomic(os.path.join(d, "purge.json"), m, private=True)
-    return {"restored": restored, "kept": kept, "backup": d}
+    return {"restored": restored, "kept": kept, "failed": failed, "notes": notes, "backup": d}
 
 
 # ---- 面板的 Claude Code 版本卡片：装的哪份、什么版本，官方最新版本（几个小时查一次）；一键 claude update
@@ -8282,16 +8951,18 @@ def claude_update_run(store):
 
 def print_env_plan(plan):
     print(color("本机 Claude Code 的配置和安装：第三方中转、API Key 这类设置在哪、装了几份、版本、缓存（只提示，不打分）", "d"))
+    tag = lambda f: color("  [要管理员确认]", "y") if needs_admin(f) else ""  # noqa: E731
     if plan["fix"]:
         print("\n" + color(f"可以一键清理的（{len(plan['fix'])} 项）：", "b"))
         for n, f in enumerate(plan["fix"], 1):
-            print(f"  {n}. {f['text']}")
+            print(f"  {n}. {f['text']}{tag(f)}")
             if f.get("advice"):
                 print(color(f"     → {f['advice']}", "d"))
     if plan.get("optional"):
-        print("\n" + color(f"官方支持的用法（{len(plan['optional'])} 项，默认不动；想用订阅账号切号就加 --all 一起清理）：", "b"))
+        corp = "、可能是公司 IT 下发的托管设置" if any(needs_admin(f) and f["fix"]["type"] == "json_key" for f in plan["optional"]) else ""
+        print("\n" + color(f"默认不动的（{len(plan['optional'])} 项：官方支持的用法{corp}；想用订阅账号切号就加 --all 一起清理）：", "b"))
         for f in plan["optional"]:
-            print(f"  · {f['text']}")
+            print(f"  · {f['text']}{tag(f)}")
             if f.get("advice"):
                 print(color(f"     → {f['advice']}", "d"))
     if plan["manual"]:
@@ -8337,6 +9008,9 @@ def cmd_env_fix(store, args):
         if not confirm("\n现在清理吗？改之前会先备份，cam env fix --undo 能改回去"):
             print(color("\n没有改任何东西。要清理就运行 cam env fix --apply", "y"))
             return 0
+    n_admin = sum(needs_admin(f) for f in plan["fix"] + (plan.get("optional") or [] if args.all else []))
+    if n_admin:
+        print(color(f"\n有 {n_admin} 项要管理员权限：Windows 会弹一次“是否允许此应用对你的设备进行更改”，点“是”", "y"))
     res = env_fix_apply(store, plan, force=args.force, optional=args.all)
     print()
     for x in res["done"]:
@@ -8352,11 +9026,17 @@ def cmd_env_fix(store, args):
     return 1 if res["failed"] else 0
 
 
+def needs_admin(f):
+    """这一项改的时候要不要管理员权限（Windows 上会弹窗确认）。"""
+    fx = f.get("fix") or {}
+    return bool(fx.get("system") or fx.get("admin"))
+
+
 def env_plan_view(store, plan):
     """给面板的：每条只带文字、怎么办、扣几分，不带路径以外的任何值；还有没有能撤销的备份。"""
     def one(f):
         return {"level": f["level"], "text": f["text"], "advice": f.get("advice") or "",
-                "slow": bool(f.get("fix")) and f["fix"]["type"] in ENV_FIX_SLOW}
+                "slow": bool(f.get("fix")) and f["fix"]["type"] in ENV_FIX_SLOW, "admin": needs_admin(f)}
     undo = next((m.get("at") for _, m in env_fix_backups(store) if not m.get("undone_at")), None)
     return {"fix": [one(f) for f in plan["fix"]], "optional": [one(f) for f in plan.get("optional") or []],
             "manual": [one(f) for f in plan["manual"]], "running": plan["running"], "undo_at": undo,
@@ -8371,6 +9051,10 @@ def cmd_env_clean(store, args):
             print(color("✓ ", "g") + f"放回去了：{x}")
         for x in r["kept"]:
             print(color("· ", "d") + f"清理后新生成的那份改名留着：{x}")
+        for x in r["failed"]:
+            print(color("✗ ", "r") + f"没改回去：{x['text']}（{x['error']}）")
+        for x in r["notes"]:
+            print(color("· ", "d") + x)
         print("新开一个终端再用 claude；当前登录是彻底清理前的那个号")
         return
     cfg = claude_config_dir()
@@ -8380,12 +9064,18 @@ def cmd_env_clean(store, args):
         if root_real == os.path.realpath(cfg) or root_real.startswith(os.path.realpath(cfg) + os.sep):
             raise CamError(f"cam 的数据目录 {store.root} 在 {cfg} 里面，不能整体移走")
         print("将把整个 Claude Code 配置移到备份目录（不删除，随时可以移回来）：")
-        for p in (cfg, claude_json_file()):
-            if os.path.lexists(p):
-                print(f"  {p}（{human_size(path_size(p))}）")
+        for p, _ in purge_targets():
+            print(f"  {p}（{human_size(path_size(p))}）")
         if use_keychain():
             print("  钥匙串里的 Claude Code 登录（内容先存进备份）")
         print("包括会话记录、项目设置、CLAUDE.md、插件——相当于全新安装。已保存的账号凭据会先存进 cam，以后能切回来。")
+        env_items = purge_env_items()
+        if env_items:
+            print("\n还会清掉别处的这些设置（先备份，--restore 时一起改回去）：")
+            for f in env_items:
+                print(f"  · {f['text']}" + (color("  [要管理员确认]", "y") if needs_admin(f) else ""))
+            if any(needs_admin(f) for f in env_items):
+                print(color("  要管理员权限的几项：Windows 会弹一次“是否允许此应用对你的设备进行更改”，点“是”", "y"))
     else:
         print("将删除这些可以重新生成的缓存：" if cache else "没有需要清理的缓存。")
         for p in cache:
@@ -8422,6 +9112,11 @@ def cmd_env_clean(store, args):
     if args.purge:
         dest = _env_purge_move(store, kc)
         print(color(f"✓ 已移到 {dest}", "g"))
+        env = purge_env_result(dest)
+        for x in env["done"]:
+            print(color("✓ 已清理：", "g") + x)
+        for x in env["failed"]:
+            print(color("✗ ", "r") + f"{x['text']}：{x['error']}")
         print("  要恢复：cam env clean --restore（或者自己把里面的 claude-config 移回 " + cfg + "，claude.json 移回 " + claude_json_file() + "）")
         return
     for p in cache:
@@ -9299,19 +9994,22 @@ def region_recheck_due(data, st, refresh_min, now=None):
     return False
 
 
-def check_region(store, max_age=300):
+def check_region(store, max_age=300, note=True):
     """后台定时调用：检测出口地区（连带 WARP、时钟偏差）和 Anthropic 官方状态页，记到 data["region"] / data["status_page"]，
     并给当前账号记一笔地区。max_age 秒内查到过就跳过（本机换了网络的不跳）；上次没连上的话 REGION_RETRY_SECS 秒内不重试
     （max_age 更短就按它）。
 
     这次没连上、以前查到过：出口那一份留着不动（checked_at 还是查到那次的时间），只记 failed_at / fail_count，
     界面据此说“最近一次没连上，先用上一次的结果”；连上了就清掉。从没查到过的还是记成查不到。
-    本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。只记录，不干预任何操作。"""
+    本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。只记录，不干预任何操作。
+    做完后评分变了就记一笔（note_risk）；note=False 不记：服务检测先调这里、自己还要接着测别的，等它全做完一起记，不然一次检测记成两笔。"""
     data = store.load()
     old = data.get("region") or {}
     fp = net_fingerprint()
     moved = bool(fp and old.get("net") and fp != old["net"])  # 本机换了网络：上次查到的是另一张网的，没到 max_age 也重测
     if region_check_fresh(_age_secs(old.get("checked_at")), _age_secs(old.get("failed_at")), max_age, moved):
+        if note:
+            note_risk(store)  # 这次没重测，分数也可能变了（出口变化的观察期过了、切了账号）
         return region_view(data)
     cfg = ip_lookup_config(store)
     # 出口、状态页、本机设置几件事并行，互不等待
@@ -9352,6 +10050,8 @@ def check_region(store, max_age=300):
             if not ss["items"]:
                 data.pop("service_status", None)
         store.save(data)
+    if note:
+        note_risk(store)
     return region_view(data)
 
 
@@ -9541,16 +10241,127 @@ RISK_GRADES = (  # (最低分, 档位, 说明)
 RISK_SCORE_ADVICE = "评分只汇总本机能看到的信号，满分也不代表一定合规；低于 90 时逐条看提醒和建议。"
 
 
+RISK_LOG_KEEP = 30   # 环境评分的变化最多记几次
+RISK_LOG_SHOWN = 8   # 界面上列最近几次
+
+
+def risk_points(item):
+    """这一条从环境评分里扣几分（不扣是 0）。规则和 Rust 版 health::risk_points 一致（tests/shared/risk_log.json）。"""
+    if item.get("kind") == "summary":
+        return 0
+    level = item.get("level")
+    return RISK_WEIGHTS.get((item.get("kind"), level), {"warn": 10, "bad": 30}.get(level, 0))
+
+
 def risk_score(items):
     """把风险项汇总成 {score, grade, label, advice}。只用于提示。"""
-    score = 100
-    for it in items:
-        if it.get("kind") == "summary":
-            continue
-        score -= RISK_WEIGHTS.get((it.get("kind"), it["level"]), {"warn": 10, "bad": 30}.get(it["level"], 0))
-    score = max(0, score)
+    score = max(0, 100 - sum(risk_points(it) for it in items))
     grade, label = next((g, l) for floor, g, l in RISK_GRADES if score >= floor)
     return {"score": score, "grade": grade, "label": label, "advice": RISK_SCORE_ADVICE}
+
+
+def strip_ago(text):
+    """去掉文字里的“（3 分钟前）”“（刚刚）”这类相对时间：记进分数变化里的说明过几天再看，这些就不对了。"""
+    return re.sub(r"（(?:刚刚|\d+ (?:分钟|小时|天)前)）", "", text or "")
+
+
+def risk_snapshot(data):
+    """现在的环境评分和扣分的是哪几条：{"score", "grade", "exit": {"loc", "ip", "org"}, "items": [{"kind", "level", "text", "points"}]}。
+    还没检测过返回 None。exit 是当时的出口；文字不带“多久前检测的”这类相对时间（strip_ago）。"""
+    reg = data.get("region") or {}
+    if not reg.get("checked_at"):
+        return None
+    items = risk_items(data, note_age=False)
+    sc = risk_score(items)
+    return {"score": sc["score"], "grade": sc["grade"], "exit": {k: reg.get(k) for k in ("loc", "ip", "org")},
+            "items": [{"kind": i.get("kind"), "level": i.get("level"), "text": strip_ago(i.get("text")), "points": risk_points(i)}
+                      for i in items if risk_points(i) > 0]}
+
+
+def exit_note(prev, cur):
+    """两次之间出口换没换，写成一句（没换、或者有一边没记是空字符串）：分数变了多半是因为出口换了，一起说出来才看得懂。
+    规则和 Rust 版 health::exit_note 一致（tests/shared/risk_log.json）。"""
+    prev, cur = prev or {}, cur or {}
+    org = f"（{cur['org']}）" if cur.get("org") and cur.get("org") != prev.get("org") else ""
+    if prev.get("loc") and cur.get("loc") and prev["loc"] != cur["loc"]:
+        return f"出口从 {region_label(prev['loc'])} 换到了 {region_label(cur['loc'])}{org}"
+    if prev.get("ip") and cur.get("ip") and prev["ip"] != cur["ip"]:
+        return f"出口 IP 换了：{prev['ip']} → {cur['ip']}{org}"
+    return ""
+
+
+def risk_same(a, b):
+    """两次的评分算不算一样：分数一样，扣分的也是同样的几条（按 kind + level 比，文字里的毫秒数、时间不算）。"""
+    key = lambda s: (s.get("score"), sorted((str(i.get("kind")), str(i.get("level"))) for i in s.get("items") or []))  # noqa: E731
+    return key(a) == key(b)
+
+
+def note_risk_in(data, at=None):
+    """环境评分变了（分数变了，或者扣分的换了几条）就在 data["risk_log"] 最前面记一笔 {at, score, grade, exit, items}，最多留
+    RISK_LOG_KEEP 笔；第一笔是开始记的时候。记了返回 True，没变（或者还没检测过）返回 False。
+    规则和 Rust 版 health::note_risk_in 一致（tests/shared/risk_log.json）。"""
+    snap = risk_snapshot(data)
+    log = data.get("risk_log") if isinstance(data.get("risk_log"), list) else []
+    if not snap or (log and risk_same(log[0], snap)):
+        return False
+    data["risk_log"] = ([dict(snap, at=at or now_iso())] + log)[:RISK_LOG_KEEP]
+    return True
+
+
+def note_risk(store):
+    """环境检测、服务检测每次做完都调一次：评分变了就记一笔（note_risk_in），没变什么都不写。只记录，不干预任何操作。"""
+    if not note_risk_in(store.load()):  # 先不加锁看一眼，绝大多数时候没变
+        return
+    with store.lock():
+        data = store.load()
+        if note_risk_in(data):
+            store.save(data)
+
+
+def risk_diff(old, new):
+    """new 比 old 多出来的扣分项、没有了的扣分项：(多出来的, 没有了的)。同一种（kind + level）有几条就按条数比。"""
+    def extra(a, b):  # a 里有、b 里没有的
+        left = {}
+        for i in b.get("items") or []:
+            k = (i.get("kind"), i.get("level"))
+            left[k] = left.get(k, 0) + 1
+        out = []
+        for i in a.get("items") or []:
+            k = (i.get("kind"), i.get("level"))
+            if left.get(k, 0) > 0:
+                left[k] -= 1
+            else:
+                out.append({"kind": i.get("kind"), "text": i.get("text") or "", "points": int(i.get("points") or 0)})
+        return out
+    return extra(new, old), extra(old, new)
+
+
+def risk_log_view(data, limit=RISK_LOG_SHOWN):
+    """界面上的“分数变化”：{"since": 从什么时候开始记的, "changes": [{"at", "score", "grade", "prev", "added", "removed", "exit_note"}]}，
+    新的在前，最多 limit 次。prev 是变之前的分数；added / removed 是和变之前比多出来、没有了的扣分项 [{"kind", "text", "points"}]；
+    exit_note 是这两次之间出口换了的那一句（没换是空的）。
+    现在的分数和最后记的那一笔不一样（后台还没来得及记）时，最前面补一条 at 为 None 的。还没记过：since 是 None。"""
+    log = [e for e in (data.get("risk_log") if isinstance(data.get("risk_log"), list) else []) if isinstance(e, dict)]
+    if not log:
+        return {"since": None, "changes": []}
+    snap = risk_snapshot(data)
+    seq = ([dict(snap, at=None)] if snap and not risk_same(log[0], snap) else []) + log
+    changes = []
+    for new, old in zip(seq, seq[1:]):
+        added, removed = risk_diff(old, new)
+        changes.append({"at": new.get("at"), "score": new.get("score"), "grade": new.get("grade"), "prev": old.get("score"),
+                        "added": added, "removed": removed, "exit_note": exit_note(old.get("exit"), new.get("exit"))})
+    return {"since": log[-1].get("at"), "changes": changes[:limit]}
+
+
+def risk_change_line(c):
+    """一次分数变化写成一行（命令行、诊断报告用）：95 → 80：多了 出口地区变化…（−15）；没有了 …（+5）。"""
+    parts = ([f"多了 {i['text']}（−{i['points']}）" for i in c["added"]]
+             + [f"没有了 {i['text']}（+{i['points']}）" for i in c["removed"]])
+    if c.get("exit_note"):
+        parts.append(c["exit_note"])
+    head = f"{c['prev']} → {c['score']}" if c["prev"] != c["score"] else f"还是 {c['score']}，扣分的换了"
+    return head + ("：" + "；".join(parts) if parts else "")
 
 
 def region_denied(msg):
@@ -9760,7 +10571,7 @@ def service_check(store=None):
     def region():
         if store is None:
             return detect_region(cfg=ip_lookup_config()) or {}
-        check_region(store, max_age=0)  # 顺便更新界面常显的缓存和账号的地区记录
+        check_region(store, max_age=0, note=False)  # 顺便更新界面常显的缓存和账号的地区记录；评分的变化等下面全测完一起记
         return {}
 
     def probe_api():
@@ -9958,6 +10769,7 @@ def service_check(store=None):
             else:
                 d.pop("service_status", None)
             store.save(d)
+        note_risk(store)
     return out
 
 
@@ -10769,7 +11581,7 @@ def panel_items(store, first=8787):
                        "可能是另一个用户或另一份数据目录（CAM_HOME）开的；cam panel 会往后找空端口再开一个")]
         if serve_outdated(p, token):
             return [ck("warn", f"后台的 cam serve（{p} 端口）跑的还是旧代码：更新代码后它没重启",
-                       "菜单栏 / 托盘小工具点开卡片时会自动把它重启；手动的话结束它再 cam panel 重开（macOS / Linux：pkill -f 'cam.py serve'）")]
+                       "运行 cam panel 或者点一下菜单栏 / 托盘小工具的卡片会自动把它换掉；还不行就结束它再 cam panel 重开（macOS / Linux：pkill -f 'cam.py serve'）")]
         if mini_available(p, token):
             return [ck("ok", f"面板：cam serve 在 {p} 端口，卡片小面板可用")]
         return [ck("ok", f"面板：桌面版的服务在 {p} 端口（菜单栏 / 托盘的卡片会在下一个端口另开一个 cam serve）")]
@@ -11390,7 +12202,8 @@ def update_self_check(root):
         return f"{len(bad)} 个文件和 {SUMS_FILE} 对不上：" + "、".join(bad[:5]) + ("…" if len(bad) > 5 else "")
     for path in sorted(glob.glob(os.path.join(root, "scripts", "*.py"))):
         try:
-            with open(path, "rb") as f:
+            with open(path, "rb") as f, warnings.catch_warnings():
+                warnings.simplefilter("ignore")  # 只看编不编得过；新版 Python 对旧写法的提醒（SyntaxWarning）别打到终端上像出错
                 compile(f.read(), path, "exec", dont_inherit=True)
         except (SyntaxError, ValueError) as e:
             return f"scripts/{os.path.basename(path)} 编译不过：{e}"
@@ -11421,7 +12234,8 @@ def serve_unit_file():
 def restart_serve_service(later=False):
     """重启 install.sh 装的后台 cam serve，让它用上新代码。没在运行就不动它。
 
-    later=True：发起更新的可能就是这个服务自己（面板里点的更新），先把结果返回给页面，一秒后再请 systemd 重启。
+    later=True：发起更新的可能就是这个服务自己（面板里点的更新）。是它自己就不用 systemd 重启，它看到代码换了会自己用新代码重启
+    （watch_code）；不是它（比如 cam panel 另开的一个），先把结果返回给页面，一秒后再请 systemd 重启那个。
     """
     env = dict(os.environ)  # 延后执行时也用现在的环境
 
@@ -11433,11 +12247,23 @@ def restart_serve_service(later=False):
     if not run("is-active", "--quiet", SERVE_UNIT, timeout=10):
         return "后台的 cam serve 服务没在运行，下次启动时就是新版本"
     if later:
+        if code_watch_on() and serve_unit_pid() == os.getpid():
+            return "后台的 cam serve 服务几秒内自己用新版本重启，页面跟着自动刷新"
         threading.Timer(1.0, run, ("--no-block", "try-restart", SERVE_UNIT)).start()
-        return "后台的 cam serve 服务马上重启，几秒后刷新页面就是新版本"
+        return "后台的 cam serve 服务马上重启，开着的页面几秒后自动刷新"
     if run("try-restart", SERVE_UNIT):
         return "已重启后台的 cam serve 服务"
     return f"后台的 cam serve 服务没能重启，手动运行 systemctl --user restart {SERVE_UNIT}"
+
+
+def serve_unit_pid():
+    """systemd 里 cam-serve.service 的主进程号，看不出来是 None。"""
+    try:
+        r = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", SERVE_UNIT],
+                           capture_output=True, text=True, timeout=10)
+        return int(r.stdout.strip() or 0) or None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def update_restart_notes(later=False):
@@ -11447,7 +12273,7 @@ def update_restart_notes(later=False):
         notes.append(restart_serve_service(later))
     if IS_MAC:
         notes.append("菜单栏小工具下次刷新（一分钟内）就是新版本")
-    notes.append("自己开着的 cam serve（包括 cam panel 在后台起的）要关掉重开才是新版本")
+    notes.append("开着的 cam serve（面板、托盘 / 菜单栏卡片用的）几秒内自己换成新版本，开着的页面跟着自动刷新")
     notes.append("桌面版是单独的安装包，不跟着更新，要更新就重新编译安装")
     return notes
 
@@ -11723,6 +12549,8 @@ def main(argv=None):
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也执行")
     e.add_argument("-y", "--yes", action="store_true", help="--purge 时不再确认")
     e.add_argument("--restore", action="store_true", help="把最近一次 --purge 移走的配置放回去（现在那份改名留着）")
+    e = esub.add_parser("admin-job", help="（cam 弹出管理员确认后自己调用的，不用手动运行）")
+    e.add_argument("job")
     e = esub.add_parser("fix", help="一键清理：第三方中转、API Key 这类设置，多装的几份，旧版本，缓存（先列出来，确认了才改）")
     e.add_argument("--apply", "-y", "--yes", dest="apply", action="store_true", help="不问，直接改")
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也卸载、升级、清缓存")
@@ -11739,7 +12567,7 @@ def main(argv=None):
     s.add_argument("--ip-lookup", choices=list(IP_LOOKUP_MODES), help="外部 IP 查询：auto（默认，可商用的数据源）/ ip-api（加上 ip-api.com，仅限非商业）/ off（关闭）")
     s.add_argument("--ipapi-key", metavar="KEY", help="ipapi.is 的 key（免费注册，每天 1000 次，可商用），空字符串删除")
     s.add_argument("--ipinfo-token", metavar="TOKEN", help="ipinfo.io 的 token，空字符串删除")
-    s.add_argument("--clear-history", action="store_true", help="清除缓存的出口信息和账号使用地区记录")
+    s.add_argument("--clear-history", action="store_true", help="清除缓存的出口信息、环境评分的变化记录和账号使用地区记录")
     s = sub.add_parser("rule", help="切号规则")
     rsub = s.add_subparsers(dest="rule_cmd")
     rsub.add_parser("ls", help="列出规则")
@@ -11772,6 +12600,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == "hook":  # Claude Code 的钩子：每个事件都跑一次，不碰账号库，不能出错
         return cmd_hook()
+    if args.cmd == "env" and args.env_cmd == "admin-job":  # 管理员进程：只做清单里的事，不碰账号库
+        return cmd_env_admin_job(args.job)
     if args.cmd == "completion":
         print(completion_script(args.shell, sorted(n for n in sub.choices if n != "hook")))
         return 0

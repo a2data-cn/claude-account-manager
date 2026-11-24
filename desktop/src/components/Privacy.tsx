@@ -178,11 +178,11 @@ export function Privacy({
           <Ico name="pin" />地区记录
         </h3>
         <div className="pv-foot">
-          <span>地区记录：{p.history.accounts} 个账号记过使用地区，用来提醒"同一账号多地区使用"</span>
+          <span>地区记录：{p.history.accounts} 个账号记过使用地区，用来提醒"同一账号多地区使用"。清除时环境评分的变化记录一起清掉</span>
           <button
             className="btn"
             disabled={busy}
-            onClick={() => call("DELETE", undefined, "已清除出口信息和地区记录").then((ok) => ok && onCleared?.())}
+            onClick={() => call("DELETE", undefined, "已清除出口信息、地区记录和环境评分的变化记录").then((ok) => ok && onCleared?.())}
           >
             清除地区记录
           </button>

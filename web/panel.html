@@ -430,7 +430,10 @@ details.src[open] summary::before { content: "▾"; }
 /* 环境区块：两张卡（出口 IP、环境评分），下面是完整检测 / 全面体检的结果。只提示，不拦 */
 /* 各区块统一：几张卡排成两列（图标 + 标题，可带一句说明），卡里左标签右值；.wide 通栏 */
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.cards.env { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+/* 环境页顶上三张卡：左边出口 IP、下面分数变化，右边环境评分占两行；窄屏排成一列：出口、评分、变化 */
+.cards.env { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-areas: "exit score" "log score"; grid-template-rows: auto 1fr; }
+.cards.env.nolog { grid-template-areas: "exit score"; grid-template-rows: auto; }
+.cards.env > .c-exit { grid-area: exit; } .cards.env > .c-score { grid-area: score; } .cards.env > .c-log { grid-area: log; }
 .cards.local { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
 .cards .wide { grid-column: 1 / -1; }
 .ecard.sub { background: var(--paper); border-color: transparent; box-shadow: none; }
@@ -442,6 +445,8 @@ details.src[open] summary::before { content: "▾"; }
 .ecard .rules + .hint { margin-top: 12px; }
 @media (max-width: 760px) {
   .cards, .cards.env { grid-template-columns: 1fr; }
+  .cards.env { grid-template-areas: "exit" "score" "log"; grid-template-rows: auto; }
+  .cards.env.nolog { grid-template-areas: "exit" "score"; }
   .lgd.row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .ecard h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; font-weight: 650; margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
@@ -487,6 +492,26 @@ details.src[open] summary::before { content: "▾"; }
 .dot.ok { background: var(--live); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--hot); }
 /* 评分：大圆环在左，右边每个信号一行 */
 .score-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 20px; align-items: start; }
+/* 圆环下面一句合计：共扣几分、几项（窄屏圆环在上面一行，合计在它右边，多一句档位说明） */
+.score-side { display: grid; justify-items: center; gap: 6px; }
+.score-sum { text-align: center; font-size: 12px; line-height: 1.45; color: var(--muted); font-variant-numeric: tabular-nums; }
+.score-sum b { display: block; font-weight: 650; color: var(--ink); }
+.score-sum .lbl { display: none; }
+/* “分数变化”卡：什么时候、从几分到几分，下面一行行写多了 / 没有了哪条扣分、出口换没换 */
+.score-log { font-size: 13px; }
+.score-log ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.score-log li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 2px 12px; align-items: baseline; }
+.score-log .when { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.score-log .delta { font-weight: 650; font-variant-numeric: tabular-nums; }
+.score-log .delta.down { color: var(--hot); } .score-log .delta.up { color: var(--live); }
+.score-log .why { grid-column: 2; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.score-log .why b { font-weight: 600; color: var(--ink); }
+.score-log details { margin-top: 10px; }
+.score-log summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.score-log details ol { margin-top: 10px; }
+.score-log > .hint { margin: 0; font-size: 12px; line-height: 1.55; }
+.score-log > ol + .hint, .score-log > details + .hint { margin-top: 12px; }
+#env-result { scroll-margin-top: 12px; }
 .score-ring svg { width: 92px; height: 92px; display: block; }
 .score-ring circle { fill: none; stroke-width: 6; }
 .score-ring .rt { stroke: var(--track); }
@@ -498,6 +523,7 @@ details.src[open] summary::before { content: "▾"; }
 .score-ring.none .rf { stroke: transparent; } .score-ring.none text { fill: var(--muted); } .score-ring.none .lab { fill: var(--muted); }
 /* 完整检测 / 全面体检：每组一张卡，每条前面一个“正常 / 注意 / 异常 / 说明”的小标 */
 .check-groups { margin-top: 12px; }
+.check-col { display: grid; gap: 12px; align-content: start; min-width: 0; }  /* 检测结果的一列：里面的卡各按自己的高度 */
 .checks { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 7px; }
 .checks li { display: flex; gap: 10px; align-items: flex-start; overflow-wrap: anywhere; line-height: 1.45; }
 .checks li.grp { margin-top: 4px; }
@@ -513,8 +539,12 @@ details.src[open] summary::before { content: "▾"; }
 .checks li.summary { font-weight: 600; }
 .checks li.summary .advice { font-weight: 400; }
 @media (max-width: 680px) {
-  .score-row { gap: 10px 14px; }
+  /* 窄屏：圆环和合计排一行在上面，下面每个信号一行占满整宽（圆环留在左边的话右边每行只放得下十来个字） */
+  .score-row { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .score-side { display: flex; align-items: center; justify-items: start; gap: 14px; }
   .score-ring svg { width: 80px; height: 80px; }
+  .score-sum { text-align: left; font-size: 13px; }
+  .score-sum .lbl { display: block; }
 }
 
 /* 本地消耗：顶上一排数字格，左边每天的柱子（按账号叠），右边按模型的占比 */
@@ -915,7 +945,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
             <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="33.9"/></svg></span><span class="t"><b>70 以下</b>高风险</span></li>
           </ul>
           <div class="tagrow"><span class="lab">扣分项</span><span class="tg">出口不在支持名单</span><span class="tg">机房或代理 IP</span><span class="tg">代理 / VPN</span><span class="tg">时区语言和出口不一致</span><span class="tg">切换到不支持地区的出口变化</span><span class="tg">同一账号多地区</span></div>
-          <p class="hint">100 分起扣，每项扣一些。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。只提醒，不拦任何操作。</p></div>
+          <p class="hint">100 分起扣，每项扣一些，“环境”页里每条提醒后面标着扣几分；分数一变就记一笔，写明从几分变到几分、多了或少了哪一条。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。只提醒，不拦任何操作。</p></div>
         <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>检测结果里的标记<span class="hint">“全面体检”“重新检测”列出来的每一行前面</span></h3>
           <ul class="lgd row">
             <li><span class="sm"><span class="mark ok">正常</span></span><span class="t">这一项没问题</span></li>
@@ -1063,7 +1093,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       });
       try { data = await res.json(); } catch (_) { data = null; }
     } catch (e) {
-      throw e && e.name === "AbortError" ? new Error("后端没有响应") : e;
+      if (e && e.name === "AbortError") throw new Error("后端没有响应");
+      // 根本没连上（cam serve 没在跑，或者正在用新代码重启）：浏览器给的是 Failed to fetch 这类英文，换成中文，并标上 net 让调用的地方能重试
+      const err = new Error("连不上后端"); err.net = true; throw err;
     } finally { clearTimeout(timer); }
     if (!res.ok) {
       const err = new Error((data && data.error) || ("HTTP " + res.status));
@@ -1554,7 +1586,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     ["本机", ["clock", "timezone", "locale", "device"]],
     ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
     ["账号", ["account_regions", "accounts"]],
-    ["说明", ["scope"]],
   ];
   const IP_TYPE = { residential: "家庭 / 公司宽带", hosting: "机房 / 云服务器", proxy: "代理 / VPN 出口", tor: "Tor 出口节点", mobile: "手机网络" };
   function checkItem(it, cls) {
@@ -1565,17 +1596,21 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const summary = items.filter((i) => i.kind === "summary");
     const rest = items.filter((i) => i.kind !== "summary");
     const list = (rows, cls) => `<ul class="checks">${rows.map((i) => checkItem(i, cls)).join("")}</ul>`;
-    let html = summary.length ? checkCard("", list(summary, "summary"), "wide") : "";
-    const used = new Set();
+    // 检测范围（查了哪些信号、没发现风险点不等于一定合规）是对总体结论的说明，接在它下面，不单独占一张卡
+    const scope = summary.length ? rest.find((i) => i.kind === "scope") : null;
+    const html = summary.length ? checkCard("", list(summary, "summary") + (scope ? `<p class="hint">${esc(scope.text)}。${esc(scope.advice)}</p>` : ""), "wide") : "";
+    const used = new Set(scope ? [scope] : []);
+    // 两列：“网络”项最多，单独占左边一列；别的几组叠在右边（每组一张卡各占一格的话，“本机”只有一行却被撑得和“网络”一样高）
+    const cols = [[], []];
     for (const [name, kinds] of CHECK_GROUPS) {
       const rows = rest.filter((i) => kinds.includes(i.kind));
       if (!rows.length) continue;
       rows.forEach((i) => used.add(i));
-      html += checkCard(name, list(rows));
+      cols[name === "网络" ? 0 : 1].push(checkCard(name, list(rows)));
     }
     const other = rest.filter((i) => !used.has(i));
-    if (other.length) html += checkCard("其它", list(other));
-    return html;
+    if (other.length) cols[1].push(checkCard("其它", list(other)));
+    return html + cols.filter((c) => c.length).map((c) => `<div class="check-col">${c.join("")}</div>`).join("");
   }
   // “重新检测”的完整结果直接展开在环境区块里（和桌面版一样），重绘时保留
   let envChecks = null, envChecking = false;
@@ -1589,7 +1624,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   // Claude Code 版本（GET /api/claude-version，只有脚本版有）：环境页一张卡片，有新版本时账号页顶上也提示一句
   let ccVer = null, ccVerBusy = false, cmdsOpen = false;  // cmdsOpen：“常用命令”展开着没有（页面定时重画时保持）
   document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("cmds")) cmdsOpen = e.target.open; }, true);
-  const ENV_FIX_TIP = "查本机 Claude Code 里第三方中转、API Key 这类设置（settings.json、环境变量、shell 配置文件）、多装的几份、旧版本和缓存，先列出来给你看，确认了才改。改之前都备份，能撤销。";
+  const ENV_FIX_TIP = "查本机 Claude Code 里第三方中转、API Key 这类设置（settings.json、托管设置、环境变量（Windows 的用户和系统的）、shell / PowerShell 配置文件）、多装的几份、旧版本和缓存，先列出来给你看，确认了才改。改之前都备份，能撤销。";
   const CHECKUP_TIP = "逐项检查每个账号的登录还能不能续（不在用的号快过期了会替它续一次，当前登录不碰）、到期日和用量，Claude 服务和官方状态页，本机 Claude Code 的版本和正在运行的会话，cam 的后台任务、更新和文件校验，装了的话还有聊天机器人。要等十几秒。";
   function envButton(label) {
     const fold = (envChecks || checkup || envFix || envFixRes) && !envChecking && !checkupBusy ? `<button class="btn quiet" data-act="env-fold">收起</button>` : "";
@@ -1615,13 +1650,22 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     }
     return html;
   }
+  // 点了“重新检测”“全面体检”“一键清理”之后结果出来时滚到它那里：结果在三张卡下面，停在页面顶上的话看不出来它出来了
+  function revealEnvResult() {
+    requestAnimationFrame(() => {
+      const el = $("#env-result");
+      if (!el || !el.firstElementChild || tab !== "env") return;
+      const top = el.getBoundingClientRect().top;
+      if (top < 0 || top > window.innerHeight * 0.6) el.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  }
   const envChecksHtml = () => envFixHtml() + (checkup ? `<div class="cards check-groups">${renderCheckup(checkup)}</div>`
     : envChecks ? `<div class="cards check-groups">${renderChecks(envChecks)}</div>` : "");
   // 一键清理的卡：能一键改的、官方支持的用法（勾上才改）、要自己处理的；改完换成结果
   function envFixHtml() {
     if (!envFix && !envFixRes) return purgeRes ? `<div class="cards check-groups"><div class="panel ecard wide"><h3>彻底清理</h3>${purgeHtml()}
       <div class="sec-acts"><button class="btn quiet" data-act="purge-done">收起</button></div></div></div>` : "";
-    const rows = (xs) => `<ul class="checks">${xs.map((f) => `<li class="${esc(f.level)}"><span class="mark">${CHECK_MARK[f.level] || "说明"}</span><span class="v">${esc(mail(f.text))}${f.advice ? `<span class="advice">→ ${esc(f.advice)}</span>` : ""}</span></li>`).join("")}</ul>`;
+    const rows = (xs) => `<ul class="checks">${xs.map((f) => `<li class="${esc(f.level)}"><span class="mark">${CHECK_MARK[f.level] || "说明"}</span><span class="v">${esc(mail(f.text))}${f.admin ? ` <span class="chip" title="Windows 会弹窗要管理员确认，点“是”">要管理员确认</span>` : ""}${f.advice ? `<span class="advice">→ ${esc(f.advice)}</span>` : ""}</span></li>`).join("")}</ul>`;
     const dis = envFixBusy ? " disabled" : "";
     const undo = envFix && envFix.undo_at ? `<button class="btn quiet" data-act="env-fix-undo"${dis} title="把上一次一键清理改过的文件、环境变量原样放回去">撤销上次清理（${esc(ago(envFix.undo_at))}）</button>` : "";
     const close = `<button class="btn quiet" data-act="env-fix-close"${dis}>收起</button>`;
@@ -1641,16 +1685,19 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const f = envFix;
     const opt = f.optional || [], n = f.fix.length + (envFixAll ? opt.length : 0);
     const go = n ? `<button class="btn primary" data-act="env-fix-go"${dis}>${envFixBusy ? "正在清理…" : `确认清理这 ${n} 项（先备份）`}</button>` : "";
-    const optHtml = opt.length ? `<h4>官方支持的用法（${opt.length} 项，默认不动）</h4>${rows(opt)}
+    const optHtml = opt.length ? `<h4>默认不动的（${opt.length} 项）</h4>${rows(opt)}
       <label class="fix-all"><input type="checkbox" data-act="env-fix-all"${envFixAll ? " checked" : ""}${dis}> 也清理这 ${opt.length} 项（想用订阅账号、用 cam 切号时勾上）</label>` : "";
     const slow = (f.running == null || f.running) && [...f.fix, ...(envFixAll ? opt : [])].some((x) => x.slow)
       ? `<p class="hint">${f.running == null ? "看不出有没有 claude 在运行" : `有 ${f.running} 个 claude 在运行`}：清缓存这类会先跳过，别的照常改。</p>` : "";
+    // 要管理员权限的几项（Windows 系统环境变量、托管设置、所有用户共用的 PowerShell 配置）：最后一起做，只弹一次确认
+    const nAdmin = [...f.fix, ...(envFixAll ? opt : [])].filter((x) => x.admin).length;
+    const uac = nAdmin ? `<p class="hint">有 ${nAdmin} 项要管理员权限：点“确认清理”后 Windows 会弹一次“是否允许此应用对你的设备进行更改”，点“是”。点“否”的话只是这几项不改，别的照常清理。</p>` : "";
     return `<div class="cards check-groups"><div class="panel ecard wide"><h3>一键清理 · 本机 Claude Code 的配置</h3>
       <p class="hint">第三方中转、API Key 这类设置在哪、装了几份、版本、缓存。只提示，不打分；点“确认清理”才改，改之前都备份，能撤销。</p>
       ${f.fix.length ? `<h4>可以一键清理的（${f.fix.length} 项）</h4>${rows(f.fix)}` : `<p>✓ 没有第三方中转这类要清理的。</p>`}
       ${optHtml}
-      ${f.manual.length ? `<h4>要你自己处理的（${f.manual.length} 项）</h4>${rows(f.manual)}` : ""}${slow}
-      <div class="sec-acts"><span class="purge-acts">${purge ? `<button class="btn quiet danger" data-act="purge-ask"${dis} title="把整个 Claude Code 配置移到备份目录，相当于重装；会先列出来再确认">彻底清理…</button>` : ""}${purge && purge.restore_at ? `<button class="btn quiet" data-act="purge-restore"${dis} title="把上一次彻底清理移走的配置放回去">恢复彻底清理前的样子（${esc(ago(purge.restore_at))}）</button>` : ""}</span>${close}${undo}${go}</div>${purgeHtml()}</div></div>`;
+      ${f.manual.length ? `<h4>要你自己处理的（${f.manual.length} 项）</h4>${rows(f.manual)}` : ""}${slow}${uac}
+      <div class="sec-acts"><span class="purge-acts">${purge ? `<button class="btn quiet danger" data-act="purge-ask"${dis} title="把整个 Claude Code 配置移到备份目录，相当于重装，别处的中转设置也一起清掉；会先列出来再确认">彻底清理…</button>` : ""}${purge && purge.restore_at ? `<button class="btn quiet" data-act="purge-restore"${dis} title="把上一次彻底清理移走的配置放回去">恢复彻底清理前的样子（${esc(ago(purge.restore_at))}）</button>` : ""}</span>${close}${undo}${go}</div>${purgeHtml()}</div></div>`;
   }
   // 面板自己的确认框（和“移除账号”“切换账号”一个样子），不用浏览器自带的 confirm。点“确定”得 true，取消 / Esc 得 false
   function askConfirm({ title, body, ok = "确定", danger = false }) {
@@ -1758,16 +1805,23 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const dis = purgeBusy ? " disabled" : "";
     if (purgeRes) {
       const r = purgeRes;
-      const lines = r.backup && !r.restored ? [`已经把整个 Claude Code 配置移到 ${r.backup}，相当于重装。终端里运行 claude 重新登录，或者在这里点一个号“切换到这个账号”`]
-        : [...(r.restored || []).map((t) => "放回去了：" + t), ...(r.kept || []).map((t) => "清理后新生成的那份改名留着：" + t)];
+      const lines = r.backup && !r.restored ? [`已经把整个 Claude Code 配置移到 ${r.backup}，相当于重装。终端里运行 claude 重新登录，或者在这里点一个号“切换到这个账号”`,
+        ...(r.done || []).map((t) => "已清理：" + t), ...(r.failed || []).map((x) => `没清理成：${x.text}（${x.error}）`)]
+        : [...(r.restored || []).map((t) => "放回去了：" + t), ...(r.kept || []).map((t) => "清理后新生成的那份改名留着：" + t),
+          ...(r.failed || []).map((x) => `没改回去：${x.text}（${x.error}）`), ...(r.notes || [])];
       return `<div class="purge-box">${lines.map((t) => `<p>${esc(t)}</p>`).join("")}</div>`;
     }
     if (!purgeAsk || !purge) return "";
     const run = purge.running == null || purge.running ? `<p class="hint">${purge.running == null ? "看不出有没有 claude 在运行" : `有 ${purge.running} 个 claude 在运行`}：先退出所有 claude 再彻底清理。</p>` : "";
+    // 别处还留着的中转设置（环境变量、shell / PowerShell 配置、托管设置）：搬完配置接着清掉，先备份，恢复时一起改回去
+    const penv = purge.env || [];
+    const envs = penv.length ? `<p>还会清掉别处的这些设置（先备份，“恢复彻底清理前的样子”时一起改回去）：</p>
+      <ul>${penv.map((f) => `<li>${esc(mail(f.text))}${f.admin ? ` <span class="chip" title="Windows 会弹窗要管理员确认，点“是”">要管理员确认</span>` : ""}</li>`).join("")}</ul>
+      ${penv.some((x) => x.admin) ? `<p class="hint">要管理员权限的几项：Windows 会弹一次“是否允许此应用对你的设备进行更改”，点“是”。</p>` : ""}` : "";
     return `<div class="purge-box"><h4>彻底清理（相当于重装 Claude Code）</h4>
       <p>会把下面这些整个移到 cam 的备份目录（不删，能恢复）：</p>
       <ul>${purge.move.map((m) => `<li>${esc(m.path)}（${esc(m.size)}）</li>`).join("")}${purge.keychain ? "<li>钥匙串里的 Claude Code 登录</li>" : ""}</ul>
-      <p>包括会话记录、设置、CLAUDE.md、插件、MCP 配置。当前登录会先存进 cam，之后在这里点“切换到这个账号”或者运行 claude 重新登录就行。</p>${run}
+      <p>包括会话记录、设置、CLAUDE.md、插件、MCP 配置。当前登录会先存进 cam，之后在这里点“切换到这个账号”或者运行 claude 重新登录就行。</p>${envs}${run}
       <div class="sec-acts"><button class="btn quiet" data-act="purge-cancel"${dis}>取消</button><button class="btn danger-fill" data-act="purge-go"${dis || (run ? " disabled" : "")}>${purgeBusy ? "正在搬…" : "确认彻底清理"}</button></div></div>`;
   }
   async function loadPurge() {
@@ -1780,7 +1834,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     try {
       purgeRes = await api("POST", "/api/env-purge", body);
       purgeAsk = false;
-      toast(body.restore ? "已恢复彻底清理前的样子" : "已彻底清理");
+      toast((body.restore ? "已恢复彻底清理前的样子" : "已彻底清理") + ((purgeRes.failed || []).length ? `，有 ${purgeRes.failed.length} 项没做成（见下面）` : ""), !!(purgeRes.failed || []).length);
       envFix = null; checkup = null;
       load();
     } catch (err) { toast(err.message, true); }
@@ -1791,7 +1845,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     envFixBusy = true; envFixRes = null; envFixAll = false; purgeAsk = false; purgeRes = null; render();
     loadPurge();
     try { envFix = await api("GET", "/api/env-fix"); } catch (err) { toast(err.message, true); }
-    finally { envFixBusy = false; render(); }
+    finally { envFixBusy = false; render(); revealEnvResult(); }
   }
   async function runEnvFix(body) {
     if (envFixBusy) return;
@@ -1812,7 +1866,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     try { checkup = await api("GET", "/api/checkup"); envChecks = null; }
     catch (err) { toast(err.message, true); }
     finally { checkupBusy = false; }
-    load(); // 体检会续登录、刷新用量和环境缓存
+    if (state) render();  // 结果先画出来
+    await load();  // 体检会续登录、刷新用量和环境缓存
+    revealEnvResult();  // 等上面几张卡按新数据画完再滚，不然卡片高度一变就滚歪了
   }
   async function probeCheckup() {
     checkupProbed = true;
@@ -1827,7 +1883,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     try { envChecks = (await api("GET", "/api/service-check")).items || []; checkup = null; }
     catch (err) { toast(err.message, true); }
     finally { envChecking = false; }
-    load(); // 检测会刷新后台缓存，分数跟着更新
+    if (state) render();  // 结果先画出来
+    await load();  // 检测会刷新后台缓存，分数跟着更新
+    revealEnvResult();
   }
   // ---- 环境区块：出口 IP 一张卡、环境评分一张卡（每个信号一行），下面是完整检测结果。只提醒，不拦任何操作
   const flag = (cc) => /^[A-Z]{2}$/.test(cc || "") ? `<span class="flag">${String.fromCodePoint(...[...cc].map((ch) => 0x1F1E6 + ch.charCodeAt(0) - 65))}</span>` : "";
@@ -1845,6 +1903,35 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     ["stale", "检测时间", ["env_stale", "env_failed"]],  // 结果是一小时前的、或者最近一次没连上才有这一行
   ];
   const LEVEL_RANK = { bad: 3, warn: 2, info: 1, ok: 0 };
+  // 这一条从环境评分里扣几分（不扣分的不标；旧版后台没有 points，也不标）
+  const ptsChip = (r) => r.points ? `<span class="chip ${r.points >= 20 ? "st-error" : "st-warn"}">−${esc(r.points)} 分</span>` : "";
+  // 分数变化：什么时候从几分变到几分，多了 / 没有了哪一条扣分，那两次之间出口换没换（exit_note）。
+  // 后台每次环境检测后分数变了就记一笔（state.risk_log），at 是空的那条是后台还没来得及记的
+  const SCORE_LOG_OPEN = 3;  // 最近几次直接列出来，更早的收起来
+  function scoreChange(c) {
+    const cls = c.score < c.prev ? "down" : c.score > c.prev ? "up" : "";
+    const head = c.score === c.prev ? `还是 ${esc(c.score)} 分，扣分的换了一条` : `${esc(c.prev)} → ${esc(c.score)}`;
+    const why = [...(c.added || []).map((i) => `<div class="why">多了：<b>${esc(i.text)}</b>（−${esc(i.points)}）</div>`),
+      ...(c.removed || []).map((i) => `<div class="why">没有了：<b>${esc(i.text)}</b>（+${esc(i.points)}）</div>`),
+      c.exit_note ? `<div class="why">${esc(c.exit_note)}</div>` : ""].join("");
+    const when = c.at ? `<span class="when" title="${esc(fmtTime(c.at))}">${ago(c.at)}</span>` : `<span class="when">现在</span>`;
+    return `<li>${when}<span class="delta ${cls}">${head}</span>${why}</li>`;
+  }
+  let scoreLogOpen = false;  // “更早的 N 次”展开着没有（页面定时重画时保持）
+  document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("sl-more")) scoreLogOpen = e.target.open; }, true);
+  function scoreLogCard(st) {
+    const log = st.risk_log;
+    if (!log) return "";  // 旧版后台不记
+    const ch = log.changes || [];
+    const head = ch.slice(0, SCORE_LOG_OPEN), more = ch.slice(SCORE_LOG_OPEN);
+    const list = head.length ? `<ol>${head.map(scoreChange).join("")}</ol>` : "";
+    const fold = more.length ? `<details class="sl-more"${scoreLogOpen ? " open" : ""}><summary>更早的 ${more.length} 次</summary><ol>${more.map(scoreChange).join("")}</ol></details>` : "";
+    const how = "分数一变，这里就列出从几分变到几分、多了或少了哪一条。";
+    const note = !log.since ? "还没开始记录：下一次环境检测之后开始记。" + how
+      : ch.length ? `从 ${esc(fmtTime(log.since))} 开始记录，最多留 30 次。` : `从 ${esc(fmtTime(log.since))} 开始记录，之后分数没变过。${how}`;
+    return `<div class="panel ecard c-log"><h3><span class="eico"><svg><use href="#i-clock"/></svg></span>分数变化</h3>
+      <div class="score-log">${list}${fold}<p class="hint">${note}</p></div></div>`;
+  }
   function envRows(st) {
     const reg = st.region || {}, risks = st.risks || [];
     const okText = {
@@ -1867,13 +1954,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (other.length) rows.push({ title: "其它", hits: other, ok: "" });
     return rows.filter((r) => r.hits.length || r.ok).map(({ title, hits, ok }) => {
       const level = hits.reduce((m, r) => LEVEL_RANK[r.level] > LEVEL_RANK[m] ? r.level : m, "ok");
-      const body = hits.length ? hits.map((r) => `<div>${esc(r.text)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</div>`).join("") : ok;
+      const body = hits.length ? hits.map((r) => `<div>${esc(r.text)}${ptsChip(r)}${r.advice ? `<span class="advice">${esc(r.advice)}</span>` : ""}</div>`).join("") : ok;
       return `<dt>${title}</dt><dd><i class="dot ${esc(level)}"></i><span class="v">${body}</span></dd>`;
     }).join("");
   }
   function exitCard(reg) {
     const h3 = (extra) => `<h3><span class="eico"><svg><use href="#i-globe"/></svg></span>出口 IP${extra || ""}</h3>`;
-    if (!reg.status) return `<div class="panel ecard">${h3()}<p class="hint" style="margin:0">还没有检测过。后台每隔几分钟自动检测一次出口地区和环境风险，也可以点“立即检测”现在就测。</p></div>`;
+    if (!reg.status) return `<div class="panel ecard c-exit">${h3()}<p class="hint" style="margin:0">还没有检测过。后台每隔几分钟自动检测一次出口地区和环境风险，也可以点“立即检测”现在就测。</p></div>`;
     const off = reg.lookup_mode === "off";
     // 最近一次检测没连上：上面留着的是以前查到的出口（从没查到过就是“查不到”），在这里说清楚是哪一次的
     const failed = !!reg.failed_at, kept = failed && !!reg.loc;
@@ -1895,7 +1982,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       reg.warp ? ["WARP", "出口经过 Cloudflare WARP / Zero Trust，上面是 WARP 的出口，不是本机网络的真实出口"] : null,
       ["检测", when],
     ].filter(Boolean).map(([k, v]) => `<dt>${k}</dt><dd><span class="v">${v}</span></dd>`).join("");
-    return `<div class="panel ecard">${h3(status)}<dl class="kv">${rows}</dl></div>`;
+    return `<div class="panel ecard c-exit">${h3(status)}<dl class="kv">${rows}</dl></div>`;
   }
   function scoreCard(st) {
     const sc = st.risk_score, reg = st.region || {};
@@ -1907,18 +1994,23 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <text class="lab" x="46" y="61" text-anchor="middle" dominant-baseline="central">${has ? esc(sc.label.split("，")[0]) : "还没检测"}</text></svg></div>`;
     const rows = has ? `<dl class="kv">${envRows(st)}</dl>`
       : `<p class="hint" style="margin:0">检测过一次后这里按项列出：出口地区、IP 类型、代理 / VPN、时区语言、DNS、出口变化、账号地区、Claude 服务。</p>`;
-    return `<div class="panel ecard"><h3><span class="eico"><svg><use href="#i-shield"/></svg></span>环境评分 <span class="chip">只提醒，不拦任何操作</span></h3>
-      <div class="score-row">${ring}${rows}</div>
-      <p class="hint">100 分起扣：出口不在支持名单、机房或代理 IP、代理 / VPN、时区语言和出口不一致、切换到不支持地区的出口变化、同一账号多地区等各扣一些；90 以上低风险，70–89 有风险，70 以下高风险。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。${has ? esc(sc.advice) : ""}</p></div>`;
+    // 圆环下面一句合计：共扣几分、几项（旧版后台不带 points 和 risk_log，不写）
+    const lost = (st.risks || []).filter((x) => x.points > 0), total = lost.reduce((n, x) => n + x.points, 0);
+    const sum = has && st.risk_log
+      ? `<div class="score-sum"><b>${total ? `共扣 ${esc(total)} 分` : "没有扣分项"}</b>${total ? `${lost.length} 项` : ""}<span class="lbl">${esc(sc.label)}</span></div>` : "";
+    return `<div class="panel ecard c-score"><h3><span class="eico"><svg><use href="#i-shield"/></svg></span>环境评分 <span class="chip">只提醒，不拦任何操作</span></h3>
+      <div class="score-row"><div class="score-side">${ring}${sum}</div>${rows}</div>
+      <p class="hint">100 分起扣，每条后面标着扣几分；90 以上低风险，70–89 有风险，70 以下高风险。${has ? esc(sc.advice) : ""}</p></div>`;
   }
   function envCard(st) {
     const reg = st.region || {};
     const ready = !!(reg.status && st.risk_score);
+    const log = ready ? scoreLogCard(st) : "";  // 检测过才有分数可记
     return `<section class="block" id="env" aria-label="环境状态">
       <div class="sec-head"><h2>环境</h2><span class="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>${envButton(ready ? "重新检测" : "立即检测")}</div>
-      <div class="cards env">${exitCard(reg)}${scoreCard(st)}</div>
+      <div class="cards env${log ? "" : " nolog"}">${exitCard(reg)}${scoreCard(st)}${log}</div>
+      <div id="env-result">${envChecksHtml()}</div>
       ${ccVerHtml()}
-      ${envChecksHtml()}
     </section>`;
   }
 
@@ -2116,8 +2208,12 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     renderTabHint();
     // 有风险时顶上只放一行提醒（分数 + 第一条），环境卡仍在账号下面，不把账号挤下去
     const firstRisk = ((state.risks || []).find((r) => r.level === "bad" || r.level === "warn") || {}).text;
-    const brief = risky ? `<div class="notice env-brief ${esc(state.risk_score.grade)}" role="status"><span class="n-text">环境评分 <b>${esc(state.risk_score.score)}/100</b>：${esc(state.risk_score.label)}${firstRisk ? ` · ${esc(firstRisk)}` : ""}</span><a class="btn quiet" href="#env">查看详情</a></div>` : "";
-    const notice = (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
+    // 一天之内刚降下来的：说一声是从几分降的，原因在环境页的“分数变化”里
+    const lastCh = ((state.risk_log || {}).changes || [])[0];
+    const drop = lastCh && lastCh.score < lastCh.prev && (!lastCh.at || Date.now() - new Date(lastCh.at) < 86400e3)
+      ? `（${lastCh.at ? ago(lastCh.at) : "刚刚"}从 ${esc(lastCh.prev)} 分降下来）` : "";
+    const brief = risky ? `<div class="notice env-brief ${esc(state.risk_score.grade)}" role="status"><span class="n-text">环境评分 <b>${esc(state.risk_score.score)}/100</b>：${esc(state.risk_score.label)}${drop}${firstRisk ? ` · ${esc(firstRisk)}` : ""}</span><a class="btn quiet" href="#env">查看详情</a></div>` : "";
+    const notice = oldServeHtml() + (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
       + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "")
       + (ccVer && ccVer.outdated ? `<div class="notice" role="status"><span class="n-text">Claude Code 有新版本 ${esc(ccVer.latest.version)}（现在是 ${esc(ccVer.installed.version)}）</span><a class="btn quiet" href="#env">去升级</a></div>` : "")
       + brief;
@@ -2443,7 +2539,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       return rows.length ? `<div class="src-group"><h5>${title}</h5><ul class="sources">${rows.map((s) =>
         `<li><b>${esc(s.name)}${s.warn ? ` <span class="chip st-warn">仅限非商业</span>` : ""}</b><span>${esc(s.what)}</span></li>`).join("")}</ul></div>` : "";
     }).join("");
-    $("#pv-hist").textContent = `地区记录：${p.history.accounts} 个账号记过使用地区，用来提醒“同一账号多地区使用”`;
+    $("#pv-hist").textContent = `地区记录：${p.history.accounts} 个账号记过使用地区，用来提醒“同一账号多地区使用”。清除时环境评分的变化记录一起清掉`;
     document.querySelectorAll("#pv-keys input[data-key]").forEach((i) => {
       if (typed[i.dataset.key]) i.value = typed[i.dataset.key];
       if (i.dataset.key === focused) i.focus();
@@ -2469,7 +2565,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const d = e.target.closest("[data-key-del]");
     if (d) return savePrivacy("PUT", "/api/privacy", { [d.dataset.keyDel]: "" }, "已删除");
   });
-  $("#pv-clear").onclick = () => { envChecks = null; savePrivacy("DELETE", "/api/privacy/history", undefined, "已清除出口信息和地区记录"); };
+  $("#pv-clear").onclick = () => { envChecks = null; savePrivacy("DELETE", "/api/privacy/history", undefined, "已清除出口信息、地区记录和环境评分的变化记录"); };
   $("#pv-modes").addEventListener("keydown", (e) => {  // 单选组：方向键切换
     const opts = [...document.querySelectorAll("#pv-modes [data-mode]")];
     const i = opts.indexOf(document.activeElement);
@@ -2480,11 +2576,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   });
 
   // ---- 软件更新：只有脚本版 cam serve 有这个接口，桌面版内置的服务返回 404，整块不显示
-  let upd = null, updDone = null, updErr = "";
+  let upd = null, updDone = null, updErr = "", updWaiting = false;
   function renderUpdate() {
     const r = upd || {}, commits = r.commits || [], blocked = r.ahead || (r.dirty || []).length;
-    const out = [];
-    if (updDone) out.push(`<div class="notice pending"><span class="n-text">${esc(updDone.message)}${(updDone.restart || []).map((t) => `<span class="n-advice">${esc(t)}</span>`).join("")}</span></div>`);
+    const out = [oldServeHtml()];
+    if (updDone) out.push(`<div class="notice pending"><span class="n-text">${esc(updDone.message)}${updWaiting ? `<span class="n-advice">正在用新版本重启后台，好了页面会自己刷新…</span>` : (updDone.restart || []).map((t) => `<span class="n-advice">${esc(t)}</span>`).join("")}</span></div>`);
     if (updErr) out.push(`<div class="notice bad">${esc(updErr).replace(/\n/g, "<br>")}</div>`);
     else if (r.failed) out.push(`<div class="notice bad">上次更新后自检没过，已经退回原来的版本：${esc(r.failed)}</div>`);
     if (r.checked_at && r.checkout === false) out.push(`<div class="notice">${esc(r.message)}</div>`);
@@ -2520,11 +2616,27 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       updErr = "";
       if (r.updated) { updDone = r; upd = { ...r, behind: 0, commits: [], failed: null }; } else upd = r;
       renderUpdate(); toast(r.message);
+      if (r.updated && r.restarting) waitRestart();
     } catch (e) {
       updErr = e.message; toast(e.message, true);
       await loadUpdate();
     } finally { btn.disabled = false; renderUpdate(); }
   };
+  // 面板里点的更新：后台先确认新代码起得来，几秒内用新代码重启自己；等它回来（code_stamp 变了）整页刷新，新页面配新后端。
+  // 重启那一下连不上是正常的；一分钟还没换就说怎么手动弄
+  async function waitRestart() {
+    updWaiting = true; renderUpdate();
+    for (const until = Date.now() + 60000; Date.now() < until;) {
+      await sleep(1500);
+      try {
+        const s = await api("GET", "/api/state", undefined, 5000);
+        if (s.code_stamp && pageStamp && s.code_stamp !== pageStamp) { location.reload(); return; }
+      } catch (_) { /* 正在重启 */ }
+    }
+    updWaiting = false;
+    updErr = "后台一分钟内没换成新版本：先手动刷新页面；还不行就结束 cam serve，再运行 cam panel 重开";
+    renderUpdate();
+  }
 
 
   // ---- 会话页：这台电脑上正在跑的 Claude Code（/api/sessions），选中一个看它的上下文窗口（/api/sessions/<id>，按记录估的组成）。
@@ -2682,10 +2794,36 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     el.hidden = !n; el.textContent = n ? String(n) : "";
   }
 
+  // 后台用新代码重启了（code_stamp 变了，见 cam.py 的 watch_code）：这个页面也是更新前从磁盘读的，整页重新加载一次，新页面配新后端。
+  // 开着对话框（正在填东西）时先不动，关掉后下一次取状态时再加载
+  let pageStamp = null;
+  function newCode(s) {
+    if (!s || !s.code_stamp) return false;  // 桌面版的服务没有这一项
+    if (!pageStamp) pageStamp = s.code_stamp;
+    if (s.code_stamp === pageStamp || document.querySelector("dialog[open]")) return false;
+    location.reload();
+    return true;
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // 取状态；连不上先别急着报错：cam serve 用新代码重启要一两秒，隔一会儿再试几次
+  async function getState() {
+    for (let i = 0; ; i++) {
+      try { return await api("GET", "/api/state", undefined, 15000); }
+      catch (e) { if (!e.net || i >= 3) throw e; await sleep(1500); }
+    }
+  }
+  // 后台的 cam serve 是这个页面之前的老版本（不会自己换新代码，回答里没有 code_watch）：页面上有些功能用不了，说一句怎么换
+  function oldServeHtml() {
+    if (!state || state.backend !== "python" || state.code_watch !== undefined) return "";
+    return `<div class="notice" role="alert">后台的 cam serve 还是更新前的旧版本，页面上有些功能会用不了。运行 <code>cam panel</code>，或者点一下菜单栏 / 托盘小工具的卡片，会自动换成新版本，这个页面跟着刷新</div>`;
+  }
+
   let loadFailed = "";  // 上一次没取到（"auth" 令牌不对 / "net" 连不上）：页面上是输令牌的框或“连不上后端”，定时重绘不能拿旧数据把它盖掉
   async function load() {
     try {
-      state = await api("GET", "/api/state", undefined, 15000);
+      const s = await getState();
+      if (newCode(s)) return;
+      state = s;
       loadFailed = "";
       render(); loadPace(); loadLocal(); loadRules(); loadPrivacy(); loadUpdate(); loadMenubar();
       if (!checkupProbed) probeCheckup();
@@ -2693,7 +2831,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       loadFailed = e.status === 401 ? "auth" : "net";
       $("#light").hidden = true;  // 灯是旧数据画的，后端都连不上了不能还亮着绿灯
       if (e.status === 401) renderLogin(token ? "令牌不对，请重新输入。" : null);
-      else { showTab("accounts", { save: false }); $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${esc(e.message)}。确认电脑上的 cam serve 或桌面版还在运行。</p></div>`; }
+      else { showTab("accounts", { save: false }); $("#list").innerHTML = `<div class="panel empty"><h2>连不上后端</h2><p class="hint">${e.net ? "" : esc(e.message) + "。"}确认电脑上的 cam serve 或桌面版还在运行，它起来后这个页面会自己恢复。</p></div>`; }
     }
   }
   // 红绿灯跟着 Claude Code 的状态走（在不在执行、是不是弹着确认等你）：页面开着时每 15 秒只取这几项，变了才重画灯；
@@ -2706,7 +2844,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     lightPolling = true;
     try {
       const s = await api("GET", "/api/state", undefined, 15000);
-      if (accountBusy || !state) return;
+      if (accountBusy || !state || newCode(s)) return;
       if (loadFailed || JSON.stringify([s.pending_switch, s.active, s.warning]) !== JSON.stringify([state.pending_switch, state.active, state.warning])) {
         if (!document.querySelector("dialog[open]")) await load();  // 开着对话框（正在填东西）时先不动，关掉后下一轮再加载
         return;

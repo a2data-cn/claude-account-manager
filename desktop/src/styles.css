@@ -417,7 +417,10 @@ details.src[open] summary::before { content: "▾"; }
 /* 环境区块：两张卡（出口 IP、环境评分），下面是完整检测 / 全面体检的结果。只提示，不拦 */
 /* 各区块统一：几张卡排成两列（图标 + 标题，可带一句说明），卡里左标签右值；.wide 通栏 */
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.cards.env { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+/* 环境页顶上三张卡：左边出口 IP、下面分数变化，右边环境评分占两行；窄屏排成一列：出口、评分、变化 */
+.cards.env { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); grid-template-areas: "exit score" "log score"; grid-template-rows: auto 1fr; }
+.cards.env.nolog { grid-template-areas: "exit score"; grid-template-rows: auto; }
+.cards.env > .c-exit { grid-area: exit; } .cards.env > .c-score { grid-area: score; } .cards.env > .c-log { grid-area: log; }
 .cards.local { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
 .cards .wide { grid-column: 1 / -1; }
 .ecard.sub { background: var(--paper); border-color: transparent; box-shadow: none; }
@@ -429,6 +432,8 @@ details.src[open] summary::before { content: "▾"; }
 .ecard .rules + .hint { margin-top: 12px; }
 @media (max-width: 760px) {
   .cards, .cards.env { grid-template-columns: 1fr; }
+  .cards.env { grid-template-areas: "exit" "score" "log"; grid-template-rows: auto; }
+  .cards.env.nolog { grid-template-areas: "exit" "score"; }
   .lgd.row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .ecard h3 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13.5px; font-weight: 650; margin: 0 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
@@ -474,6 +479,26 @@ details.src[open] summary::before { content: "▾"; }
 .dot.ok { background: var(--live); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--hot); }
 /* 评分：大圆环在左，右边每个信号一行 */
 .score-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 20px; align-items: start; }
+/* 圆环下面一句合计：共扣几分、几项（窄屏圆环在上面一行，合计在它右边，多一句档位说明） */
+.score-side { display: grid; justify-items: center; gap: 6px; }
+.score-sum { text-align: center; font-size: 12px; line-height: 1.45; color: var(--muted); font-variant-numeric: tabular-nums; }
+.score-sum b { display: block; font-weight: 650; color: var(--ink); }
+.score-sum .lbl { display: none; }
+/* “分数变化”卡：什么时候、从几分到几分，下面一行行写多了 / 没有了哪条扣分、出口换没换 */
+.score-log { font-size: 13px; }
+.score-log ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.score-log li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 2px 12px; align-items: baseline; }
+.score-log .when { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.score-log .delta { font-weight: 650; font-variant-numeric: tabular-nums; }
+.score-log .delta.down { color: var(--hot); } .score-log .delta.up { color: var(--live); }
+.score-log .why { grid-column: 2; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.score-log .why b { font-weight: 600; color: var(--ink); }
+.score-log details { margin-top: 10px; }
+.score-log summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.score-log details ol { margin-top: 10px; }
+.score-log > .hint { margin: 0; font-size: 12px; line-height: 1.55; }
+.score-log > ol + .hint, .score-log > details + .hint { margin-top: 12px; }
+#env-result { scroll-margin-top: 12px; }
 .score-ring svg { width: 92px; height: 92px; display: block; }
 .score-ring circle { fill: none; stroke-width: 6; }
 .score-ring .rt { stroke: var(--track); }
@@ -485,6 +510,7 @@ details.src[open] summary::before { content: "▾"; }
 .score-ring.none .rf { stroke: transparent; } .score-ring.none text { fill: var(--muted); } .score-ring.none .lab { fill: var(--muted); }
 /* 完整检测 / 全面体检：每组一张卡，每条前面一个“正常 / 注意 / 异常 / 说明”的小标 */
 .check-groups { margin-top: 12px; }
+.check-col { display: grid; gap: 12px; align-content: start; min-width: 0; }  /* 检测结果的一列：里面的卡各按自己的高度 */
 .checks { list-style: none; margin: 0; padding: 0; font-size: 13px; display: grid; gap: 7px; }
 .checks li { display: flex; gap: 10px; align-items: flex-start; overflow-wrap: anywhere; line-height: 1.45; }
 .checks li.grp { margin-top: 4px; }
@@ -500,8 +526,12 @@ details.src[open] summary::before { content: "▾"; }
 .checks li.summary { font-weight: 600; }
 .checks li.summary .advice { font-weight: 400; }
 @media (max-width: 680px) {
-  .score-row { gap: 10px 14px; }
+  /* 窄屏：圆环和合计排一行在上面，下面每个信号一行占满整宽（圆环留在左边的话右边每行只放得下十来个字） */
+  .score-row { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .score-side { display: flex; align-items: center; justify-items: start; gap: 14px; }
   .score-ring svg { width: 80px; height: 80px; }
+  .score-sum { text-align: left; font-size: 13px; }
+  .score-sum .lbl { display: block; }
 }
 
 /* 本地消耗：顶上一排数字格，左边每天的柱子（按账号叠），右边按模型的占比 */

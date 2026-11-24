@@ -1037,12 +1037,21 @@ def render(store, st, out=print, rich=None, phase=None):
         warns = [r for r in risks if r["level"] in ("warn", "bad")]  # 出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区：只提醒，不拦
         out(f"{mark} 环境 {sc['score']}/100" + (f" · {esc(warns[0]['text'])}" if warns else f"：{esc(sc['label'])}") + f" | size=12 color={c} length={LINE}")
         out(f"--{esc(sc['label'])} | size=12 color=gray")
-        for r in warns:
-            out(f"--⚠ {esc(r['text'])} | size=12 color=#BF3B33,#E06C66 length=70")
+        # 扣分的提示项（代理、VPN、语言这类不算“注意”的）也列出来，后面标扣几分：不然 95 分看不出扣在哪
+        for r in [r for r in risks if r in warns or cam.risk_points(r)]:
+            pts = f"（−{cam.risk_points(r)} 分）" if cam.risk_points(r) else ""
+            if r in warns:
+                out(f"--⚠ {esc(r['text'])}{pts} | size=12 color=#BF3B33,#E06C66 length=70")
+            else:
+                out(f"--· {esc(r['text'])}{pts} | size=12 color=#5A6676,#94A0AF length=70")
             if r["advice"]:
                 out(f"--{esc(r['advice'])} | size=11 color=#5A6676,#94A0AF length=70")
-        if not warns:
+        if not warns and sc["score"] == 100:
             out("--没有要注意的 | size=12 color=gray")
+        last = (cam.risk_log_view(data, 1)["changes"] or [None])[0]  # 最近一次分数是怎么变的（完整的在管理面板的环境页）
+        if last:
+            out("-----")
+            out(f"--{cam.fmt_ago(last['at']) if last['at'] else '刚刚'}：{esc(cam.risk_change_line(last))} | size=11 color=#5A6676,#94A0AF length=70")
     err = bg_error(store, st)
     if err and accs:  # 没账号时已经放在最上面了
         out(f"⚠ {esc(err)} | size=12 color=#B87A08,#E0A93B length={LINE}")

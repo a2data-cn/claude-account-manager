@@ -200,6 +200,7 @@ export interface State {
   region?: RegionInfo | null; // 后台上次检测到的出口地区，只用于提示
   risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
+  risk_log?: RiskLog | null; // 环境评分最近是怎么变的（后台每次环境检测后分数变了就记一笔）
   sessions?: SessionsBrief | null; // 本机开着的 claude 会话：几个、有没有在执行、几个在回答 / 等你确认（标题旁的红绿灯用）
   attention?: { count: number; text: string; since?: string | null } | null; // Claude Code 弹着权限确认在等你（cam 的钩子记的）
   desktop_app?: DesktopApp | null; // 有桌面版的号时才有
@@ -211,6 +212,29 @@ export interface RiskScore {
   grade: "low" | "medium" | "high";
   label: string;
   advice: string;
+}
+
+/** 一次分数变化里多出来 / 没有了的一条扣分项 */
+export interface RiskLogItem {
+  kind?: string | null;
+  text: string;
+  points: number;
+}
+
+/** 环境评分的一次变化：at 为 null 是后台还没来得及记的（现在的分数和最后记的那一笔不一样） */
+export interface RiskChange {
+  at: string | null;
+  score: number;
+  grade: "low" | "medium" | "high";
+  prev: number; // 变之前的分数
+  added: RiskLogItem[];
+  removed: RiskLogItem[];
+  exit_note: string; // 这两次之间出口换了的那一句，没换是空的
+}
+
+export interface RiskLog {
+  since: string | null; // 从什么时候开始记的；还没记过是 null
+  changes: RiskChange[]; // 新的在前
 }
 
 export interface PendingSwitch {
@@ -239,6 +263,7 @@ export interface ServiceCheckItem {
   level: "ok" | "bad" | "warn" | "info";
   text: string;
   advice: string; // 这意味着什么 / 建议怎么做，可能为空
+  points?: number; // /api/state 的 risks 里才有：这一条从环境评分里扣几分
   score?: number; // 只有 summary 项有：实测后的评分和档位
   grade?: "low" | "medium" | "high";
 }

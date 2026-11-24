@@ -1963,6 +1963,12 @@ pub fn region_recheck_due_at(
 /// 本机设置（代理、VPN、时区、DNS）不用联网，每次都更新。最多等 REGION_CHECK_BUDGET 秒。只记录，不干预任何操作。
 /// 与 cam.py 的 check_region 一致。
 pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
+    check_region_with(store, max_age, true)
+}
+
+/// check_region 的本体。做完后评分变了就记一笔（note_risk）；note 为 false 不记：服务检测先调这里、自己还要接着测别的，
+/// 等它全做完一起记，不然一次检测记成两笔。
+fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
     let data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
     let fp = net_fingerprint();
@@ -1974,6 +1980,9 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
         max_age,
         moved,
     ) {
+        if note {
+            note_risk(store); // 这次没重测，分数也可能变了（出口变化的观察期过了、切了账号）
+        }
         return Ok(region_view(&data));
     }
     let cfg = ip_lookup_config(Some(store));
@@ -2076,6 +2085,9 @@ pub fn check_region(store: &Store, max_age: i64) -> R<Value> {
         if let Some(o) = data.as_object_mut() {
             o.remove("service_status");
         }
+    }
+    if note {
+        note_risk_in(&mut data, None); // 评分变了记一笔（锁还拿着，直接写进这一份）
     }
     store.save(&mut data)?;
     Ok(region_view(&data))
@@ -2577,32 +2589,252 @@ const RISK_GRADES: &[(i64, &str, &str)] = &[
 const RISK_SCORE_ADVICE: &str =
     "评分只汇总本机能看到的信号，满分也不代表一定合规；低于 90 时逐条看提醒和建议。";
 
+/// 环境评分的变化最多记几次
+const RISK_LOG_KEEP: usize = 30;
+/// 界面上列最近几次
+pub const RISK_LOG_SHOWN: usize = 8;
+
+/// 这一条从环境评分里扣几分（不扣是 0）。与 cam.py 的 risk_points 一致（tests/shared/risk_log.json）。
+pub fn risk_points(item: &Value) -> i64 {
+    let (kind, level) = (
+        s(item, "kind").unwrap_or(""),
+        s(item, "level").unwrap_or(""),
+    );
+    if kind == "summary" {
+        return 0;
+    }
+    match RISK_WEIGHTS
+        .iter()
+        .find(|(k, l, _)| *k == kind && *l == level)
+    {
+        Some((_, _, w)) => *w,
+        None => match level {
+            "warn" => 10,
+            "bad" => 30,
+            _ => 0,
+        },
+    }
+}
+
 /// 把风险项汇总成 {score, grade, label, advice}。只用于提示。
 pub fn risk_score(items: &[Value]) -> Value {
-    let mut score: i64 = 100;
-    for it in items {
-        let (kind, level) = (s(it, "kind").unwrap_or(""), s(it, "level").unwrap_or(""));
-        if kind == "summary" {
-            continue;
-        }
-        score -= match RISK_WEIGHTS
-            .iter()
-            .find(|(k, l, _)| *k == kind && *l == level)
-        {
-            Some((_, _, w)) => *w,
-            None => match level {
-                "warn" => 10,
-                "bad" => 30,
-                _ => 0,
-            },
-        };
-    }
-    let score = score.max(0);
+    let score = (100 - items.iter().map(risk_points).sum::<i64>()).max(0);
     let (_, grade, label) = RISK_GRADES
         .iter()
         .find(|(floor, _, _)| score >= *floor)
         .unwrap_or(&RISK_GRADES[2]);
     json!({"score": score, "grade": grade, "label": label, "advice": RISK_SCORE_ADVICE})
+}
+
+/// 去掉文字里的“（3 分钟前）”“（刚刚）”这类相对时间：记进分数变化里的说明过几天再看，这些就不对了。与 cam.py 的 strip_ago 一致。
+pub fn strip_ago(text: &str) -> String {
+    fn is_ago(inner: &str) -> bool {
+        if inner == "刚刚" {
+            return true;
+        }
+        let digits = inner.chars().take_while(|c| c.is_ascii_digit()).count();
+        digits > 0 && matches!(&inner[digits..], " 分钟前" | " 小时前" | " 天前")
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(a) = rest.find('（') {
+        let body = &rest[a + '（'.len_utf8()..];
+        match body.find('）') {
+            // 括号里还套着别的括号的不算（“（没有（3 分钟前）”只去掉里面那一对）
+            Some(b) if is_ago(&body[..b]) => {
+                out.push_str(&rest[..a]);
+                rest = &body[b + '）'.len_utf8()..];
+            }
+            _ => {
+                out.push_str(&rest[..a + '（'.len_utf8()]);
+                rest = body;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 现在的环境评分和扣分的是哪几条：{score, grade, exit: {loc, ip, org}, items: [{kind, level, text, points}]}。还没检测过返回 None。
+/// exit 是当时的出口；文字不带“多久前检测的”这类相对时间（strip_ago）。与 cam.py 的 risk_snapshot 一致。
+pub fn risk_snapshot(data: &Value) -> Option<Value> {
+    let reg = data.get("region")?;
+    s(reg, "checked_at")?;
+    let items = risk_items(data, true, false);
+    let sc = risk_score(&items);
+    let lost: Vec<Value> = items
+        .iter()
+        .filter(|i| risk_points(i) > 0)
+        .map(|i| {
+            json!({"kind": i.get("kind"), "level": i.get("level"),
+                   "text": strip_ago(s(i, "text").unwrap_or("")), "points": risk_points(i)})
+        })
+        .collect();
+    Some(json!({
+        "score": sc["score"], "grade": sc["grade"],
+        "exit": {"loc": reg.get("loc"), "ip": reg.get("ip"), "org": reg.get("org")},
+        "items": lost
+    }))
+}
+
+/// 两次之间出口换没换，写成一句（没换、或者有一边没记是空字符串）：分数变了多半是因为出口换了，一起说出来才看得懂。
+/// 与 cam.py 的 exit_note 一致（tests/shared/risk_log.json）。
+pub fn exit_note(prev: &Value, cur: &Value) -> String {
+    let org = match s(cur, "org") {
+        Some(o) if !o.is_empty() && s(prev, "org") != Some(o) => format!("（{}）", o),
+        _ => String::new(),
+    };
+    let pair = |k: &str| match (s(prev, k), s(cur, k)) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() && a != b => Some((a, b)),
+        _ => None,
+    };
+    if let Some((a, b)) = pair("loc") {
+        return format!(
+            "出口从 {} 换到了 {}{}",
+            region_label(Some(a)),
+            region_label(Some(b)),
+            org
+        );
+    }
+    if let Some((a, b)) = pair("ip") {
+        return format!("出口 IP 换了：{} → {}{}", a, b, org);
+    }
+    String::new()
+}
+
+fn risk_item_keys(snap: &Value) -> Vec<(String, String)> {
+    snap.get("items")
+        .and_then(|i| i.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|i| {
+                    (
+                        s(i, "kind").unwrap_or("").to_string(),
+                        s(i, "level").unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 两次的评分算不算一样：分数一样，扣分的也是同样的几条（按 kind + level 比，文字里的毫秒数、时间不算）。
+fn risk_same(a: &Value, b: &Value) -> bool {
+    let key = |v: &Value| {
+        let mut k = risk_item_keys(v);
+        k.sort();
+        (v.get("score").and_then(|x| x.as_i64()), k)
+    };
+    key(a) == key(b)
+}
+
+fn risk_log(data: &Value) -> Vec<Value> {
+    data.get("risk_log")
+        .and_then(|l| l.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// 环境评分变了（分数变了，或者扣分的换了几条）就在 data["risk_log"] 最前面记一笔 {at, score, grade, exit, items}，最多留
+/// RISK_LOG_KEEP 笔；第一笔是开始记的时候。记了返回 true，没变（或者还没检测过）返回 false。与 cam.py 的 note_risk_in 一致。
+pub fn note_risk_in(data: &mut Value, at: Option<&str>) -> bool {
+    let Some(mut snap) = risk_snapshot(data) else {
+        return false;
+    };
+    let mut log = risk_log(data);
+    if log.first().is_some_and(|last| risk_same(last, &snap)) {
+        return false;
+    }
+    snap["at"] = json!(at.map(String::from).unwrap_or_else(now_iso));
+    log.insert(0, snap);
+    log.truncate(RISK_LOG_KEEP);
+    data["risk_log"] = json!(log);
+    true
+}
+
+/// 环境检测、服务检测每次做完都调一次：评分变了就记一笔，没变什么都不写。只记录，不干预任何操作。
+pub fn note_risk(store: &Store) {
+    // 先不加锁看一眼，绝大多数时候没变
+    let changed = store
+        .load()
+        .map(|mut d| note_risk_in(&mut d, None))
+        .unwrap_or(false);
+    if !changed {
+        return;
+    }
+    if let Ok(_g) = store.lock() {
+        if let Ok(mut d) = store.load() {
+            if note_risk_in(&mut d, None) {
+                let _ = store.save(&mut d);
+            }
+        }
+    }
+}
+
+/// new 比 old 多出来的扣分项、没有了的扣分项。同一种（kind + level）有几条就按条数比。
+fn risk_diff(old: &Value, new: &Value) -> (Vec<Value>, Vec<Value>) {
+    fn extra(a: &Value, b: &Value) -> Vec<Value> {
+        let mut left = risk_item_keys(b);
+        let mut out = Vec::new();
+        for i in a
+            .get("items")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let k = (
+                s(i, "kind").unwrap_or("").to_string(),
+                s(i, "level").unwrap_or("").to_string(),
+            );
+            match left.iter().position(|x| *x == k) {
+                Some(n) => {
+                    left.remove(n);
+                }
+                None => out.push(json!({
+                    "kind": i.get("kind"), "text": s(i, "text").unwrap_or(""),
+                    "points": i.get("points").and_then(|p| p.as_i64()).unwrap_or(0)
+                })),
+            }
+        }
+        out
+    }
+    (extra(new, old), extra(old, new))
+}
+
+/// 界面上的“分数变化”：{since: 从什么时候开始记的, changes: [{at, score, grade, prev, added, removed, exit_note}]}，新的在前，最多 limit 次。
+/// prev 是变之前的分数；added / removed 是和变之前比多出来、没有了的扣分项 [{kind, text, points}]；exit_note 是这两次之间出口换了的那一句（没换是空的）。
+/// 现在的分数和最后记的那一笔不一样（后台还没来得及记）时，最前面补一条 at 为 null 的。与 cam.py 的 risk_log_view 一致。
+pub fn risk_log_view(data: &Value, limit: usize) -> Value {
+    let log: Vec<Value> = risk_log(data)
+        .into_iter()
+        .filter(|e| e.is_object())
+        .collect();
+    if log.is_empty() {
+        return json!({"since": null, "changes": []});
+    }
+    let mut seq = Vec::new();
+    if let Some(mut snap) = risk_snapshot(data) {
+        if !risk_same(&log[0], &snap) {
+            snap["at"] = Value::Null;
+            seq.push(snap);
+        }
+    }
+    seq.extend(log.iter().cloned());
+    let changes: Vec<Value> = seq
+        .windows(2)
+        .take(limit)
+        .map(|w| {
+            let (new, old) = (&w[0], &w[1]);
+            let (added, removed) = risk_diff(old, new);
+            let note = exit_note(
+                old.get("exit").unwrap_or(&Value::Null),
+                new.get("exit").unwrap_or(&Value::Null),
+            );
+            json!({"at": new.get("at"), "score": new.get("score"), "grade": new.get("grade"),
+                   "prev": old.get("score"), "added": added, "removed": removed, "exit_note": note})
+        })
+        .collect();
+    json!({"since": log[log.len() - 1].get("at"), "changes": changes})
 }
 
 fn region_denied(msg: &str) -> bool {
@@ -3027,7 +3259,8 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             root: store.root.clone(),
         };
         // 顺便更新界面常显的缓存和账号的地区记录
-        spawn_job(move || check_region(&store, 0).is_ok())
+        // 评分的变化等下面全测完一起记
+        spawn_job(move || check_region_with(&store, 0, false).is_ok())
     };
     let j_api = {
         let at = at.clone();
@@ -3498,6 +3731,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             } else {
                 d["service_status"] = json!({"checked_at": now_iso(), "items": bad});
             }
+            note_risk_in(&mut d, None);
             let _ = store.save(&mut d);
         }
     }
@@ -3671,6 +3905,7 @@ pub fn clear_region_history(store: &Store) -> R<Value> {
         if let Some(o) = data.as_object_mut() {
             o.remove("region");
             o.remove("status_page");
+            o.remove("risk_log"); // 分数变化的说明里带着出口地区，一起清
         }
         for a in accounts_mut(&mut data) {
             if let Some(o) = a.as_object_mut() {

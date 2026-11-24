@@ -9,9 +9,9 @@ use cam_engine::claude::{
 };
 use cam_engine::desktop_app::{path_key, view_with};
 use cam_engine::health::{
-    check_region, clear_region_history, exit_trace, parse_exit_meta, peer_issuer, privacy_view,
-    region_recheck_due_at, risk_items, risk_score, save_privacy, service_check, system_dns_servers,
-    tunnel_kind, RegionRecheck,
+    check_region, clear_region_history, exit_trace, note_risk, note_risk_in, parse_exit_meta,
+    peer_issuer, privacy_view, region_recheck_due_at, risk_items, risk_log_view, risk_score,
+    save_privacy, service_check, system_dns_servers, tunnel_kind, RegionRecheck, RISK_LOG_SHOWN,
 };
 use cam_engine::rules::{apply_time_rules_at, save_rules};
 use cam_engine::store::{parse_time, read_json, try_lock_file, update_json_file, Store};
@@ -1900,6 +1900,117 @@ fn by_kind<'a>(items: &'a [Value], kind: &str) -> Option<&'a Value> {
     items.iter().find(|i| i["kind"] == kind)
 }
 
+/// 环境评分变了记一笔：界面看得到从几分变到几分、多了哪条；没变不写盘；清除地区记录时一起清。
+#[test]
+fn risk_log_records_score_changes() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    check_region(&store, 300).unwrap();
+    let scores = |d: &Value| -> Vec<i64> {
+        d["risk_log"]
+            .as_array()
+            .map(|l| l.iter().map(|x| x["score"].as_i64().unwrap()).collect())
+            .unwrap_or_default()
+    };
+    let d = e.data();
+    assert_eq!(scores(&d), vec![100]); // 第一笔是开始记的时候
+    assert_eq!(d["risk_log"][0]["exit"]["loc"], "US");
+    let st = public_state(&store, &d);
+    assert_eq!(
+        st["risk_log"],
+        json!({"since": d["risk_log"][0]["at"], "changes": []})
+    );
+    // 没变：不多记，也不写盘
+    let path = store.accounts_path();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    note_risk(&store);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        before
+    );
+    check_region(&store, 0).unwrap();
+    assert_eq!(scores(&e.data()), vec![100]);
+    // 出口走了 WARP：扣 5 分，记一笔
+    mock().lock().unwrap().trace_warp = true;
+    check_region(&store, 0).unwrap();
+    let d = e.data();
+    assert_eq!(scores(&d), vec![95, 100]);
+    let st = public_state(&store, &d);
+    let ch = &st["risk_log"]["changes"];
+    assert_eq!(ch.as_array().unwrap().len(), 1);
+    assert_eq!(
+        (
+            &ch[0]["prev"],
+            &ch[0]["score"],
+            &ch[0]["added"][0]["kind"],
+            &ch[0]["exit_note"]
+        ),
+        (&json!(100), &json!(95), &json!("warp"), &json!(""))
+    );
+    assert_eq!(ch[0]["removed"], json!([]));
+    let warp = st["risks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "warp")
+        .unwrap();
+    assert_eq!(warp["points"], 5);
+    // 没到重测时间、直接用缓存的那条路也记：分数不重测也会变（出口变化的观察期过了、切了账号）
+    {
+        let _g = store.lock().unwrap();
+        let mut d = store.load().unwrap();
+        d["region"]["warp"] = json!(false);
+        store.save(&mut d).unwrap();
+    }
+    check_region(&store, 3600).unwrap();
+    assert_eq!(scores(&e.data()), vec![100, 95, 100]);
+    // 后台还没来得及记：界面最前面补一条没有时间的
+    let mut d = e.data();
+    d["region"]["skew"] = json!(900);
+    let first = risk_log_view(&d, RISK_LOG_SHOWN)["changes"][0].clone();
+    assert!(first["at"].is_null());
+    assert_eq!(
+        (&first["prev"], &first["score"], &first["added"][0]["kind"]),
+        (&json!(100), &json!(90), &json!("clock"))
+    );
+    // “重新检测”（service_check）：出口和服务都测完才记，一次检测只记一笔（出口走了 WARP −5，官方限流 −5）
+    mock().lock().unwrap().usage_code = 429;
+    service_check(&store);
+    let d = e.data();
+    assert_eq!(scores(&d), vec![90, 100, 95, 100]);
+    let kinds: Vec<&str> = d["risk_log"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["api", "warp"]);
+    mock().lock().unwrap().usage_code = 0;
+    // 最多留 30 笔，界面上列最近 RISK_LOG_SHOWN 次
+    let mut d = e.data();
+    for _ in 0..35 {
+        let on = d["region"]["warp"].as_bool().unwrap_or(false);
+        d["region"]["warp"] = json!(!on);
+        assert!(note_risk_in(&mut d, None));
+    }
+    assert_eq!(d["risk_log"].as_array().unwrap().len(), 30);
+    assert_eq!(
+        risk_log_view(&d, RISK_LOG_SHOWN)["changes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        RISK_LOG_SHOWN
+    );
+    // 清除地区记录：一起清掉
+    clear_region_history(&store).unwrap();
+    assert!(e.data().get("risk_log").is_none());
+    assert_eq!(
+        public_state(&store, &e.data())["risk_log"],
+        json!({"since": null, "changes": []})
+    );
+}
+
 #[test]
 fn risk_items_and_reminders() {
     let e = Env::new();
@@ -1917,9 +2028,9 @@ fn risk_items_and_reminders() {
         ),
         (Some(100), Some("low"))
     );
-    assert!(risks
-        .iter()
-        .all(|r| r.as_object().unwrap().len() == 4 && r.get("advice").is_some()));
+    assert!(risks.iter().all(|r| r.as_object().unwrap().len() == 5
+        && r.get("advice").is_some()
+        && r["points"] == 0));
     // 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
     mock().lock().unwrap().trace_loc = "HK".into();
     check_region(&store, 0).unwrap();

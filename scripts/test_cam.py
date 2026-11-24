@@ -8,6 +8,7 @@ import base64
 import contextlib
 import datetime as dt
 import getpass
+import glob
 import io
 import signal
 import socket
@@ -24,6 +25,7 @@ import types
 import time
 import unittest
 import urllib.request
+import warnings
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -291,8 +293,10 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_NO_KEYCHAIN"] = "1"
         os.environ["CAM_NO_NOTIFY"] = "1"  # 不弹真的系统通知；要测的地方单独换掉
         os.environ["NO_COLOR"] = "1"
-        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "XDG_CACHE_HOME"):
             os.environ.pop(k, None)
+        os.environ["CAM_TEST_PS_PROFILES"] = "1"  # PowerShell 配置只看临时主目录，不读注册表里“文档”的真实位置
+        os.environ["CAM_TEST_PS_SYSTEM"] = ""  # 所有用户共用的 PowerShell 配置：不看本机真的
         sys.path.insert(0, HERE)
         import cam
         cls.cam = importlib.reload(cam)
@@ -339,12 +343,16 @@ class CamTest(unittest.TestCase):
         # 跑测试的机器上可能真有 claude 在运行，测试里统一当作没有；cam doctor 读的 /proc 换成一个空的假目录
         self._real_procs = self.cam.running_claude_processes
         self.cam.running_claude_processes = lambda: []
+        # 要管理员权限的几项（Windows 系统环境变量、托管设置、共用的 PowerShell 配置）默认只提示：Windows 上跑测试也不会去改本机真的
+        self._real_admin_ok = self.cam.admin_fix_ok
+        self.cam.admin_fix_ok = lambda: False
         os.environ["CAM_TEST_PROC_ROOT"] = os.path.join(self.tmp, "proc")
         os.makedirs(os.environ["CAM_TEST_PROC_ROOT"])
 
     def tearDown(self):
         self.drain()
         self.cam.running_claude_processes = self._real_procs
+        self.cam.admin_fix_ok = self._real_admin_ok
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ---- helpers
@@ -1974,7 +1982,7 @@ class CamTest(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(cam.NO_WINDOW, {})  # 别的系统上 subprocess 不认 creationflags，传了会报错
 
-    @unittest.skipIf(os.name == "nt", "假的 /proc 用符号链接记工作目录（Linux 的做法），Windows 上读回来的路径带 \\?\ 前缀，对不上")
+    @unittest.skipIf(os.name == "nt", "假的 /proc 用符号链接记工作目录（Linux 的做法），Windows 上读回来的路径带 \\\\?\\ 前缀，对不上")
     def test_sessions_view(self):
         """会话页：进程对上会话（钩子记的 pid → 工作目录 → 那个目录里最新的记录），读出状态、模型、几轮、上下文；
         组成只给还在跑的会话；红绿灯数几个在回答、几个等你确认。消息内容不出现在返回里。"""
@@ -3412,6 +3420,75 @@ foreach ($dark in @($false, $true)) {{
             for s in listeners:
                 s.close()
 
+    def test_risk_log_records_score_changes(self):
+        """环境评分变了记一笔：面板、cam risk 都看得到从几分变到几分、多了哪条；没变不写盘；清除地区记录时一起清。"""
+        self._two_accounts()
+        store = self.cam.Store()
+        self.cam.check_region(store)
+        log = self.data()["risk_log"]
+        self.assertEqual([(e["score"], e["items"]) for e in log], [(100, [])])  # 第一笔是开始记的时候
+        self.assertEqual(log[0]["exit"]["loc"], "US")
+        st = self.cam.public_state(store, self.data())
+        self.assertEqual(st["risk_log"], {"since": log[0]["at"], "changes": []})
+        self.assertTrue(all(r["points"] == 0 for r in st["risks"]))
+        code, out = self.run_cam_out("risk")
+        self.assertIn("没有扣分的项", out)
+        self.assertIn("之后没变过", out)
+        # 没变：不多记，也不写盘
+        before = os.stat(store.accounts_path).st_mtime_ns
+        self.cam.note_risk(store)
+        self.assertEqual(os.stat(store.accounts_path).st_mtime_ns, before)
+        self.cam.check_region(store, max_age=0)
+        self.assertEqual(len(self.data()["risk_log"]), 1)
+        # 出口走了 WARP：扣 5 分，记一笔
+        MockAnthropic.trace_warp = True
+        self.cam.check_region(store, max_age=0)
+        d = self.data()
+        self.assertEqual([e["score"] for e in d["risk_log"]], [95, 100])
+        st = self.cam.public_state(store, d)
+        self.assertEqual([(c["prev"], c["score"], [i["kind"] for i in c["added"]], c["removed"], c["exit_note"])
+                          for c in st["risk_log"]["changes"]], [(100, 95, ["warp"], [], "")])
+        self.assertEqual({r["kind"]: r["points"] for r in st["risks"]}["warp"], 5)
+        code, out = self.run_cam_out("risk")
+        self.assertIn("−5   出口经过 Cloudflare WARP / Zero Trust", out)
+        self.assertIn("100 → 95：多了 出口经过 Cloudflare WARP / Zero Trust（−5）", out)
+        # 诊断报告里也有
+        rep = self.cam.account_diagnostic(store, d, d["accounts"][0]["id"])
+        self.assertEqual(len(rep["risk_log"]["changes"]), 1)
+        self.assertIn("## 环境评分的变化", self.cam.diagnostic_text(rep))
+        # 没到重测时间、直接用缓存的那条路也记：分数不重测也会变（出口变化的观察期过了、切了账号）
+        with store.lock():
+            d = store.load()
+            d["region"]["warp"] = False
+            store.save(d)
+        MockAnthropic.calls = []
+        self.cam.check_region(store, max_age=3600)
+        self.assertFalse([c for c in MockAnthropic.calls if c[1] == "/cdn-cgi/trace"])
+        self.assertEqual([e["score"] for e in self.data()["risk_log"]], [100, 95, 100])
+        # 后台还没来得及记：界面最前面补一条没有时间的
+        d = self.data()
+        d["region"]["skew"] = 900
+        ch = self.cam.risk_log_view(d)["changes"][0]
+        self.assertEqual((ch["at"], ch["prev"], ch["score"], [i["kind"] for i in ch["added"]]), (None, 100, 90, ["clock"]))
+        # 面板的“重新检测”（service_check）：出口和服务都测完才记，一次检测只记一笔（出口走了 WARP −5，官方限流 −5）
+        MockAnthropic.usage_code = 429
+        self.cam.service_check(store)
+        log = self.data()["risk_log"]
+        self.assertEqual([e["score"] for e in log], [90, 100, 95, 100])
+        self.assertEqual([i["kind"] for i in log[0]["items"]], ["api", "warp"])
+        MockAnthropic.usage_code = None
+        # 最多留 RISK_LOG_KEEP 笔，界面上列最近 RISK_LOG_SHOWN 次
+        d = self.data()
+        for n in range(self.cam.RISK_LOG_KEEP + 5):
+            d["region"]["warp"] = not d["region"].get("warp")
+            self.assertTrue(self.cam.note_risk_in(d))
+        self.assertEqual(len(d["risk_log"]), self.cam.RISK_LOG_KEEP)
+        self.assertEqual(len(self.cam.risk_log_view(d)["changes"]), self.cam.RISK_LOG_SHOWN)
+        # 清除地区记录：一起清掉
+        self.cam.clear_region_history(store)
+        self.assertNotIn("risk_log", self.data())
+        self.assertEqual(self.cam.public_state(store, self.data())["risk_log"], {"since": None, "changes": []})
+
     def test_risk_items_and_reminders(self):
         a_id, b_id = self._two_accounts()  # 当前登录 B
         store = self.cam.Store()
@@ -3421,7 +3498,7 @@ foreach ($dark in @($false, $true)) {{
         risks = st["risks"]
         self.assertEqual([r["kind"] for r in risks], ["accounts"])
         self.assertEqual((st["risk_score"]["score"], st["risk_score"]["grade"]), (100, "low"))
-        self.assertTrue(all(set(r) == {"kind", "level", "text", "advice"} for r in risks))
+        self.assertTrue(all(set(r) == {"kind", "level", "text", "advice", "points"} for r in risks))
         # 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
         MockAnthropic.trace_loc = "HK"
         self.cam.check_region(store, max_age=0)
@@ -4646,6 +4723,181 @@ foreach ($dark in @($false, $true)) {{
         with self.assertRaises(cam.CamError):
             cam.env_fix_undo(cam.Store())
         self.assertIsNone(cam.env_plan_view(cam.Store(), cam.env_fix_plan(None))["undo_at"])
+
+    def _admin_setup(self):
+        """Windows 上要管理员权限的几项：系统环境变量（还有一个用户环境变量）、托管设置、所有用户共用的 PowerShell 配置，
+        cmd 的 AutoRun 里 set 的。注册表换成假的；“弹 UAC 起管理员进程”换成在本进程里跑 cam env admin-job，记下弹了几次。"""
+        cam = self.cam
+        reg = FakeReg()
+        reg.put("HKLM", cam.WIN_SYSTEM_ENV, "ANTHROPIC_AUTH_TOKEN", "SECRET-sys", 2)
+        reg.put("HKLM", cam.WIN_SYSTEM_ENV, "Path", r"C:\Windows", 2)
+        reg.put("HKCU", cam.WIN_USER_ENV, "ANTHROPIC_MODEL", "glm-4.6", 1)
+        reg.put("HKCU", r"Software\Microsoft\Command Processor", "AutoRun", "set ANTHROPIC_API_KEY=SECRET-ar && doskey ls=dir")
+        managed = os.path.join(self.tmp, "ProgramData", "managed-settings.json")
+        os.makedirs(os.path.dirname(managed))
+        with open(managed, "w", encoding="utf-8") as f:
+            json.dump({"env": {"ANTHROPIC_BASE_URL": "https://corp-relay.example.org"}, "permissions": {"deny": ["Bash(rm:*)"]}}, f)
+        sysps = os.path.join(self.tmp, "PowerShell7", "profile.ps1")
+        os.makedirs(os.path.dirname(sysps))
+        with open(sysps, "w", encoding="utf-8-sig", newline="") as f:
+            f.write('Set-PSReadLineOption -EditMode Emacs\r\n$env:ANTHROPIC_BASE_URL = "https://relay3.example.net"\r\n')
+        elevations = []
+
+        def fake_elevated(args, timeout):  # 弹窗点“是”：管理员进程就是 cam env admin-job
+            elevations.append(args)
+            self.assertEqual(args[2:4], ["env", "admin-job"])
+            self.assertNotIn("SECRET", " ".join(args))
+            return cam.main(args[2:])
+        for p in (mock.patch.dict(sys.modules, {"winreg": reg.module()}),
+                  mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": managed, "CAM_TEST_PS_SYSTEM": sysps}),
+                  mock.patch.object(cam, "admin_fix_ok", lambda: True), mock.patch.object(cam, "win_is_admin", lambda: False),
+                  mock.patch.object(cam, "_run_elevated", fake_elevated)):
+            p.start()
+            self.addCleanup(p.stop)
+        return reg, managed, sysps, elevations
+
+    def test_env_fix_admin_items_go_through_one_windows_confirmation(self):
+        """Windows 系统环境变量、托管设置、所有用户共用的 PowerShell 配置：一键清理能清了，要管理员权限的几项攒到最后，
+        只弹一次确认（UAC）；撤销也弹一次，全都原样放回去。托管设置可能是公司 IT 下发的，归到默认不动的那组。"""
+        cam = self.cam
+        reg, managed, sysps, elevations = self._admin_setup()
+        before = {"managed": _rb(managed), "sysps": _rb(sysps)}
+        plan = cam.env_fix_plan(None)
+        self.assertNotIn("SECRET", json.dumps(plan, ensure_ascii=False))
+        has = lambda xs, *words: [f for f in xs if all(w in f["text"] for w in words)]  # noqa: E731
+        [sys_env] = has(plan["fix"], "Windows 系统环境变量", "ANTHROPIC_AUTH_TOKEN")
+        self.assertTrue(cam.needs_admin(sys_env))
+        self.assertIn("管理员确认", sys_env["advice"])
+        [user_env] = has(plan["fix"], "Windows 用户环境变量", "ANTHROPIC_MODEL=glm-4.6")
+        self.assertFalse(cam.needs_admin(user_env))
+        [ps] = has(plan["fix"], "所有用户共用的 PowerShell 配置", "第 2 行", "relay3.example.net")
+        self.assertTrue(cam.needs_admin(ps))
+        [mg] = has(plan["optional"], "系统级托管设置", "corp-relay.example.org")  # 可能是公司下发的：能清，默认不动
+        self.assertTrue(cam.needs_admin(mg))
+        self.assertIn("公司", mg["advice"])
+        self.assertTrue(has(plan["manual"], "cmd 的自动运行命令", "ANTHROPIC_API_KEY"))  # AutoRun 只提示
+        view = cam.env_plan_view(cam.Store(), plan)
+        self.assertEqual(sorted(f["admin"] for f in view["fix"]), [False, True, True])
+        self.assertEqual([f["admin"] for f in view["optional"]], [True])
+        code, out = self.run_cam_out("env", "fix", "--offline")  # 预演：标出哪几项要管理员确认
+        self.assertIn("[要管理员确认]", out)
+        self.assertIn("默认不动的", out)
+        self.assertIn("公司 IT", out)
+        self.assertEqual(elevations, [])
+        # 清理（连默认不动的一起）：只弹一次
+        res = cam.env_fix_apply(cam.Store(), plan, optional=True)
+        self.assertEqual(res["failed"], [])
+        self.assertEqual(len(res["done"]), 4)
+        self.assertEqual(len(elevations), 1)
+        self.assertNotIn("SECRET", json.dumps(res, ensure_ascii=False))
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", reg.values("HKLM", cam.WIN_SYSTEM_ENV))
+        self.assertIn("Path", reg.values("HKLM", cam.WIN_SYSTEM_ENV))  # 别的系统变量不动
+        self.assertNotIn("ANTHROPIC_MODEL", reg.values("HKCU", cam.WIN_USER_ENV))
+        with open(managed, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"permissions": {"deny": ["Bash(rm:*)"]}})  # 只去掉那一项
+        with open(sysps, encoding="utf-8-sig", newline="") as f:
+            rows = f.read().split("\r\n")
+        self.assertEqual(rows[0], "Set-PSReadLineOption -EditMode Emacs")
+        self.assertTrue(rows[1].startswith("# [cam env fix ") and rows[1].endswith("relay3.example.net\""), rows)
+        left = sorted(os.listdir(res["backup"]))
+        self.assertFalse([n for n in left if n.startswith("new-") or n.startswith("admin-")], left)  # 准备好的内容、任务单用完就删
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", cam.env_removed_by_fix())  # 旧终端里带着的旧值：系统变量删掉的也算
+        after = cam.env_fix_plan(None)
+        self.assertFalse([f for f in after["fix"] + after["optional"] if f["fix"]["type"] != "cache"])
+        # 管理员那一步只肯改自己该改的：别的变量、别的文件都不动
+        bad = os.path.join(res["backup"], "x")
+        with open(bad, "wb") as f:
+            f.write(b"evil")
+        errs = cam._admin_do([{"op": "reg_del", "key": "Path"},
+                              {"op": "write", "path": os.path.join(self.tmp, ".bashrc"), "src": bad, "expect": cam._sha(None)},
+                              {"op": "write", "path": managed, "src": os.path.join(self.tmp, "elsewhere"), "expect": cam._sha(_rb(managed))},
+                              {"op": "write", "path": managed, "src": bad, "expect": "0" * 64}], res["backup"])
+        self.assertTrue(all(errs), errs)
+        self.assertIn("Path", reg.values("HKLM", cam.WIN_SYSTEM_ENV))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, ".bashrc")))
+        os.unlink(bad)
+        # 撤销：也只弹一次，全都原样放回去（值和类型）
+        r = cam.env_fix_undo(cam.Store())
+        self.assertEqual(r["failed"], [])
+        self.assertEqual(len(elevations), 2)
+        self.assertEqual(reg.values("HKLM", cam.WIN_SYSTEM_ENV)["ANTHROPIC_AUTH_TOKEN"], ("SECRET-sys", 2))
+        self.assertEqual(reg.values("HKCU", cam.WIN_USER_ENV)["ANTHROPIC_MODEL"], ("glm-4.6", 1))
+        self.assertEqual(_rb(managed), before["managed"])
+        self.assertEqual(_rb(sysps), before["sysps"])
+        self.assertFalse([n for n in os.listdir(r["backup"]) if n.startswith("undo-") or n.startswith("admin-")])
+
+    def test_env_fix_admin_items_skipped_when_confirmation_declined(self):
+        """Windows 弹窗里点了“否”：要管理员权限的几项原样没动、记成没做成（不留要撤销的东西），别的照常清理、照常撤销。"""
+        cam = self.cam
+        reg, managed, sysps, elevations = self._admin_setup()
+        before = {"managed": _rb(managed), "sysps": _rb(sysps)}
+        with mock.patch.object(cam, "_run_elevated", lambda args, timeout: elevations.append(args)):  # 返回 None：点了“否”
+            res = cam.env_fix_apply(cam.Store(), cam.env_fix_plan(None), optional=True)
+        self.assertEqual(len(elevations), 1)
+        self.assertEqual(len(res["failed"]), 3)
+        self.assertTrue(all("点了“否”" in x["error"] for x in res["failed"]), res["failed"])
+        self.assertEqual(len(res["done"]), 1)  # 用户环境变量不用管理员权限，照常删
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", reg.values("HKLM", cam.WIN_SYSTEM_ENV))
+        self.assertEqual((_rb(managed), _rb(sysps)), (before["managed"], before["sysps"]))
+        with open(os.path.join(res["backup"], "manifest.json"), encoding="utf-8") as f:
+            self.assertEqual([i["type"] for i in json.load(f)["items"]], ["win_env"])
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", cam.env_removed_by_fix())
+        r = cam.env_fix_undo(cam.Store())
+        self.assertEqual((r["failed"], len(elevations)), ([], 1))  # 只撤销用户环境变量，不用再弹窗
+        self.assertIn("ANTHROPIC_MODEL", reg.values("HKCU", cam.WIN_USER_ENV))
+
+    def test_env_purge_also_cleans_relay_settings_elsewhere_and_restore_puts_them_back(self):
+        """彻底清理不只搬走 ~/.claude、~/.claude.json：旁边的 .claude.json.backup、系统缓存目录里的 claude-cli-nodejs 也带走；
+        别处的中转设置（环境变量、shell 配置文件）也清掉，先列出来给人看；恢复时全都放回去。"""
+        cam = self.cam
+        reg = FakeReg()
+        reg.put("HKCU", cam.WIN_USER_ENV, "ANTHROPIC_BASE_URL", "https://relay.example.net", 1)
+        bashrc = os.path.join(self.tmp, ".bashrc")
+        with open(bashrc, "w", encoding="utf-8") as f:
+            f.write('export ANTHROPIC_AUTH_TOKEN="SECRET-b"\n')
+        with open(os.path.join(self.tmp, ".claude", "settings.json"), "w", encoding="utf-8") as f:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "SECRET-s"}}, f)  # 在要搬走的配置里：跟着搬走，不另外改
+        with open(self.cj_path + ".backup", "w", encoding="utf-8") as f:
+            f.write("{}")
+        logs = os.path.join(cam.claude_cache_dir(), "-work-x", "mcp-logs-m")  # Windows 在 AppData\\Local，macOS 在 Library/Caches 下面
+        self.assertTrue(logs.startswith(self.tmp))
+        os.makedirs(logs)
+        with open(os.path.join(logs, "1.txt"), "w", encoding="utf-8") as f:
+            f.write("log")
+        before = {"bashrc": _rb(bashrc)}
+        store = cam.Store()
+        with mock.patch.dict(sys.modules, {"winreg": reg.module()}), mock.patch.dict(os.environ, {"CAM_MANAGED_SETTINGS": ""}):
+            view = cam.env_purge_view(store)
+            moved = [m["path"] for m in view["move"]]
+            self.assertTrue(any(p.endswith(".claude.json.backup") for p in moved), moved)
+            self.assertTrue(any(p.endswith("claude-cli-nodejs") for p in moved), moved)
+            texts = [e["text"] for e in view["env"]]
+            self.assertTrue(any(".bashrc" in t for t in texts) and any("用户环境变量" in t for t in texts), texts)
+            self.assertFalse(any("settings.json" in t for t in texts), texts)
+            self.assertNotIn("SECRET", json.dumps(view, ensure_ascii=False))
+            code, out = self.run_cam_out("env", "clean", "--purge")  # 预演也列出来
+            self.assertIn("还会清掉别处的这些设置", out)
+            self.assertIn("claude-cli-nodejs", out)
+            dest = cam.env_purge(store)
+            self.assertFalse(os.path.exists(self.cj_path + ".backup"))
+            self.assertFalse(os.path.exists(cam.claude_cache_dir()))
+            self.assertTrue(os.path.isfile(os.path.join(dest, "claude-cli-nodejs", "-work-x", "mcp-logs-m", "1.txt")))
+            self.assertTrue(os.path.isfile(os.path.join(dest, "claude.json.backup")))
+            with open(os.path.join(dest, "claude-config", "settings.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["env"], {"ANTHROPIC_AUTH_TOKEN": "SECRET-s"})  # 搬走的原样
+            self.assertNotIn("ANTHROPIC_BASE_URL", reg.values("HKCU", cam.WIN_USER_ENV))
+            with open(bashrc, encoding="utf-8") as f:
+                self.assertTrue(f.read().startswith("# [cam env fix "))
+            env = cam.purge_env_result(dest)
+            self.assertEqual((len(env["done"]), env["failed"]), (2, []))
+            self.assertNotIn("SECRET", json.dumps(env, ensure_ascii=False))
+            r = cam.env_purge_restore(store)
+            self.assertEqual(r["failed"], [])
+        self.assertEqual(_rb(bashrc), before["bashrc"])
+        self.assertEqual(reg.values("HKCU", cam.WIN_USER_ENV)["ANTHROPIC_BASE_URL"], ("https://relay.example.net", 1))
+        self.assertTrue(os.path.isfile(self.cj_path + ".backup"))
+        self.assertTrue(os.path.isfile(os.path.join(logs, "1.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, ".claude", "settings.json")))
 
     def test_env_fix_command_previews_and_skips_slow_steps_while_claude_runs(self):
         files = self._relay_setup()
@@ -6569,6 +6821,39 @@ class SharedFixtureTest(unittest.TestCase):
                 for kind, text in c["expect_" + field].items():
                     self.assertIn(text, items[kind][field], c["name"])
 
+    def test_risk_log(self):
+        """环境评分：每条扣几分、分数变了记一笔、界面上的“分数变化”。"""
+        import datetime as dt
+        fx = json.loads(json.dumps(shared("risk_log.json")).replace("$now", dt.datetime.now(dt.timezone.utc).isoformat()))
+        for c in fx["points"]:
+            self.assertEqual(self.cam.risk_points({"kind": c["kind"], "level": c["level"]}), c["points"], c)
+        for c in fx["strip_ago"]:
+            self.assertEqual(self.cam.strip_ago(c["text"]), c["expect"])
+        for c in fx["exit_note"]:
+            self.assertEqual(self.cam.exit_note(c["prev"], c["cur"]), c["expect"], c)
+        pairs = lambda items: [[i["kind"], i["points"]] for i in items]  # noqa: E731
+        for seq in fx["sequences"]:
+            data = {}
+            for n, step in enumerate(seq["steps"]):
+                with self.subTest(seq["name"], step=n):
+                    data.update(json.loads(json.dumps(step["set"])))
+                    if step.get("note", True):
+                        self.assertEqual(self.cam.note_risk_in(data, f"2026-01-01T00:00:{n:02d}+00:00"), step["expect_noted"])
+                    log = data.get("risk_log") or []
+                    self.assertEqual([{"score": e["score"], "kinds": [i["kind"] for i in e["items"]]} for e in log], step["expect_log"])
+                    text = " ".join(i["text"] for e in log for i in e["items"])
+                    for part in step.get("text_excludes", []):
+                        self.assertNotIn(part, text)
+                    for part in step.get("text_includes", []):
+                        self.assertIn(part, text)
+                    if "expect_view" in step:
+                        v = self.cam.risk_log_view(data)
+                        got = {"since": bool(v["since"]), "changes": [
+                            {"at": bool(c["at"]), "prev": c["prev"], "score": c["score"], "grade": c["grade"],
+                             "added": pairs(c["added"]), "removed": pairs(c["removed"]), "exit_note": c["exit_note"]}
+                            for c in v["changes"]]}
+                        self.assertEqual(got, step["expect_view"])
+
     def test_alert_rules(self):
         """后台提醒：额度快满（5 小时、7 天）、用满后恢复、快到期 / 过了到期日。"""
         import datetime as dt
@@ -6768,6 +7053,71 @@ def write(path, text):
 def menu_arg(path):
     """菜单栏插件把路径写进 bash= / param1= 时会把反斜杠写成两个（Windows 路径才有）。"""
     return path.replace("\\", "\\\\")
+
+
+class FakeReg:
+    """测试用的假注册表（winreg）：{(根, 键路径小写): {名字: (值, 类型)}}，名字不分大小写，和真的一样。"""
+
+    def __init__(self):
+        self.keys = {}
+
+    def put(self, root, path, name, value, kind=1):
+        self.keys.setdefault((root, path.lower()), {})[name] = (value, kind)
+
+    def values(self, root, path):
+        return dict(self.keys.get((root, path.lower()), {}))
+
+    def module(self):
+        reg = self
+        m = types.ModuleType("winreg")
+        m.HKEY_CURRENT_USER, m.HKEY_LOCAL_MACHINE = "HKCU", "HKLM"
+        m.KEY_READ, m.KEY_SET_VALUE = 1, 2
+        m.REG_SZ, m.REG_EXPAND_SZ = 1, 2
+
+        class Key:
+            def __init__(self, k):
+                self.k = k
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def find(d, name):
+            return next((n for n in d if n.lower() == name.lower()), None)
+
+        def OpenKey(root, path, reserved=0, access=1):
+            if (root, path.lower()) not in reg.keys:
+                raise FileNotFoundError(2, "找不到键")
+            return Key((root, path.lower()))
+
+        def EnumValue(key, i):
+            items = list(reg.keys[key.k].items())
+            if i >= len(items):
+                raise OSError(259, "没有了")
+            name, (v, kind) = items[i]
+            return name, v, kind
+
+        def QueryValueEx(key, name):
+            d = reg.keys[key.k]
+            n = find(d, name)
+            if n is None:
+                raise FileNotFoundError(2, "找不到值")
+            return d[n]
+
+        def SetValueEx(key, name, reserved, kind, value):
+            d = reg.keys[key.k]
+            d[find(d, name) or name] = (value, kind)
+
+        def DeleteValue(key, name):
+            d = reg.keys[key.k]
+            n = find(d, name)
+            if n is None:
+                raise FileNotFoundError(2, "找不到值")
+            del d[n]
+        m.OpenKey, m.EnumValue, m.QueryValueEx, m.SetValueEx, m.DeleteValue = OpenKey, EnumValue, QueryValueEx, SetValueEx, DeleteValue
+        return m
 
 
 def _rb(path):
@@ -7076,6 +7426,11 @@ class UpdateTest(unittest.TestCase):
             self.assertEqual(st["code_stamp"], self.cam.CODE_STAMP)  # 插件据此判断后台 cam serve 是不是旧代码
             self.assertFalse(self.cam.serve_outdated(port, token))
             self.assertFalse(self.cam.serve_outdated(1, token))  # 连不上不算旧
+            # 和磁盘上现在的代码比，不和问的这个进程启动时的比（常驻的菜单栏插件记的可能是旧时间）
+            with mock.patch.object(self.cam, "code_stamp_now", return_value="99999999999"):
+                self.assertTrue(self.cam.serve_outdated(port, token))  # 磁盘上的代码比它新
+            with mock.patch.object(self.cam, "code_stamp_now", return_value=None):
+                self.assertFalse(self.cam.serve_outdated(port, token))  # 正在被替换：这一轮不算
             req = urllib.request.Request(f"http://127.0.0.1:{port}/api/menubar", headers={"Authorization": "Bearer " + token})
             with opener.open(req) as r:
                 # 没选过：菜单栏默认信号格；Windows 上是托盘，默认数字方块
@@ -7194,15 +7549,29 @@ class UpdateTest(unittest.TestCase):
             write(self.cam.serve_unit_file(), "[Service]\n")
             st, res = call("POST", "/api/update")
             self.assertEqual((st, res["updated"]), (200, True))
+            self.assertFalse(res["restarting"])  # 换的是别处的代码，处理请求的这个服务自己的代码没变，不用重启
             self.assertEqual(self.read("README.md"), "v4\n")
         if sys.platform.startswith("linux"):
-            # 面板里点的更新：处理请求的可能就是那个后台服务自己，先回复页面，一秒后再让 systemd 重启
-            self.assertIn("后台的 cam serve 服务马上重启，几秒后刷新页面就是新版本", res["restart"])
+            # 面板里点的更新，处理请求的不是 systemd 里那个后台服务：先回复页面，一秒后再让 systemd 重启它
+            self.assertIn("后台的 cam serve 服务马上重启，开着的页面几秒后自动刷新", res["restart"])
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and "--user --no-block try-restart cam-serve.service" not in self._calls():
                 time.sleep(0.1)
             self.assertEqual(self._calls(), ["--user is-active --quiet cam-serve.service",
+                                             "--user show -p MainPID --value cam-serve.service",
                                              "--user --no-block try-restart cam-serve.service"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "systemd 只在 Linux 上")
+    def test_panel_update_handled_by_the_service_itself_lets_it_restart_on_its_own(self):
+        # 处理请求的就是 systemd 里那个服务：它看到代码换了会自己用新代码重启（watch_code），不用 systemd 再重启一次
+        stub(self.bindir, "systemctl", f'echo "$*" >> "{self.calls}"; [ "$2" = show ] && echo {os.getpid()}; exit 0')
+        self.assertEqual(self.cam.restart_serve_service(later=True), "后台的 cam serve 服务几秒内自己用新版本重启，页面跟着自动刷新")
+        time.sleep(1.5)
+        self.assertEqual(self._calls(), ["--user is-active --quiet cam-serve.service", "--user show -p MainPID --value cam-serve.service"])
+        with mock.patch.dict(os.environ, {"CAM_NO_CODE_WATCH": "1"}), mock.patch.object(self.cam.threading, "Timer") as timer:
+            self.assertEqual(self.cam.restart_serve_service(later=True), "后台的 cam serve 服务马上重启，开着的页面几秒后自动刷新")
+        self.assertTrue(timer.called)  # 自己不会换新代码（关掉了）：还是请 systemd 重启
+        self.assertEqual(self.cam.restart_serve_service(), "已重启后台的 cam serve 服务")  # 命令行的 cam update：直接重启
 
     def _calls(self):
         try:
@@ -7210,6 +7579,244 @@ class UpdateTest(unittest.TestCase):
                 return f.read().splitlines()
         except FileNotFoundError:
             return []
+
+
+class ServeRestartTest(unittest.TestCase):
+    """代码换了新版本：后台的 cam serve 用新代码重启自己（watch_code），页面据 code_stamp 整页刷新；cam panel 换掉旧代码的 serve。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, HERE)
+        import cam
+        cls.cam = cam
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home)
+        env = {"HOME": home, "USERPROFILE": home, "CAM_HOME": os.path.join(self.tmp, "cam"),
+               "CLAUDE_CONFIG_DIR": os.path.join(self.tmp, "claude"), "XDG_CONFIG_HOME": os.path.join(self.tmp, "config"),
+               "CAM_NO_KEYCHAIN": "1", "CAM_NO_NOTIFY": "1", "CAM_NO_BG_CHECK": "1", "NO_COLOR": "1"}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("CAM_NO_CODE_WATCH", None)
+
+    def watch(self, stamps, running=(), problems=(), rounds=20):
+        """按给定的修改时间序列跑 watch_code，返回 (有没有重启, 看了几次时间, 打到 stderr 的)。"""
+        restarted, seen = [], []
+        stamps = list(stamps)
+
+        def stamp():
+            seen.append(1)
+            return stamps.pop(0) if stamps else stamp.last
+        stamp.last = stamps[-1]
+        err = io.StringIO()
+        with mock.patch.object(self.cam, "code_stamp_now", stamp), \
+                mock.patch.object(self.cam, "update_running", side_effect=list(running) or None, return_value=False), \
+                mock.patch.object(self.cam, "new_code_problem", side_effect=list(problems) or None, return_value=None), \
+                mock.patch("sys.stderr", err), mock.patch("sys.stdout", io.StringIO()):
+            r = self.cam.watch_code(lambda: restarted.append(1), interval=0, rounds=rounds)
+        self.assertEqual(r, bool(restarted))
+        return r, len(seen), err.getvalue()
+
+    def test_watch_code_restarts_only_on_a_settled_new_version_that_starts(self):
+        cam = self.cam
+        self.assertEqual(self.watch([cam.CODE_STAMP], rounds=5)[:2], (False, 5))  # 没换：一直不动
+        # 文件暂时不在（git 正在替换）不算；看到新时间先等一轮，确认没在写了再重启
+        self.assertEqual(self.watch([cam.CODE_STAMP, None, "9", "9"])[:2], (True, 4))
+        # 更新正在进行（拿着 update.lock，自检没过会退回）：等它做完
+        self.assertEqual(self.watch(["9", "9", "9"], running=[True, False])[:2], (True, 3))
+        # 新代码起不来：不重启，接着用现在的，说一声；同一个版本不再试，文件再变才再试
+        r, n, err = self.watch(["9", "9", "9", "9", "10", "10"], problems=["boom", None])
+        self.assertEqual((r, n), (True, 6))
+        self.assertIn("新代码起不来", err)
+        self.assertIn("boom", err)
+
+    def test_code_stamp_covers_modules_and_pages_and_new_code_check(self):
+        cam = self.cam
+        files = [os.path.join(self.tmp, n) for n in ("cam.py", "cam_vault.py", "panel.html", "gone.html")]
+        for i, path in enumerate(files[:3]):
+            write(path, "x")
+            os.utime(path, (1000 + i, 1000 + i * 10))
+        with mock.patch.object(cam, "code_files", return_value=files):
+            self.assertEqual(cam.code_stamp_now(), "1020")  # 面板页面最新：页面换了也算代码换了
+            os.utime(files[0], (1, 5000))
+            self.assertEqual(cam.code_stamp_now(), "5000")
+            os.remove(files[0])
+            self.assertIsNone(cam.code_stamp_now())  # cam.py 暂时不在：这一轮不算
+        real = cam.code_files()
+        self.assertEqual(real[0], os.path.realpath(cam.__file__))
+        self.assertIn(os.path.join(HERE, "cam_vault.py"), real)
+        self.assertTrue(any(p.endswith("panel.html") and os.path.exists(p) for p in real))
+        self.assertEqual(cam.CODE_STAMP, cam.code_stamp_now())  # 测试跑的时候代码没动
+        self.assertIsNone(cam.new_code_problem())  # 现在的代码起得来
+        # 更新正在进行：update.lock 被拿着
+        self.assertFalse(cam.update_running())
+        lock = cam.FileLock(os.path.join(cam.cam_home(), "update.lock"))
+        self.assertTrue(lock.try_acquire())
+        try:
+            self.assertTrue(cam.update_running())
+        finally:
+            lock.release()
+        self.assertFalse(cam.update_running())
+
+    def test_serve_busy_waits_for_requests_in_flight(self):
+        busy = self.cam.ServeBusy()
+        self.assertTrue(busy.wait_idle(0))
+        go = threading.Event()
+
+        def work():
+            with busy.hold():
+                go.wait(5)
+        t = threading.Thread(target=work)
+        t.start()
+        while busy.n == 0:
+            time.sleep(0.01)
+        self.assertFalse(busy.wait_idle(0.05))  # 手上还有一个
+        go.set()
+        self.assertTrue(busy.wait_idle(5))
+        t.join()
+        # 要换新代码了：不再开始新的活（新请求、后台下一轮都等着进程被换掉），手上的做完就换
+        go.clear()
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        while busy.n == 0:
+            time.sleep(0.01)
+        self.assertFalse(busy.close(0.05))
+        late = threading.Thread(target=work, daemon=True)
+        late.start()
+        go.set()
+        self.assertTrue(busy.close(5))
+        t.join(5)
+        time.sleep(0.05)
+        self.assertEqual(busy.n, 0)  # 后来的那个没开始
+        self.assertTrue(late.is_alive())
+
+    def test_relaunch_uses_same_command_line(self):
+        cam = self.cam
+        script = os.path.abspath(cam.__file__)
+        with mock.patch.object(sys, "argv", ["scripts/cam.py", "serve", "--port", "8790"]), \
+                mock.patch.object(sys, "orig_argv", ["python3", "-X", "utf8", "scripts/cam.py", "serve", "--port", "8790"], create=True):
+            args = cam.serve_relaunch_args()
+            self.assertEqual(args, [sys.executable, "-X", "utf8", script, "serve", "--port", "8790"])  # 解释器选项带上，脚本用绝对路径
+            # macOS / Linux：exec 换掉自己（进程号不变）
+            execd = []
+            with mock.patch.object(cam, "IS_WIN", False), \
+                    mock.patch.object(cam.os, "execv", lambda exe, a: (execd.append((exe, a)), sys.exit(0))):
+                with self.assertRaises(SystemExit):
+                    cam.relaunch_serve()
+            self.assertEqual(execd, [(sys.executable, args)])
+            # Windows：起一个新的再退出自己；后台起的（没有终端）不给它开窗口
+            spawned = []
+            with mock.patch.object(cam, "IS_WIN", True), mock.patch("sys.stdout", io.StringIO()), \
+                    mock.patch.object(cam.subprocess, "Popen", lambda a, **kw: spawned.append((a, kw))), \
+                    mock.patch.object(cam.os, "_exit", lambda code: sys.exit(code)):
+                with self.assertRaises(SystemExit):
+                    cam.relaunch_serve()
+            self.assertEqual(spawned[0][0], args)
+            self.assertEqual(spawned[0][1]["creationflags"], cam.BG_FLAGS)
+            self.assertEqual(spawned[0][1]["stdout"], subprocess.DEVNULL)
+        with mock.patch.object(sys, "argv", ["cam.py", "serve"]), mock.patch.object(sys, "orig_argv", [], create=True):
+            self.assertEqual(cam.serve_relaunch_args(), [sys.executable, script, "serve"])  # Python 3.8 / 3.9 没有 orig_argv
+
+    def test_open_panel_replaces_a_serve_running_old_code(self):
+        cam = self.cam
+        store = cam.Store()
+        token = cam.server_token(store)
+        spawned = []
+        with mock.patch.object(cam, "panel_running", return_value=True), \
+                mock.patch.object(cam, "serve_outdated", return_value=True), \
+                mock.patch.object(cam, "restart_stale_serve", return_value=True) as rs, \
+                mock.patch.object(cam, "port_free", return_value=True), \
+                mock.patch.object(cam.time, "sleep", lambda s: None), \
+                mock.patch.object(cam.subprocess, "Popen", lambda a, **kw: spawned.append(a)):
+            self.assertEqual(cam.ensure_panel(store, 8787), (8787, token))
+        self.assertTrue(rs.called)
+        self.assertEqual(spawned[0][-3:], ["serve", "--port", "8787"])  # 结束了旧的，在同一个端口起新的
+        with mock.patch.object(cam, "panel_running", return_value=True), \
+                mock.patch.object(cam, "serve_outdated", return_value=True), \
+                mock.patch.object(cam, "restart_stale_serve", return_value=False), \
+                mock.patch.object(cam, "mini_available", return_value=True), \
+                mock.patch.object(cam.subprocess, "Popen", lambda a, **kw: spawned.append(a)):
+            self.assertEqual(cam.ensure_panel(store, 8787, need_mini=True), (8787, token))  # 结束不了（找不到进程）：先用着它
+        self.assertEqual(len(spawned), 1)
+
+    @unittest.skipIf(os.name == "nt", "TIME_WAIT 挡不挡 bind 是 macOS / Linux 的规矩")
+    def test_port_left_by_a_stopped_serve_counts_as_free(self):
+        # 结束旧的 cam serve 后，开着的页面连过它留下 TIME_WAIT：端口其实能用（cam serve 带 SO_REUSEADDR 绑），不能当成被占了
+        lst = socket.socket()
+        lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        lst.bind(("127.0.0.1", 0))
+        lst.listen(1)
+        port = lst.getsockname()[1]
+        cli = socket.create_connection(("127.0.0.1", port))
+        conn, _ = lst.accept()
+        self.assertFalse(self.cam.port_free(port))  # 有人在听：占着
+        conn.close()  # 服务端先关：TIME_WAIT 留在服务端这个端口上
+        cli.recv(1)
+        cli.close()
+        lst.close()
+        with socket.socket() as plain:
+            try:
+                plain.bind(("127.0.0.1", port))
+                self.skipTest("这台机器上 TIME_WAIT 不挡 bind")
+            except OSError:
+                pass
+        self.assertTrue(self.cam.port_free(port))
+
+    def test_scripts_compile_without_warnings(self):
+        # 新版 Python 对旧写法（比如字符串里没转义的反斜杠）给 SyntaxWarning：cam update 自检时会打到终端上，看着像出错
+        paths = sorted(glob.glob(os.path.join(HERE, "*.py")) + glob.glob(os.path.join(ROOT, "extras", "swiftbar", "*.py")))
+        self.assertIn(os.path.join(HERE, "cam.py"), paths)
+        for path in paths:
+            with open(path, "rb") as f, warnings.catch_warnings():
+                warnings.simplefilter("error")
+                compile(f.read(), path, "exec", dont_inherit=True)
+
+    @unittest.skipIf(os.name == "nt", "Windows 上是起一个新进程再退出自己，测试里不好收拾那个进程；那条路上面用假的测过")
+    def test_serve_restarts_itself_when_its_code_changes(self):
+        # 真起一个 cam serve（用一份拷贝的代码），把面板页面的修改时间往后拨：它几秒内用新代码重启，进程号不变，code_stamp 变成新的
+        code = os.path.join(self.tmp, "code")
+        os.makedirs(os.path.join(code, "scripts"))
+        for path in glob.glob(os.path.join(HERE, "cam*.py")):
+            shutil.copy(path, os.path.join(code, "scripts"))
+        shutil.copytree(os.path.join(ROOT, "web"), os.path.join(code, "web"))
+        port = free_port()
+        env = dict(os.environ, CAM_CODE_WATCH_SEC="0.2", HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9",
+                   NO_PROXY="127.0.0.1,localhost", PYTHONDONTWRITEBYTECODE="1")
+        proc = subprocess.Popen([sys.executable, os.path.join(code, "scripts", "cam.py"), "serve", "--port", str(port)],
+                                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(proc.wait, 10)
+        self.addCleanup(proc.kill)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def state():
+            try:
+                with open(os.path.join(os.environ["CAM_HOME"], "server-token")) as f:
+                    tok = f.read().strip()
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers={"Authorization": "Bearer " + tok})
+                with opener.open(req, timeout=5) as r:
+                    return json.load(r)
+            except (OSError, ValueError):
+                return None
+
+        def wait(cond, secs=30):
+            deadline = time.monotonic() + secs
+            while time.monotonic() < deadline:
+                st = state()
+                if st and cond(st):
+                    return st
+                time.sleep(0.1)
+            self.fail("等不到 cam serve")
+        first = wait(lambda st: True)
+        self.assertTrue(first["code_watch"])
+        new = int(time.time()) + 100
+        os.utime(os.path.join(code, "web", "panel.html"), (new, new))
+        second = wait(lambda st: st["code_stamp"] != first["code_stamp"])
+        self.assertEqual(second["code_stamp"], str(new))
+        self.assertIsNone(proc.poll())  # 还是同一个进程（exec 换的代码）
 
 
 class LauncherTest(unittest.TestCase):

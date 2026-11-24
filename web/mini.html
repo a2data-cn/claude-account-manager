@@ -408,7 +408,8 @@ button { font: inherit; color: inherit; }
         body: body === undefined ? undefined : JSON.stringify(body), signal: ctl ? ctl.signal : undefined });
       try { data = await res.json(); } catch (_) {}
     } catch (e) {
-      throw e && e.name === "AbortError" ? new Error("后端没有响应") : e;
+      if (e && e.name === "AbortError") throw new Error("后端没有响应");
+      const err = new Error("连不上后端"); err.net = true; throw err;  // 没连上（没在跑，或者正在用新代码重启）：不显示浏览器的英文报错
     } finally { clearTimeout(timer); }
     if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
     return data;
@@ -902,9 +903,13 @@ button { font: inherit; color: inherit; }
     const bigAcc = code.find((a) => a.is_active) || code[0], rest = list.filter((a) => a !== bigAcc);
     const rn = renaming && list.some((a) => a.id === renaming) ? `<div class="tile glass rn-tile"><div class="t">给 ${esc(nameOf(list.find((a) => a.id === renaming), pos))} 改名：菜单栏、命令行、聊天机器人里都用这个名字</div>${renameForm(list.find((a) => a.id === renaming))}</div>` : "";
     const sc = state.risk_score, reg = state.region || {};
+    // 一天之内分数刚降下来：标一个 ↓，鼠标放上去写从几分降的、多了哪一条（完整的在管理面板的环境页）
+    const lastCh = ((state.risk_log || {}).changes || [])[0];
+    const dropTip = lastCh && lastCh.score < lastCh.prev && (!lastCh.at || Date.now() - new Date(lastCh.at) < 86400e3)
+      ? `${lastCh.at ? ago(lastCh.at) : "刚刚"}从 ${lastCh.prev} 分降到 ${lastCh.score} 分${(lastCh.added || []).length ? "：多了 " + lastCh.added.map((i) => `${i.text}（−${i.points}）`).join("；") : ""}${lastCh.exit_note ? "。" + lastCh.exit_note : ""}` : "";
     // 最近一次环境检测没连上：留着的是上一次查到的出口，标一个问号（详情在管理面板的环境区块）
     const left = (reg.loc ? `<span${reg.failed_at ? ` title="最近一次环境检测没连上，这是${ago(reg.checked_at)}查到的"` : ""}>出口 ${esc(reg.loc)}${reg.failed_at ? " ?" : reg.status === "supported" ? " ✓" : reg.status === "unsupported" ? " ⚠" : ""}</span>` : "")
-      + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}">环境 ${esc(sc.score)}/100</span>` : "");
+      + (sc && reg.status ? `${reg.loc ? " · " : ""}<span class="risk ${esc(sc.grade)}"${dropTip ? ` title="${esc(dropTip)}"` : ""}>环境 ${esc(sc.score)}/100${dropTip ? " ↓" : ""}</span>` : "");
     const foot = `<div class="foot"><span>${left}</span><span>${state.generated_at ? "更新 " + new Date(state.generated_at).toTimeString().slice(0, 5) : ""}</span></div>`;
     const quota = mtab === "quota";
     paint({ light: lightHtml(cur, pos), tabs: tabsHtml(), rn, sum: quota ? sum : "", cards: quota ? `<div class="mgrid">${bigAcc ? big(bigAcc) : ""}${rest.map(mc).join("")}</div>` : "",
@@ -916,12 +921,16 @@ button { font: inherit; color: inherit; }
     if (Date.now() - loadedAt < 1500) return Promise.resolve();
     loading = (async () => {
       try {
-        state = await api("GET", "/api/state", undefined, 15000); loadedAt = Date.now();
+        for (let i = 0; ; i++) {  // 连不上先隔一会儿再试几次：cam serve 用新代码重启要一两秒
+          try { state = await api("GET", "/api/state", undefined, 15000); break; }
+          catch (e) { if (!e.net || i >= 3) throw e; await new Promise((r) => setTimeout(r, 1500)); }
+        }
+        loadedAt = Date.now();
         if (stamp && state.code_stamp && state.code_stamp !== stamp) { location.reload(); return; }  // 弹窗常驻：代码更新、cam serve 换了新版后整页重新加载一次
         stamp = state.code_stamp || stamp;
         render();
       }
-      catch (e) { $("#main").innerHTML = `<div class="tile glass empty">连不上后端：${esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
+      catch (e) { $("#main").innerHTML = `<div class="tile glass empty">连不上后端${e.net ? "" : "：" + esc(e.message)}<br>确认 cam serve 还在运行</div>`; }
       finally { loading = null; }
     })();
     return loading;

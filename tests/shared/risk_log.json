@@ -1,0 +1,84 @@
+{
+  "points": [
+    {"kind": "region", "level": "warn", "points": 60},
+    {"kind": "region_change", "level": "warn", "points": 15},
+    {"kind": "region_change", "level": "info", "points": 0},
+    {"kind": "timezone", "level": "warn", "points": 25},
+    {"kind": "timezone", "level": "info", "points": 5},
+    {"kind": "proxy", "level": "info", "points": 5},
+    {"kind": "vpn", "level": "info", "points": 10},
+    {"kind": "tls", "level": "bad", "points": 0},
+    {"kind": "api", "level": "bad", "points": 40},
+    {"kind": "没列出的", "level": "warn", "points": 10},
+    {"kind": "没列出的", "level": "bad", "points": 30},
+    {"kind": "没列出的", "level": "info", "points": 0},
+    {"kind": "没列出的", "level": "ok", "points": 0},
+    {"kind": "summary", "level": "bad", "points": 0}
+  ],
+  "strip_ago": [
+    {"text": "出口地区变化：US（美国） → JP（日本）（3 分钟前）", "expect": "出口地区变化：US（美国） → JP（日本）"},
+    {"text": "出口地区变化：US → JP（刚刚）", "expect": "出口地区变化：US → JP"},
+    {"text": "上一次查到是 US（5 小时前），之后（12 天前）没连上", "expect": "上一次查到是 US，之后没连上"},
+    {"text": "环境变量设了代理（HTTPS_PROXY）", "expect": "环境变量设了代理（HTTPS_PROXY）"},
+    {"text": "出口 IP 属于 X（3 分钟前检测的）", "expect": "出口 IP 属于 X（3 分钟前检测的）"},
+    {"text": "连续 3 次（没有数字前）", "expect": "连续 3 次（没有数字前）"},
+    {"text": "", "expect": ""}
+  ],
+  "exit_note": [
+    {"prev": {"loc": "US", "ip": "1.1.1.1", "org": "A"}, "cur": {"loc": "US", "ip": "1.1.1.1", "org": "A"}, "expect": ""},
+    {"prev": null, "cur": {"loc": "US", "ip": "1.1.1.1", "org": "A"}, "expect": ""},
+    {"prev": {"loc": "US", "ip": "1.1.1.1", "org": "A"}, "cur": {"loc": null, "ip": null, "org": null}, "expect": ""},
+    {"prev": {"loc": "US", "ip": "1.1.1.1", "org": "A"}, "cur": {"loc": "US", "ip": "2.2.2.2", "org": "A"}, "expect": "出口 IP 换了：1.1.1.1 → 2.2.2.2"},
+    {"prev": {"loc": "US", "ip": "1.1.1.1", "org": "A"}, "cur": {"loc": "SG", "ip": "2.2.2.2", "org": "B"}, "expect": "出口从 US（美国） 换到了 SG（新加坡）（B）"},
+    {"prev": {"loc": "US", "ip": null, "org": null}, "cur": {"loc": "ZZ", "ip": null, "org": null}, "expect": "出口从 US（美国） 换到了 ZZ"}
+  ],
+  "sequences": [
+    {
+      "name": "还没检测过：什么都不记",
+      "steps": [
+        {"set": {"accounts": []}, "expect_noted": false, "expect_log": [], "expect_view": {"since": false, "changes": []}}
+      ]
+    },
+    {
+      "name": "第一笔是开始记的时候；没变不重复记；变了记多了哪条、少了哪条",
+      "steps": [
+        {"set": {"region": {"loc": "US", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": []}},
+        {"set": {}, "expect_noted": false, "expect_log": [{"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": []}},
+        {"set": {"region": {"loc": "US", "checked_at": "$now", "warp": true}}, "expect_noted": true, "expect_log": [{"score": 95, "kinds": ["warp"]}, {"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 100, "score": 95, "grade": "low", "added": [["warp", 5]], "removed": [], "exit_note": ""}]}},
+        {"set": {"region": {"loc": "US", "checked_at": "$now", "ip_type": "hosting", "org": "某机房", "skew": 500}}, "expect_noted": true, "expect_log": [{"score": 70, "kinds": ["isp", "clock"]}, {"score": 95, "kinds": ["warp"]}, {"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 95, "score": 70, "grade": "medium", "added": [["isp", 20], ["clock", 10]], "removed": [["warp", 5]], "exit_note": ""}, {"at": true, "prev": 100, "score": 95, "grade": "low", "added": [["warp", 5]], "removed": [], "exit_note": ""}]}},
+        {"set": {"region": {"loc": "US", "checked_at": "$now", "ip_type": "hosting", "org": "另一家机房", "skew": 900}}, "expect_noted": false, "expect_log": [{"score": 70, "kinds": ["isp", "clock"]}, {"score": 95, "kinds": ["warp"]}, {"score": 100, "kinds": []}]},
+        {"set": {"region": {"loc": "US", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 100, "kinds": []}, {"score": 70, "kinds": ["isp", "clock"]}, {"score": 95, "kinds": ["warp"]}, {"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 70, "score": 100, "grade": "low", "added": [], "removed": [["isp", 20], ["clock", 10]], "exit_note": ""}, {"at": true, "prev": 95, "score": 70, "grade": "medium", "added": [["isp", 20], ["clock", 10]], "removed": [["warp", 5]], "exit_note": ""}, {"at": true, "prev": 100, "score": 95, "grade": "low", "added": [["warp", 5]], "removed": [], "exit_note": ""}]}}
+      ]
+    },
+    {
+      "name": "分数没变但扣分的换了一条，也记",
+      "steps": [
+        {"set": {"region": {"loc": "US", "checked_at": "$now", "warp": true}}, "expect_noted": true, "expect_log": [{"score": 95, "kinds": ["warp"]}]},
+        {"set": {"region": {"loc": "US", "checked_at": "$now", "reg_loc": "SG"}}, "expect_noted": true, "expect_log": [{"score": 95, "kinds": ["ip_origin"]}, {"score": 95, "kinds": ["warp"]}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 95, "score": 95, "grade": "low", "added": [["ip_origin", 5]], "removed": [["warp", 5]], "exit_note": ""}]}}
+      ]
+    },
+    {
+      "name": "后台还没来得及记：界面最前面补一条没有时间的",
+      "steps": [
+        {"set": {"region": {"loc": "US", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 100, "kinds": []}]},
+        {"set": {"region": {"loc": "US", "checked_at": "$now", "ip_type": "proxy", "org": "某 VPN"}}, "note": false, "expect_log": [{"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": false, "prev": 100, "score": 75, "grade": "medium", "added": [["proxy_ip", 25]], "removed": [], "exit_note": ""}]}}
+      ]
+    },
+    {
+      "name": "记下来的说明不带“刚刚”“几分钟前”",
+      "steps": [
+        {"set": {"region": {"loc": "US", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 100, "kinds": []}]},
+        {"set": {"region": {"loc": "CN", "checked_at": "$now", "prev_loc": "US", "changed_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 25, "kinds": ["region", "region_change"]}, {"score": 100, "kinds": []}], "text_excludes": ["刚刚", "分钟前"], "text_includes": ["出口地区变化"], "expect_view": {"since": true, "changes": [{"at": true, "prev": 100, "score": 25, "grade": "high", "added": [["region", 60], ["region_change", 15]], "removed": [], "exit_note": "出口从 US（美国） 换到了 CN（中国大陆）"}]}}
+      ]
+    },
+    {
+      "name": "出口换了：和分数变化写在一起（地区没变写 IP，运营商变了带上运营商）",
+      "steps": [
+        {"set": {"region": {"loc": "US", "ip": "203.0.113.24", "org": "某宽带", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 100, "kinds": []}]},
+        {"set": {"region": {"loc": "US", "ip": "198.51.100.7", "org": "某机房", "ip_type": "hosting", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 80, "kinds": ["isp"]}, {"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 100, "score": 80, "grade": "medium", "added": [["isp", 20]], "removed": [], "exit_note": "出口 IP 换了：203.0.113.24 → 198.51.100.7（某机房）"}]}},
+        {"set": {"region": {"loc": "JP", "ip": "198.51.100.9", "org": "某机房", "ip_type": "hosting", "warp": true, "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 75, "kinds": ["isp", "warp"]}, {"score": 80, "kinds": ["isp"]}, {"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 80, "score": 75, "grade": "medium", "added": [["warp", 5]], "removed": [], "exit_note": "出口从 US（美国） 换到了 JP（日本）"}, {"at": true, "prev": 100, "score": 80, "grade": "medium", "added": [["isp", 20]], "removed": [], "exit_note": "出口 IP 换了：203.0.113.24 → 198.51.100.7（某机房）"}]}},
+        {"set": {"region": {"loc": "JP", "ip": "198.51.100.9", "org": "某机房", "ip_type": "hosting", "checked_at": "$now"}}, "expect_noted": true, "expect_log": [{"score": 80, "kinds": ["isp"]}, {"score": 75, "kinds": ["isp", "warp"]}, {"score": 80, "kinds": ["isp"]}, {"score": 100, "kinds": []}], "expect_view": {"since": true, "changes": [{"at": true, "prev": 75, "score": 80, "grade": "medium", "added": [], "removed": [["warp", 5]], "exit_note": ""}, {"at": true, "prev": 80, "score": 75, "grade": "medium", "added": [["warp", 5]], "removed": [], "exit_note": "出口从 US（美国） 换到了 JP（日本）"}, {"at": true, "prev": 100, "score": 80, "grade": "medium", "added": [["isp", 20]], "removed": [], "exit_note": "出口 IP 换了：203.0.113.24 → 198.51.100.7（某机房）"}]}}
+      ]
+    }
+  ]
+}

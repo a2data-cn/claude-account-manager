@@ -266,7 +266,14 @@ const PUBLIC_FIELDS: [&str; 14] = [
 ];
 
 pub fn public_state(store: &Store, data: &Value) -> Value {
-    let risks = super::health::risk_items(data, true, true);
+    // points：这一条从环境评分里扣几分
+    let risks: Vec<Value> = super::health::risk_items(data, true, true)
+        .into_iter()
+        .map(|mut r| {
+            r["points"] = json!(super::health::risk_points(&r));
+            r
+        })
+        .collect();
     let risk_score = super::health::risk_score(&risks);
     let active = active_code_id(data);
     let active_desktop = data
@@ -424,6 +431,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "region": super::health::region_view(data),
         "risks": risks,
         "risk_score": risk_score,
+        "risk_log": super::health::risk_log_view(data, super::health::RISK_LOG_SHOWN),
         "sessions": brief,  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算；几个在回答、几个等你确认
         "attention": attention_view(sessions > 0),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
         "desktop_app": desk_app,  // 有桌面版的号时才有：装没装、版本、开着没有、开着的是哪个号
