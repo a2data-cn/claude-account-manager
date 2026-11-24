@@ -36,6 +36,10 @@ struct Mock {
     refresh: HashMap<String, (String, String)>,
     /// (方法, 路径, 用到的 refresh token)
     calls: Vec<(String, String, String)>,
+    /// 明文网页那个地址（/generate_204）怎么回：空表示原样（空的 204）；"portal" 跳去登录页；"inject" 回一个带脚本的网页
+    plain_http: String,
+    /// /generate_204 被问了几次（不记进 calls：别的用例数的是另外那些请求）
+    plain_calls: usize,
     /// /cdn-cgi/trace 返回的地区，空表示 US
     trace_loc: String,
     trace_warp: bool,
@@ -127,6 +131,28 @@ fn mock_base() -> &'static str {
                     .unwrap_or_default();
                 let path = req.url().to_string();
                 let mut m = mock().lock().unwrap();
+                if path == "/generate_204" {
+                    m.plain_calls += 1;
+                    let how = m.plain_http.clone();
+                    drop(m);
+                    let resp = match how.as_str() {
+                        "portal" => tiny_http::Response::from_string("")
+                            .with_status_code(302)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Location"[..],
+                                    &b"http://portal.hotel.example/login"[..],
+                                )
+                                .unwrap(),
+                            ),
+                        "inject" => tiny_http::Response::from_string(
+                            "<html><script src=//evil.example/x.js></script></html>",
+                        ),
+                        _ => tiny_http::Response::from_string("").with_status_code(204),
+                    };
+                    let _ = req.respond(resp);
+                    continue;
+                }
                 let rt = serde_json::from_str::<Value>(&body)
                     .ok()
                     .and_then(|b| b["refresh_token"].as_str().map(String::from))
@@ -394,6 +420,7 @@ impl Env {
         std::env::set_var("CAM_CF_TRACE6_URL", format!("{}/trace6", base));
         // claude.ai 没回音时的备用 trace 也指到假接口，不去问真的 www.cloudflare.com
         std::env::set_var("CAM_CF_TRACE_URL", format!("{}/cf/cdn-cgi/trace", base));
+        std::env::set_var("CAM_PLAIN_HTTP_URL", format!("{}/generate_204", base));
         // 本机连的是哪张网：固定住，要测换网络的用例自己改
         std::env::set_var("CAM_TEST_NET", "net-a");
         // 各种时限用回正式的值，要调短的用例自己设
@@ -409,6 +436,7 @@ impl Env {
         std::env::set_var("CAM_TEST_LOCALE", "en_US");
         std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
         std::env::set_var("CAM_TEST_HOSTS", ""); // 不读这台电脑真的 hosts 文件
+        std::env::set_var("CAM_TEST_WIFI", ""); // 不查这台电脑真的 Wi-Fi
         std::env::set_var("CAM_TEST_PROXY", ""); // 不读本机的系统代理设置
         std::env::set_var("CAM_TEST_TZ", "America/New_York=US"); // 跑测试的机器时区不定，固定成和假出口一致
         std::env::set_var("CAM_TEST_ROUTE_IF", "");
@@ -1908,6 +1936,66 @@ fn kinds(items: &[Value]) -> Vec<String> {
 
 fn by_kind<'a>(items: &'a [Value], kind: &str) -> Option<&'a Value> {
     items.iter().find(|i| i["kind"] == kind)
+}
+
+/// 明文网页有没有被中途改动：被带去登录页、被塞了内容就标“注意”、扣 10 分；原样就没有这一条；“外部 IP 查询”关掉时不测。
+#[test]
+fn plain_http_tampering_is_flagged() {
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    check_region(&store, 0).unwrap();
+    assert_eq!(mock().lock().unwrap().plain_calls, 1);
+    assert_eq!(e.data()["region"]["plain_http"], json!({"ok": true}));
+    let st = public_state(&store, &e.data());
+    assert_eq!(st["region"]["plain_http"], true);
+    assert!(by_kind(st["risks"].as_array().unwrap(), "http_tamper").is_none());
+    // 公共 Wi-Fi 的门户页
+    mock().lock().unwrap().plain_http = "portal".into();
+    check_region(&store, 0).unwrap();
+    let st = public_state(&store, &e.data());
+    let item = by_kind(st["risks"].as_array().unwrap(), "http_tamper")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (&item["level"], &item["points"]),
+        (&json!("warn"), &json!(10))
+    );
+    assert_eq!(
+        item["text"],
+        "这张网在改动没加密的网页：被带去了 portal.hotel.example（HTTP 302）"
+    );
+    assert_eq!(st["region"]["plain_http"], false);
+    assert_eq!(st["risk_score"]["score"], 90);
+    // 被塞了内容
+    mock().lock().unwrap().plain_http = "inject".into();
+    check_region(&store, 0).unwrap();
+    let items = risk_items(&e.data(), true, true);
+    assert!(by_kind(&items, "http_tamper").unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .contains("回来的是一段内容（本该是空的）"));
+    // 关掉外部 IP 查询：不测，上一次的结论也不留，“会访问的服务”里没有它
+    let n = mock().lock().unwrap().plain_calls;
+    save_privacy(&store, &json!({"ip_lookup": "off"})).unwrap();
+    check_region(&store, 0).unwrap();
+    assert_eq!(mock().lock().unwrap().plain_calls, n);
+    assert!(e.data()["region"].get("plain_http").is_none());
+    let names = |v: &Value| -> Vec<String> {
+        v["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(!names(&privacy_view(&store).unwrap())
+        .iter()
+        .any(|n| n.contains("cp.cloudflare.com")));
+    save_privacy(&store, &json!({"ip_lookup": "auto"})).unwrap();
+    assert!(names(&privacy_view(&store).unwrap())
+        .iter()
+        .any(|n| n.contains("cp.cloudflare.com")));
 }
 
 /// 环境评分变了记一笔：界面看得到从几分变到几分、多了哪条；没变不写盘；清除地区记录时一起清。

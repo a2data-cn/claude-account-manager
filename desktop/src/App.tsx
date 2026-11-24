@@ -44,7 +44,7 @@ const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 /** 检测结果分组（和手机面板同样的分组） */
 const CHECK_GROUPS: [string, string[]][] = [
-  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "hosts", "warp"]],
+  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "hosts", "warp", "wifi", "http_tamper"]],
   ["本机", ["clock", "timezone", "locale", "creds_perm", "device"]],
   ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
   ["账号", ["account_regions", "accounts"]],
@@ -175,6 +175,7 @@ const ENV_ROWS: [string, string, string[]][] = [
   ["proxy", "代理 / VPN", ["proxy", "vpn", "proxy_down"]],
   ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
   ["dns", "DNS / hosts", ["dns", "dns_resolver", "dns_servers", "hosts"]],
+  ["netsafe", "这张网", ["wifi", "http_tamper"]], // Wi-Fi 加没加密、没加密的网页有没有被中途改动；都没查到时没有这一行
   ["change", "出口变化", ["region_change"]],
   ["creds", "登录凭据", ["creds_perm"]], // 凭据文件别的用户也读得到时才有这一行
   ["account", "账号", ["account_regions", "accounts"]],
@@ -312,6 +313,7 @@ function ScoreCard({ state }: { state: State }) {
     proxy: "未检出显式代理或默认隧道；TUN 分流仍可能生效",
     local: "没发现和出口地区不一致的设置",
     dns: "没发现问题，hosts 文件没动过 Claude 的域名",
+    netsafe: [reg?.wifi?.security === "wpa" ? "Wi-Fi 已加密" : "", reg?.plain_http === true ? "没加密的网页没被中途改动" : ""].filter(Boolean).join(" · "),
     change: reg?.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${reg.prev_loc} 换到 ${reg.loc}，已过了观察期` : "最近没变",
     account: "当前账号最近没在多个地区用过",
     service: "正常",

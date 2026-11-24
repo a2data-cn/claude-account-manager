@@ -290,6 +290,8 @@ export interface RegionInfo {
   prev_loc?: string | null; // 上一次检测到的不同出口地区（24 小时内变过）
   changed_at?: string | null;
   org?: string | null; // 出口 IP 的运营商
+  plain_http?: boolean | null; // 没加密的网页有没有被中途改动：true 没被改，false 被改了，null 没测
+  wifi?: { ssid?: string | null; security: "open" | "wep" | "wpa" } | null; // 连着的 Wi-Fi 加没加密；有线、没查到是 null
   city?: string | null;
   ip_type?: "residential" | "hosting" | "proxy" | "tor" | "mobile" | null; // 数据库判定的 IP 类型，null = 数据源没有标记
   meta_source?: string | null; // 运营商信息来自哪家（ipapi.is / ipinfo.io / Cloudflare / ip-api.com），界面上注明来源

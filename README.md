@@ -292,9 +292,13 @@ python.org 装的 Python（macOS 上常见）默认不带根证书，https 请�
 - 出口地区判定一致性：两个接口看到的国家不一致（代理只分流了一部分）时提醒
 - DNS 实测：`api.anthropic.com`、`claude.ai` 这两个域名系统解析得出来吗、解析到哪个地址、用了多少毫秒。解析不了又确实连不上才算异常、扣 20 分；解析不了但实际连得上（请求走的是代理，域名由代理解析）只作说明，不扣分；解析成内网 / 保留地址（回环、私有、198.18.0.0/15 这类）也只作说明：解析被本机的代理或安全软件接管了，没装这类软件的话该去看 hosts 文件和 DNS 设置
 - hosts 文件：系统的 hosts 文件（Windows 的 `C:\Windows\System32\drivers\etc\hosts`，macOS / Linux 的 `/etc/hosts`）里有没有把 `anthropic.com`、`claude.ai`、`claude.com`、`claudeusercontent.com` 或它们的子域名指到别处。正常用不着这样设：发往这个域名的请求连同登录凭据会被送到那个地址，可能是第三方中转 / 加速工具写的，也可能是恶意软件改的。有的话标“注意”、扣 20 分，写明是哪个域名指到了哪、怎么删。只读，不改
+- 这张网安不安全（公共场所连网时看）：
+  - Wi-Fi 加没加密：连着的 Wi-Fi 是开放网络（不要密码）或者用的是早就被破解的 WEP 时标“注意”、扣 10 分——同一个 Wi-Fi 上的人能看到、改动没加密的流量。只读系统自己报的连接信息（Linux 问 `nmcli`，macOS 问 `system_profiler`，Windows 问 `netsh wlan show interfaces`）；有线、没连 Wi-Fi、读不出来就不显示，不乱报
+  - 没加密的网页有没有被中途改动：取一个本该是空白的明文地址（`http://cp.cloudflare.com/generate_204`，直连、不走代理、不跟着跳转），被带去登录页、回来的是一段内容，就是这张网在改动明文流量——要先登录的公共 Wi-Fi，或者有人往里塞东西。标“注意”、扣 10 分。“外部 IP 查询”关掉时不测
+  - Claude 自己的连接都是 HTTPS、有证书校验，这两项说的是这张网可不可信；真正被中途解密时由下面的“HTTPS 证书”那一项标出来
 - 登录凭据文件：Claude Code 的 `.credentials.json`（macOS 上登录存在钥匙串里，没有这个文件；Windows 的权限不是这么管的，不查）这台电脑上别的用户读不读得到。读得到就标“注意”、扣 15 分，给出 `chmod 600` 的命令：里面是登录用的令牌，别人读到就能用你的账号。只看，不改
 - DNS 解析器：本机配置的 DNS 服务器是局域网的、任播公共 DNS（Google、Cloudflare 等，不拿来判断位置）还是某个国家的公共 DNS（阿里、腾讯、114、HiNet 等）；与出口地区不同时仅作信息展示，不扣分。TUN / 代理可能接管 DNS，系统配置不等于实际解析出口，不能据此判断泄漏或所在地；真实的域名解析失败仍会扣分。**只读本机配置，不做泄漏探测**（泄漏探测要往第三方的记录服务发带标识的查询，没有做）
-- `api.anthropic.com`：用当前登录实测，区分"服务正常 / 登录已过期 / 拒绝访问（通常是地区不支持）/ 连不上 / 服务端故障"，并显示时延。登录已过期是账号的事（大约每 8 小时过期一次，运行 claude 时自己续上），只作说明、不扣分
+- `api.anthropic.com`：用当前登录实测，区分"服务正常 / 登录已过期 / 拒绝访问（通常是地区不支持）/ 连不上 / 服务端故障"，并显示时延。连不上时接着写卡在哪一层：域名解析、建 TCP 连接、TLS 握手，还是等服务端回应（没走代理时另外直连一下端口来判断；走代理时写“问题在代理这一段”），`claude.ai` 同样。登录已过期是账号的事（大约每 8 小时过期一次，运行 claude 时自己续上），只作说明、不扣分
 - `claude.ai`：是否可达，是否被公司网络的人机验证页拦住（只影响网页账号读额度，不影响切号）。`api.anthropic.com`、`claude.ai` 回 429（官方限流）、529（官方过载）、5xx（服务端错误）时单独说明是 Anthropic 那边的状况，不是网络或账号的问题。这几样和下面的官方状态页公告是“关注项”：照样标出来，后面写着“只提醒，不扣分”，不扣环境评分
 - 续登录的地址：`platform.claude.com`、`console.anthropic.com`（Claude Code 和 cam 续登录用的地方）连不连得上。不带登录、只发一个 GET（正常会回 405），回什么都算连得上，回人机验证页或因为地区拒绝才算被拦。都连不上时登录到期（大约 8 小时）后就续不上，会出现“需要登录”；只连得上一个算留意
 - HTTPS 证书：`api.anthropic.com` 现在拿到的证书是谁签的（只握手，不发请求；有 http 代理时经代理打通道再看）。正常是 Google Trust Services、Let's Encrypt 这类公共证书机构；不是的话网络里有设备在解密 HTTPS（公司安全网关、杀毒软件的 HTTPS 扫描、抓包工具），Claude Code 可能报 `SELF_SIGNED_CERT_IN_CHAIN`，建议向网络管理员要根证书并设 `NODE_EXTRA_CA_CERTS`。不扣环境分
@@ -436,7 +440,7 @@ cam risk --off                  # 关掉启动前提醒（--on 打开）；CAM_N
 | 设置 | 会访问 | 说明 |
 |---|---|---|
 | 关闭 `off` | `claude.ai/cdn-cgi/trace`、`status.claude.com` | 只看出口国家和官方状态，不查运营商、IP 类型、IPv6、注册国 |
-| 自动 `auto`（默认） | 上面两个，加 `www.cloudflare.com/cdn-cgi/trace`（claude.ai 两秒内没回音或连不上时才问）、`api.ipapi.is` → `ipinfo.io` → `speed.cloudflare.com`（按顺序，第一个查到的为准）、`rdap.org`、`1.1.1.1` 和 Cloudflare IPv6 | 都可以商用。ipapi.is 免费注册 key 每天 1000 次、带机房 / VPN / Tor 标记（官方写明可商用）；不配 key 每天 30 次、不带标记。ipinfo.io 免费版可商用但要求注明来源，界面上会写"数据：ipinfo.io" |
+| 自动 `auto`（默认） | 上面两个，加 `www.cloudflare.com/cdn-cgi/trace`（claude.ai 两秒内没回音或连不上时才问）、`cp.cloudflare.com/generate_204`（明文的 http，看没加密的网页有没有被中途改动，只取一个空白页）、`api.ipapi.is` → `ipinfo.io` → `speed.cloudflare.com`（按顺序，第一个查到的为准）、`rdap.org`、`1.1.1.1` 和 Cloudflare IPv6 | 都可以商用。ipapi.is 免费注册 key 每天 1000 次、带机房 / VPN / Tor 标记（官方写明可商用）；不配 key 每天 30 次、不带标记。ipinfo.io 免费版可商用但要求注明来源，界面上会写"数据：ipinfo.io" |
 | 加上 ip-api `ip-api` | 自动的那些，并优先用 `ip-api.com` | ip-api.com 免费接口**仅限非商业用途**、只有 http，个人自用才选 |
 
 出口 IP 没变时，运营商这些信息一天只查一次，第三方请求很少。这些第三方查询同时进行，合起来最多等 8 秒：到点还没答的那几项这次空着，不拖着出口地区和评分。

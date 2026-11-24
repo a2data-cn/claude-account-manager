@@ -39,6 +39,8 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
     # sessionKey -> 网页账号资料；cloudflare=True 时所有网页请求返回挑战页
     web_keys = {}
     cloudflare = False
+    plain_http = "ok"  # 明文网页那个地址怎么回：ok（空的 204）/ portal（跳去登录页）/ inject（回一个带脚本的网页）
+    plain_calls = 0
     trace_loc = "US"
     trace_warp = False
     trace_ts_offset = 0  # 服务器时间相对本机的偏差（秒）
@@ -120,6 +122,17 @@ class MockAnthropic(http.server.BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        if self.path == "/generate_204":  # 明文网页有没有被改的那个地址（不记进 calls：别的用例数的是另外那些请求）
+            MockAnthropic.plain_calls += 1
+            if self.plain_http == "portal":  # 公共 Wi-Fi 的门户页：跳走
+                self.send_response(302)
+                self.send_header("Location", "http://portal.hotel.example/login")
+                self.send_header("Content-Length", "0")
+                return self.end_headers()
+            if self.plain_http == "inject":  # 有人往里塞东西
+                return self._send_html(200, "<html><script src=//evil.example/x.js></script></html>")
+            self.send_response(204)
+            return self.end_headers()
         MockAnthropic.calls.append(("GET", self.path, self.headers.get("Authorization") or self.headers.get("x-api-key")))
         if self.path in ("/api/organizations", "/api/account") or (
                 self.path.startswith("/api/organizations/") and self.path.endswith("/usage")):
@@ -281,6 +294,7 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_NO_BG_CHECK"] = "1"  # 不起后台检测进程
         os.environ.pop("CAM_IP_LOOKUP", None)
         os.environ["CAM_RDAP_URL"] = base + "/rdap/"
+        os.environ["CAM_PLAIN_HTTP_URL"] = base + "/generate_204"
         os.environ["CAM_CF_TRACE4_URL"] = base + "/trace4"
         os.environ["CAM_CF_TRACE6_URL"] = base + "/trace6"
         os.environ["CAM_CF_TRACE_URL"] = base + "/cf/cdn-cgi/trace"
@@ -288,6 +302,7 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_TEST_LOCALE"] = "en_US"
         os.environ["CAM_TEST_DNS"] = "192.168.1.1"
         os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
+        os.environ["CAM_TEST_WIFI"] = ""  # 不查这台电脑真的 Wi-Fi
         os.environ["CAM_TEST_PROXY"] = ""  # 不读本机的系统代理设置（macOS 上开着系统代理时结果会变）
         os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
         os.environ["CAM_TEST_ROUTE_IF"] = ""
@@ -323,6 +338,8 @@ class CamTest(unittest.TestCase):
         MockAnthropic.refresh_map = {}
         MockAnthropic.web_keys = {}
         MockAnthropic.cloudflare = False
+        MockAnthropic.plain_http = "ok"
+        MockAnthropic.plain_calls = 0
         MockAnthropic.trace_loc = "US"
         MockAnthropic.trace_warp = False
         MockAnthropic.trace_ts_offset = 0
@@ -3486,6 +3503,18 @@ foreach ($dark in @($false, $true)) {{
         [bad] = dns_items(fail, dead)
         self.assertEqual((bad["level"], cam.risk_points(bad)), ("bad", 20))
         self.assertIn("DNS：localhost 解析失败", bad["text"])
+        # 连不上时写明卡在哪一层：解析得出来，但那个端口没人听 → 卡在建 TCP 连接
+        with mock.patch.object(cam, "API_BASE", dead), mock.patch.object(cam, "CLAUDE_WEB_BASE", dead), \
+                mock.patch.object(cam, "resolve_host", lambda h: ["127.0.0.1"]):
+            api = next(i for i in cam.service_check(None) if i["kind"] == "api")
+        self.assertEqual(api["level"], "bad")
+        self.assertIn("连不上（", api["text"])
+        self.assertIn("域名解析得出来，卡在建 TCP 连接这一步（连接被拒绝）", api["text"])
+        # 解析也不行：卡在域名解析
+        with mock.patch.object(cam, "API_BASE", dead), mock.patch.object(cam, "CLAUDE_WEB_BASE", dead), \
+                mock.patch.object(cam, "resolve_host", fail):
+            api = next(i for i in cam.service_check(None) if i["kind"] == "api")
+        self.assertIn("卡在域名解析这一步：系统解析不出 localhost", api["text"])
         # 解析成了内网 / 保留地址：解析被本机的软件接管了，说明一下
         [fake] = dns_items(lambda h: ["198.18.0.5"])
         self.assertEqual((fake["level"], cam.risk_points(fake)), ("info", 0))
@@ -3731,6 +3760,7 @@ foreach ($dark in @($false, $true)) {{
         finally:
             os.environ["CAM_TEST_DNS"] = "192.168.1.1"
             os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
+            os.environ["CAM_TEST_WIFI"] = ""  # 不查这台电脑真的 Wi-Fi
         self.cam.check_region(store, max_age=0)
         # IP 类型：数据库标记为代理 → warn；机房 → warn；手机 → 不提；IPv6 出口和 IPv4 不同 → warn；注册国不同 → info
         MockAnthropic.ipapi_type = "proxy"
@@ -3848,6 +3878,7 @@ foreach ($dark in @($false, $true)) {{
         finally:
             os.environ["CAM_TEST_DNS"] = "192.168.1.1"
             os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
+            os.environ["CAM_TEST_WIFI"] = ""  # 不查这台电脑真的 Wi-Fi
         self.assertEqual([(d["ip"], d["private"], d["name"], d["country"]) for d in dns],
                          [("10.0.0.1", True, None, None), ("8.8.8.8", False, "Google", None), ("223.5.5.5", False, "阿里 DNS", "CN"),
                           ("fe80::1", True, None, None), ("1.2.3.4", False, None, None)])
@@ -5686,6 +5717,70 @@ foreach ($dark in @($false, $true)) {{
         self.assertEqual(self.run_cam("env", "clean", "--restore"), 0)
         self.assertTrue(os.path.isfile(os.path.join(cfg, "settings.json")))
 
+    def test_open_wifi_shows_up_after_a_check(self):
+        """连着开放 Wi-Fi 时环境检测记下来、面板的状态里带着；换到加密的就没有这一条。"""
+        cam = self.cam
+        self._two_accounts()
+        store = cam.Store()
+        with mock.patch.dict(os.environ, {"CAM_TEST_WIFI": "open:Cafe Free"}):
+            self.assertEqual(cam.wifi_info(), {"ssid": "Cafe Free", "security": "open"})
+            cam.check_region(store, max_age=0)
+        st = cam.public_state(store, self.data())
+        item = next(r for r in st["risks"] if r["kind"] == "wifi")
+        self.assertEqual((item["level"], item["points"]), ("warn", 10))
+        self.assertIn("“Cafe Free”没有加密", item["text"])
+        self.assertEqual(st["region"]["wifi"], {"ssid": "Cafe Free", "security": "open"})
+        with mock.patch.dict(os.environ, {"CAM_TEST_WIFI": "wpa:Home"}):
+            cam.check_region(store, max_age=0)
+        st = cam.public_state(store, self.data())
+        self.assertFalse([r for r in st["risks"] if r["kind"] == "wifi"])
+        self.assertEqual(st["region"]["wifi"], {"ssid": "Home", "security": "wpa"})
+        cam.check_region(store, max_age=0)  # 测试里默认：没连 Wi-Fi
+        self.assertIsNone(cam.public_state(store, self.data())["region"]["wifi"])
+
+    def test_plain_http_tampering_is_flagged(self):
+        """明文网页有没有被中途改动：取一个本该是空 204 的地址，被带去登录页、被塞了内容就标“注意”、扣 10 分；
+        原样就没有这一条；“外部 IP 查询”关掉时不测。"""
+        cam = self.cam
+        self._two_accounts()
+        store = cam.Store()
+        for c in shared("service.json")["plain_http"]:
+            self.assertEqual(cam.plain_http_verdict(c["status"], c["location"], c["body"]), c["expect"], c["name"])
+        cam.check_region(store, max_age=0)
+        self.assertEqual(MockAnthropic.plain_calls, 1)
+        self.assertEqual(self.data()["region"]["plain_http"], {"ok": True})
+        st = cam.public_state(store, self.data())
+        self.assertIs(st["region"]["plain_http"], True)
+        self.assertFalse([r for r in st["risks"] if r["kind"] == "http_tamper"])
+        # 公共 Wi-Fi 的门户页
+        MockAnthropic.plain_http = "portal"
+        cam.check_region(store, max_age=0)
+        st = cam.public_state(store, self.data())
+        item = next(r for r in st["risks"] if r["kind"] == "http_tamper")
+        self.assertEqual((item["level"], item["points"]), ("warn", 10))
+        self.assertEqual(item["text"], "这张网在改动没加密的网页：被带去了 portal.hotel.example（HTTP 302）")
+        self.assertIn("证书警告", item["advice"])
+        self.assertIs(st["region"]["plain_http"], False)
+        self.assertEqual(st["risk_score"]["score"], 90)
+        # 被塞了内容
+        MockAnthropic.plain_http = "inject"
+        cam.check_region(store, max_age=0)
+        item = next(r for r in cam.risk_items(self.data()) if r["kind"] == "http_tamper")
+        self.assertIn("回来的是一段内容（本该是空的）", item["text"])
+        # 那个地址连不上：不知道，不留上一次的结论
+        with mock.patch.object(cam, "PLAIN_HTTP_URL", f"http://127.0.0.1:{free_port()}/generate_204"):
+            cam.check_region(store, max_age=0)
+        self.assertNotIn("plain_http", self.data()["region"])
+        self.assertIsNone(cam.public_state(store, self.data())["region"]["plain_http"])
+        # 关掉外部 IP 查询：不测，“会访问的服务”里也没有它
+        n = MockAnthropic.plain_calls
+        cam.save_privacy(store, {"ip_lookup": "off"})
+        cam.check_region(store, max_age=0)
+        self.assertEqual(MockAnthropic.plain_calls, n)
+        self.assertFalse([x for x in cam.privacy_view(store)["sources"] if "cp.cloudflare.com" in x["name"]])
+        cam.save_privacy(store, {"ip_lookup": "auto"})
+        self.assertTrue([x for x in cam.privacy_view(store)["sources"] if "cp.cloudflare.com" in x["name"]])
+
     def test_claude_alias_in_shell_config_is_only_a_notice(self):
         """终端配置里给 claude 起的别名、同名函数：只提示在哪一行（不显示内容，里面可能带 Key），不算问题、一键清理不动它；
         指到 cam claude 的不提。"""
@@ -7171,6 +7266,34 @@ class SharedFixtureTest(unittest.TestCase):
             self.assertEqual((got["level"], self.cam.risk_points(got), got["text"]), (c["expect"]["level"], c["expect"]["points"], c["expect"]["text"]), c["name"])
             self.assertIn(c["expect"]["advice_has"], got["advice"], c["name"])
             self.assertEqual(self.cam.risk_score(items)["score"], c["expect"]["score"], c["name"])
+
+    def test_wifi_security(self):
+        """连着的 Wi-Fi 加没加密：三个系统各自的输出怎么读、加密方式怎么归类、开放网络和 WEP 在环境里怎么提醒。"""
+        import datetime as dt
+        fx = shared("wifi.json")
+        for raw, want in fx["class"]:
+            self.assertEqual(self.cam.wifi_security_class(raw), want, raw)
+        for key, fn in (("nmcli", self.cam.parse_nmcli_wifi), ("netsh", self.cam.parse_netsh_wlan), ("airport", self.cam.parse_airport_json)):
+            for c in fx[key]:
+                self.assertEqual(fn(c["text"]), c["expect"], f"{key}：{c['name']}")
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        for c in fx["risk"]:
+            data = {"region": {"loc": "US", "checked_at": now, "env": {"proxy": [], "tunnel": None, "wifi": c["wifi"]}}}
+            items = self.cam.risk_items(data, note_age=False)
+            got = next((i for i in items if i["kind"] == "wifi"), None)
+            view = self.cam.region_view(data)["wifi"]
+            self.assertEqual(view, c["wifi"] and {"ssid": c["wifi"]["ssid"], "security": c["wifi"]["security"]}, c["name"])
+            if c["expect"] is None:
+                self.assertIsNone(got, c["name"])
+                continue
+            self.assertEqual((got["level"], got["text"], self.cam.risk_points(got)), ("warn", c["expect"]["text"], c["expect"]["points"]), c["name"])
+            self.assertIn(c["expect"]["advice_has"], got["advice"], c["name"])
+            self.assertEqual(self.cam.risk_score(items)["score"], c["expect"]["score"], c["name"])
+
+    def test_stuck_stage(self):
+        """连不上时卡在哪一层：走代理、解析、TCP、TLS、等回应。"""
+        for c in shared("service.json")["stuck_stage"]:
+            self.assertEqual(self.cam.stuck_stage(c["host"], c["proxied"], c["dns_ok"], c["tcp_why"], c["tls_ok"]), c["expect"], c["name"])
 
     def test_risk_rules(self):
         """给人看的扣分规则和实际扣的分是同一张表；关注项（Anthropic 那边的状况）、说明项不扣分。"""

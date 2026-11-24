@@ -1283,13 +1283,15 @@ WIN_ENV_PS = ("$ErrorActionPreference='SilentlyContinue'; "
               "$dns = @(Get-DnsClientServerAddress | ForEach-Object { $_.ServerAddresses }); "
               "$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric "
               "| Select-Object -First 1; $a = $null; if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex }; "
+              "$w = ''; try { $w = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((netsh wlan show interfaces | Out-String))) } catch {}; "
               "[pscustomobject]@{ dns = $dns; culture = (Get-Culture).Name; route = \"$($r.InterfaceAlias)\"; "
-              "route_desc = \"$($a.InterfaceDescription)\" } | ConvertTo-Json -Compress")
+              "route_desc = \"$($a.InterfaceDescription)\"; wlan = $w } | ConvertTo-Json -Compress")
 _WIN_ENV = {"t": 0.0, "v": None}
 
 
 def parse_windows_env(text):
-    """WIN_ENV_PS 的输出（ConvertTo-Json）→ {"dns": [...], "culture", "route", "route_desc"}；前后有别的输出也认，解析不了的项是空的。
+    """WIN_ENV_PS 的输出（ConvertTo-Json）→ {"dns": [...], "culture", "route", "route_desc", "wlan"}；前后有别的输出也认，解析不了的项是空的。
+    wlan 是 netsh wlan show interfaces 的原文（脚本里转成了 base64，中文系统的代码页过管道不会乱）。
     规则和 Rust 版 health::parse_windows_env 一致（tests/shared/windows_env.json）。"""
     t = str(text or "")
     i, j = t.find("{"), t.rfind("}")
@@ -1301,8 +1303,12 @@ def parse_windows_env(text):
     dns = v.get("dns")
     dns = [dns] if isinstance(dns, str) else dns if isinstance(dns, list) else []
     text_of = lambda k: v.get(k).strip() if isinstance(v.get(k), str) else ""  # noqa: E731
+    try:
+        wlan = base64.b64decode(text_of("wlan"), validate=True).decode("utf-8", "replace") if text_of("wlan") else ""
+    except ValueError:
+        wlan = ""
     return {"dns": [d.strip() for d in dns if isinstance(d, str) and d.strip()],
-            "culture": text_of("culture"), "route": text_of("route"), "route_desc": text_of("route_desc")}
+            "culture": text_of("culture"), "route": text_of("route"), "route_desc": text_of("route_desc"), "wlan": wlan}
 
 
 def windows_env(max_age=WIN_ENV_SECS):
@@ -2953,7 +2959,8 @@ def privacy_sources(cfg):
             src("speed.cloudflare.com", "再查不到时：运营商、城市"),
             src("rdap.org", "出口 IP 的注册国"),
             src("1.1.1.1 / Cloudflare IPv6", "分别测 IPv4、IPv6 出口"),
-            src("www.cloudflare.com", "claude.ai 连不上或两秒没回音时，代替它看出口国家")]
+            src("www.cloudflare.com", "claude.ai 连不上或两秒没回音时，代替它看出口国家"),
+            src("cp.cloudflare.com（http）", "看没加密的网页有没有被中途改动：只取一个空白页，不带任何本机信息")]
     return out
 
 
@@ -10026,6 +10033,181 @@ def creds_file_mode():
     return f"{mode:o}" if mode & 0o077 else None
 
 
+# ---- 连着的 Wi-Fi 加没加密：开放网络（不要密码）和早就被破解的 WEP，同一个 Wi-Fi 上的人能看到、改动没加密的流量。
+# 只读系统自己报的连接信息：Linux 问 NetworkManager（nmcli），macOS 问 system_profiler，Windows 问 netsh；
+# 有线、没连 Wi-Fi、读不出来都是 None（不显示，不乱报）。规则和 Rust 版一致（tests/shared/wifi.json）
+WIFI_SECS = 8
+WIFI_REUSE_SECS = 600  # 同一张网上多久之内不重查（macOS 的 system_profiler 要一两秒）
+WIFI_OPEN_WORDS = ("open", "none", "--", "开放", "开放式", "无", "offen", "ouvert", "ouverte", "abierta", "abierto", "aperta", "aberta")
+WIFI_ADVICE = ("同一个 Wi-Fi 上的人能看到、改动没加密的流量。Claude 的连接是 HTTPS、有证书校验，内容看不到也改不了；"
+               "但别在这种网络上忽略证书警告，也别开着 cam 面板的局域网访问。条件允许就换成要密码的 Wi-Fi，或者用手机热点。")
+_WIFI = {"net": None, "t": 0.0, "v": None}
+
+
+def wifi_security_class(raw):
+    """系统报的加密方式归成三类："open"（没加密）、"wep"、"wpa"（WPA / WPA2 / WPA3、企业版 802.1X、OWE 都算加密了）；
+    认不出来返回 None。"""
+    v = str(raw or "").strip().lower()
+    if not v:
+        return None
+    if "wep" in v:
+        return "wep"
+    if any(k in v for k in ("wpa", "sae", "802.1x", "rsn", "eap", "owe", "wapi")):
+        return "wpa"
+    return "open" if v in WIFI_OPEN_WORDS or v.endswith("_none") else None
+
+
+def parse_nmcli_wifi(text):
+    """nmcli -t -f ACTIVE,SSID,SECURITY dev wifi 的输出里正连着的那一行 → {"ssid", "security"}；没有返回 None。
+    每行 yes:名字:WPA2 这样，名字里的冒号写成 \\:；SECURITY 是空的或 -- 就是开放网络。"""
+    for line in str(text or "").splitlines():
+        f = [x.replace("\\:", ":").replace("\\\\", "\\") for x in re.split(r"(?<!\\):", line)]
+        if len(f) >= 3 and f[0].strip().lower() == "yes":
+            sec = f[2].strip()
+            cls = "open" if sec in ("", "--") else wifi_security_class(sec)
+            return {"ssid": f[1] or None, "security": cls} if cls else None
+    return None
+
+
+def parse_netsh_wlan(text):
+    """netsh wlan show interfaces 的输出里第一块连着的网卡 → {"ssid", "security"}；没连、认不出来返回 None。
+    各行的名字跟着系统语言变（Authentication / 身份验证），所以不看名字，看 SSID 那行后面几行的值：
+    SSID、BSSID、网络类型、无线电类型、身份验证、密码，第一个认得出加密方式的值就是。"""
+    ssid, started, left = None, False, 6
+    for line in str(text or "").splitlines():
+        k, sep, v = line.partition(":")
+        k, v = k.strip(), v.strip()
+        if not line.strip():
+            if started:
+                break
+            continue
+        if not sep:
+            continue
+        if not started:
+            if k.upper() == "SSID":
+                ssid, started = v or None, True
+            continue
+        if "BSSID" in k.upper():
+            continue
+        cls = wifi_security_class(v)
+        if cls:
+            return {"ssid": ssid, "security": cls}
+        left -= 1
+        if left <= 0:
+            break
+    return None
+
+
+def parse_airport_json(text):
+    """system_profiler SPAirPortDataType -json 的输出里正连着的网络 → {"ssid", "security"}；没连、认不出来返回 None。
+    新版 macOS 没给定位权限时名字是 <redacted>，当作不知道名字。"""
+    try:
+        d = json.loads(text or "")
+    except ValueError:
+        return None
+    for top in (d.get("SPAirPortDataType") if isinstance(d, dict) else None) or []:
+        for iface in (top.get("spairport_airport_interfaces") if isinstance(top, dict) else None) or []:
+            cur = iface.get("spairport_current_network_information") if isinstance(iface, dict) else None
+            cls = wifi_security_class(cur.get("spairport_security_mode")) if isinstance(cur, dict) else None
+            if cls:
+                name = cur.get("_name")
+                return {"ssid": name if isinstance(name, str) and name and "redacted" not in name.lower() else None, "security": cls}
+    return None
+
+
+def wifi_info():
+    """现在连着的 Wi-Fi：{"ssid": 名字或 None, "security": "open" | "wep" | "wpa"}；有线、没连、读不出来返回 None。
+    同一张网上 WIFI_REUSE_SECS 秒内不重查。测试用 CAM_TEST_WIFI="open:CafeFree"（空字符串：没连 Wi-Fi）。"""
+    t = os.environ.get("CAM_TEST_WIFI")
+    if t is not None:
+        sec, _, ssid = t.partition(":")
+        return {"ssid": ssid or None, "security": sec} if sec in ("open", "wep", "wpa") else None
+    net = net_fingerprint()
+    if _WIFI["net"] == net and time.monotonic() - _WIFI["t"] < WIFI_REUSE_SECS:
+        return _WIFI["v"]
+    try:
+        if IS_WIN:
+            v = parse_netsh_wlan(windows_env()["wlan"])
+        elif IS_MAC:
+            v = parse_airport_json(_run_text(["system_profiler", "SPAirPortDataType", "-json"], timeout=WIFI_SECS))
+        else:
+            env = dict(os.environ, LC_ALL="C")  # ACTIVE 那一列在别的语言下不是 yes / no
+            v = parse_nmcli_wifi(decode_output(subprocess.run(["nmcli", "-t", "-f", "ACTIVE,SSID,SECURITY", "dev", "wifi"],
+                                                              capture_output=True, timeout=WIFI_SECS, env=env).stdout))
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError):
+        v = None
+    _WIFI.update(net=net, t=time.monotonic(), v=v)
+    return v
+
+
+# ---- 明文网页有没有被中途改动：取一个内容固定的明文地址（Cloudflare 的 generate_204，本该回一个空的 204），拿到别的东西
+# 就是路上有设备在改没加密的流量——要登录的公共 Wi-Fi 的门户页，或者有人往里塞东西。Claude 自己的连接都是 HTTPS、有证书校验，
+# 这一项说的是这张网可不可信。直连、不走代理、不跟着跳转，只发一个空请求。“外部 IP 查询”关掉时不做
+PLAIN_HTTP_URL = os.environ.get("CAM_PLAIN_HTTP_URL", "http://cp.cloudflare.com/generate_204")
+PLAIN_HTTP_SECS = 4
+HTTP_TAMPER_ADVICE = ("常见于要先登录的公共 Wi-Fi（门户页），也可能是网络里有人往没加密的流量里塞东西。先在浏览器里完成这个 Wi-Fi 的登录再重新检测；"
+                      "登录后还这样，就别在这张网上处理要紧的事。Claude 的连接是 HTTPS、有证书校验，内容改不了，但千万别忽略任何证书警告。")
+
+
+def plain_http_probe(url=None, timeout=PLAIN_HTTP_SECS):
+    """取一下 PLAIN_HTTP_URL：(状态码, Location, 正文开头)；连不上、地址不是 http:// 返回 None。"""
+    import http.client  # noqa: PLC0415  用到才加载
+    u = urllib.parse.urlsplit(url or PLAIN_HTTP_URL)
+    if u.scheme != "http" or not u.hostname:
+        return None
+    conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=timeout)
+    try:
+        conn.request("GET", u.path or "/", headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+        r = conn.getresponse()
+        return r.status, r.getheader("Location") or "", r.read(200).decode("utf-8", "replace")
+    except (OSError, http.client.HTTPException, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+def plain_http_verdict(status, location, body):
+    """plain_http_probe 拿到的东西对不对：空的 204 是 {"ok": True}；不是就是被改了，{"ok": False, "got": 拿到了什么}。
+    和 Rust 版 health::plain_http_verdict 一致（tests/shared/service.json）。"""
+    if status == 204 and not (body or "").strip():
+        return {"ok": True}
+    if 300 <= status < 400 and location:
+        host = urllib.parse.urlsplit(location if "://" in location else "http://" + location).hostname or location[:60]
+        return {"ok": False, "got": f"被带去了 {host}（HTTP {status}）"}
+    if (body or "").strip():
+        return {"ok": False, "got": f"HTTP {status}，回来的是一段内容（本该是空的）"}
+    return {"ok": False, "got": f"HTTP {status}（本该是 204）"}
+
+
+def plain_http_check():
+    """明文网页有没有被中途改动（plain_http_probe + plain_http_verdict）；连不上返回 None（不知道）。"""
+    got = plain_http_probe()
+    return plain_http_verdict(*got) if got else None
+
+
+TCP_PROBE_SECS = 5  # 服务检测里直连一下 api.anthropic.com、claude.ai 的端口（只建 TCP 连接，不发数据）最多等多久
+
+
+def stuck_stage(host, proxied, dns_ok, tcp_why, tls_ok):
+    """连不上 host 时卡在哪一层，写成一句接在“连不上”后面（没测出来是空字符串）。
+    proxied：请求走的是代理（这时本机直连 host 的情况说明不了问题）；dns_ok：本机解析得出来；
+    tcp_why：直连 host 端口没连上的原因（连上了是 ""，没测是 None）；tls_ok：TLS 握手成没成（没测是 None）。
+    和 Rust 版 health::stuck_stage 一致（tests/shared/service.json）。"""
+    if proxied:
+        return f"请求走的是代理，问题在代理这一段：看代理软件有没有开、它连不连得到 {host}"
+    if not dns_ok:
+        return f"卡在域名解析这一步：系统解析不出 {host}"
+    if tcp_why is None:
+        return ""
+    if tcp_why:
+        return f"域名解析得出来，卡在建 TCP 连接这一步（{tcp_why}）：多半是网络或防火墙拦了"
+    if tls_ok is None:
+        return "TCP 连得上，卡在 TLS 握手或等服务端回应这一步"
+    if not tls_ok:
+        return "TCP 连得上，卡在 TLS 握手这一步：多半是网络里有设备在干扰加密连接"
+    return "TCP 连接和 TLS 握手都通，卡在等服务端回应这一步"
+
+
 def resolve_host(host):
     """系统解析 host 得到的地址（去重、排好序）。服务检测的 DNS 实测用；单独一个函数，测试好换掉。"""
     return sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
@@ -10044,14 +10226,14 @@ def is_ip_literal(host):
 def local_env():
     """本机的区域设置、代理和 VPN 快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
     顶部环境卡和服务检测都用这一份，两边的分数才一致。hosts：hosts 文件里把 Claude 的域名指到了哪（没有是 []）；
-    creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 None。"""
+    creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 None；wifi：连着的 Wi-Fi 的名字和加没加密，有线、没查到是 None。"""
     tz = system_timezone()
     lc = system_locale()
     tun = default_route_tunnel()
     return {"tz": tz[0] if tz else None, "tz_cc": tz[1] if tz else [],
             "locale": lc[0] if lc else None, "locale_cc": lc[1] if lc else None, "dns": system_dns_servers(),
             "proxy": proxy_parts(), "tunnel": list(tun) if tun else None, "hosts": hosts_overrides(),
-            "creds_mode": creds_file_mode()}
+            "creds_mode": creds_file_mode(), "wifi": wifi_info()}
 
 
 def proxy_vpn_items(env):
@@ -10306,7 +10488,8 @@ def region_view(data):
     if not c.get("checked_at"):
         return {"loc": None, "loc_name": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
                 "warp": False, "prev_loc": None, "changed_at": None, "org": None, "asn": None, "city": None, "ip_type": None,
-                "reg_loc": None, "reg_loc_name": None, "meta_source": None, "lookup_mode": None, "failed_at": None, "fail_count": 0}
+                "reg_loc": None, "reg_loc_name": None, "meta_source": None, "lookup_mode": None, "failed_at": None, "fail_count": 0,
+                "plain_http": None, "wifi": None}
     status = region_status(c.get("loc"))
     return {"loc": c.get("loc"), "loc_name": region_name(c.get("loc")), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
             "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
@@ -10314,7 +10497,12 @@ def region_view(data):
             "org": c.get("org"), "asn": c.get("asn"), "city": c.get("city"), "ip_type": c.get("ip_type"),
             "reg_loc": c.get("reg_loc"), "reg_loc_name": region_name(c.get("reg_loc")),
             "meta_source": c.get("meta_source"), "lookup_mode": c.get("lookup_mode"),
-            "failed_at": c.get("failed_at"), "fail_count": int(c.get("fail_count") or 0)}
+            "failed_at": c.get("failed_at"), "fail_count": int(c.get("fail_count") or 0),
+            # 明文网页有没有被中途改动：True 没被改，False 被改了，None 没测（关掉了外部查询、或者没连上）
+            "plain_http": (c.get("plain_http") or {}).get("ok") if isinstance(c.get("plain_http"), dict) else None,
+            # 连着的 Wi-Fi：{"ssid", "security": open / wep / wpa}；有线、没查到是 None
+            "wifi": (lambda w: {"ssid": w.get("ssid"), "security": w.get("security")} if isinstance(w, dict) and w.get("security") else None)(
+                (c.get("env") or {}).get("wifi") if isinstance(c.get("env"), dict) else None)}
 
 
 def net_fingerprint():
@@ -10415,9 +10603,11 @@ def check_region(store, max_age=300, note=True):
         return region_view(data)
     cfg = ip_lookup_config(store)
     # 出口、状态页、本机设置几件事并行，互不等待
-    res = run_parallel({"r": lambda: detect_region(6, cfg, old), "sp": fetch_status_page, "env": local_env, "net": net_fingerprint,
-                        "proxy": lambda: proxies_back(data)},
-                       REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2, "proxy": PROXY_PROBE_SECS + 1})
+    jobs = {"r": lambda: detect_region(6, cfg, old), "sp": fetch_status_page, "env": local_env, "net": net_fingerprint,
+            "proxy": lambda: proxies_back(data)}
+    if cfg["mode"] != "off":  # 明文网页有没有被改：要访问一个 Anthropic 以外的地址，“外部 IP 查询”关掉时不做
+        jobs["plain"] = plain_http_check
+    res = run_parallel(jobs, REGION_CHECK_BUDGET, {"sp": 7, "env": 10, "net": 2, "proxy": PROXY_PROBE_SECS + 1, "plain": PLAIN_HTTP_SECS + 1})
     r, sp, env, back = res["r"] or {}, res["sp"], res["env"], res["proxy"] or set()
     with store.lock():
         data = store.load()
@@ -10439,6 +10629,10 @@ def check_region(store, max_age=300, note=True):
             reg.update(failed_at=now, fail_count=int(old.get("fail_count") or 0) + 1)
         if env is not None:
             reg.update(env=env, env_at=now)
+        if res.get("plain"):  # 这次测到了：记下；没测、没连上就当不知道，不留上一次的
+            reg["plain_http"] = res["plain"]
+        else:
+            reg.pop("plain_http", None)
         data["region"] = reg
         if sp:  # 状态页这次没连上就留着上次的（它自己带时间，过一小时不再算数）
             data["status_page"] = dict(sp, checked_at=now)
@@ -10580,6 +10774,15 @@ def risk_items(data, include_region=True, note_age=True):
         more = f"（另有 {len(hosts) - 1} 条）" if len(hosts) > 1 else ""
         out.append({"kind": "hosts", "level": "warn", "text": f"hosts 文件把 {hosts[0]['host']} 指到了 {hosts[0].get('ip')}{more}" + env_old,
                     "advice": HOSTS_ADVICE})
+    wifi = (env or {}).get("wifi")
+    if isinstance(wifi, dict) and wifi.get("security") in ("open", "wep"):  # 连着的 Wi-Fi 没加密，或者是 WEP
+        name = f"“{wifi['ssid']}”" if wifi.get("ssid") else ""
+        text = (f"连着的 Wi-Fi{name}没有加密（开放网络）" if wifi["security"] == "open"
+                else f"连着的 Wi-Fi{name}用的是 WEP 加密：早就被破解了，和没加密差不多")
+        out.append({"kind": "wifi", "level": "warn", "text": text + env_old, "advice": WIFI_ADVICE})
+    ph = reg.get("plain_http")
+    if isinstance(ph, dict) and ph.get("ok") is False:  # 明文网页被中途改动了
+        add("http_tamper", "warn", f"这张网在改动没加密的网页：{ph.get('got') or '拿到的不是原样'}", HTTP_TAMPER_ADVICE)
     creds_mode = (env or {}).get("creds_mode")
     if creds_mode:  # 登录凭据文件别的用户也读得到
         out.append({"kind": "creds_perm", "level": "warn",
@@ -10646,7 +10849,7 @@ RISK_WEIGHTS = {
     ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15,
     ("dns_resolver", "info"): 0, ("ip_origin", "info"): 5, ("dns_servers", "info"): 0,
     ("auth", "bad"): 20, ("auth", "warn"): 5, ("proxy_down", "bad"): 0, ("tls_intercept", "warn"): 0,
-    ("hosts", "warn"): 20, ("creds_perm", "warn"): 15,
+    ("hosts", "warn"): 20, ("creds_perm", "warn"): 15, ("http_tamper", "warn"): 10, ("wifi", "warn"): 10,
 }
 # 扣分规则写给人看的说法（面板评分卡里的“扣分规则”、cam risk --rules）：每条对应 RISK_WEIGHTS 里扣分的一项，分数从那里取，
 # 所以界面上列的和实际扣的不会对不上。和 Rust 版 RISK_RULES / RISK_NOTICES 一致（tests/shared/risk_rules.json）
@@ -10667,6 +10870,8 @@ RISK_RULES = (
     ("region_mismatch", "warn", "两个接口看到的出口地区不一致"),
     ("region_change", "warn", "24 小时内出口换到了不支持的地区"),
     ("clock", "warn", "本机时钟和服务器相差 2 分钟以上"),
+    ("wifi", "warn", "连着的 Wi-Fi 没有加密（开放网络），或者用的是 WEP"),
+    ("http_tamper", "warn", "这张网在改动没加密的网页（公共 Wi-Fi 的登录页，或者有人往里塞东西）"),
     ("vpn", "info", "默认路由走 VPN / 隧道"),
     ("web", "bad", "claude.ai 连不上，或者拒绝访问"),
     ("proxy", "info", "设了代理（环境变量或系统代理）"),
@@ -11071,11 +11276,29 @@ def service_check(store=None):
                 tls=lambda: peer_issuer(api_host) if API_BASE.startswith("https://") else None)
     jobs.update({k: (lambda u=u: probe_url(u)) for k, u in zip(auth_keys, TOKEN_URLS)})
     jobs.update({k: (lambda h=h, p=p: port_open(h, p, PROXY_PROBE_SECS)) for k, (_, h, p) in zip(proxy_keys, proxy_eps)})
+    # 没走代理时再直连一下这两个地址的端口（只建 TCP 连接）：连不上的时候好说清楚卡在解析、TCP、TLS 还是等回应（stuck_stage）
+    proxied = bool(proxies or proxy_eps)
+    ports = {}
+    for base in (API_BASE, CLAUDE_WEB_BASE):
+        u = urllib.parse.urlparse(base)
+        if u.hostname:
+            ports.setdefault(u.hostname, u.port or (80 if u.scheme == "http" else 443))
+    if not proxied:
+        jobs.update({f"tcp:{h}": (lambda h=h: port_open(h, ports[h], TCP_PROBE_SECS)) for h in hosts if h in ports})
     limits = dict.fromkeys((f"dns:{h}" for h in hosts), SERVICE_DNS_SECS)
     limits.update(api=SERVICE_PROBE_SECS + 1, web=SERVICE_PROBE_SECS + 1, tls=TLS_PROBE_SECS * 2 + 1)
     limits.update(dict.fromkeys(auth_keys, SERVICE_PROBE_SECS + 1))
     limits.update(dict.fromkeys(proxy_keys, PROXY_PROBE_SECS + 1))
+    limits.update(dict.fromkeys((f"tcp:{h}" for h in hosts), TCP_PROBE_SECS + 1))
     res = run_parallel(jobs, REGION_CHECK_BUDGET + 2, limits)
+    dns_ok = {h: bool((res[f"dns:{h}"] or (None,))[0]) for h in hosts}
+
+    def stage(host, tls_ok=None):  # 连不上 host 时接在后面的那一句
+        why = res.get(f"tcp:{host}") if f"tcp:{host}" in jobs else None
+        if f"tcp:{host}" in jobs and why is None:  # 到时限还没连上
+            why = f"超过 {TCP_PROBE_SECS} 秒没有回应"
+        text = stuck_stage(host, proxied, dns_ok.get(host, False), why, tls_ok)
+        return f"；{text}" if text else ""
     dns_advice = "检查本机 DNS 或代理设置" + ("；设了代理的话通常由代理解析，可忽略" if proxies else "")
     # 本机解析不了、但这个域名实际连得上（请求走的是代理，域名由代理解析）：不是问题，只说明一下
     up = {api_host: bool((res["api"] or (0,))[0])}
@@ -11148,7 +11371,8 @@ def service_check(store=None):
     msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
     region_hint = "通常是出口地区不在 Anthropic 支持范围。Anthropic 按使用者实际所在地判断；人在支持地区的话，查一下代理 / VPN 把出口带到了哪里"
     if st == 0:
-        add("api", "bad", f"{api_host}：连不上（{msg}）", "检查网络或代理；公司网络可能屏蔽了这个域名")
+        tls_ok = (res["tls"] is not None) if API_BASE.startswith("https://") else None
+        add("api", "bad", f"{api_host}：连不上（{msg}）{stage(api_host, tls_ok)}", "检查网络或代理；公司网络可能屏蔽了这个域名")
     elif st == 403 or region_denied(msg):
         add("api", "bad", f"{api_host}：拒绝访问（HTTP {st}：{msg or '-'}）", region_hint)
     elif at and st == 200:
@@ -11172,7 +11396,7 @@ def service_check(store=None):
     code, body, raw, ms = res["web"] or (0, None, no_answer, None)
     msg = ((body or {}).get("error") or {}).get("message", "") if isinstance(body, dict) else ""
     if code == 0:
-        add("web", "bad", f"{web_host}：连不上（{raw}）", "检查网络或代理")
+        add("web", "bad", f"{web_host}：连不上（{raw}）{stage(web_host)}", "检查网络或代理")
     elif is_cloudflare(raw):
         add("web", "warn", f"{web_host}：返回人机验证页（{ms} ms）",
             "公司网络或代理触发了 Cloudflare 人机验证；只影响网页账号读取额度，不影响 Claude Code 切换")

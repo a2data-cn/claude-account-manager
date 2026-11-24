@@ -16,6 +16,8 @@
     {"kind": "region_mismatch", "level": "warn", "points": 15, "text": "两个接口看到的出口地区不一致"},
     {"kind": "region_change", "level": "warn", "points": 15, "text": "24 小时内出口换到了不支持的地区"},
     {"kind": "clock", "level": "warn", "points": 10, "text": "本机时钟和服务器相差 2 分钟以上"},
+    {"kind": "wifi", "level": "warn", "points": 10, "text": "连着的 Wi-Fi 没有加密（开放网络），或者用的是 WEP"},
+    {"kind": "http_tamper", "level": "warn", "points": 10, "text": "这张网在改动没加密的网页（公共 Wi-Fi 的登录页，或者有人往里塞东西）"},
     {"kind": "vpn", "level": "info", "points": 10, "text": "默认路由走 VPN / 隧道"},
     {"kind": "web", "level": "bad", "points": 10, "text": "claude.ai 连不上，或者拒绝访问"},
     {"kind": "proxy", "level": "info", "points": 5, "text": "设了代理（环境变量或系统代理）"},

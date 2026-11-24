@@ -40,6 +40,25 @@
     {"name": "抓包工具，本机不认", "host": "api.anthropic.com", "issuer": {"cn": "mitmproxy"}, "verified": false, "expect": {"kind": "tls_intercept", "level": "warn", "text": "HTTPS 证书：api.anthropic.com 由 mitmproxy 签发，不是公共证书机构：网络里有设备在解密 HTTPS，本机不认它"}},
     {"name": "什么名字都没有", "host": "api.anthropic.com", "issuer": {}, "verified": true, "expect": {"kind": "tls_intercept", "level": "warn", "text": "HTTPS 证书：api.anthropic.com 由 ? 签发，不是公共证书机构：网络里有设备在解密 HTTPS"}}
   ],
+  "stuck_stage": [
+    {"name": "走代理：直连的情况说明不了问题", "host": "api.anthropic.com", "proxied": true, "dns_ok": false, "tcp_why": null, "tls_ok": null, "expect": "请求走的是代理，问题在代理这一段：看代理软件有没有开、它连不连得到 api.anthropic.com"},
+    {"name": "解析不出来", "host": "api.anthropic.com", "proxied": false, "dns_ok": false, "tcp_why": "连接被拒绝", "tls_ok": null, "expect": "卡在域名解析这一步：系统解析不出 api.anthropic.com"},
+    {"name": "解析得出来，TCP 连不上", "host": "claude.ai", "proxied": false, "dns_ok": true, "tcp_why": "超过 5 秒没有回应", "tls_ok": null, "expect": "域名解析得出来，卡在建 TCP 连接这一步（超过 5 秒没有回应）：多半是网络或防火墙拦了"},
+    {"name": "TCP 没测：不说", "host": "claude.ai", "proxied": false, "dns_ok": true, "tcp_why": null, "tls_ok": null, "expect": ""},
+    {"name": "TCP 通，TLS 没测", "host": "claude.ai", "proxied": false, "dns_ok": true, "tcp_why": "", "tls_ok": null, "expect": "TCP 连得上，卡在 TLS 握手或等服务端回应这一步"},
+    {"name": "TCP 通，TLS 握手不成", "host": "api.anthropic.com", "proxied": false, "dns_ok": true, "tcp_why": "", "tls_ok": false, "expect": "TCP 连得上，卡在 TLS 握手这一步：多半是网络里有设备在干扰加密连接"},
+    {"name": "TCP、TLS 都通", "host": "api.anthropic.com", "proxied": false, "dns_ok": true, "tcp_why": "", "tls_ok": true, "expect": "TCP 连接和 TLS 握手都通，卡在等服务端回应这一步"}
+  ],
+  "plain_http": [
+    {"name": "原样：空的 204", "status": 204, "location": "", "body": "", "expect": {"ok": true}},
+    {"name": "204 但带着空白", "status": 204, "location": "", "body": "\n", "expect": {"ok": true}},
+    {"name": "公共 Wi-Fi 的门户页：跳走了", "status": 302, "location": "http://portal.hotel.example/login?u=1", "body": "", "expect": {"ok": false, "got": "被带去了 portal.hotel.example（HTTP 302）"}},
+    {"name": "跳转地址没写协议", "status": 307, "location": "wifi.cafe.example/auth", "body": "", "expect": {"ok": false, "got": "被带去了 wifi.cafe.example（HTTP 307）"}},
+    {"name": "回了一个网页", "status": 200, "location": "", "body": "<html><script src=x></script>", "expect": {"ok": false, "got": "HTTP 200，回来的是一段内容（本该是空的）"}},
+    {"name": "204 却带着内容", "status": 204, "location": "", "body": "<script>", "expect": {"ok": false, "got": "HTTP 204，回来的是一段内容（本该是空的）"}},
+    {"name": "别的状态、没内容", "status": 200, "location": "", "body": "", "expect": {"ok": false, "got": "HTTP 200（本该是 204）"}},
+    {"name": "跳转但没给地址", "status": 302, "location": "", "body": "", "expect": {"ok": false, "got": "HTTP 302（本该是 204）"}}
+  ],
   "risk_score": [
     {"name": "续登录的地址都连不上", "items": [{"kind": "auth", "level": "bad"}], "expect": 80},
     {"name": "续登录的地址有的连不上", "items": [{"kind": "auth", "level": "warn"}], "expect": 95},

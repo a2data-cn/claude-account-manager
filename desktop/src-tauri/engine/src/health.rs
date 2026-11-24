@@ -1176,7 +1176,8 @@ pub fn local_env() -> Value {
         "dns": system_dns_servers(), "proxy": proxy_parts(),
         "tunnel": tun.map(|(n, k)| json!([n, k])),
         "hosts": hosts_overrides(),
-        "creds_mode": creds_file_mode()
+        "creds_mode": creds_file_mode(),
+        "wifi": wifi_info()
     })
 }
 
@@ -1509,13 +1510,15 @@ const WIN_ENV_PS: &str = "$ErrorActionPreference='SilentlyContinue'; \
     $dns = @(Get-DnsClientServerAddress | ForEach-Object { $_.ServerAddresses }); \
     $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 | Sort-Object RouteMetric, InterfaceMetric \
     | Select-Object -First 1; $a = $null; if ($r) { $a = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex }; \
+    $w = ''; try { $w = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((netsh wlan show interfaces | Out-String))) } catch {}; \
     [pscustomobject]@{ dns = $dns; culture = (Get-Culture).Name; route = \"$($r.InterfaceAlias)\"; \
-    route_desc = \"$($a.InterfaceDescription)\" } | ConvertTo-Json -Compress";
+    route_desc = \"$($a.InterfaceDescription)\"; wlan = $w } | ConvertTo-Json -Compress";
 const WIN_PROCS_PS: &str =
     "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { \
     \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$($_.CommandLine)\" }";
 
-/// WIN_ENV_PS 的输出（ConvertTo-Json）→ {dns: [...], culture, route, route_desc}；前后有别的输出也认，解析不了的项是空的
+/// WIN_ENV_PS 的输出（ConvertTo-Json）→ {dns: [...], culture, route, route_desc, wlan}；前后有别的输出也认，解析不了的项是空的。
+/// wlan 是 netsh wlan show interfaces 的原文（脚本里转成了 base64，中文系统的代码页过管道不会乱）
 pub fn parse_windows_env(text: &str) -> Value {
     let v = match (text.find('{'), text.rfind('}')) {
         (Some(i), Some(j)) if i < j => serde_json::from_str::<Value>(&text[i..=j]).ok(),
@@ -1542,7 +1545,15 @@ pub fn parse_windows_env(text: &str) -> Value {
             .trim()
             .to_string()
     };
-    json!({"dns": dns, "culture": txt("culture"), "route": txt("route"), "route_desc": txt("route_desc")})
+    let wlan = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(txt("wlan"))
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default()
+    };
+    json!({"dns": dns, "culture": txt("culture"), "route": txt("route"), "route_desc": txt("route_desc"), "wlan": wlan})
 }
 
 /// WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行)]
@@ -1943,7 +1954,8 @@ pub fn region_view(data: &Value) -> Value {
         return json!({"loc": null, "loc_name": null, "ip": null, "status": null, "checked_at": null,
                       "message": "还没有检测过出口地区", "advice": "", "warp": false, "prev_loc": null, "changed_at": null,
                       "org": null, "asn": null, "city": null, "ip_type": null, "reg_loc": null, "reg_loc_name": null,
-                      "meta_source": null, "lookup_mode": null, "failed_at": null, "fail_count": 0});
+                      "meta_source": null, "lookup_mode": null, "failed_at": null, "fail_count": 0,
+                      "plain_http": null, "wifi": null});
     };
     let loc = s(&c, "loc").map(String::from);
     let status = region_status(loc.as_deref());
@@ -1956,7 +1968,12 @@ pub fn region_view(data: &Value) -> Value {
         "org": s(&c, "org"), "asn": c.get("asn").cloned().unwrap_or(Value::Null), "city": s(&c, "city"), "ip_type": s(&c, "ip_type"),
         "reg_loc": reg_loc, "reg_loc_name": region_name(s(&c, "reg_loc")),
         "meta_source": s(&c, "meta_source"), "lookup_mode": s(&c, "lookup_mode"),
-        "failed_at": s(&c, "failed_at"), "fail_count": c.get("fail_count").and_then(|v| v.as_i64()).unwrap_or(0)
+        "failed_at": s(&c, "failed_at"), "fail_count": c.get("fail_count").and_then(|v| v.as_i64()).unwrap_or(0),
+        // 明文网页有没有被中途改动：true 没被改，false 被改了，null 没测（关掉了外部查询、或者没连上）
+        "plain_http": c.get("plain_http").and_then(|p| p.get("ok")).and_then(|v| v.as_bool()),
+        // 连着的 Wi-Fi：{ssid, security: open / wep / wpa}；有线、没查到是 null
+        "wifi": c.get("env").and_then(|e| e.get("wifi")).filter(|w| s(w, "security").is_some())
+            .map(|w| json!({"ssid": w.get("ssid"), "security": w.get("security")}))
     })
 }
 
@@ -2152,6 +2169,8 @@ fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
         let data = data.clone();
         spawn_job(move || proxies_back(&data))
     };
+    // 明文网页有没有被改：要访问一个 Anthropic 以外的地址，“外部 IP 查询”关掉时不做
+    let jh = (cfg.mode != "off").then(|| spawn_job(plain_http_check));
     let r = wait_job(&jr, within(REGION_CHECK_BUDGET))
         .flatten()
         .unwrap_or_else(|| json!({}));
@@ -2159,6 +2178,10 @@ fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
     let sp = wait_job(&js, within(7)).flatten();
     let net = wait_job(&jn, within(2)).unwrap_or_default();
     let back = wait_job(&jp, within(PROXY_PROBE_SECS + 1)).unwrap_or_default();
+    let plain = jh
+        .as_ref()
+        .and_then(|j| wait_job(j, within(PLAIN_HTTP_SECS + 1)))
+        .flatten();
     let _g = store.lock()?;
     let mut data = store.load()?;
     let old = data.get("region").cloned().unwrap_or_else(|| json!({}));
@@ -2203,6 +2226,15 @@ fn check_region_with(store: &Store, max_age: i64, note: bool) -> R<Value> {
     if let Some(env) = env {
         reg["env"] = env;
         reg["env_at"] = json!(now);
+    }
+    // 这次测到了：记下；没测、没连上就当不知道，不留上一次的
+    match plain {
+        Some(v) => reg["plain_http"] = v,
+        None => {
+            if let Some(o) = reg.as_object_mut() {
+                o.remove("plain_http");
+            }
+        }
     }
     data["region"] = reg;
     // 状态页这次没连上就留着上次的（它自己带时间，过一小时不再算数）
@@ -2579,6 +2611,44 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
             HOSTS_ADVICE,
         );
     }
+    // 连着的 Wi-Fi 没加密，或者是 WEP
+    if let Some(wifi) = env.as_ref().and_then(|e| e.get("wifi")) {
+        let sec = s(wifi, "security").unwrap_or("");
+        if sec == "open" || sec == "wep" {
+            let name = s(wifi, "ssid")
+                .filter(|n| !n.is_empty())
+                .map(|n| format!("“{}”", n))
+                .unwrap_or_default();
+            let text = if sec == "open" {
+                format!("连着的 Wi-Fi{}没有加密（开放网络）", name)
+            } else {
+                format!(
+                    "连着的 Wi-Fi{}用的是 WEP 加密：早就被破解了，和没加密差不多",
+                    name
+                )
+            };
+            add_plain("wifi", "warn", text + &env_old, WIFI_ADVICE);
+        }
+    }
+    // 明文网页被中途改动了
+    if reg
+        .get("plain_http")
+        .and_then(|p| p.get("ok"))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        let got = reg
+            .get("plain_http")
+            .and_then(|p| s(p, "got"))
+            .filter(|g| !g.is_empty())
+            .unwrap_or("拿到的不是原样");
+        add(
+            "http_tamper",
+            "warn",
+            format!("这张网在改动没加密的网页：{}", got),
+            HTTP_TAMPER_ADVICE,
+        );
+    }
     // 登录凭据文件别的用户也读得到
     if let Some(mode) = env.as_ref().and_then(|e| s(e, "creds_mode")) {
         add_plain(
@@ -2790,6 +2860,8 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("tls_intercept", "warn", 0),
     ("hosts", "warn", 20),
     ("creds_perm", "warn", 15),
+    ("http_tamper", "warn", 10),
+    ("wifi", "warn", 10),
 ];
 /// (最低分, 档位, 说明)
 const RISK_GRADES: &[(i64, &str, &str)] = &[
@@ -2868,6 +2940,16 @@ const RISK_RULES: &[(&str, &str, &str)] = &[
     ("region_mismatch", "warn", "两个接口看到的出口地区不一致"),
     ("region_change", "warn", "24 小时内出口换到了不支持的地区"),
     ("clock", "warn", "本机时钟和服务器相差 2 分钟以上"),
+    (
+        "wifi",
+        "warn",
+        "连着的 Wi-Fi 没有加密（开放网络），或者用的是 WEP",
+    ),
+    (
+        "http_tamper",
+        "warn",
+        "这张网在改动没加密的网页（公共 Wi-Fi 的登录页，或者有人往里塞东西）",
+    ),
     ("vpn", "info", "默认路由走 VPN / 隧道"),
     ("web", "bad", "claude.ai 连不上，或者拒绝访问"),
     ("proxy", "info", "设了代理（环境变量或系统代理）"),
@@ -3157,6 +3239,336 @@ pub fn is_cloudflare(raw: &str) -> bool {
     ]
     .iter()
     .any(|k| low.contains(k))
+}
+
+// ---- 连着的 Wi-Fi 加没加密：开放网络（不要密码）和早就被破解的 WEP，同一个 Wi-Fi 上的人能看到、改动没加密的流量。
+// 只读系统自己报的连接信息：Linux 问 NetworkManager（nmcli），macOS 问 system_profiler，Windows 问 netsh；
+// 有线、没连 Wi-Fi、读不出来都是 None（不显示，不乱报）。与 cam.py 一致（tests/shared/wifi.json）
+const WIFI_SECS: u64 = 8;
+/// 同一张网上多久之内不重查（macOS 的 system_profiler 要一两秒）
+const WIFI_REUSE_SECS: u64 = 600;
+const WIFI_OPEN_WORDS: &[&str] = &[
+    "open",
+    "none",
+    "--",
+    "开放",
+    "开放式",
+    "无",
+    "offen",
+    "ouvert",
+    "ouverte",
+    "abierta",
+    "abierto",
+    "aperta",
+    "aberta",
+];
+const WIFI_ADVICE: &str = "同一个 Wi-Fi 上的人能看到、改动没加密的流量。Claude 的连接是 HTTPS、有证书校验，内容看不到也改不了；\
+                           但别在这种网络上忽略证书警告，也别开着 cam 面板的局域网访问。条件允许就换成要密码的 Wi-Fi，或者用手机热点。";
+
+/// 系统报的加密方式归成三类："open"（没加密）、"wep"、"wpa"（WPA / WPA2 / WPA3、企业版 802.1X、OWE 都算加密了）；认不出来是 None。
+pub fn wifi_security_class(raw: &str) -> Option<&'static str> {
+    let v = raw.trim().to_lowercase();
+    if v.is_empty() {
+        return None;
+    }
+    if v.contains("wep") {
+        return Some("wep");
+    }
+    if ["wpa", "sae", "802.1x", "rsn", "eap", "owe", "wapi"]
+        .iter()
+        .any(|k| v.contains(k))
+    {
+        return Some("wpa");
+    }
+    (WIFI_OPEN_WORDS.contains(&v.as_str()) || v.ends_with("_none")).then_some("open")
+}
+
+fn wifi_value(ssid: Option<&str>, security: &str) -> Value {
+    json!({"ssid": ssid.filter(|x| !x.is_empty()), "security": security})
+}
+
+/// nmcli -t -f ACTIVE,SSID,SECURITY dev wifi 的输出里正连着的那一行 → {ssid, security}；没有返回 None。
+/// 每行 yes:名字:WPA2 这样，名字里的冒号写成 \:；SECURITY 是空的或 -- 就是开放网络。
+pub fn parse_nmcli_wifi(text: &str) -> Option<Value> {
+    for line in text.lines() {
+        // 按没被反斜杠转义的冒号切开
+        let mut fields: Vec<String> = vec![String::new()];
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if matches!(chars.peek(), Some(':') | Some('\\')) => {
+                    fields.last_mut().unwrap().push(chars.next().unwrap());
+                }
+                ':' => fields.push(String::new()),
+                _ => fields.last_mut().unwrap().push(c),
+            }
+        }
+        if fields.len() >= 3 && fields[0].trim().eq_ignore_ascii_case("yes") {
+            let sec = fields[2].trim();
+            let cls = if sec.is_empty() || sec == "--" {
+                Some("open")
+            } else {
+                wifi_security_class(sec)
+            };
+            return cls.map(|c| wifi_value(Some(&fields[1]), c));
+        }
+    }
+    None
+}
+
+/// netsh wlan show interfaces 的输出里第一块连着的网卡 → {ssid, security}；没连、认不出来返回 None。
+/// 各行的名字跟着系统语言变（Authentication / 身份验证），所以不看名字，看 SSID 那行后面几行的值：
+/// SSID、BSSID、网络类型、无线电类型、身份验证、密码，第一个认得出加密方式的值就是。
+pub fn parse_netsh_wlan(text: &str) -> Option<Value> {
+    let (mut ssid, mut started, mut left) = (String::new(), false, 6);
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if started {
+                break;
+            }
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if !started {
+            if k.eq_ignore_ascii_case("SSID") {
+                ssid = v.to_string();
+                started = true;
+            }
+            continue;
+        }
+        if k.to_uppercase().contains("BSSID") {
+            continue;
+        }
+        if let Some(cls) = wifi_security_class(v) {
+            return Some(wifi_value(Some(&ssid), cls));
+        }
+        left -= 1;
+        if left <= 0 {
+            break;
+        }
+    }
+    None
+}
+
+/// system_profiler SPAirPortDataType -json 的输出里正连着的网络 → {ssid, security}；没连、认不出来返回 None。
+/// 新版 macOS 没给定位权限时名字是 <redacted>，当作不知道名字。
+pub fn parse_airport_json(text: &str) -> Option<Value> {
+    let d: Value = serde_json::from_str(text).ok()?;
+    for top in d.get("SPAirPortDataType")?.as_array()? {
+        let Some(ifaces) = top
+            .get("spairport_airport_interfaces")
+            .and_then(|i| i.as_array())
+        else {
+            continue;
+        };
+        for iface in ifaces {
+            let Some(cur) = iface.get("spairport_current_network_information") else {
+                continue;
+            };
+            if let Some(cls) = s(cur, "spairport_security_mode").and_then(wifi_security_class) {
+                let name = s(cur, "_name").filter(|n| !n.to_lowercase().contains("redacted"));
+                return Some(wifi_value(name, cls));
+            }
+        }
+    }
+    None
+}
+
+/// 现在连着的 Wi-Fi：{ssid: 名字或 null, security: "open" | "wep" | "wpa"}；有线、没连、读不出来返回 None。
+/// 同一张网上 WIFI_REUSE_SECS 秒内不重查。测试用 CAM_TEST_WIFI="open:CafeFree"（空字符串：没连 Wi-Fi）。
+fn wifi_info() -> Option<Value> {
+    if let Ok(t) = std::env::var("CAM_TEST_WIFI") {
+        let (sec, ssid) = t.split_once(':').unwrap_or((t.as_str(), ""));
+        return ["open", "wep", "wpa"]
+            .iter()
+            .find(|c| **c == sec)
+            .map(|c| wifi_value(Some(ssid), c));
+    }
+    type Cached = Option<(String, Instant, Option<Value>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cached>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let net = net_fingerprint();
+    if let Some((n, at, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *n == net && at.elapsed() < Duration::from_secs(WIFI_REUSE_SECS) {
+            return v.clone();
+        }
+    }
+    let v = if cfg!(windows) {
+        windows_env()
+            .get("wlan")
+            .and_then(|w| w.as_str())
+            .and_then(parse_netsh_wlan)
+    } else if cfg!(target_os = "macos") {
+        let mut c = Command::new("system_profiler");
+        c.args(["SPAirPortDataType", "-json"]);
+        parse_airport_json(&run_with_timeout(c, Duration::from_secs(WIFI_SECS)))
+    } else {
+        let mut c = Command::new("nmcli");
+        // ACTIVE 那一列在别的语言下不是 yes / no
+        c.args(["-t", "-f", "ACTIVE,SSID,SECURITY", "dev", "wifi"])
+            .env("LC_ALL", "C");
+        parse_nmcli_wifi(&run_with_timeout(c, Duration::from_secs(WIFI_SECS)))
+    };
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((net, Instant::now(), v.clone()));
+    v
+}
+
+// ---- 明文网页有没有被中途改动：取一个内容固定的明文地址（Cloudflare 的 generate_204，本该回一个空的 204），拿到别的东西
+// 就是路上有设备在改没加密的流量——要登录的公共 Wi-Fi 的门户页，或者有人往里塞东西。Claude 自己的连接都是 HTTPS、有证书校验，
+// 这一项说的是这张网可不可信。直连、不走代理、不跟着跳转，只发一个空请求。“外部 IP 查询”关掉时不做。与 cam.py 一致
+const PLAIN_HTTP_SECS: u64 = 4;
+const HTTP_TAMPER_ADVICE: &str = "常见于要先登录的公共 Wi-Fi（门户页），也可能是网络里有人往没加密的流量里塞东西。先在浏览器里完成这个 Wi-Fi 的登录再重新检测；\
+                                  登录后还这样，就别在这张网上处理要紧的事。Claude 的连接是 HTTPS、有证书校验，内容改不了，但千万别忽略任何证书警告。";
+
+fn plain_http_url() -> String {
+    std::env::var("CAM_PLAIN_HTTP_URL")
+        .unwrap_or_else(|_| "http://cp.cloudflare.com/generate_204".into())
+}
+
+/// 取一下 plain_http_url()：(状态码, Location, 正文开头)；连不上、地址不是 http:// 返回 None。
+/// 自己拼一个最简单的 HTTP 请求：不走代理、不跟着跳转。
+fn plain_http_probe() -> Option<(u16, String, String)> {
+    use std::io::{Read, Write};
+    let url = plain_http_url();
+    let rest = url.strip_prefix("http://")?;
+    let (hostport, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if hostport.is_empty() {
+        return None;
+    }
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok()?),
+        None => (hostport, 80),
+    };
+    let timeout = Duration::from_secs(PLAIN_HTTP_SECS);
+    let addr = (host, port).to_socket_addrs().ok()?.next()?;
+    let mut sock = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+    sock.set_read_timeout(Some(timeout)).ok()?;
+    sock.set_write_timeout(Some(timeout)).ok()?;
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: claude-account-manager/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        path,
+        hostport,
+        super::api::VERSION
+    );
+    sock.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while buf.len() < 4096 {
+        match sock.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+        // 头收全了、又是没有正文的回应：不用等对面关连接
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.starts_with(b"HTTP/1.1 204") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let mut lines = head.lines();
+    let status: u16 = lines.next()?.split_whitespace().nth(1)?.parse().ok()?;
+    let location = lines
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case("location"))
+        .map(|(_, v)| v.trim().to_string())
+        .unwrap_or_default();
+    Some((status, location, body.chars().take(200).collect()))
+}
+
+/// plain_http_probe 拿到的东西对不对：空的 204 是 {ok: true}；不是就是被改了，{ok: false, got: 拿到了什么}。
+/// 与 cam.py 的 plain_http_verdict 一致（tests/shared/service.json）。
+pub fn plain_http_verdict(status: u16, location: &str, body: &str) -> Value {
+    let has_body = !body.trim().is_empty();
+    if status == 204 && !has_body {
+        return json!({"ok": true});
+    }
+    if (300..400).contains(&status) && !location.is_empty() {
+        let rest = location
+            .split_once("://")
+            .map(|(_, r)| r)
+            .unwrap_or(location);
+        let hostport = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let hostport = hostport
+            .rsplit_once('@')
+            .map(|(_, h)| h)
+            .unwrap_or(hostport);
+        let host = hostport
+            .split(':')
+            .next()
+            .unwrap_or(hostport)
+            .to_lowercase();
+        let host = if host.is_empty() {
+            location.chars().take(60).collect()
+        } else {
+            host
+        };
+        return json!({"ok": false, "got": format!("被带去了 {}（HTTP {}）", host, status)});
+    }
+    if has_body {
+        return json!({"ok": false, "got": format!("HTTP {}，回来的是一段内容（本该是空的）", status)});
+    }
+    json!({"ok": false, "got": format!("HTTP {}（本该是 204）", status)})
+}
+
+/// 明文网页有没有被中途改动；连不上返回 None（不知道）。
+fn plain_http_check() -> Option<Value> {
+    plain_http_probe().map(|(st, loc, body)| plain_http_verdict(st, &loc, &body))
+}
+
+/// 服务检测里直连一下 api.anthropic.com、claude.ai 的端口（只建 TCP 连接，不发数据）最多等多久
+const TCP_PROBE_SECS: u64 = 5;
+
+/// 连不上 host 时卡在哪一层，写成一句接在“连不上”后面（没测出来是空字符串）。
+/// proxied：请求走的是代理（这时本机直连 host 的情况说明不了问题）；dns_ok：本机解析得出来；
+/// tcp_why：直连 host 端口没连上的原因（连上了是 ""，没测是 None）；tls_ok：TLS 握手成没成（没测是 None）。
+/// 与 cam.py 的 stuck_stage 一致（tests/shared/service.json）。
+pub fn stuck_stage(
+    host: &str,
+    proxied: bool,
+    dns_ok: bool,
+    tcp_why: Option<&str>,
+    tls_ok: Option<bool>,
+) -> String {
+    if proxied {
+        return format!(
+            "请求走的是代理，问题在代理这一段：看代理软件有没有开、它连不连得到 {}",
+            host
+        );
+    }
+    if !dns_ok {
+        return format!("卡在域名解析这一步：系统解析不出 {}", host);
+    }
+    match (tcp_why, tls_ok) {
+        (None, _) => String::new(),
+        (Some(why), _) if !why.is_empty() => format!(
+            "域名解析得出来，卡在建 TCP 连接这一步（{}）：多半是网络或防火墙拦了",
+            why
+        ),
+        (_, None) => "TCP 连得上，卡在 TLS 握手或等服务端回应这一步".into(),
+        (_, Some(false)) => {
+            "TCP 连得上，卡在 TLS 握手这一步：多半是网络里有设备在干扰加密连接".into()
+        }
+        (_, Some(true)) => "TCP 连接和 TLS 握手都通，卡在等服务端回应这一步".into(),
+    }
+}
+
+/// 地址里的端口；没写的话 https 是 443、http 是 80。
+fn port_of(url: &str) -> u16 {
+    let default = if url.starts_with("http://") { 80 } else { 443 };
+    let rest = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    hostport
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(default)
 }
 
 fn host_of(url: &str) -> String {
@@ -3617,6 +4029,22 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             spawn_job(move || port_open(&h, p, Duration::from_secs(PROXY_PROBE_SECS)))
         })
         .collect();
+    // 没走代理时再直连一下这两个地址的端口（只建 TCP 连接）：连不上的时候好说清楚卡在解析、TCP、TLS 还是等回应（stuck_stage）
+    let proxied = !proxies.is_empty() || !proxy_eps.is_empty();
+    let ports = [port_of(&api_base()), port_of(&web_base())];
+    let j_tcp: Vec<_> = hosts
+        .iter()
+        .zip(ports)
+        .map(|(h, port)| {
+            if proxied {
+                return None;
+            }
+            let h = h.clone();
+            Some(spawn_job(move || {
+                port_open(&h, port, Duration::from_secs(TCP_PROBE_SECS))
+            }))
+        })
+        .collect();
     let j_tls = {
         let h = api_host.clone();
         let https = api_base().starts_with("https://");
@@ -3649,6 +4077,16 @@ pub fn service_check(store: &Store) -> Vec<Value> {
                 .unwrap_or_else(|| format!("超过 {} 秒没有回应", PROXY_PROBE_SECS))
         })
         .collect();
+    let tcp_why: Vec<Option<String>> = j_tcp
+        .iter()
+        .map(|j| {
+            j.as_ref().map(|j| {
+                wait_job(j, within(TCP_PROBE_SECS + 1))
+                    .unwrap_or_else(|| format!("超过 {} 秒没有回应", TCP_PROBE_SECS))
+            })
+        })
+        .collect();
+    let mut dns_ok: Vec<bool> = Vec::new(); // 和 hosts 一一对应：本机解析得出来没有
     let dns_advice = if proxies.is_empty() {
         "检查本机 DNS 或代理设置"
     } else {
@@ -3659,7 +4097,9 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     let web_up = web.as_ref().is_some_and(|w| w.0 != 0);
     for (host, job) in hosts.iter().zip(&j_dns) {
         let up = (*host == api_host && api_up) || (*host == web_host && web_up);
-        let why = match wait_job(job, within(SERVICE_DNS_SECS)) {
+        let got = wait_job(job, within(SERVICE_DNS_SECS));
+        dns_ok.push(matches!(&got, Some((Ok(ips), _)) if !ips.is_empty()));
+        let why = match got {
             Some((Ok(ips), ms)) if !ips.is_empty() => {
                 let shown = ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
                 // host 本身就是 IP 地址时没有“解析”这回事
@@ -3848,11 +4288,33 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     let (st, body, ms) = api.unwrap_or_else(|| (0, no_answer.clone(), 0));
     let msg = err_message(&body);
     let region_hint = "通常是出口地区不在 Anthropic 支持范围。Anthropic 按使用者实际所在地判断；人在支持地区的话，查一下代理 / VPN 把出口带到了哪里";
+    // 连不上 host 时接在后面的那一句：卡在哪一层
+    let stage = |host: &str, tls_ok: Option<bool>| -> String {
+        let i = hosts.iter().position(|h| h == host).unwrap_or(0);
+        let text = stuck_stage(
+            host,
+            proxied,
+            dns_ok.get(i).copied().unwrap_or(false),
+            tcp_why.get(i).and_then(|w| w.as_deref()),
+            tls_ok,
+        );
+        if text.is_empty() {
+            text
+        } else {
+            format!("；{}", text)
+        }
+    };
     if st == 0 {
+        let tls_ok = api_base().starts_with("https://").then_some(tls.is_some());
         add(
             "api",
             "bad",
-            format!("{}：连不上（{}）", api_host, msg),
+            format!(
+                "{}：连不上（{}）{}",
+                api_host,
+                msg,
+                stage(&api_host, tls_ok)
+            ),
             "检查网络或代理；公司网络可能屏蔽了这个域名",
         );
     } else if st == 403 || region_denied(&msg) {
@@ -3922,7 +4384,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         add(
             "web",
             "bad",
-            format!("{}：连不上（{}）", web_host, msg),
+            format!("{}：连不上（{}）{}", web_host, msg, stage(&web_host, None)),
             "检查网络或代理",
         );
     } else if is_cloudflare(&msg) {
@@ -4159,6 +4621,12 @@ pub fn privacy_sources(cfg: &LookupConfig) -> Vec<Value> {
     out.push(src(
         "www.cloudflare.com",
         "claude.ai 连不上或两秒没回音时，代替它看出口国家",
+        "third",
+        false,
+    ));
+    out.push(src(
+        "cp.cloudflare.com（http）",
+        "看没加密的网页有没有被中途改动：只取一个空白页，不带任何本机信息",
         "third",
         false,
     ));

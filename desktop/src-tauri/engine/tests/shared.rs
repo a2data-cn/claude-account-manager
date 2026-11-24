@@ -6,9 +6,13 @@ use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::desktop_app::{login_state, version_from_path};
 use cam_engine::health::{
     addr_special, auth_item, der_issuer, exit_note, net_fingerprint_of, note_risk_in, parse_hosts,
-    parse_status_summary, proxy_endpoints, proxy_vpn_items, region_check_fresh, region_fail_item,
-    region_retry_wait, risk_items, risk_log_view, risk_points, risk_rules, risk_score,
-    status_relevant, status_risk, strip_ago, tls_issuer_item, RISK_LOG_SHOWN,
+    parse_status_summary, plain_http_verdict, proxy_endpoints, proxy_vpn_items, region_check_fresh,
+    region_fail_item, region_retry_wait, risk_items, risk_log_view, risk_points, risk_rules,
+    risk_score, status_relevant, status_risk, strip_ago, stuck_stage, tls_issuer_item,
+    RISK_LOG_SHOWN,
+};
+use cam_engine::health::{
+    parse_airport_json, parse_netsh_wlan, parse_nmcli_wifi, region_view, wifi_security_class,
 };
 use cam_engine::health::{parse_windows_env, parse_windows_processes};
 use cam_engine::local_report::{report_event, usage_report};
@@ -597,6 +601,92 @@ fn hosts_cases() {
             c["name"]
         );
         assert_eq!(risk_score(&items)["score"], want["score"], "{}", c["name"]);
+    }
+}
+
+/// 连着的 Wi-Fi 加没加密：三个系统各自的输出怎么读、加密方式怎么归类、开放网络和 WEP 在环境里怎么提醒。
+#[test]
+fn wifi_cases() {
+    let fx = fixture("wifi.json");
+    for c in cases(&fx, "class") {
+        assert_eq!(
+            json!(wifi_security_class(c[0].as_str().unwrap())),
+            c[1],
+            "{}",
+            c[0]
+        );
+    }
+    type Parser = fn(&str) -> Option<Value>;
+    let parsers: [(&str, Parser); 3] = [
+        ("nmcli", parse_nmcli_wifi),
+        ("netsh", parse_netsh_wlan),
+        ("airport", parse_airport_json),
+    ];
+    for (key, parse) in parsers {
+        for c in cases(&fx, key) {
+            assert_eq!(
+                json!(parse(c["text"].as_str().unwrap())),
+                c["expect"],
+                "{}：{}",
+                key,
+                c["name"]
+            );
+        }
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    for c in cases(&fx, "risk") {
+        let data = json!({"region": {"loc": "US", "checked_at": now,
+                                     "env": {"proxy": [], "tunnel": null, "wifi": c["wifi"]}}});
+        let items = risk_items(&data, true, false);
+        let got = items.iter().find(|i| i["kind"] == "wifi");
+        assert_eq!(region_view(&data)["wifi"], c["wifi"], "{}", c["name"]);
+        if c["expect"].is_null() {
+            assert!(got.is_none(), "{}", c["name"]);
+            continue;
+        }
+        let (got, want) = (got.unwrap(), &c["expect"]);
+        assert_eq!(got["level"], "warn", "{}", c["name"]);
+        assert_eq!(got["text"], want["text"], "{}", c["name"]);
+        assert_eq!(json!(risk_points(got)), want["points"], "{}", c["name"]);
+        assert!(
+            got["advice"]
+                .as_str()
+                .unwrap()
+                .contains(want["advice_has"].as_str().unwrap()),
+            "{}",
+            c["name"]
+        );
+        assert_eq!(risk_score(&items)["score"], want["score"], "{}", c["name"]);
+    }
+}
+
+/// 明文网页有没有被中途改动：拿到的是不是空的 204。
+#[test]
+fn plain_http_cases() {
+    let fx = fixture("service.json");
+    for c in cases(&fx, "plain_http") {
+        let got = plain_http_verdict(
+            c["status"].as_u64().unwrap() as u16,
+            c["location"].as_str().unwrap(),
+            c["body"].as_str().unwrap(),
+        );
+        assert_eq!(got, c["expect"], "{}", c["name"]);
+    }
+}
+
+/// 连不上时卡在哪一层：走代理、解析、TCP、TLS、等回应。
+#[test]
+fn stuck_stage_cases() {
+    let fx = fixture("service.json");
+    for c in cases(&fx, "stuck_stage") {
+        let got = stuck_stage(
+            c["host"].as_str().unwrap(),
+            c["proxied"].as_bool().unwrap(),
+            c["dns_ok"].as_bool().unwrap(),
+            c["tcp_why"].as_str(),
+            c["tls_ok"].as_bool(),
+        );
+        assert_eq!(json!(got), c["expect"], "{}", c["name"]);
     }
 }
 
