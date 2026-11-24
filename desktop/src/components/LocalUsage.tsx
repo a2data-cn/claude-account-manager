@@ -123,6 +123,7 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
   const [rowBy, setRowBy] = useState(() => pick("cam-local-rows", ROWBY, "account"));
   const [rep, setRep] = useState<LocalReport | null>(null);
   const [loaded, setLoaded] = useState<"" | "ok" | "fail">(""); // 用量是单独一页：没数据时给一句话，不是一片空白
+  const [busy, setBusy] = useState(false); // 换了时间范围、数据还没回来：整块变淡（过四分之一秒还没好才看得出来）
   const [tip, setTip] = useState<(Tip & { id: string }) | null>(null);
   const box = useRef<HTMLElement>(null);
   const plot = useRef<HTMLDivElement>(null);
@@ -135,12 +136,14 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
         if (!stale) {
           setRep(r);
           setLoaded("ok");
+          setBusy(false);
         }
       })
       .catch(() => {
         if (!stale) {
           setRep(null);
           setLoaded("fail");
+          setBusy(false);
         }
       });
     return () => {
@@ -194,16 +197,23 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
   const splitList = Object.values(split)
     .filter((x) => x.cost > 0)
     .sort((a, b) => a.rank - b.rank);
-  const splitText =
-    splitList
-      .slice(0, 3)
-      .map((x) => `${x.name} ${usd(x.cost)}`)
-      .join(" · ") + (splitList.length > 3 ? ` 等 ${splitList.length} 个` : "");
+  const splitSegs = [...splitList.slice(0, 3).map((x) => `${x.name} ${usd(x.cost)}`), splitList.length > 3 ? `等 ${splitList.length} 个` : ""].filter(Boolean);
   const nAcc = rep.accounts.filter((a) => order.includes(a.account_id)).length;
   const hasLoose = rep.accounts.some((a) => !order.includes(a.account_id));
   const hit = t.cache_hit;
   const note: [string, string] =
-    hit == null ? ["", "还没有记录"] : hit >= 0.9 ? ["good", "很高：大部分输入是从缓存读的"] : hit >= 0.6 ? ["", "还行：一半以上的输入从缓存读"] : ["", "偏低：大部分输入没走缓存"];
+    hit == null ? ["", "还没有记录"] : hit >= 0.9 ? ["good", "很高：输入大多从缓存读"] : hit >= 0.6 ? ["", "还行：过半输入从缓存读"] : ["", "偏低：输入大多没走缓存"];
+  // 小字一项一个 span，整项不断开：格子窄的时候一项一项往下排，不把“8449 万”“有未归属的”这种从中间拆成两行
+  const segs = (xs: (string | false)[], cls = "") => (
+    <div className={`s${cls ? " " + cls : ""}`}>
+      {xs.filter(Boolean).map((x, i) => (
+        <span key={i}>{x}</span>
+      ))}
+    </div>
+  );
+  // 明细每行下面的小字：右边已经写了正在看的那一项（Token / 金额 / 消息），小字写另外两项，不重复
+  const others = (r: UsageRec) =>
+    [metric !== "messages" && `${r.messages} 条消息`, metric !== "tokens" && `${wan(tokens(r))} tokens`, metric !== "cost" && usd(r.cost_usd)].filter(Boolean).join(" · ");
 
   // ---- 柱子
   const byModel = group === "model";
@@ -343,8 +353,9 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
 
   return (
     <section
-      className="block"
+      className={`block${busy ? " loading" : ""}`}
       id="local-block"
+      aria-busy={busy}
       ref={box}
       onPointerDown={(e) => (pointer.current = e.pointerType || "mouse")}
       onPointerLeave={(e) => e.pointerType === "mouse" && setTip(null)}
@@ -358,34 +369,41 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
       <div className="sec-head">
         <h2>本机 Claude Code 消耗</h2>
         <span className="hint">这台电脑上 claude 的用量 · 金额按 API 价折算，订阅不按这个收费，只用来比较用量大小</span>
-        <span className="sec-acts">{seg(RANGES, range, setRange, "cam-local-range", "时间范围")}</span>
+        <span className="sec-acts">
+          {seg(
+            RANGES,
+            range,
+            (v) => {
+              if (v === range) return; // 点的就是现在这个范围：不会重新读，别让页面一直淡着
+              setBusy(true);
+              setRange(v);
+            },
+            "cam-local-range",
+            "时间范围",
+          )}
+        </span>
       </div>
       <div className="panel lu-tiles">
         <div>
           <div className="k">Token</div>
           <div className="v">{wan(tokens(t))}</div>
-          <div className="s">
-            输入 {wan(t.input)} · 输出 {wan(t.output)}
-            <br />
-            缓存写入 {wan(t.cache_write)} · 缓存读取 {wan(t.cache_read)}
-          </div>
+          {segs([`输入 ${wan(t.input)}`, `输出 ${wan(t.output)}`])}
+          {segs([`缓存写入 ${wan(t.cache_write)}`, `缓存读取 ${wan(t.cache_read)}`])}
         </div>
         <div>
           <div className="k">消息</div>
           <div className="v">{t.messages}</div>
-          <div className="s">
-            {t.sessions} 个会话 · {nAcc} 个号{hasLoose ? " · 有未归属的" : ""}
-          </div>
+          {segs([`${t.sessions} 个会话`, `${nAcc} 个号`, hasLoose && "有未归属的"])}
         </div>
         <div>
           <div className="k">折算金额</div>
           <div className="v">≈ {usd(t.cost_usd)}</div>
-          <div className="s">{splitText || "按 API 价折算"}</div>
+          {segs(splitSegs.length ? splitSegs : ["按 API 价折算"])}
         </div>
         <div>
           <div className="k">缓存命中率</div>
           <div className="v">{hit == null ? "–" : (hit * 100).toFixed(1) + "%"}</div>
-          <div className={`s ${note[0]}`}>{note[1]}</div>
+          {segs([note[1]], note[0])}
         </div>
       </div>
 
@@ -474,7 +492,7 @@ export function LocalUsage({ accounts, stamp }: { accounts: Account[]; stamp: st
                     <i style={{ width: `${rowMax > 0 ? (val(x.r) / rowMax) * 100 : 0}%`, background: x.color }} />
                   </span>
                   <span className="sub">
-                    {x.r.messages} 条消息 · {usd(x.r.cost_usd)} · {x.sub}
+                    {others(x.r)} · {x.sub}
                   </span>
                 </div>
               ))

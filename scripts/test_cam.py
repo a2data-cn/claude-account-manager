@@ -772,6 +772,104 @@ class CamTest(unittest.TestCase):
         self.assertEqual(outs(), [])
         self.assertNotIn(p, self.cam._LOCAL_CACHE)  # 删掉的文件不留在缓存里
 
+    def test_local_scan_results_are_kept_on_disk_between_processes(self):
+        """大一点的记录读到哪、读出了什么存一份在盘上：下一个进程（重启后的 cam serve、cam refresh）接着读新加的部分，
+        结果和从头读一样；记录被重写、缓存坏了就不用它；里面没有聊天内容。"""
+        import datetime as dt
+        cam = self.cam
+        now = dt.datetime.now(dt.timezone.utc)
+
+        def ev(mid, out, sess=None, secret="SECRET-CHAT-TEXT"):
+            return json.dumps({"type": "assistant", "requestId": "r" + mid, "sessionId": sess,
+                               "timestamp": (now - dt.timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+                               "message": {"id": mid, "model": "claude-opus-4-1-20250805", "content": [{"type": "text", "text": secret}],
+                                           "usage": {"input_tokens": 1, "output_tokens": out, "cache_read_input_tokens": 7,
+                                                     "cache_creation_input_tokens": 30, "service_tier": "standard",
+                                                     "cache_creation": {"ephemeral_5m_input_tokens": 10, "ephemeral_1h_input_tokens": 20}}}})
+        root = os.path.join(self.tmp, ".claude", "projects")
+        p = os.path.join(root, "proj3", "sess-1.jsonl")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        since = now - dt.timedelta(days=1)
+        rows = lambda: sorted((ts.isoformat(), m, json.dumps(u, sort_keys=True), s) for ts, m, u, s in cam.local_events(since, sessions=True))  # noqa: E731
+
+        def restart():  # 换了一个进程：进程里记的都没了
+            cam._LOCAL_CACHE.clear()
+            cam._SCAN_SAVED.clear()
+            cam._SCAN_PRUNED.clear()
+        restart()
+        cache = cam.scan_cache_file(root, p)
+        starts, real_scan = [], cam._scan_jsonl
+
+        def spy(path, entry):  # 记下每次是从哪个位置接着读的（None：从头读）
+            starts.append(None if entry is None else entry[0])
+            return real_scan(path, entry)
+        with mock.patch.object(cam, "SCAN_CACHE_MIN_BYTES", 0), mock.patch.object(cam, "_scan_jsonl", spy):
+            with open(p, "w") as f:
+                f.write(ev("a", 10) + "\n" + ev("b", 20, sess="other-session") + "\n")
+            first = rows()
+            self.assertEqual(len(first), 2)
+            self.assertTrue(os.path.exists(cache))
+            with open(cache, encoding="utf-8") as f:
+                raw = f.read()
+            self.assertNotIn("SECRET-CHAT-TEXT", raw)  # 只有时间、模型、数字和 id
+            self.assertNotIn("service_tier", raw)
+            if os.name != "nt":
+                self.assertEqual(os.stat(cache).st_mode & 0o777, 0o600)
+                self.assertEqual(os.stat(os.path.dirname(cache)).st_mode & 0o777, 0o700)
+            # 重启后：不从头读，接着存盘的位置读新加的一条；结果和从头读一样（金额也一样：5 分钟 / 1 小时两种缓存分开记着）
+            size = os.path.getsize(p)
+            with open(p, "a") as f:
+                f.write(ev("c", 30) + "\n")
+            restart()
+            second = rows()
+            self.assertEqual(starts[-1], size)  # 交给 _scan_jsonl 的是存盘的那份：从上次读到的位置接着读
+            restart()
+            with mock.patch.dict(os.environ, {"CAM_NO_SCAN_CACHE": "1"}):
+                fresh = rows()
+            self.assertEqual(second, fresh)
+            self.assertEqual(len(second), 3)
+            self.assertEqual(sorted(s for _, _, _, s in second), ["other-session", "sess-1", "sess-1"])
+            u = json.loads(second[0][2])
+            self.assertEqual(cam.message_cost("claude-opus-4-1-20250805", u), cam.message_cost("claude-opus-4-1-20250805", json.loads(ev("a", u["output_tokens"]))["message"]["usage"]))
+            # 文件没变：重启后也不用再读记录本身
+            restart()
+            with mock.patch.object(cam, "json", mock.Mock(wraps=json)) as js:
+                self.assertEqual(rows(), second)
+            self.assertEqual(starts[-1], os.path.getsize(p))
+            self.assertEqual(js.loads.call_count, 0)  # 记录里的行一行都没再解析
+            # 记录被重写了（开头变了，还更长）：存盘的那份对不上，从头读
+            with open(p, "w") as f:
+                f.write(ev("x", 1) + "\n" + ev("y", 2) + "\n" + ev("z", 3) + "\n" + ev("w", 4) + "\n")
+            restart()
+            self.assertEqual(sorted(json.loads(u)["output_tokens"] for _, _, u, _ in rows()), [1, 2, 3, 4])
+            self.assertIsNone(starts[-1])
+            # 缓存文件坏了：当没有
+            with open(cache, "w") as f:
+                f.write("{不是 json")
+            restart()
+            self.assertEqual(len(rows()), 4)
+            # 关掉：不读也不写
+            os.unlink(cache)
+            restart()
+            with mock.patch.dict(os.environ, {"CAM_NO_SCAN_CACHE": "1"}):
+                self.assertEqual(len(rows()), 4)
+            self.assertFalse(os.path.exists(cache))
+            # 记录删掉了：下一个进程把它存的那份也清掉
+            restart()
+            rows()
+            self.assertTrue(os.path.exists(cache))
+            os.remove(p)
+            restart()
+            self.assertEqual(rows(), [])
+            self.assertFalse(os.path.exists(cache))
+        # 小记录不存（读一遍用不了几毫秒）
+        with open(p, "w") as f:
+            f.write(ev("s", 5) + "\n")
+        restart()
+        self.assertEqual(len(rows()), 1)
+        self.assertFalse(os.path.exists(cache))
+        restart()
+
     def test_incident_and_diagnostic(self):
         """账号刚出问题那一刻记现场（出口 IP、环境、会话数），同一问题持续着不重复记；用过的出口补 IP 和次数；导出的诊断不含密钥。"""
         self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")

@@ -3104,6 +3104,20 @@ _LOCAL_CACHE = {}  # 日志文件 -> [读到的字节位置, 文件大小, mtime
 _LOCAL_CACHE_LOCK = threading.Lock()
 
 
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+CACHE_WRITE_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def _slim_usage(u):
+    """一条消息的 usage 只留算用量和金额要用的几个数（message_cost、_usage_add 看的那些）。记录里还带着工具调用次数、
+    服务分层这些，用不上；记录多的电脑上有十几万条，都留着很占内存，存盘的扫描结果也大好几倍。"""
+    out = {k: u[k] for k in USAGE_KEYS if k in u}
+    cc = u.get("cache_creation")
+    if isinstance(cc, dict) and cc:  # 有这一项时金额按它分 5 分钟 / 1 小时两种缓存算，没有才看 cache_creation_input_tokens
+        out["cache_creation"] = {k: cc.get(k) or 0 for k in CACHE_WRITE_KEYS}
+    return out
+
+
 def _scan_jsonl(path, entry):
     """从 entry 记录的位置接着读 path 到最后一个完整的行，带用量的消息追加进 entry；文件变小（被重写）就从头读。
 
@@ -3135,9 +3149,120 @@ def _scan_jsonl(path, entry):
             ts = parse_iso(ev.get("timestamp"))
             if not ts:
                 continue
-            entry[3].append((ts, msg.get("model") or "", msg["usage"], (msg.get("id"), ev.get("requestId")),
+            entry[3].append((ts, msg.get("model") or "", _slim_usage(msg["usage"]), (msg.get("id"), ev.get("requestId")),
                              str(ev.get("sessionId") or file_session)))
     entry[0], entry[1], entry[2] = pos, st.st_size, st.st_mtime
+    return entry
+
+
+# ---- 扫描结果存盘：进程里的缓存（_LOCAL_CACHE）一重启就没了，记录多的电脑上（几百 MB 到上 GB）重启后第一次要从头读十几秒。
+# 每份记录的扫描结果另存一个文件（CAM_HOME/scan-cache/<配置目录>/<记录路径的哈希>.json），下一个进程接着它读新加的部分。
+# 里面只有每条消息的时间、模型名、用量数字、消息和会话的 id，没有聊天内容。CAM_NO_SCAN_CACHE=1 关掉。
+SCAN_CACHE_VERSION = 1
+SCAN_CACHE_MIN_BYTES = 256 * 1024   # 小于这么大的记录读一遍用不了几毫秒，不存
+SCAN_CACHE_GROW = 1024 * 1024       # 上次存盘之后又读了这么多字节：马上再存
+SCAN_CACHE_SAVE_SECS = 120          # 没读够那么多：隔这么久再存（常驻的 cam serve 不用每次都重写）
+SCAN_HEAD_BYTES = 4096              # 认“还是不是同一份记录”看开头这么多字节
+_SCAN_SAVED = {}  # 日志文件 -> (存盘时读到的字节位置, 存盘的时间)；从盘上读回来的记成 (位置, 0)
+_SCAN_PRUNED = set()  # 已经清过没用的缓存文件的配置目录（一个进程清一次）
+
+
+def scan_cache_on():
+    return os.environ.get("CAM_NO_SCAN_CACHE") != "1"
+
+
+def scan_cache_dir(root):
+    """root（Claude Code 的 projects 目录）下面那些记录的扫描结果存在哪：换了配置目录（CLAUDE_CONFIG_DIR）各存各的。"""
+    return os.path.join(cam_home(), "scan-cache", hashlib.sha1(os.path.abspath(root).encode("utf-8")).hexdigest()[:12])
+
+
+def scan_cache_file(root, path):
+    return os.path.join(scan_cache_dir(root), hashlib.sha1(os.path.abspath(path).encode("utf-8")).hexdigest()[:20] + ".json")
+
+
+def _scan_head(path, pos):
+    """记录开头一小段的指纹：Claude Code 的记录只往后追加，开头没变、文件没变短，就是同一份记录接着写的。"""
+    with open(path, "rb") as f:
+        return hashlib.sha1(f.read(min(pos, SCAN_HEAD_BYTES))).hexdigest()
+
+
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+_MICRO = dt.timedelta(microseconds=1)
+
+
+def _scan_cache_load(root, path):
+    """上一个进程存下来的这份记录的扫描结果 [位置, 大小, mtime, 事件]；没存过、存的不是这份记录（被重写过、变短了）、
+    读不懂，都返回 None（照常从头读）。存的格式见 _scan_cache_save。"""
+    try:
+        with open(scan_cache_file(root, path), encoding="utf-8") as f:
+            c = json.load(f)
+        pos = int(c["pos"])
+        if (c.get("v") != SCAN_CACHE_VERSION or c.get("path") != os.path.abspath(path)
+                or not 0 < pos <= os.path.getsize(path) or c.get("head") != _scan_head(path, pos)):
+            return None
+        models, file_session = c["models"], os.path.splitext(os.path.basename(path))[0]
+        events = []
+        for us, mi, i, o, cw, cr, w5, w1, mid, rid, sess in c["events"]:
+            u = {k: v for k, v in zip(USAGE_KEYS, (i, o, cw, cr)) if v is not None}
+            if w5 is not None:
+                u["cache_creation"] = dict(zip(CACHE_WRITE_KEYS, (w5, w1)))
+            events.append((_EPOCH + int(us) * _MICRO, models[mi], u, (mid, rid), file_session if sess is None else sess))
+        return [pos, int(c["size"]), float(c["mtime"]), events]
+    except (OSError, ValueError, KeyError, TypeError, IndexError, OverflowError):
+        return None
+
+
+def _scan_cache_save(root, path, entry):
+    """把这份记录读到现在的结果存盘（先写临时文件再换上去；写不了就算了，下次从头读而已）。
+    每条消息一行数组：[时间（1970 年起的微秒）, 模型在 models 里的序号, 输入, 输出, 缓存写入, 缓存读取, 5 分钟缓存, 1 小时缓存,
+    消息 id, 请求 id, 会话 id（和文件名一样的记成 null）]。记录多的电脑上有十几万条，写成这样比原样存 usage 小好几倍。"""
+    try:
+        file_session, models, rows = os.path.splitext(os.path.basename(path))[0], {}, []
+        for t, model, u, key, sess in entry[3]:
+            cc = u.get("cache_creation") or {}
+            rows.append([(t - _EPOCH) // _MICRO, models.setdefault(model, len(models)), *(u.get(k) for k in USAGE_KEYS),
+                         *((cc.get(k) or 0 for k in CACHE_WRITE_KEYS) if cc else (None, None)),
+                         key[0], key[1], None if sess == file_session else sess])
+        data = {"v": SCAN_CACHE_VERSION, "path": os.path.abspath(path), "head": _scan_head(path, entry[0]),
+                "pos": entry[0], "size": entry[1], "mtime": entry[2], "models": list(models), "events": rows}
+        for d in (os.path.dirname(scan_cache_dir(root)), scan_cache_dir(root)):  # 两层都只有自己能进
+            os.makedirs(d, mode=0o700, exist_ok=True)
+        write_json_atomic(scan_cache_file(root, path), data, private=True, compact=True)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _scan_cache_prune(root, paths):
+    """已经不在了的记录，它们存的扫描结果也删掉（一个进程里每个配置目录清一次）。"""
+    if root in _SCAN_PRUNED:
+        return
+    _SCAN_PRUNED.add(root)
+    keep = {os.path.basename(scan_cache_file(root, p)) for p in paths}
+    try:
+        for name in os.listdir(scan_cache_dir(root)):
+            if name.endswith(".json") and name not in keep:
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(scan_cache_dir(root), name))
+    except OSError:
+        pass
+
+
+def _scan_cached(root, path):
+    """这份记录读到最新（_scan_jsonl），进程里没有时先接上存盘的结果，读了够多新内容就再存一次。调用方拿着 _LOCAL_CACHE_LOCK。"""
+    entry = _LOCAL_CACHE.get(path)
+    cache = scan_cache_on()
+    if entry is None and cache:
+        entry = _scan_cache_load(root, path)
+        if entry is not None:
+            _SCAN_SAVED[path] = (entry[0], 0.0)
+    entry = _LOCAL_CACHE[path] = _scan_jsonl(path, entry)
+    if cache and entry[1] >= SCAN_CACHE_MIN_BYTES:
+        pos, at = _SCAN_SAVED.get(path, (0, 0.0))
+        if entry[0] < pos:  # 文件被重写过、从头读的
+            pos = 0
+        if entry[0] > pos and (entry[0] - pos >= SCAN_CACHE_GROW or time.time() - at >= SCAN_CACHE_SAVE_SECS):
+            _scan_cache_save(root, path, entry)
+            _SCAN_SAVED[path] = (entry[0], time.time())
     return entry
 
 
@@ -3145,7 +3270,8 @@ def local_events(since, sessions=False):
     """本机 Claude Code 记录里每条带用量的消息：(时间, 模型, usage)，sessions=True 时后面再加会话 id。同一条消息只算一次。
 
     按文件缓存在进程里：没变的文件不重读，只追加了的只读新加的部分。cam serve 常驻，卡片小面板每两分钟要一次今天的
-    消耗，一天的记录几百 MB，每次从头读要一两秒，会把整个服务拖住。
+    消耗，一天的记录几百 MB，每次从头读要一两秒，会把整个服务拖住。大一点的记录读到哪、读出了什么还存一份在盘上
+    （见上面“扫描结果存盘”），重启后、别的 cam 进程（cam refresh、菜单栏小工具的后台那一轮）接着读，不用从头来。
     """
     root = os.path.join(claude_config_dir(), "projects")
     seen = set()
@@ -3153,12 +3279,15 @@ def local_events(since, sessions=False):
     with _LOCAL_CACHE_LOCK:
         for gone in set(_LOCAL_CACHE) - set(paths):
             del _LOCAL_CACHE[gone]
+            _SCAN_SAVED.pop(gone, None)
+        if scan_cache_on():
+            _scan_cache_prune(root, paths)
     for path in paths:
         try:
             if dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc) < since:
                 continue
             with _LOCAL_CACHE_LOCK:
-                entry = _LOCAL_CACHE[path] = _scan_jsonl(path, _LOCAL_CACHE.get(path))
+                entry = _scan_cached(root, path)
                 events = list(entry[3])
         except OSError:
             continue

@@ -559,7 +559,10 @@ details.src[open] summary::before { content: "▾"; }
 .lu-tiles > div:first-child { border-left: 0; }
 .lu-tiles .k { font-size: 12.5px; color: var(--muted); }
 .lu-tiles .v { font-size: 24px; font-weight: 650; letter-spacing: -.02em; line-height: 1.25; margin: 2px 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lu-tiles .s { font-size: 12px; color: var(--muted); line-height: 1.55; }
+.lu-tiles .s { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 12px; color: var(--muted); line-height: 1.55; }
+.lu-tiles .s > span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }  /* 一项不从中间断开，放不下就整项换到下一行 */
+/* 换时间范围、数据还没回来：过四分之一秒还没好才变淡（读得快的时候不闪一下） */
+#local-block.loading > .panel, #local-block.loading > .lu-split { opacity: .5; transition: opacity .2s ease .25s; }
 .lu-tiles .s.good { color: var(--live); }
 @media (max-width: 720px) {
   .lu-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2345,15 +2348,17 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const byKey = {};
     accs.forEach((a) => { const e = ent.account(a.account_id), k = e.key === "_other" ? a.account_id : e.key; byKey[k] = byKey[k] || { name: e.own || e.name, rank: e.rank, cost: 0 }; byKey[k].cost += a.cost_usd || 0; });
     const split = Object.values(byKey).filter((x) => x.cost > 0).sort((a, b) => a.rank - b.rank);
-    const splitText = split.slice(0, 3).map((x) => `${esc(x.name)} ${usd(x.cost)}`).join(" · ") + (split.length > 3 ? ` 等 ${split.length} 个` : "");
+    const splitSegs = [...split.slice(0, 3).map((x) => `${esc(x.name)} ${usd(x.cost)}`), split.length > 3 ? `等 ${split.length} 个` : ""];
     const nAcc = accs.filter((a) => state.accounts.some((x) => x.id === a.account_id)).length;
     const hit = t.cache_hit;
-    const note = hit == null ? ["", "还没有记录"] : hit >= 0.9 ? ["good", "很高：大部分输入是从缓存读的"] : hit >= 0.6 ? ["", "还行：一半以上的输入从缓存读"] : ["", "偏低：大部分输入没走缓存"];
+    const note = hit == null ? ["", "还没有记录"] : hit >= 0.9 ? ["good", "很高：输入大多从缓存读"] : hit >= 0.6 ? ["", "还行：过半输入从缓存读"] : ["", "偏低：输入大多没走缓存"];
+    // 小字一项一个 span，整项不断开：格子窄的时候一项一项往下排，不把“8449 万”“有未归属的”这种从中间拆成两行
+    const segs = (xs, cls) => `<div class="s${cls ? " " + cls : ""}">${xs.filter(Boolean).map((x) => `<span>${x}</span>`).join("")}</div>`;
     $("#lu-tiles").innerHTML =
-      `<div><div class="k">Token</div><div class="v">${wan(luTokens(t))}</div><div class="s">输入 ${wan(t.input || 0)} · 输出 ${wan(t.output || 0)}<br>缓存写入 ${wan(t.cache_write || 0)} · 缓存读取 ${wan(t.cache_read || 0)}</div></div>` +
-      `<div><div class="k">消息</div><div class="v">${t.messages || 0}</div><div class="s">${t.sessions || 0} 个会话 · ${nAcc} 个号${accs.some((a) => ent.account(a.account_id).key === "unattributed") ? " · 有未归属的" : ""}</div></div>` +
-      `<div><div class="k">折算金额</div><div class="v">≈ ${usd(t.cost_usd || 0)}</div><div class="s">${splitText || "按 API 价折算"}</div></div>` +
-      `<div><div class="k">缓存命中率</div><div class="v">${hit == null ? "–" : (hit * 100).toFixed(1) + "%"}</div><div class="s ${note[0]}">${note[1]}</div></div>`;
+      `<div><div class="k">Token</div><div class="v">${wan(luTokens(t))}</div>${segs([`输入 ${wan(t.input || 0)}`, `输出 ${wan(t.output || 0)}`])}${segs([`缓存写入 ${wan(t.cache_write || 0)}`, `缓存读取 ${wan(t.cache_read || 0)}`])}</div>` +
+      `<div><div class="k">消息</div><div class="v">${t.messages || 0}</div>${segs([`${t.sessions || 0} 个会话`, `${nAcc} 个号`, accs.some((a) => ent.account(a.account_id).key === "unattributed") ? "有未归属的" : ""])}</div>` +
+      `<div><div class="k">折算金额</div><div class="v">≈ ${usd(t.cost_usd || 0)}</div>${segs(splitSegs.some(Boolean) ? splitSegs : ["按 API 价折算"])}</div>` +
+      `<div><div class="k">缓存命中率</div><div class="v">${hit == null ? "–" : (hit * 100).toFixed(1) + "%"}</div>${segs([note[1]], note[0])}</div>`;
   }
   function luChartDraw(rep, ent) {
     const keys = rep.buckets || [], unit = rep.unit, n = keys.length;
@@ -2396,6 +2401,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         `<div class="tl total"><span>合计 · ${sum.messages} 条消息</span><b>${esc(wan(luTokens(sum)))} tokens · ${esc(usd(sum.cost_usd))}</b></div>`
       : `<div class="tl"><span>没有记录</span></div>`);
   }
+  // 明细每行下面的小字：右边已经写了正在看的那一项（Token / 金额 / 消息），小字写另外两项，不重复
+  const luOthers = (r) => [luMetric !== "messages" ? `${r.messages || 0} 条消息` : "", luMetric !== "tokens" ? `${wan(luTokens(r))} tokens` : "",
+    luMetric !== "cost" ? usd(r.cost_usd || 0) : ""].filter(Boolean).join(" · ");
   function luRowsDraw(rep, ent) {
     const byModel = luRowBy === "model", items = [];
     if (byModel) {
@@ -2414,7 +2422,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     $("#lu-rows").innerHTML = items.length
       ? items.map((x) => `<div class="r"><i class="dot" style="background:${x.color}"></i><span class="nm" title="${esc(x.name)}">${esc(x.name)}</span><span class="val">${esc(luFmt(luVal(x.r)))}</span>
           <span class="tr"><i style="width:${max > 0 ? (luVal(x.r) / max) * 100 : 0}%;background:${x.color}"></i></span>
-          <span class="sub">${x.r.messages || 0} 条消息 · ${usd(x.r.cost_usd || 0)} · ${x.sub}</span></div>`).join("")
+          <span class="sub">${luOthers(x.r)} · ${x.sub}</span></div>`).join("")
       : `<p class="hint" style="margin:0">这段时间没有记录</p>`;
   }
   function luHeatDraw(h) {
@@ -2432,7 +2440,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const rep = localRep;
     const heatSum = rep && rep.heatmap ? rep.heatmap.cells.flat().reduce((a, b) => a + b, 0) : 0;
     if (!state || !rep || !rep.totals || (!rep.totals.messages && !heatSum && localRange !== "today")) {
-      $("#local-block").hidden = true; luHideTip();
+      $("#local-block").hidden = true; luHideTip(); luBusy(false);
       $("#usage-empty").hidden = false;
       $("#usage-empty-text").textContent = !localLoaded ? "正在读取这台电脑上的 Claude Code 记录…"
         : !rep ? "没读到本机记录，稍后会自动再试。" : "这台电脑上还没有 Claude Code 的使用记录。用 claude 聊过之后，这里按天、按账号、按模型汇总。";
@@ -2449,8 +2457,10 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     luRowsDraw(rep, ent);
     luHeatDraw(rep.heatmap);
     luHideTip();
+    luBusy(false);
     $("#local-block").hidden = false;
   }
+  function luBusy(on) { const b = $("#local-block"); b.classList.toggle("loading", on); b.setAttribute("aria-busy", String(on)); }
   // 悬停提示：鼠标悬停就出来；手机上点一下出来，再点一下或点别处收起
   let luTipFor = null, luPointer = "mouse";
   function luShowTip(el) {
@@ -2508,6 +2518,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     lsPut("cam-local-range", localRange);
     $("#local-range").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.range === localRange)));
     luHideTip();
+    luBusy(true);
     loadLocal();
   });
 

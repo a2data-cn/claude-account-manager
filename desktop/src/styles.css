@@ -546,7 +546,10 @@ details.src[open] summary::before { content: "▾"; }
 .lu-tiles > div:first-child { border-left: 0; }
 .lu-tiles .k { font-size: 12.5px; color: var(--muted); }
 .lu-tiles .v { font-size: 24px; font-weight: 650; letter-spacing: -.02em; line-height: 1.25; margin: 2px 0 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lu-tiles .s { font-size: 12px; color: var(--muted); line-height: 1.55; }
+.lu-tiles .s { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 12px; color: var(--muted); line-height: 1.55; }
+.lu-tiles .s > span { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }  /* 一项不从中间断开，放不下就整项换到下一行 */
+/* 换时间范围、数据还没回来：过四分之一秒还没好才变淡（读得快的时候不闪一下） */
+#local-block.loading > .panel, #local-block.loading > .lu-split { opacity: .5; transition: opacity .2s ease .25s; }
 .lu-tiles .s.good { color: var(--live); }
 @media (max-width: 720px) {
   .lu-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
