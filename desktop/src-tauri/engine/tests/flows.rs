@@ -408,6 +408,7 @@ impl Env {
         }
         std::env::set_var("CAM_TEST_LOCALE", "en_US");
         std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
+        std::env::set_var("CAM_TEST_HOSTS", ""); // 不读这台电脑真的 hosts 文件
         std::env::set_var("CAM_TEST_PROXY", ""); // 不读本机的系统代理设置
         std::env::set_var("CAM_TEST_TZ", "America/New_York=US"); // 跑测试的机器时区不定，固定成和假出口一致
         std::env::set_var("CAM_TEST_ROUTE_IF", "");
@@ -440,6 +441,12 @@ impl Env {
         let v = json!({"claudeAiOauth": {"accessToken": at, "refreshToken": rt, "expiresAt": expires_ms,
                                          "subscriptionType": "max"}});
         std::fs::write(self.creds(), v.to_string()).unwrap();
+        // Claude Code 自己写这个文件时就是只有自己能读
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(self.creds(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
     fn login(&self, at: &str, rt: &str, uuid: &str, email: &str, expires_ms: i64) {
         self.write_creds(at, rt, expires_ms);
@@ -1350,7 +1357,10 @@ fn stale_environment_results_are_labelled() {
         vec!["proxy", "isp", "clock", "status", "accounts"]
     );
     assert_eq!(labelled(&fresh), 0);
-    assert_eq!(risk_score(&fresh)["score"], 100 - 5 - 20 - 10 - 30);
+    assert_eq!(
+        risk_score(&fresh)["score"],
+        100 - 5 - 20 - 10 /* 官方故障只提醒，不扣分 */
+    );
     // 两天前测的：每条标出来，两天前的故障不算，多一条 env_stale；分数只少了故障那一项
     let d = put(&ago(2 * 86400), Some("same"));
     let old = risk_items(&d, true, true);
@@ -1974,18 +1984,19 @@ fn risk_log_records_score_changes() {
         (&first["prev"], &first["score"], &first["added"][0]["kind"]),
         (&json!(100), &json!(90), &json!("clock"))
     );
-    // “重新检测”（service_check）：出口和服务都测完才记，一次检测只记一笔（出口走了 WARP −5，官方限流 −5）
+    // “重新检测”（service_check）：出口和服务都测完才记，一次检测只记一笔。出口走了 WARP −5；
+    // 官方限流（429）、登录过期这类是关注项 / 说明，不扣分
     mock().lock().unwrap().usage_code = 429;
     service_check(&store);
     let d = e.data();
-    assert_eq!(scores(&d), vec![90, 100, 95, 100]);
+    assert_eq!(scores(&d), vec![95, 100, 95, 100]);
     let kinds: Vec<&str> = d["risk_log"][0]["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|i| i["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, vec!["api", "warp"]);
+    assert_eq!(kinds, vec!["warp"]);
     mock().lock().unwrap().usage_code = 0;
     // 最多留 30 笔，界面上列最近 RISK_LOG_SHOWN 次
     let mut d = e.data();

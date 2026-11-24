@@ -499,6 +499,14 @@ details.src[open] summary::before { content: "▾"; }
 .score-log > .hint { margin: 0; font-size: 12px; line-height: 1.55; }
 .score-log > ol + .hint, .score-log > details + .hint { margin-top: 12px; }
 #env-result { scroll-margin-top: 12px; }
+/* 评分卡底下折叠着的“扣分规则”：左边扣几分，右边是什么情况 */
+.score-rules { margin-top: 10px; font-size: 12.5px; }
+.score-rules summary { cursor: pointer; color: var(--muted); }
+.score-rules ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 3px 16px; }
+.score-rules li { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); gap: 6px; line-height: 1.5; }
+.score-rules li b { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.score-rules li span { color: var(--muted); overflow-wrap: anywhere; }
+.score-rules .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
 .score-ring svg { width: 92px; height: 92px; display: block; }
 .score-ring circle { fill: none; stroke-width: 6; }
 .score-ring .rt { stroke: var(--track); }

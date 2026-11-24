@@ -45,8 +45,8 @@
     {"name": "续登录的地址有的连不上", "items": [{"kind": "auth", "level": "warn"}], "expect": 95},
     {"name": "代理没开不另外扣分（连不上的那几项已经扣了）", "items": [{"kind": "proxy_down", "level": "bad"}, {"kind": "api", "level": "bad"}], "expect": 60},
     {"name": "HTTPS 被解密不扣分（不是所在地的信号）", "items": [{"kind": "tls_intercept", "level": "warn"}, {"kind": "tls_chain", "level": "ok"}], "expect": 100},
-    {"name": "状态页：有关组件严重故障", "items": [{"kind": "status", "level": "bad"}], "expect": 70},
-    {"name": "状态页：留意", "items": [{"kind": "status", "level": "warn"}], "expect": 90},
+    {"name": "状态页：有关组件严重故障，只提醒不扣分（Anthropic 那边的事，不是本机环境的风险）", "items": [{"kind": "status", "level": "bad"}], "expect": 100},
+    {"name": "状态页：留意，不扣分", "items": [{"kind": "status", "level": "warn"}], "expect": 100},
     {"name": "代理在运行、续登录正常不扣分", "items": [{"kind": "proxy_up", "level": "ok"}, {"kind": "auth", "level": "ok"}], "expect": 100}
   ]
 }

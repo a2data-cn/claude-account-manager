@@ -512,6 +512,14 @@ details.src[open] summary::before { content: "▾"; }
 .score-log > .hint { margin: 0; font-size: 12px; line-height: 1.55; }
 .score-log > ol + .hint, .score-log > details + .hint { margin-top: 12px; }
 #env-result { scroll-margin-top: 12px; }
+/* 评分卡底下折叠着的“扣分规则”：左边扣几分，右边是什么情况 */
+.score-rules { margin-top: 10px; font-size: 12.5px; }
+.score-rules summary { cursor: pointer; color: var(--muted); }
+.score-rules ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 3px 16px; }
+.score-rules li { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); gap: 6px; line-height: 1.5; }
+.score-rules li b { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.score-rules li span { color: var(--muted); overflow-wrap: anywhere; }
+.score-rules .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
 .score-ring svg { width: 92px; height: 92px; display: block; }
 .score-ring circle { fill: none; stroke-width: 6; }
 .score-ring .rt { stroke: var(--track); }
@@ -948,7 +956,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
             <li><span class="sm"><svg class="mring hot" viewBox="0 0 32 32" aria-hidden="true"><circle class="rt" cx="16" cy="16" r="12"/><circle class="rf" cx="16" cy="16" r="12" stroke-dasharray="75.4" stroke-dashoffset="33.9"/></svg></span><span class="t"><b>70 以下</b>高风险</span></li>
           </ul>
           <div class="tagrow"><span class="lab">扣分项</span><span class="tg">出口不在支持名单</span><span class="tg">机房或代理 IP</span><span class="tg">代理 / VPN</span><span class="tg">时区语言和出口不一致</span><span class="tg">切换到不支持地区的出口变化</span><span class="tg">同一账号多地区</span></div>
-          <p class="hint">100 分起扣，每项扣一些，“环境”页里每条提醒后面标着扣几分；分数一变就记一笔，写明从几分变到几分、多了或少了哪一条。系统 DNS 配置差异、当前出口在支持名单内的网络变化仅作记录，不扣分。只提醒，不拦任何操作。</p></div>
+          <p class="hint">100 分起扣，每项扣一些，“环境”页里每条提醒后面标着扣几分，评分卡底下的“扣分规则”列着全部规则；分数一变就记一笔，写明从几分变到几分、多了或少了哪一条。Anthropic 那边的状况（官方状态页的公告、限流、过载、服务端错误）、系统 DNS 配置差异、当前出口在支持名单内的网络变化只提醒，不扣分。只提醒，不拦任何操作。</p></div>
         <div class="panel ecard wide"><h3><span class="eico"><svg><use href="#i-list"/></svg></span>检测结果里的标记<span class="hint">“全面体检”“重新检测”列出来的每一行前面</span></h3>
           <ul class="lgd row">
             <li><span class="sm"><span class="mark ok">正常</span></span><span class="t">这一项没问题</span></li>
@@ -1585,14 +1593,14 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 
   // ---- 环境状态卡 / 检测结果分组（和桌面版同样的分组）
   const CHECK_GROUPS = [
-    ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
-    ["本机", ["clock", "timezone", "locale", "device"]],
+    ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "hosts", "warp"]],
+    ["本机", ["clock", "timezone", "locale", "creds_perm", "device"]],
     ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
     ["账号", ["account_regions", "accounts"]],
   ];
   const IP_TYPE = { residential: "家庭 / 公司宽带", hosting: "机房 / 云服务器", proxy: "代理 / VPN 出口", tor: "Tor 出口节点", mobile: "手机网络" };
   function checkItem(it, cls) {
-    return `<li class="${esc(it.level)}${cls ? " " + cls : ""}"><span class="mark">${CHECK_MARK[it.level] || "说明"}</span><span class="v">${esc(it.text)}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`;
+    return `<li class="${esc(it.level)}${cls ? " " + cls : ""}"><span class="mark">${CHECK_MARK[it.level] || "说明"}</span><span class="v">${esc(it.text)}${it.notice ? ` <span class="chip">只提醒，不扣分</span>` : ""}${it.advice ? `<span class="advice">→ ${esc(it.advice)}</span>` : ""}</span></li>`;
   }
   const checkCard = (name, body, cls) => `<div class="panel ecard${cls ? " " + cls : ""}">${name ? `<h3>${esc(name)}</h3>` : ""}${body}</div>`;
   function renderChecks(items) {  // 返回放进 .check-groups 的内容：总体结论一张通栏的卡，其余每组一张卡
@@ -1624,6 +1632,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   let envFix = null, envFixRes = null, envFixBusy = false, envFixAvail = false, envFixAll = false;
   // 彻底清理（同 cam env clean --purge）：整个 Claude Code 配置移进备份目录，相当于重装；能恢复。放在一键清理卡片里，要再确认一次
   let purge = null, purgeAsk = false, purgeBusy = false, purgeRes = null;
+  // 备份怎么处理（确认框里的两个勾选，默认都不勾）：purgeDrop 同时删掉以前留下的备份；purgeNoBackup 这次的也不留。删了恢复不了
+  let purgeDrop = false, purgeNoBackup = false;
   // Claude Code 版本（GET /api/claude-version，只有脚本版有）：环境页一张卡片，有新版本时账号页顶上也提示一句
   let ccVer = null, ccVerBusy = false, cmdsOpen = false;  // cmdsOpen：“常用命令”展开着没有（页面定时重画时保持）
   document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("cmds")) cmdsOpen = e.target.open; }, true);
@@ -1700,7 +1710,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       ${f.fix.length ? `<h4>可以一键清理的（${f.fix.length} 项）</h4>${rows(f.fix)}` : `<p>✓ 没有第三方中转这类要清理的。</p>`}
       ${optHtml}
       ${f.manual.length ? `<h4>要你自己处理的（${f.manual.length} 项）</h4>${rows(f.manual)}` : ""}${slow}${uac}
-      <div class="sec-acts"><span class="purge-acts">${purge ? `<button class="btn quiet danger" data-act="purge-ask"${dis} title="把整个 Claude Code 配置移到备份目录，相当于重装，别处的中转设置也一起清掉；会先列出来再确认">彻底清理…</button>` : ""}${purge && purge.restore_at ? `<button class="btn quiet" data-act="purge-restore"${dis} title="把上一次彻底清理移走的配置放回去">恢复彻底清理前的样子（${esc(ago(purge.restore_at))}）</button>` : ""}</span>${close}${undo}${go}</div>${purgeHtml()}</div></div>`;
+      <div class="sec-acts"><span class="purge-acts">${purge ? `<button class="btn quiet danger" data-act="purge-ask"${dis} title="把整个 Claude Code 配置移到备份目录，相当于重装，别处的中转设置也一起清掉；会先列出来再确认">彻底清理…</button>` : ""}${purge && purge.restore_at ? `<button class="btn quiet" data-act="purge-restore"${dis} title="把上一次彻底清理移走的配置放回去">恢复彻底清理前的样子（${esc(ago(purge.restore_at))}）</button>` : ""}${purge && purge.backups && purge.backups.count ? `<button class="btn quiet danger" data-act="purge-drop-only"${dis} title="把以前彻底清理留下的备份删掉，腾出空间；删了恢复不了">删除备份（${esc(purge.backups.count)} 份，${esc(purge.backups.size)}）…</button>` : ""}</span>${close}${undo}${go}</div>${purgeHtml()}</div></div>`;
   }
   // 面板自己的确认框（和“移除账号”“切换账号”一个样子），不用浏览器自带的 confirm。点“确定”得 true，取消 / Esc 得 false
   function askConfirm({ title, body, ok = "确定", danger = false }) {
@@ -1808,8 +1818,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const dis = purgeBusy ? " disabled" : "";
     if (purgeRes) {
       const r = purgeRes;
-      const lines = r.backup && !r.restored ? [`已经把整个 Claude Code 配置移到 ${r.backup}，相当于重装。终端里运行 claude 重新登录，或者在这里点一个号“切换到这个账号”`,
-        ...(r.done || []).map((t) => "已清理：" + t), ...(r.failed || []).map((x) => `没清理成：${x.text}（${x.error}）`)]
+      const login = "终端里运行 claude 重新登录，或者在这里点一个号“切换到这个账号”";
+      const dropped = r.dropped ? [`已删除 ${r.dropped.removed} 份备份，腾出 ${r.dropped.freed}`, ...(r.dropped.left || []).map((t) => "没删掉（里面有文件被占用）：" + t)] : [];
+      const lines = !r.restored && (r.backup || r.kept_backup === false) ? [
+        r.backup ? `已经把整个 Claude Code 配置移到 ${r.backup}，相当于重装。${login}` : `已经把整个 Claude Code 配置删除，没留备份（恢复不了），相当于重装。${login}`,
+        ...(r.done || []).map((t) => "已清理：" + t), ...(r.failed || []).map((x) => `没清理成：${x.text}（${x.error}）`), ...dropped]
         : [...(r.restored || []).map((t) => "放回去了：" + t), ...(r.kept || []).map((t) => "清理后新生成的那份改名留着：" + t),
           ...(r.failed || []).map((x) => `没改回去：${x.text}（${x.error}）`), ...(r.notes || [])];
       return `<div class="purge-box">${lines.map((t) => `<p>${esc(t)}</p>`).join("")}</div>`;
@@ -1821,15 +1834,45 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const envs = penv.length ? `<p>还会清掉别处的这些设置（先备份，“恢复彻底清理前的样子”时一起改回去）：</p>
       <ul>${penv.map((f) => `<li>${esc(mail(f.text))}${f.admin ? ` <span class="chip" title="Windows 会弹窗要管理员确认，点“是”">要管理员确认</span>` : ""}</li>`).join("")}</ul>
       ${penv.some((x) => x.admin) ? `<p class="hint">要管理员权限的几项：Windows 会弹一次“是否允许此应用对你的设备进行更改”，点“是”。</p>` : ""}` : "";
+    // 备份怎么处理：以前留下的可以一起删，这次的也可以不留。都默认不勾，勾了的在“确认彻底清理”时再问一次
+    const bk = purge.backups || { count: 0 };
+    const backups = `<p>备份（每次彻底清理都把整个配置留一份在 cam 的备份目录里，会话记录多的话一份就有几个 GB）：</p>
+      ${bk.count ? `<label class="fix-all"><input type="checkbox" data-act="purge-drop"${purgeDrop ? " checked" : ""}${dis}> 同时删掉以前留下的备份（${esc(bk.count)} 份，共 ${esc(bk.size)}）</label>` : ""}
+      <label class="fix-all"><input type="checkbox" data-act="purge-nobackup"${purgeNoBackup ? " checked" : ""}${dis}> 这次也不留备份：清掉的配置直接删除，恢复不了</label>`;
     return `<div class="purge-box"><h4>彻底清理（相当于重装 Claude Code）</h4>
-      <p>会把下面这些整个移到 cam 的备份目录（不删，能恢复）：</p>
+      <p>${purgeNoBackup ? "会把下面这些整个<b>删除，不留备份，恢复不了</b>：" : "会把下面这些整个移到 cam 的备份目录（不删，能恢复）："}</p>
       <ul>${purge.move.map((m) => `<li>${esc(m.path)}（${esc(m.size)}）</li>`).join("")}${purge.keychain ? "<li>钥匙串里的 Claude Code 登录</li>" : ""}</ul>
-      <p>包括会话记录、设置、CLAUDE.md、插件、MCP 配置。当前登录会先存进 cam，之后在这里点“切换到这个账号”或者运行 claude 重新登录就行。</p>${envs}${run}
+      <p>包括会话记录、设置、CLAUDE.md、插件、MCP 配置。当前登录会先存进 cam，之后在这里点“切换到这个账号”或者运行 claude 重新登录就行。</p>${envs}${backups}${run}
       <div class="sec-acts"><button class="btn quiet" data-act="purge-cancel"${dis}>取消</button><button class="btn danger-fill" data-act="purge-go"${dis || (run ? " disabled" : "")}>${purgeBusy ? "正在搬…" : "确认彻底清理"}</button></div></div>`;
   }
   async function loadPurge() {
     try { purge = await api("GET", "/api/env-purge"); } catch (_) { purge = null; }
     render();
+  }
+  // “确认彻底清理”：勾了删备份的（恢复不了）再问一次，写明删的是什么
+  async function confirmPurge() {
+    const bk = (purge && purge.backups) || { count: 0 };
+    const drop = purgeDrop && bk.count > 0;
+    if (drop || purgeNoBackup) {
+      const what = [drop ? `以前留下的 ${bk.count} 份备份（共 ${bk.size}）` : "", purgeNoBackup ? "这次清掉的整个 Claude Code 配置（会话记录、设置、插件这些）" : ""].filter(Boolean).join("，还有");
+      const ok = await askConfirm({ title: "删了恢复不了", body: `会直接删除：${what}。\n${purgeNoBackup ? "这次不留备份，“恢复彻底清理前的样子”用不了。" : "这次的还留一份，能恢复。"}账号的登录已经存在 cam 里，不受影响。`, ok: "确认删除", danger: true });
+      if (!ok) return;
+    }
+    runPurge({ purge: true, confirm: "彻底清理", drop_backups: drop, no_backup: purgeNoBackup });
+  }
+  // 不清理，只把以前彻底清理留下的备份删掉
+  async function dropPurgeBackups() {
+    const bk = (purge && purge.backups) || { count: 0 };
+    if (!bk.count || purgeBusy) return;
+    const ok = await askConfirm({ title: "删除备份", body: `把以前彻底清理留下的 ${bk.count} 份备份（共 ${bk.size}）删掉。\n删了恢复不了：“恢复彻底清理前的样子”就用不了了。现在的 Claude Code 配置和账号不受影响。`, ok: "删除", danger: true });
+    if (!ok) return;
+    purgeBusy = true; render();
+    try {
+      const r = (await api("POST", "/api/env-purge", { drop_backups: true, confirm: "删除备份" })).dropped || {};
+      toast(`已删除 ${r.removed || 0} 份备份，腾出 ${r.freed || "0 B"}` + ((r.left || []).length ? `，有 ${r.left.length} 份没删掉（里面有文件被占用）` : ""), !!(r.left || []).length);
+      await loadPurge();
+    } catch (err) { toast(err.message, true); }
+    finally { purgeBusy = false; render(); }
   }
   async function runPurge(body) {
     if (purgeBusy) return;
@@ -1899,15 +1942,18 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
     ["proxy", "代理 / VPN", ["proxy", "vpn", "proxy_down"]],
     ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
-    ["dns", "DNS", ["dns", "dns_resolver", "dns_servers"]],
+    ["dns", "DNS / hosts", ["dns", "dns_resolver", "dns_servers", "hosts"]],
     ["change", "出口变化", ["region_change"]],
+    ["creds", "登录凭据", ["creds_perm"]],  // 凭据文件别的用户也读得到时才有这一行
     ["account", "账号", ["account_regions", "accounts"]],
     ["service", "Claude 服务", ["api", "web", "tls", "status", "auth", "tls_intercept"]],
     ["stale", "检测时间", ["env_stale", "env_failed"]],  // 结果是一小时前的、或者最近一次没连上才有这一行
   ];
   const LEVEL_RANK = { bad: 3, warn: 2, info: 1, ok: 0 };
   // 这一条从环境评分里扣几分（不扣分的不标；旧版后台没有 points，也不标）
-  const ptsChip = (r) => r.points ? `<span class="chip ${r.points >= 20 ? "st-error" : "st-warn"}">−${esc(r.points)} 分</span>` : "";
+  // 关注项（r.notice：Anthropic 那边的状况，不是这台电脑环境的风险）标“只提醒，不扣分”
+  const ptsChip = (r) => r.points ? `<span class="chip ${r.points >= 20 ? "st-error" : "st-warn"}">−${esc(r.points)} 分</span>`
+    : r.notice ? `<span class="chip">只提醒，不扣分</span>` : "";
   // 分数变化：什么时候从几分变到几分，多了 / 没有了哪一条扣分，那两次之间出口换没换（exit_note）。
   // 后台每次环境检测后分数变了就记一笔（state.risk_log），at 是空的那条是后台还没来得及记的
   const SCORE_LOG_OPEN = 3;  // 最近几次直接列出来，更早的收起来
@@ -1919,6 +1965,16 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       c.exit_note ? `<div class="why">${esc(c.exit_note)}</div>` : ""].join("");
     const when = c.at ? `<span class="when" title="${esc(fmtTime(c.at))}">${ago(c.at)}</span>` : `<span class="when">现在</span>`;
     return `<li>${when}<span class="delta ${cls}">${head}</span>${why}</li>`;
+  }
+  // 扣分规则（state.risk_rules，后台按实际扣分的那张表给的）：每个信号扣几分，哪些只提醒不扣分。折叠着，展开状态重画时保持
+  let rulesOpen = false;
+  document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("score-rules")) rulesOpen = e.target.open; }, true);
+  function scoreRulesHtml(st) {
+    const rr = st.risk_rules;
+    if (!rr || !(rr.rules || []).length) return "";  // 旧版后台没有
+    return `<details class="score-rules"${rulesOpen ? " open" : ""}><summary>扣分规则（${rr.rules.length} 条）</summary>
+      <ul>${rr.rules.map((r) => `<li><b>−${esc(r.points)}</b><span>${esc(r.text)}</span></li>`).join("")}</ul>
+      ${(rr.notices || []).length ? `<p class="hint">只提醒、不扣分的：${rr.notices.map(esc).join("；")}。</p>` : ""}</details>`;
   }
   let scoreLogOpen = false;  // “更早的 N 次”展开着没有（页面定时重画时保持）
   document.addEventListener("toggle", (e) => { if (e.target.classList && e.target.classList.contains("sl-more")) scoreLogOpen = e.target.open; }, true);
@@ -1942,7 +1998,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       iptype: reg.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
       proxy: "未检出显式代理或默认隧道；TUN 分流仍可能生效",
       local: "没发现和出口地区不一致的设置",
-      dns: "没发现问题",
+      dns: "没发现问题，hosts 文件没动过 Claude 的域名",
       change: reg.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${esc(reg.prev_loc)} 换到 ${esc(reg.loc)}，已过了观察期` : "最近没变",
       account: "当前账号最近没在多个地区用过",
       service: "正常",
@@ -2003,7 +2059,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       ? `<div class="score-sum"><b>${total ? `共扣 ${esc(total)} 分` : "没有扣分项"}</b>${total ? `${lost.length} 项` : ""}<span class="lbl">${esc(sc.label)}</span></div>` : "";
     return `<div class="panel ecard c-score"><h3><span class="eico"><svg><use href="#i-shield"/></svg></span>环境评分 <span class="chip">只提醒，不拦任何操作</span></h3>
       <div class="score-row"><div class="score-side">${ring}${sum}</div>${rows}</div>
-      <p class="hint">100 分起扣，每条后面标着扣几分；90 以上低风险，70–89 有风险，70 以下高风险。${has ? esc(sc.advice) : ""}</p></div>`;
+      <p class="hint">100 分起扣，每条后面标着扣几分；90 以上低风险，70–89 有风险，70 以下高风险。${has ? esc(sc.advice) : ""}</p>
+      ${scoreRulesHtml(st)}</div>`;
   }
   function envCard(st) {
     const reg = st.region || {};
@@ -2216,10 +2273,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const drop = lastCh && lastCh.score < lastCh.prev && (!lastCh.at || Date.now() - new Date(lastCh.at) < 86400e3)
       ? `（${lastCh.at ? ago(lastCh.at) : "刚刚"}从 ${esc(lastCh.prev)} 分降下来）` : "";
     const brief = risky ? `<div class="notice env-brief ${esc(state.risk_score.grade)}" role="status"><span class="n-text">环境评分 <b>${esc(state.risk_score.score)}/100</b>：${esc(state.risk_score.label)}${drop}${firstRisk ? ` · ${esc(firstRisk)}` : ""}</span><a class="btn quiet" href="#env">查看详情</a></div>` : "";
+    // Anthropic 那边的严重状况（官方状态页的故障、服务端错误）不扣分，上面那一行看不出来：单独提醒一句
+    const outage = (state.risks || []).find((r) => r.notice && r.level === "bad");
+    const outageHtml = outage ? `<div class="notice env-brief medium" role="status"><span class="n-text">${esc(outage.text)} · 这是 Anthropic 那边的状况，不是本机环境的问题，不扣环境评分</span><a class="btn quiet" href="#env">查看详情</a></div>` : "";
     const notice = oldServeHtml() + (state.warning ? `<div class="notice" role="alert">⚠ ${esc(state.warning)}</div>` : "")
       + (p ? `<div class="notice pending" role="status"><span class="n-text">${esc(p.message)}</span><button class="btn" data-act="pending-rm">取消等待</button></div>` : "")
       + (ccVer && ccVer.outdated ? `<div class="notice" role="status"><span class="n-text">Claude Code 有新版本 ${esc(ccVer.latest.version)}（现在是 ${esc(ccVer.installed.version)}）</span><a class="btn quiet" href="#env">去升级</a></div>` : "")
-      + brief;
+      + brief + outageHtml;
     if (!state.accounts.length) {
       list.innerHTML = notice + `<div class="panel empty"><h2>还没有账号</h2>
         <p class="hint"><b>用 Claude Code（命令行）</b>：终端里 <code>claude</code> 已经登录的话，点下面的按钮导入；还没登录就在终端运行 <code>cam login 工作号</code>（点一下命令就复制），浏览器里登录完自动保存。以后加号也用 <code>cam login 名字</code>，它会先把当前号存好。</p>
@@ -3224,9 +3284,12 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (e.target.closest("[data-act=env-fix-go]")) { runEnvFix({ apply: true, optional: envFixAll, digest: envFix && envFix.digest, digest_optional: envFix && envFix.digest_optional }); return; }
     if (e.target.closest("[data-act=env-fix-all]")) { envFixAll = e.target.closest("[data-act=env-fix-all]").checked; render(); return; }
     if (e.target.closest("[data-act=env-fix-undo]")) { runEnvFix({ undo: true }); return; }
-    if (e.target.closest("[data-act=purge-ask]")) { purgeAsk = true; purgeRes = null; loadPurge(); return; }
+    if (e.target.closest("[data-act=purge-ask]")) { purgeAsk = true; purgeRes = null; purgeDrop = false; purgeNoBackup = false; loadPurge(); return; }
     if (e.target.closest("[data-act=purge-cancel]")) { purgeAsk = false; render(); return; }
-    if (e.target.closest("[data-act=purge-go]")) { runPurge({ purge: true, confirm: "彻底清理" }); return; }
+    if (e.target.closest("[data-act=purge-drop]")) { purgeDrop = e.target.closest("[data-act=purge-drop]").checked; render(); return; }
+    if (e.target.closest("[data-act=purge-nobackup]")) { purgeNoBackup = e.target.closest("[data-act=purge-nobackup]").checked; render(); return; }
+    if (e.target.closest("[data-act=purge-go]")) { confirmPurge(); return; }
+    if (e.target.closest("[data-act=purge-drop-only]")) { dropPurgeBackups(); return; }
     if (e.target.closest("[data-act=purge-restore]")) { runPurge({ restore: true }); return; }
     if (e.target.closest("[data-act=purge-done]")) { purgeRes = null; render(); return; }
     if (e.target.closest("[data-act=cc-recheck]")) { loadCcVer(true); return; }

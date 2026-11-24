@@ -1,0 +1,37 @@
+{
+  "parse_hosts": [
+    {"name": "没有 Claude 的域名", "text": "127.0.0.1 localhost\n::1 ip6-localhost\n192.168.1.5 nas.local\n", "expect": []},
+    {"name": "一行几个域名、带注释；同一个域名只留第一条", "text": "127.0.0.1 localhost\n1.2.3.4 api.anthropic.com claude.ai # 加速\n5.6.7.8 claude.ai\n", "expect": [{"host": "api.anthropic.com", "ip": "1.2.3.4"}, {"host": "claude.ai", "ip": "1.2.3.4"}]},
+    {"name": "整行注释掉的不算；子域名算；大小写和末尾的点不管", "text": "#1.2.3.4 api.anthropic.com\n  9.9.9.9\tStatsig.Anthropic.COM.  platform.claude.com\n", "expect": [{"host": "statsig.anthropic.com", "ip": "9.9.9.9"}, {"host": "platform.claude.com", "ip": "9.9.9.9"}]},
+    {"name": "只是名字里带这几个字的别的域名不算", "text": "9.9.9.9 notanthropic.com evil-claude.ai.example claude.ai.evil.com myclaude.ai\n", "expect": []},
+    {"name": "IPv6 地址、Windows 换行", "text": "::1 console.anthropic.com\r\n0.0.0.0 claude.com\r\n", "expect": [{"host": "console.anthropic.com", "ip": "::1"}, {"host": "claude.com", "ip": "0.0.0.0"}]},
+    {"name": "官方文档里 Claude Code 用到的 claudeusercontent.com 也算", "text": "6.6.6.6 bridge.claudeusercontent.com x.frame.claudeusercontent.com\n", "expect": [{"host": "bridge.claudeusercontent.com", "ip": "6.6.6.6"}, {"host": "x.frame.claudeusercontent.com", "ip": "6.6.6.6"}]},
+    {"name": "只有一列的行、空行不算", "text": "\n\napi.anthropic.com\n   \n", "expect": []},
+    {"name": "最多留 8 条", "text": "1.1.1.1 a.claude.ai b.claude.ai c.claude.ai d.claude.ai e.claude.ai f.claude.ai g.claude.ai h.claude.ai i.claude.ai j.claude.ai\n", "expect": [{"host": "a.claude.ai", "ip": "1.1.1.1"}, {"host": "b.claude.ai", "ip": "1.1.1.1"}, {"host": "c.claude.ai", "ip": "1.1.1.1"}, {"host": "d.claude.ai", "ip": "1.1.1.1"}, {"host": "e.claude.ai", "ip": "1.1.1.1"}, {"host": "f.claude.ai", "ip": "1.1.1.1"}, {"host": "g.claude.ai", "ip": "1.1.1.1"}, {"host": "h.claude.ai", "ip": "1.1.1.1"}]}
+  ],
+  "addr_special": [
+    {"ip": "127.0.0.1", "expect": true}, {"ip": "0.0.0.0", "expect": true}, {"ip": "10.1.2.3", "expect": true},
+    {"ip": "172.16.0.1", "expect": true}, {"ip": "172.31.255.255", "expect": true}, {"ip": "172.32.0.1", "expect": false},
+    {"ip": "192.168.88.1", "expect": true}, {"ip": "169.254.1.1", "expect": true},
+    {"ip": "100.64.1.1", "expect": true}, {"ip": "100.127.255.255", "expect": true}, {"ip": "100.128.0.1", "expect": false},
+    {"ip": "198.18.0.5", "expect": true}, {"ip": "198.19.255.255", "expect": true}, {"ip": "198.20.0.1", "expect": false},
+    {"ip": "224.0.0.1", "expect": true}, {"ip": "255.255.255.255", "expect": true},
+    {"ip": "160.79.104.10", "expect": false}, {"ip": "104.18.32.47", "expect": false}, {"ip": "1.1.1.1", "expect": false},
+    {"ip": "::", "expect": true}, {"ip": "::1", "expect": true}, {"ip": "fd00::1", "expect": true}, {"ip": "fc00::1", "expect": true},
+    {"ip": "fe80::1", "expect": true}, {"ip": "fe80::1%eth0", "expect": true}, {"ip": "febf::1", "expect": true}, {"ip": "fec0::1", "expect": false},
+    {"ip": "2607:6bc0::10", "expect": false}, {"ip": "2606:4700::6812:202f", "expect": false},
+    {"ip": "::ffff:10.0.0.1", "expect": true}, {"ip": "::ffff:160.79.104.10", "expect": false},
+    {"ip": "不是地址", "expect": false}, {"ip": "", "expect": false}
+  ],
+  "risk": [
+    {"name": "hosts 文件改了 Claude 的域名：注意，扣 20 分", "data": {"region": {"loc": "US", "checked_at": "$now", "env": {"proxy": [], "tunnel": null, "hosts": [{"host": "api.anthropic.com", "ip": "1.2.3.4"}]}}},
+     "expect": {"level": "warn", "points": 20, "text": "hosts 文件把 api.anthropic.com 指到了 1.2.3.4", "advice_has": "恶意软件", "score": 80}},
+    {"name": "好几条：写第一条，说还有几条", "data": {"region": {"loc": "US", "checked_at": "$now", "env": {"proxy": [], "tunnel": null, "hosts": [{"host": "claude.ai", "ip": "127.0.0.1"}, {"host": "api.anthropic.com", "ip": "127.0.0.1"}, {"host": "console.anthropic.com", "ip": "127.0.0.1"}]}}},
+     "expect": {"level": "warn", "points": 20, "text": "hosts 文件把 claude.ai 指到了 127.0.0.1（另有 2 条）", "advice_has": "删掉", "score": 80}},
+    {"name": "没改：没有这一条", "data": {"region": {"loc": "US", "checked_at": "$now", "env": {"proxy": [], "tunnel": null, "hosts": []}}}, "expect": null},
+    {"name": "登录凭据文件别的用户也读得到：注意，扣 15 分", "kind": "creds_perm", "data": {"region": {"loc": "US", "checked_at": "$now", "env": {"proxy": [], "tunnel": null, "hosts": [], "creds_mode": "644"}}},
+     "expect": {"level": "warn", "points": 15, "text": "Claude Code 的登录凭据文件权限是 0644，这台电脑上的其他用户也读得到", "advice_has": "chmod 600", "score": 85}},
+    {"name": "凭据文件只有自己能读：没有这一条", "kind": "creds_perm", "data": {"region": {"loc": "US", "checked_at": "$now", "env": {"proxy": [], "tunnel": null, "hosts": [], "creds_mode": null}}}, "expect": null},
+    {"name": "旧版缓存没有 hosts 这一项：当没有", "data": {"region": {"loc": "US", "checked_at": "$now", "env": {"proxy": [], "tunnel": null}}}, "expect": null}
+  ]
+}

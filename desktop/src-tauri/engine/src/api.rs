@@ -145,7 +145,19 @@ pub fn incident_scene(data: &Value, sessions: usize) -> IncidentScene {
                 "checked_at",
             ],
         ),
-        env: pick(&env, &["tz", "locale", "dns", "proxy", "tunnel"]),
+        // hosts、creds_mode：hosts 文件有没有改 Claude 的域名、凭据文件别人读不读得到（出问题时一起记下）
+        env: pick(
+            &env,
+            &[
+                "tz",
+                "locale",
+                "dns",
+                "proxy",
+                "tunnel",
+                "hosts",
+                "creds_mode",
+            ],
+        ),
         active: active_code_id(data),
         score,
         sessions,
@@ -432,6 +444,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "risks": risks,
         "risk_score": risk_score,
         "risk_log": super::health::risk_log_view(data, super::health::RISK_LOG_SHOWN),
+        "risk_rules": super::health::risk_rules(),
         "sessions": brief,  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算；几个在回答、几个等你确认
         "attention": attention_view(sessions > 0),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
         "desktop_app": desk_app,  // 有桌面版的号时才有：装没装、版本、开着没有、开着的是哪个号

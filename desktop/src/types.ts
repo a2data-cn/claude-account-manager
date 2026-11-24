@@ -201,6 +201,7 @@ export interface State {
   risks?: ServiceCheckItem[]; // 后台缓存算出的风险提示（出口不支持 / 出口变化 / 时区 / 时钟 / 官方状态页 / 账号多地区…），只提醒不拦
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
   risk_log?: RiskLog | null; // 环境评分最近是怎么变的（后台每次环境检测后分数变了就记一笔）
+  risk_rules?: RiskRules | null; // 扣分规则：每个信号扣几分，哪些只提醒不扣分（后台按实际扣分的那张表给的）
   sessions?: SessionsBrief | null; // 本机开着的 claude 会话：几个、有没有在执行、几个在回答 / 等你确认（标题旁的红绿灯用）
   attention?: { count: number; text: string; since?: string | null } | null; // Claude Code 弹着权限确认在等你（cam 的钩子记的）
   desktop_app?: DesktopApp | null; // 有桌面版的号时才有
@@ -230,6 +231,11 @@ export interface RiskChange {
   added: RiskLogItem[];
   removed: RiskLogItem[];
   exit_note: string; // 这两次之间出口换了的那一句，没换是空的
+}
+
+export interface RiskRules {
+  rules: { points: number; text: string }[]; // 扣得多的在前
+  notices: string[]; // 只提醒、不扣分的
 }
 
 export interface RiskLog {
@@ -264,6 +270,7 @@ export interface ServiceCheckItem {
   text: string;
   advice: string; // 这意味着什么 / 建议怎么做，可能为空
   points?: number; // /api/state 的 risks 里才有：这一条从环境评分里扣几分
+  notice?: boolean; // 关注项：Anthropic 那边的状况（官方状态页的公告、限流、过载、服务端错误），标出来但不扣分
   score?: number; // 只有 summary 项有：实测后的评分和档位
   grade?: "low" | "medium" | "high";
 }

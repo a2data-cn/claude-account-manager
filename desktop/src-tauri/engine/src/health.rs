@@ -143,12 +143,16 @@ const AUTH_DOWN_ADVICE: &str = "登录大约每 8 小时要续一次，这些地
                                 先检查网络或代理设置。";
 const PROXY_DOWN_ADVICE: &str = "代理软件多半没开、已经退出，或者端口改了。设着代理但它没在运行时，走它的请求（Claude Code、cam）都会失败。\
                                  打开代理软件，或者把这个代理设置去掉（环境变量在启动终端的配置文件里删，系统代理在系统的网络设置里关）。";
-const RATE_LIMIT_ADVICE: &str =
-    "Anthropic 那边在限流（短时间请求太多），不是网络或账号的问题；过几分钟再试。";
-const OVERLOAD_ADVICE: &str =
-    "Anthropic 那边负载太高，不是网络或账号的问题；稍后再试，可查看 status.claude.com。";
+const RATE_LIMIT_ADVICE: &str = "Anthropic 那边在限流（短时间请求太多），不是网络或账号的问题，只提醒、不扣环境评分；过几分钟再试。";
+const OVERLOAD_ADVICE: &str = "Anthropic 那边负载太高，不是网络或账号的问题，只提醒、不扣环境评分；稍后再试，可查看 status.claude.com。";
+const SERVER_ERROR_ADVICE: &str = "多半是 Anthropic 那边的故障，不是本机环境的问题，只提醒、不扣环境评分；稍后再试，可查看 status.claude.com。";
+/// 用这几条说明的检测项是关注项（Anthropic 那边的状况：限流、过载、服务端错误）：标出来但不扣环境评分，条目上带 notice。
+const NOTICE_ADVICE: &[&str] = &[RATE_LIMIT_ADVICE, OVERLOAD_ADVICE, SERVER_ERROR_ADVICE];
+/// 本机解析不了域名、但实际连得上时的说明。与 cam.py 的 DNS_VIA_PROXY_ADVICE 一致
+const DNS_VIA_PROXY_ADVICE: &str =
+    "请求走的是代理，域名由代理解析，本机解析不了不影响使用，不扣分。";
 const STATUS_ADVICE: &str =
-    "这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 status.claude.com。";
+    "这是 Anthropic 那边的故障，不是本机或账号的问题，只提醒、不扣环境评分；等恢复后再试，详情见 status.claude.com。";
 /// 服务检测发现的这些问题记进 data["service_status"]，界面顶部的环境卡也列出来。与 cam.py 一致
 const SERVICE_STATUS_KINDS: &[&str] = &[
     "api",
@@ -1015,7 +1019,153 @@ pub fn system_dns_servers() -> Vec<Value> {
     out
 }
 
-/// 本机的区域设置快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
+// ---- 域名有没有被人动过手脚（木马、来路不明的“加速器 / 中转工具”常改 hosts 文件，把 Claude 的域名指到自己的服务器，
+// 流量连同登录凭据就送过去了）。只读本机，不改任何东西。与 cam.py 一致（tests/shared/hosts.json）
+
+/// 这几个域名和它们的子域名：Claude Code 官方文档“Network access requirements”里 Anthropic 自己的那几个
+const CLAUDE_DOMAINS: &[&str] = &[
+    "anthropic.com",
+    "claude.ai",
+    "claude.com",
+    "claudeusercontent.com",
+];
+/// hosts 文件里最多记几条
+const HOSTS_MAX: usize = 8;
+const HOSTS_ADVICE: &str = "正常用不着这样设：发往这个域名的请求（带着登录凭据）会被送到那个地址。可能是第三方中转 / 加速工具写的，也可能是恶意软件改的。\
+                            不是你自己设的就把这几行删掉（Windows：C:\\Windows\\System32\\drivers\\etc\\hosts；macOS / Linux：/etc/hosts，要管理员权限），\
+                            再用杀毒软件查一遍。";
+const DNS_SPECIAL_ADVICE: &str =
+    "装了代理软件（TUN / fake-ip）、安全软件或者家长控制时会这样：是它们在替你解析，不扣分。\
+                                  你没装这类软件的话，检查 hosts 文件和系统的 DNS 设置。";
+
+/// 系统的 hosts 文件在哪。测试用 CAM_TEST_HOSTS 指过去（空字符串：当没有）。
+fn hosts_file_path() -> Option<std::path::PathBuf> {
+    if let Ok(t) = std::env::var("CAM_TEST_HOSTS") {
+        return if t.is_empty() { None } else { Some(t.into()) };
+    }
+    if cfg!(windows) {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        return Some(
+            std::path::Path::new(&root)
+                .join("System32")
+                .join("drivers")
+                .join("etc")
+                .join("hosts"),
+        );
+    }
+    Some("/etc/hosts".into())
+}
+
+/// hosts 文件里指到 Claude / Anthropic 域名（CLAUDE_DOMAINS 和它们的子域名）的条目 [{host, ip}]，最多 HOSTS_MAX 条。
+/// 同一个域名只留第一条（系统用的就是第一条）；# 后面是注释。与 cam.py 的 parse_hosts 一致。
+pub fn parse_hosts(text: &str) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("");
+        let mut parts = line.split_whitespace();
+        let Some(ip) = parts.next() else { continue };
+        for name in parts {
+            let h = name.to_lowercase();
+            let h = h.trim_end_matches('.').to_string();
+            let ours = CLAUDE_DOMAINS
+                .iter()
+                .any(|d| h == *d || h.ends_with(&format!(".{}", d)));
+            if ours && !seen.contains(&h) {
+                seen.push(h.clone());
+                out.push(json!({"host": h, "ip": ip}));
+            }
+        }
+    }
+    out.truncate(HOSTS_MAX);
+    out
+}
+
+/// 这台电脑的 hosts 文件里把 Claude / Anthropic 的域名指到了哪（parse_hosts）；没有、读不了返回空的。
+fn hosts_overrides() -> Vec<Value> {
+    let Some(path) = hosts_file_path() else {
+        return Vec::new();
+    };
+    match std::fs::read(&path) {
+        Ok(raw) => {
+            let raw = &raw[..raw.len().min(1_000_000)];
+            parse_hosts(&String::from_utf8_lossy(raw))
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 解析出来的地址是不是内网 / 保留地址：回环、私有、链路本地、运营商内网（100.64.0.0/10）、测试用的 198.18.0.0/15、
+/// 0 开头和 224 以上，IPv6 的 ::、::1、fc00::/7、fe80::/10（映射的 IPv4 按 IPv4 看）。Claude 的域名解析成这样，
+/// 是解析被本机的软件接管了。与 cam.py 的 addr_special 一致。
+pub fn addr_special(ip: &str) -> bool {
+    let ip = ip.split('%').next().unwrap_or("");
+    let v4 = |b: [u8; 4]| {
+        matches!(b[0], 0 | 10 | 127)
+            || b[0] >= 224
+            || (b[0] == 100 && (64..=127).contains(&b[1]))
+            || (b[0] == 169 && b[1] == 254)
+            || (b[0] == 172 && (16..=31).contains(&b[1]))
+            || (b[0] == 192 && b[1] == 168)
+            || (b[0] == 198 && (b[1] == 18 || b[1] == 19))
+    };
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => v4(a.octets()),
+        Ok(std::net::IpAddr::V6(a)) => match a.to_ipv4_mapped() {
+            Some(m) => v4(m.octets()),
+            None => {
+                let n = u128::from(a);
+                n <= 1 || (n >> 121) == 0x7E || (n >> 118) == 0x3FA
+            }
+        },
+        Err(_) => false,
+    }
+}
+
+const CREDS_PERM_ADVICE: &str =
+    "凭据文件里是登录用的令牌，别的用户读到就能用你的账号。改成只有自己能读：chmod 600 ";
+const CREDS_PERM_ADVICE_TAIL: &str =
+    "（Claude Code 自己写这个文件时就是 600；被改宽多半是复制、解压或者同步工具造成的）。";
+
+/// Claude Code 的登录凭据文件（.credentials.json）这台电脑上别的用户读不读得到：读得到返回它的权限（"644" 这样），
+/// 只有自己能读、没有这个文件（macOS 上登录存在钥匙串里）、Windows（权限不是这么管的）返回 None。只看，不改。
+/// 与 cam.py 的 creds_file_mode 一致。
+fn creds_file_mode() -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(crate::claude::credentials_file())
+            .ok()?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode & 0o077 != 0 {
+            return Some(format!("{:o}", mode));
+        }
+    }
+    None
+}
+
+/// 路径里的主目录写成 ~（给人看的）。
+fn tilde_path(p: &std::path::Path) -> String {
+    let full = p.display().to_string();
+    match dirs::home_dir() {
+        Some(h) => {
+            let h = h.display().to_string();
+            match full.strip_prefix(&h) {
+                Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+                    format!("~{}", rest)
+                }
+                _ => full,
+            }
+        }
+        None => full,
+    }
+}
+
+/// 本机的区域设置、代理和 VPN 快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
+/// 顶部环境卡和服务检测都用这一份，两边的分数才一致。hosts：hosts 文件里把 Claude 的域名指到了哪（没有是空的）；
+/// creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 null。
 pub fn local_env() -> Value {
     let tz = system_timezone();
     let lc = system_locale();
@@ -1024,7 +1174,9 @@ pub fn local_env() -> Value {
         "tz": tz.as_ref().map(|t| t.0.clone()), "tz_cc": tz.as_ref().map(|t| t.1.clone()).unwrap_or_default(),
         "locale": lc.as_ref().map(|l| l.0.clone()), "locale_cc": lc.as_ref().and_then(|l| l.1.clone()),
         "dns": system_dns_servers(), "proxy": proxy_parts(),
-        "tunnel": tun.map(|(n, k)| json!([n, k]))
+        "tunnel": tun.map(|(n, k)| json!([n, k])),
+        "hosts": hosts_overrides(),
+        "creds_mode": creds_file_mode()
     })
 }
 
@@ -2199,6 +2351,12 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
     let add_plain = |kind: &str, level: &str, text: String, advice: &str| {
         push(kind, level, text, advice, false)
     };
+    // 刚加的那一条是关注项
+    let mark_notice = || {
+        if let Some(last) = out.borrow_mut().last_mut() {
+            last["notice"] = json!(true);
+        }
+    };
     let loc: Option<String> = if s(&reg, "checked_at").is_some() {
         s(&reg, "loc").map(String::from)
     } else {
@@ -2260,6 +2418,9 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
                         s(&it, "text").unwrap_or("").to_string(),
                         s(&it, "advice").unwrap_or(""),
                     );
+                    if is_notice(&it) {
+                        mark_notice();
+                    }
                 }
             }
         }
@@ -2387,6 +2548,54 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
             break;
         }
     }
+    // hosts 文件把 Claude 的域名指到了别处：流量（带着登录凭据）被送去那个地址
+    let hosts: Vec<Value> = env
+        .as_ref()
+        .and_then(|e| e.get("hosts"))
+        .and_then(|h| h.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|h| s(h, "host").is_some())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(first) = hosts.first() {
+        let more = if hosts.len() > 1 {
+            format!("（另有 {} 条）", hosts.len() - 1)
+        } else {
+            String::new()
+        };
+        add_plain(
+            "hosts",
+            "warn",
+            format!(
+                "hosts 文件把 {} 指到了 {}{}{}",
+                s(first, "host").unwrap_or(""),
+                s(first, "ip").unwrap_or(""),
+                more,
+                env_old
+            ),
+            HOSTS_ADVICE,
+        );
+    }
+    // 登录凭据文件别的用户也读得到
+    if let Some(mode) = env.as_ref().and_then(|e| s(e, "creds_mode")) {
+        add_plain(
+            "creds_perm",
+            "warn",
+            format!(
+                "Claude Code 的登录凭据文件权限是 0{}，这台电脑上的其他用户也读得到{}",
+                mode, env_old
+            ),
+            &format!(
+                "{}{}{}",
+                CREDS_PERM_ADVICE,
+                tilde_path(&crate::claude::credentials_file()),
+                CREDS_PERM_ADVICE_TAIL
+            ),
+        );
+    }
     if reg.get("warp").and_then(|v| v.as_bool()).unwrap_or(false) {
         add(
             "warp",
@@ -2414,6 +2623,7 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
             age_ms(s(sp, "checked_at").or(checked)).is_some_and(|a| a <= REGION_FRESH_SECS * 1000);
         if let Some((level, text)) = status_risk(sp).filter(|_| sp_fresh) {
             add_plain("status", level, text, STATUS_ADVICE);
+            mark_notice(); // 关注项：只提醒，不扣分
         }
     }
     let tz_cached = env.as_ref().and_then(|e| {
@@ -2557,8 +2767,9 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("warp", "info", 5),
     ("vpn", "info", 10),
     ("proxy", "info", 5),
-    ("status", "bad", 30),
-    ("status", "warn", 10),
+    // 官方状态页的公告不扣分：那是 Anthropic 那边的事，不是这台电脑环境的风险，只当关注项列出来
+    ("status", "bad", 0),
+    ("status", "warn", 0),
     ("api", "bad", 40),
     ("api", "warn", 5),
     ("web", "bad", 10),
@@ -2570,15 +2781,15 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("tor_exit", "warn", 40),
     ("proxy_ip", "warn", 25),
     ("ipv6_mismatch", "warn", 15),
-    ("dns_resolver", "warn", 15),
     ("dns_resolver", "info", 0),
     ("ip_origin", "info", 5),
-    ("ipv6", "info", 0),
     ("dns_servers", "info", 0),
     ("auth", "bad", 20),
     ("auth", "warn", 5),
     ("proxy_down", "bad", 0),
     ("tls_intercept", "warn", 0),
+    ("hosts", "warn", 20),
+    ("creds_perm", "warn", 15),
 ];
 /// (最低分, 档位, 说明)
 const RISK_GRADES: &[(i64, &str, &str)] = &[
@@ -2594,13 +2805,19 @@ const RISK_LOG_KEEP: usize = 30;
 /// 界面上列最近几次
 pub const RISK_LOG_SHOWN: usize = 8;
 
-/// 这一条从环境评分里扣几分（不扣是 0）。与 cam.py 的 risk_points 一致（tests/shared/risk_log.json）。
+/// 条目是不是关注项（带 notice）：Anthropic 那边的状况，不是这台电脑环境的风险，照样标出来但不扣分。
+fn is_notice(item: &Value) -> bool {
+    item.get("notice").and_then(|v| v.as_bool()) == Some(true)
+}
+
+/// 这一条从环境评分里扣几分（不扣是 0）。关注项（官方状态页的公告、限流、过载、服务端错误）不扣分。
+/// 与 cam.py 的 risk_points 一致（tests/shared/risk_log.json）。
 pub fn risk_points(item: &Value) -> i64 {
     let (kind, level) = (
         s(item, "kind").unwrap_or(""),
         s(item, "level").unwrap_or(""),
     );
-    if kind == "summary" {
+    if kind == "summary" || is_notice(item) {
         return 0;
     }
     match RISK_WEIGHTS
@@ -2614,6 +2831,84 @@ pub fn risk_points(item: &Value) -> i64 {
             _ => 0,
         },
     }
+}
+
+/// 扣分规则写给人看的说法（面板评分卡里的“扣分规则”）：每条对应 RISK_WEIGHTS 里扣分的一项，分数从那里取，
+/// 所以界面上列的和实际扣的不会对不上。与 cam.py 的 RISK_RULES / RISK_NOTICES 一致（tests/shared/risk_rules.json）
+const RISK_RULES: &[(&str, &str, &str)] = &[
+    ("region", "warn", "出口地区不在 Anthropic 支持名单"),
+    ("tor_exit", "warn", "出口 IP 是 Tor 出口节点"),
+    ("api", "bad", "api.anthropic.com 连不上，或者拒绝访问"),
+    (
+        "region_unknown",
+        "warn",
+        "出口地区查不到（连不上 claude.ai 和 Cloudflare）",
+    ),
+    ("proxy_ip", "warn", "出口 IP 被数据库标记为代理 / VPN 出口"),
+    (
+        "timezone",
+        "warn",
+        "系统时区指向不支持的地区，出口却在支持地区",
+    ),
+    ("isp", "warn", "出口 IP 是机房 / 云服务器"),
+    ("account_regions", "warn", "当前账号 7 天内在多个地区用过"),
+    ("auth", "bad", "续登录的地址都连不上"),
+    ("dns", "bad", "Claude 的域名解析不了，也确实连不上"),
+    (
+        "hosts",
+        "warn",
+        "hosts 文件把 Claude / Anthropic 的域名指到了别处",
+    ),
+    (
+        "creds_perm",
+        "warn",
+        "Claude Code 的登录凭据文件别的用户也读得到",
+    ),
+    ("ipv6_mismatch", "warn", "IPv4 和 IPv6 的出口不在同一个地区"),
+    ("region_mismatch", "warn", "两个接口看到的出口地区不一致"),
+    ("region_change", "warn", "24 小时内出口换到了不支持的地区"),
+    ("clock", "warn", "本机时钟和服务器相差 2 分钟以上"),
+    ("vpn", "info", "默认路由走 VPN / 隧道"),
+    ("web", "bad", "claude.ai 连不上，或者拒绝访问"),
+    ("proxy", "info", "设了代理（环境变量或系统代理）"),
+    ("warp", "info", "出口经过 Cloudflare WARP / Zero Trust"),
+    (
+        "timezone",
+        "info",
+        "系统时区和出口地区不一致（两边都在支持地区）",
+    ),
+    ("locale", "info", "系统语言 / 区域和出口地区不一致"),
+    (
+        "ip_origin",
+        "info",
+        "出口 IP 的注册地和定位不一致（广播 IP）",
+    ),
+    ("auth", "warn", "续登录的地址有的连不上"),
+    ("web", "warn", "claude.ai 返回人机验证页，或者少见的状态"),
+    ("api", "warn", "api.anthropic.com 返回少见的状态"),
+];
+/// 只提醒、不扣分的（关注项和说明）：不是这台电脑环境的风险
+const RISK_NOTICES: &[&str] = &[
+    "Anthropic 官方状态页的公告",
+    "官方限流（429）、服务过载（529）、服务端错误（5xx）",
+    "当前登录已过期（账号的事，运行一次 claude 会自动续上）",
+    "出口在支持地区之间变化、系统配的 DNS 和出口地区不一致",
+    "本机解析不了域名但实际连得上（请求走代理）、域名解析成内网 / 保留地址（被本机的软件接管）",
+    "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）",
+];
+
+/// 给人看的扣分规则：{rules: [{points, text}]（扣得多的在前，同分按表里的顺序）, notices: [只提醒不扣分的]}。
+pub fn risk_rules() -> Value {
+    let mut rules: Vec<(i64, &str)> = RISK_RULES
+        .iter()
+        .map(|(k, l, t)| (risk_points(&json!({"kind": k, "level": l})), *t))
+        .collect();
+    rules.sort_by_key(|r| -r.0); // 稳定排序
+    let rules: Vec<Value> = rules
+        .into_iter()
+        .map(|(p, t)| json!({"points": p, "text": t}))
+        .collect();
+    json!({"rules": rules, "notices": RISK_NOTICES})
 }
 
 /// 把风险项汇总成 {score, grade, label, advice}。只用于提示。
@@ -3215,7 +3510,11 @@ pub fn tls_issuer_item(host: &str, issuer: &Value, verified: bool) -> Value {
 pub fn service_check(store: &Store) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut add = |kind: &str, level: &str, text: String, advice: &str| {
-        out.push(json!({"kind": kind, "level": level, "text": text, "advice": advice}))
+        let mut item = json!({"kind": kind, "level": level, "text": text, "advice": advice});
+        if NOTICE_ADVICE.contains(&advice) {
+            item["notice"] = json!(true); // 关注项：Anthropic 那边的状况，不扣环境评分
+        }
+        out.push(item)
     };
     let proxies: Vec<(String, String)> = [
         "HTTPS_PROXY",
@@ -3251,7 +3550,10 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         .iter()
         .map(|h| {
             let h = h.clone();
-            spawn_job(move || resolve_host(&h))
+            spawn_job(move || {
+                let t = Instant::now();
+                (resolve_host(&h), t.elapsed().as_millis())
+            })
         })
         .collect();
     let j_region = {
@@ -3352,30 +3654,52 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     } else {
         "检查本机 DNS 或代理设置；设了代理的话通常由代理解析，可忽略"
     };
+    // 本机解析不了、但这个域名实际连得上（请求走的是代理，域名由代理解析）：不是问题，只说明一下
+    let api_up = api.as_ref().is_some_and(|a| a.0 != 0);
+    let web_up = web.as_ref().is_some_and(|w| w.0 != 0);
     for (host, job) in hosts.iter().zip(&j_dns) {
-        match wait_job(job, within(SERVICE_DNS_SECS)) {
-            Some(Ok(ips)) if !ips.is_empty() => add(
+        let up = (*host == api_host && api_up) || (*host == web_host && web_up);
+        let why = match wait_job(job, within(SERVICE_DNS_SECS)) {
+            Some((Ok(ips), ms)) if !ips.is_empty() => {
+                let shown = ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+                // host 本身就是 IP 地址时没有“解析”这回事
+                let literal = host
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok();
+                if !literal && ips.iter().any(|i| addr_special(i)) {
+                    // 解析成了内网 / 保留地址：解析被本机的软件接管了，说明一下
+                    add(
+                        "dns",
+                        "info",
+                        format!(
+                            "DNS：{} → {}（{} ms）是内网 / 保留地址，解析被本机的代理或安全软件接管了",
+                            host, shown, ms
+                        ),
+                        DNS_SPECIAL_ADVICE,
+                    );
+                } else {
+                    add(
+                        "dns",
+                        "ok",
+                        format!("DNS：{} → {}（{} ms）", host, shown, ms),
+                        "",
+                    );
+                }
+                continue;
+            }
+            Some((Err(e), _)) => format!("解析失败（{}）", e),
+            _ => format!("解析超过 {} 秒没有回应", SERVICE_DNS_SECS),
+        };
+        if up {
+            add(
                 "dns",
-                "ok",
-                format!(
-                    "DNS：{} → {}",
-                    host,
-                    ips.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
-                ),
-                "",
-            ),
-            Some(Err(e)) => add(
-                "dns",
-                "bad",
-                format!("DNS：{} 解析失败（{}）", host, e),
-                dns_advice,
-            ),
-            _ => add(
-                "dns",
-                "bad",
-                format!("DNS：{} 解析超过 {} 秒没有回应", host, SERVICE_DNS_SECS),
-                dns_advice,
-            ),
+                "info",
+                format!("DNS：{} 本机{}，但 {} 连得上", host, why, host),
+                DNS_VIA_PROXY_ADVICE,
+            );
+        } else {
+            add("dns", "bad", format!("DNS：{} {}", host, why), dns_advice);
         }
     }
     // 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息
@@ -3548,12 +3872,12 @@ pub fn service_check(store: &Store) -> Vec<Value> {
     } else if at.is_some() && st == 401 {
         add(
             "api",
-            "warn",
+            "info",
             format!(
                 "{}：服务可达，但当前登录已过期或无效（{} ms）",
                 api_host, ms
             ),
-            "运行一次 claude 会自动续登录，不影响切换账号",
+            "运行一次 claude 会自动续登录，不影响切换账号；不扣环境评分",
         );
     } else if st == 401 {
         add(
@@ -3581,7 +3905,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             "api",
             "bad",
             format!("{}：服务端错误（HTTP {}）", api_host, st),
-            "可能是 Anthropic 故障，稍后再试，可查看 status.claude.com",
+            SERVER_ERROR_ADVICE,
         );
     } else {
         add(
@@ -3629,7 +3953,7 @@ pub fn service_check(store: &Store) -> Vec<Value> {
             "web",
             "bad",
             format!("{}：服务端错误（HTTP {}）", web_host, code),
-            "稍后再试",
+            SERVER_ERROR_ADVICE,
         );
     } else {
         add(
@@ -3682,15 +4006,22 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         "advice": "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，\
                    所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。"
     }));
-    // 总体结论放最前面：评分 + 档位 + 最严重的一条
+    // 总体结论放最前面：评分 + 档位 + 最严重的一条。关注项（Anthropic 那边的状况）不扣分、不算本机这边的问题：
+    // 本机这边有问题时说最严重的那条，那边也有状况就接在后面；本机这边没问题而那边有状况，写明“本机环境没问题，那边有状况”，级别是“注意”
     let sc = risk_score(&out);
-    let first = |lv: &str| out.iter().find(|i| s(i, "level") == Some(lv)).cloned();
-    let (first_bad, first_warn) = (first("bad"), first("warn"));
-    let worst = first_bad.clone().or_else(|| first_warn.clone());
+    let pick = |notice: bool| -> Option<Value> {
+        let hit = |lv: &str| {
+            out.iter()
+                .find(|i| s(i, "level") == Some(lv) && is_notice(i) == notice)
+                .cloned()
+        };
+        hit("bad").or_else(|| hit("warn"))
+    };
+    let (worst, notice) = (pick(false), pick(true));
     let grade = s(&sc, "grade").unwrap_or("");
-    let level = if first_bad.is_some() || grade == "high" {
+    let level = if worst.as_ref().is_some_and(|w| s(w, "level") == Some("bad")) || grade == "high" {
         "bad"
-    } else if first_warn.is_some() || grade == "medium" {
+    } else if worst.is_some() || notice.is_some() || grade == "medium" {
         "warn"
     } else {
         "ok"
@@ -3701,17 +4032,51 @@ pub fn service_check(store: &Store) -> Vec<Value> {
         s(&sc, "label").unwrap_or("")
     );
     // 出口这次没测到，别说成“在支持名单内”
-    let fine = if out.iter().any(|i| s(i, "kind") == Some("env_failed")) {
-        "；Claude 服务连得上，这次没测到出口地区，先按上一次查到的算，其它没有发现风险点"
+    let failed = out.iter().any(|i| s(i, "kind") == Some("env_failed"));
+    let fine = if failed {
+        "这次没测到出口地区，先按上一次查到的算，其它没有发现风险点"
     } else {
-        "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"
+        "出口地区在支持名单内，没有发现风险点"
     };
-    let summary = match &worst {
-        Some(w) => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
-                          "text": format!("{} —— {}", head, s(w, "text").unwrap_or("")), "advice": w["advice"]}),
-        None => json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
-                       "text": format!("{}{}", head, fine), "advice": RISK_SCORE_ADVICE}),
+    let theirs_text = notice
+        .as_ref()
+        .map(|n| {
+            format!(
+                "Anthropic 那边有状况（只提醒，不扣分）：{}",
+                s(n, "text").unwrap_or("")
+            )
+        })
+        .unwrap_or_default();
+    let (text, advice) = match (&worst, &notice) {
+        (Some(w), n) => (
+            format!(
+                "{} —— {}{}",
+                head,
+                s(w, "text").unwrap_or(""),
+                if n.is_some() {
+                    format!("；另外{}", theirs_text)
+                } else {
+                    String::new()
+                }
+            ),
+            w["advice"].clone(),
+        ),
+        (None, Some(n)) => (
+            format!("{}；本机环境这边{}。{}", head, fine, theirs_text),
+            n["advice"].clone(),
+        ),
+        (None, None) => (
+            format!(
+                "{}；Claude 服务{}，{}",
+                head,
+                if failed { "连得上" } else { "正常" },
+                fine
+            ),
+            json!(RISK_SCORE_ADVICE),
+        ),
     };
+    let summary = json!({"kind": "summary", "level": level, "score": sc["score"], "grade": grade,
+                         "text": text, "advice": advice});
     out.insert(0, summary);
     // 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
     let bad: Vec<Value> = out

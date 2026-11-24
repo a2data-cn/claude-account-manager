@@ -5,10 +5,10 @@ use cam_engine::api::{account_health, apply_manual, days_left_at};
 use cam_engine::claude::{identify, identity_agrees};
 use cam_engine::desktop_app::{login_state, version_from_path};
 use cam_engine::health::{
-    auth_item, der_issuer, exit_note, net_fingerprint_of, note_risk_in, parse_status_summary,
-    proxy_endpoints, proxy_vpn_items, region_check_fresh, region_fail_item, region_retry_wait,
-    risk_items, risk_log_view, risk_points, risk_score, status_relevant, status_risk, strip_ago,
-    tls_issuer_item, RISK_LOG_SHOWN,
+    addr_special, auth_item, der_issuer, exit_note, net_fingerprint_of, note_risk_in, parse_hosts,
+    parse_status_summary, proxy_endpoints, proxy_vpn_items, region_check_fresh, region_fail_item,
+    region_retry_wait, risk_items, risk_log_view, risk_points, risk_rules, risk_score,
+    status_relevant, status_risk, strip_ago, tls_issuer_item, RISK_LOG_SHOWN,
 };
 use cam_engine::health::{parse_windows_env, parse_windows_processes};
 use cam_engine::local_report::{report_event, usage_report};
@@ -551,6 +551,72 @@ fn environment_risk_cases() {
                 );
             }
         }
+    }
+}
+
+/// 域名有没有被动过手脚：hosts 文件里指到 Claude / Anthropic 域名的条目、解析出来的地址是不是内网 / 保留地址。
+#[test]
+fn hosts_cases() {
+    let raw = fixture("hosts.json").to_string();
+    let fx: Value =
+        serde_json::from_str(&raw.replace("$now", &chrono::Utc::now().to_rfc3339())).unwrap();
+    for c in cases(&fx, "parse_hosts") {
+        assert_eq!(
+            json!(parse_hosts(c["text"].as_str().unwrap())),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "addr_special") {
+        assert_eq!(
+            json!(addr_special(c["ip"].as_str().unwrap())),
+            c["expect"],
+            "{}",
+            c["ip"]
+        );
+    }
+    for c in cases(&fx, "risk") {
+        let items = risk_items(&c["data"], true, false);
+        let kind = c["kind"].as_str().unwrap_or("hosts");
+        let got = items.iter().find(|i| i["kind"] == kind);
+        if c["expect"].is_null() {
+            assert!(got.is_none(), "{}", c["name"]);
+            continue;
+        }
+        let (got, want) = (got.unwrap(), &c["expect"]);
+        assert_eq!(got["level"], want["level"], "{}", c["name"]);
+        assert_eq!(json!(risk_points(got)), want["points"], "{}", c["name"]);
+        assert_eq!(got["text"], want["text"], "{}", c["name"]);
+        assert!(
+            got["advice"]
+                .as_str()
+                .unwrap()
+                .contains(want["advice_has"].as_str().unwrap()),
+            "{}",
+            c["name"]
+        );
+        assert_eq!(risk_score(&items)["score"], want["score"], "{}", c["name"]);
+    }
+}
+
+/// 给人看的扣分规则和实际扣的分是同一张表；关注项（Anthropic 那边的状况）、说明项不扣分。
+#[test]
+fn risk_rules_cases() {
+    let fx = fixture("risk_rules.json");
+    let got = risk_rules();
+    let want: Vec<Value> = cases(&fx, "rules")
+        .iter()
+        .map(|r| json!({"points": r["points"], "text": r["text"]}))
+        .collect();
+    assert_eq!(got["rules"], json!(want));
+    assert_eq!(got["notices"], fx["notices"]);
+    for r in cases(&fx, "rules") {
+        assert_eq!(json!(risk_points(r)), r["points"], "{}", r);
+        assert!(r["points"].as_i64().unwrap() > 0, "{}", r);
+    }
+    for r in cases(&fx, "no_points") {
+        assert_eq!(risk_points(r), 0, "{}", r);
     }
 }
 

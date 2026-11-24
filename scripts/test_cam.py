@@ -287,6 +287,7 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_TEST_NET"] = "net-a"  # 本机连的是哪张网：固定住，要测换网络的用例自己改
         os.environ["CAM_TEST_LOCALE"] = "en_US"
         os.environ["CAM_TEST_DNS"] = "192.168.1.1"
+        os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
         os.environ["CAM_TEST_PROXY"] = ""  # 不读本机的系统代理设置（macOS 上开着系统代理时结果会变）
         os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
         os.environ["CAM_TEST_ROUTE_IF"] = ""
@@ -371,6 +372,8 @@ class CamTest(unittest.TestCase):
             expires_ms = int((time.time() + 3600) * 1000)
         with open(self.creds_path, "w") as f:
             json.dump(creds(at, rt, expires_ms, sub), f)
+        if os.name != "nt":
+            os.chmod(self.creds_path, 0o600)  # Claude Code 自己写这个文件时就是只有自己能读
 
     def live(self):
         with open(self.creds_path) as f, open(self.cj_path) as g:
@@ -1277,6 +1280,23 @@ class CamTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(open(out).read().splitlines(), ["--resume", "-p", "hi there"])
         self.assertEqual(self.live()[0]["accessToken"], "at-A1")
+
+    def test_launch_prompt_mentions_official_incident_without_deducting(self):
+        """官方状态页有公告：不扣环境评分，启动 claude 前照样说一声（不然撞上官方故障会以为是自己这边的问题），不问、直接启动。"""
+        self._two_accounts()
+        store = self.cam.Store()
+        MockAnthropic.status_summary = "incident"
+        self.cam.check_region(store, max_age=0)
+        d = self.data()
+        self.assertIn(next(r for r in self.cam.risk_items(d) if r["kind"] == "status")["level"], ("warn", "bad"))
+        self.assertEqual(self.cam.risk_score(self.cam.risk_items(d))["score"], 100)
+        self.assertEqual([e["score"] for e in d["risk_log"]], [100])  # 不扣分，也就不记成一次分数变化
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertTrue(self.cam.risk_prompt_before_launch(store, ask=lambda _: self.fail("不该问"), interactive=True))
+        self.assertIn("环境评分 100/100", err.getvalue())
+        self.assertIn("Anthropic 官方状态页", err.getvalue())
+        self.assertIn("不扣环境评分", err.getvalue())
 
     def test_launch_risk_prompt_tiers(self):
         a_id, b_id = self._two_accounts()
@@ -3410,10 +3430,69 @@ foreach ($dark in @($false, $true)) {{
         # 官方限流、过载：留意，说清楚不是网络或账号的问题
         for code, word in ((429, "官方在限流（HTTP 429"), (529, "官方服务过载（HTTP 529")):
             MockAnthropic.usage_code = code
-            api = next(i for i in self.cam.service_check(None) if i["kind"] == "api")
+            items = self.cam.service_check(None)
+            api = next(i for i in items if i["kind"] == "api")
             self.assertEqual(api["level"], "warn", code)
             self.assertIn(word, api["text"])
             self.assertIn("不是网络或账号的问题", api["advice"])
+            # 关注项：Anthropic 那边的状况，标出来但不扣环境评分；总体结论里单独说
+            self.assertTrue(api.get("notice"))
+            self.assertEqual(self.cam.risk_points(api), 0)
+            self.assertIn("不扣环境评分", api["advice"])
+            self.assertIn("Anthropic 那边有状况（只提醒，不扣分）：", items[0]["text"])
+            self.assertEqual(items[0]["score"], self.cam.risk_score([i for i in items if i is not api])["score"])
+        MockAnthropic.usage_code = 500  # 服务端错误：也是 Anthropic 那边的，以前扣 40 分
+        items = self.cam.service_check(None)
+        api = next(i for i in items if i["kind"] == "api")
+        self.assertEqual((api["level"], api.get("notice"), self.cam.risk_points(api)), ("bad", True, 0))
+        self.assertIn("服务端错误（HTTP 500）", api["text"])
+        self.assertIn("本机环境这边", items[0]["text"])  # 本机这边没问题：结论是“注意”，不是“异常”
+        self.assertEqual((items[0]["level"], items[0]["score"]), ("warn", 100))
+        MockAnthropic.usage_code = None
+        # 存进 service_status 再回到顶部环境卡时，关注项的标记还在：/api/state 里也是 0 分
+        store = self.cam.Store()
+        MockAnthropic.usage_code = 529
+        self.cam.service_check(store)
+        st = self.cam.public_state(store, self.data())
+        api = next(r for r in st["risks"] if r["kind"] == "api")
+        self.assertEqual((api.get("notice"), api["points"]), (True, 0))
+        self.assertEqual(st["risk_score"]["score"], 100)
+        self.assertGreater(len(st["risk_rules"]["rules"]), 20)
+        MockAnthropic.usage_code = None
+
+    def test_dns_check_tells_real_problems_from_harmless_ones(self):
+        """DNS 实测：解析不了又连不上才是问题（扣分）；解析不了但实际连得上（请求走代理）、解析成内网 / 保留地址（被本机的软件接管）只说明。"""
+        cam = self.cam
+        named = cam.API_BASE.replace("127.0.0.1", "localhost")  # 用域名才有“解析”这回事
+
+        def dns_items(resolve, base=named):
+            with mock.patch.object(cam, "API_BASE", base), mock.patch.object(cam, "CLAUDE_WEB_BASE", base), \
+                    mock.patch.object(cam, "resolve_host", resolve):
+                return [i for i in cam.service_check(None) if i["kind"] == "dns"]
+
+        def fail(host):
+            raise OSError("Name or service not known")
+        # 正常：写出地址和用了多少毫秒
+        [ok] = dns_items(lambda h: ["160.79.104.10"])
+        self.assertEqual(ok["level"], "ok")
+        self.assertRegex(ok["text"], r"^DNS：localhost → 160\.79\.104\.10（\d+ ms）$")
+        # 本机解析不了，但这个域名实际连得上：只说明，不扣分
+        [via] = dns_items(fail)
+        self.assertEqual((via["level"], cam.risk_points(via)), ("info", 0))
+        self.assertIn("本机解析失败（Name or service not known），但 localhost 连得上", via["text"])
+        self.assertIn("不扣分", via["advice"])
+        # 解析不了、也连不上：异常，扣 20 分
+        dead = f"http://localhost:{free_port()}"
+        [bad] = dns_items(fail, dead)
+        self.assertEqual((bad["level"], cam.risk_points(bad)), ("bad", 20))
+        self.assertIn("DNS：localhost 解析失败", bad["text"])
+        # 解析成了内网 / 保留地址：解析被本机的软件接管了，说明一下
+        [fake] = dns_items(lambda h: ["198.18.0.5"])
+        self.assertEqual((fake["level"], cam.risk_points(fake)), ("info", 0))
+        self.assertIn("是内网 / 保留地址", fake["text"])
+        # 地址本身就是 IP（测试里的假服务器）：没有解析这回事，不这么说
+        [lit] = dns_items(lambda h: ["127.0.0.1"], cam.API_BASE)
+        self.assertEqual(lit["level"], "ok")
 
     def test_status_page_counts_only_claude_components(self):
         """官方状态页按组件看：别的组件出故障不提醒、不扣分；summary.json 连不上时退回 status.json 的总体状态。"""
@@ -3568,13 +3647,13 @@ foreach ($dark in @($false, $true)) {{
         d["region"]["skew"] = 900
         ch = self.cam.risk_log_view(d)["changes"][0]
         self.assertEqual((ch["at"], ch["prev"], ch["score"], [i["kind"] for i in ch["added"]]), (None, 100, 90, ["clock"]))
-        # 面板的“重新检测”（service_check）：出口和服务都测完才记，一次检测只记一笔（出口走了 WARP −5，官方限流 −5）
-        MockAnthropic.usage_code = 429
+        # 面板的“重新检测”（service_check）：出口和服务都测完才记，一次检测只记一笔（出口走了 WARP −5，claude.ai 返回人机验证页 −5）
+        MockAnthropic.cloudflare = True
         self.cam.service_check(store)
         log = self.data()["risk_log"]
         self.assertEqual([e["score"] for e in log], [90, 100, 95, 100])
-        self.assertEqual([i["kind"] for i in log[0]["items"]], ["api", "warp"])
-        MockAnthropic.usage_code = None
+        self.assertEqual([i["kind"] for i in log[0]["items"]], ["web", "warp"])
+        MockAnthropic.cloudflare = False
         # 最多留 RISK_LOG_KEEP 笔，界面上列最近 RISK_LOG_SHOWN 次
         d = self.data()
         for n in range(self.cam.RISK_LOG_KEEP + 5):
@@ -3651,6 +3730,7 @@ foreach ($dark in @($false, $true)) {{
             self.assertEqual(risks_with(CAM_TEST_DNS="168.95.1.1")["dns_resolver"]["level"], "info")
         finally:
             os.environ["CAM_TEST_DNS"] = "192.168.1.1"
+            os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
         self.cam.check_region(store, max_age=0)
         # IP 类型：数据库标记为代理 → warn；机房 → warn；手机 → 不提；IPv6 出口和 IPv4 不同 → warn；注册国不同 → info
         MockAnthropic.ipapi_type = "proxy"
@@ -3767,6 +3847,7 @@ foreach ($dark in @($false, $true)) {{
             dns = self.cam.system_dns_servers()
         finally:
             os.environ["CAM_TEST_DNS"] = "192.168.1.1"
+            os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
         self.assertEqual([(d["ip"], d["private"], d["name"], d["country"]) for d in dns],
                          [("10.0.0.1", True, None, None), ("8.8.8.8", False, "Google", None), ("223.5.5.5", False, "阿里 DNS", "CN"),
                           ("fe80::1", True, None, None), ("1.2.3.4", False, None, None)])
@@ -3894,8 +3975,11 @@ foreach ($dark in @($false, $true)) {{
         fresh = self.cam.risk_items(put(self.cam.now_iso()))
         self.assertEqual(kinds(fresh), ["proxy", "isp", "clock", "status", "accounts"])
         self.assertFalse([r for r in fresh if "检测的）" in r["text"]])
-        self.assertEqual(self.cam.risk_score(fresh)["score"], 100 - 5 - 20 - 10 - 30)
-        # 两天前测的：每条标出来，两天前的故障不算，多一条 env_stale；分数只少了故障那一项
+        self.assertEqual(self.cam.risk_score(fresh)["score"], 100 - 5 - 20 - 10)  # 官方故障只提醒，不扣分
+        status = next(r for r in fresh if r["kind"] == "status")
+        self.assertEqual((status["level"], self.cam.risk_points(status)), ("bad", 0))
+        self.assertIn("不扣环境评分", status["advice"])
+        # 两天前测的：每条标出来，两天前的故障不算，多一条 env_stale；分数没变（故障本来就不扣分）
         old = self.cam.risk_items(put(ago(days=2)))
         self.assertEqual(kinds(old), ["proxy", "isp", "clock", "accounts", "env_stale"])
         by = {r["kind"]: r for r in old}
@@ -5602,6 +5686,157 @@ foreach ($dark in @($false, $true)) {{
         self.assertEqual(self.run_cam("env", "clean", "--restore"), 0)
         self.assertTrue(os.path.isfile(os.path.join(cfg, "settings.json")))
 
+    def test_claude_alias_in_shell_config_is_only_a_notice(self):
+        """终端配置里给 claude 起的别名、同名函数：只提示在哪一行（不显示内容，里面可能带 Key），不算问题、一键清理不动它；
+        指到 cam claude 的不提。"""
+        cam = self.cam
+        with open(os.path.join(self.tmp, ".zshrc"), "w", encoding="utf-8") as f:
+            f.write("export PATH=$HOME/bin:$PATH\n"
+                    "alias claude='ANTHROPIC_API_KEY=SECRET-in-alias claude --verbose'\n"
+                    "# alias claude=old\n"
+                    "alias cc=claude\n")
+        with open(os.path.join(self.tmp, ".bashrc"), "w", encoding="utf-8") as f:
+            f.write("claude() {\n  /opt/tools/wrap.sh \"$@\"\n}\n"
+                    "function claude {\n  cam claude \"$@\"\n}\n"
+                    "alias claude=\"cam claude\"\n")
+        got = cam.claude_wrap_findings()
+        self.assertEqual([(f["level"], f["fix"], f["optional"]) for f in got], [("info", None, False)] * 2)
+        texts = sorted(f["text"] for f in got)
+        self.assertIn("~/.bashrc 第 1 行给 claude 定义了同名函数", texts[0])
+        self.assertIn("~/.zshrc 第 2 行给 claude 定义了别名", texts[1])
+        self.assertNotIn("SECRET", json.dumps(got, ensure_ascii=False))
+        self.assertIn("是你自己加的", got[0]["advice"])
+        plan = cam.env_fix_plan(None, with_cache=False)
+        self.assertFalse(plan["fix"])  # 一键清理不动它
+        self.assertEqual(len([f for f in plan["manual"] if "给 claude 定义了" in f["text"]]), 2)
+        self.assertFalse([t for t in cam.override_findings() if "给 claude 定义了" in t])  # 不算“让 Claude Code 不用订阅登录的设置”
+
+    def test_credentials_file_readable_by_others_is_flagged(self):
+        """Claude Code 的登录凭据文件别的用户也读得到：环境里标“注意”、扣 15 分，诊断报告里也写；只有自己能读就没有这一条。只看，不改。"""
+        if os.name == "nt":
+            self.skipTest("Windows 的权限不是这么管的")
+        cam = self.cam
+        self._two_accounts()
+        store = cam.Store()
+        self.assertIsNone(cam.creds_file_mode())  # Claude Code 自己写的：600
+        os.chmod(self.creds_path, 0o644)
+        self.assertEqual(cam.creds_file_mode(), "644")
+        cam.check_region(store, max_age=0)
+        d = self.data()
+        item = next(r for r in cam.risk_items(d) if r["kind"] == "creds_perm")
+        self.assertEqual((item["level"], cam.risk_points(item)), ("warn", 15))
+        self.assertIn("权限是 0644", item["text"])
+        self.assertIn("chmod 600 ~/.claude/.credentials.json", item["advice"])
+        self.assertEqual(os.stat(self.creds_path).st_mode & 0o777, 0o644)  # 只看，不改
+        rep = cam.account_diagnostic(store, d, d["accounts"][0]["id"])
+        text = cam.diagnostic_text(rep)
+        self.assertIn("凭据文件权限 0644（别的用户读得到）", text)
+        self.assertIn("hosts 文件没动 Claude 的域名", text)
+        self.assertIn("## 环境评分的变化", text)
+        self.assertIn("−15 分", text)
+        os.chmod(self.creds_path, 0o600)
+        cam.check_region(store, max_age=0)
+        self.assertFalse([r for r in cam.risk_items(self.data()) if r["kind"] == "creds_perm"])
+
+    def test_env_purge_can_delete_backups(self):
+        """彻底清理留下的备份可以删：确认时勾“同时删掉以前的”、勾“这次也不留”，或者单独删。只删 cam 备份目录里自己的那几份，
+        一键清理的备份（-fix）、目录外面的东西不碰；删了就恢复不了，账号还在 cam 里。"""
+        cam = self.cam
+        self.login("at-A1", "rt-A1", "uuid-A", "a@x.com")
+        self.assertEqual(self.run_cam("import", "--label", "A"), 0)
+        cfg = os.path.join(self.tmp, ".claude")
+        store = cam.Store()
+        root = os.path.join(store.root, "env-backups")
+
+        def fresh_config(mark):  # 清理之后又运行了 claude：生成一份新的
+            os.makedirs(cfg, exist_ok=True)
+            with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+                json.dump({"mark": mark}, f)
+        purges = lambda: sorted(n for n in os.listdir(root) if n.endswith("-purge"))  # noqa: E731
+        fresh_config(1)
+        self.assertEqual(cam.env_purge_view(store)["backups"]["count"], 0)
+        first = cam.env_purge(store)
+        fresh_config(2)
+        second = cam.env_purge(store)
+        fix = os.path.join(root, "20260101-000000-000000-fix")  # 一键清理自己的备份：不归这里管
+        os.makedirs(fix)
+        with open(os.path.join(fix, "manifest.json"), "w") as f:
+            f.write("{}")
+        outside = os.path.join(self.tmp, "elsewhere")  # 备份目录里一个指到外面的链接：不跟过去删
+        os.makedirs(os.path.join(outside, "claude-config"))
+        if os.name != "nt":
+            os.symlink(outside, os.path.join(root, "20260102-000000-000000-purge"))
+        b = cam.env_purge_view(store)["backups"]
+        self.assertEqual(b["count"], 2 if os.name == "nt" else 3)
+        self.assertRegex(b["size"], r"^\d")
+        # 1. 确认彻底清理时勾“同时删掉以前留下的备份”：以前的两份没了，这次的留着，还能恢复
+        fresh_config(3)
+        r = cam.env_purge_run(store, drop_backups=True)
+        self.assertEqual((r["dropped"]["removed"], r["kept_backup"]), (2, True))
+        self.assertFalse(os.path.exists(first) or os.path.exists(second))
+        self.assertTrue(os.path.isfile(os.path.join(r["backup"], "claude-config", "settings.json")))
+        self.assertTrue(os.path.isdir(fix))
+        self.assertTrue(os.path.isdir(os.path.join(outside, "claude-config")))  # 链接指到的外面那份原样
+        if os.name != "nt":
+            self.assertEqual(r["dropped"]["left"], [cam.short_path(os.path.join(root, "20260102-000000-000000-purge"))])
+            os.unlink(os.path.join(root, "20260102-000000-000000-purge"))
+        self.assertEqual(purges(), [os.path.basename(r["backup"])])
+        self.assertTrue(cam.env_purge_view(store)["restore_at"])
+        # 2. 勾“这次也不留备份”：清掉的配置直接删了，备份目录里一份彻底清理的都不剩，恢复不了；账号还在 cam 里
+        fresh_config(4)
+        r = cam.env_purge_run(store, keep_backup=False)
+        self.assertEqual((r["backup"], r["kept_backup"], r["dropped"]["removed"]), (None, False, 2))
+        self.assertFalse(os.path.exists(cfg))
+        self.assertEqual(purges(), [])
+        self.assertIsNone(cam.env_purge_view(store)["restore_at"])
+        with self.assertRaises(cam.CamError):
+            cam.env_purge_restore(store)
+        self.assertTrue(any(a["label"] == "A" for a in self.data()["accounts"]))
+        self.assertTrue(os.path.isdir(fix))
+        # 3. 单独删（命令行）：先预演，--apply -y 才删
+        fresh_config(5)
+        kept = cam.env_purge(store)
+        code, out = self.run_cam_out("env", "clean", "--drop-backups")
+        self.assertIn("将删除以前彻底清理留下的 1 份备份", out)
+        self.assertIn("这只是预演", out)
+        self.assertTrue(os.path.isdir(kept))
+        code, out = self.run_cam_out("env", "clean", "--drop-backups", "--apply", "-y")
+        self.assertIn("已删除 1 份备份", out)
+        self.assertFalse(os.path.exists(kept))
+        code, out = self.run_cam_out("env", "clean", "--drop-backups", "--apply", "-y")
+        self.assertIn("没有彻底清理留下的备份", out)
+        self.assertNotEqual(self.run_cam("env", "clean", "--no-backup", "--apply", "-y"), 0)  # 要和 --purge 一起用
+        # 命令行的 --purge --no-backup
+        fresh_config(6)
+        code, out = self.run_cam_out("env", "clean", "--purge", "--no-backup", "--apply", "-y")
+        self.assertIn("不留备份", out)
+        self.assertIn("恢复不了", out)
+        self.assertFalse(os.path.exists(cfg))
+        self.assertEqual(purges(), [])
+        # 面板的接口：只删备份要带“删除备份”四个字
+        fresh_config(7)
+        last = cam.env_purge(store)
+        token = cam.server_token(store)
+        srv = cam.ThreadingServer(("127.0.0.1", 0), cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def post(body):
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/api/env-purge", method="POST", data=json.dumps(body).encode(),
+                                         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+            try:
+                with opener.open(req, timeout=20) as resp:
+                    return resp.status, json.load(resp)
+            except urllib.error.HTTPError as e:
+                return e.code, json.load(e)
+        self.assertEqual(post({"drop_backups": True})[0], 400)
+        self.assertTrue(os.path.isdir(last))
+        code, body = post({"drop_backups": True, "confirm": "删除备份"})
+        self.assertEqual((code, body["dropped"]["removed"], body["dropped"]["left"]), (200, 1, []))
+        self.assertFalse(os.path.exists(last))
+
     def test_env_fix_http_api(self):
         files = self._relay_setup()
         before = _rb(files["settings"])
@@ -6918,6 +7153,38 @@ class SharedFixtureTest(unittest.TestCase):
             for field in ("text", "advice"):
                 for kind, text in c["expect_" + field].items():
                     self.assertIn(text, items[kind][field], c["name"])
+
+    def test_hosts_and_special_addresses(self):
+        """域名有没有被动过手脚：hosts 文件里指到 Claude / Anthropic 域名的条目、解析出来的地址是不是内网 / 保留地址。"""
+        import datetime as dt
+        fx = json.loads(json.dumps(shared("hosts.json")).replace("$now", dt.datetime.now(dt.timezone.utc).isoformat()))
+        for c in fx["parse_hosts"]:
+            self.assertEqual(self.cam.parse_hosts(c["text"]), c["expect"], c["name"])
+        for c in fx["addr_special"]:
+            self.assertEqual(self.cam.addr_special(c["ip"]), c["expect"], c["ip"])
+        for c in fx["risk"]:
+            items = self.cam.risk_items(c["data"], note_age=False)
+            got = next((i for i in items if i["kind"] == c.get("kind", "hosts")), None)
+            if c["expect"] is None:
+                self.assertIsNone(got, c["name"])
+                continue
+            self.assertEqual((got["level"], self.cam.risk_points(got), got["text"]), (c["expect"]["level"], c["expect"]["points"], c["expect"]["text"]), c["name"])
+            self.assertIn(c["expect"]["advice_has"], got["advice"], c["name"])
+            self.assertEqual(self.cam.risk_score(items)["score"], c["expect"]["score"], c["name"])
+
+    def test_risk_rules(self):
+        """给人看的扣分规则和实际扣的分是同一张表；关注项（Anthropic 那边的状况）、说明项不扣分。"""
+        fx = shared("risk_rules.json")
+        got = self.cam.risk_rules()
+        self.assertEqual(got["rules"], [{"points": r["points"], "text": r["text"]} for r in fx["rules"]])
+        self.assertEqual(got["notices"], fx["notices"])
+        for r in fx["rules"]:
+            self.assertEqual(self.cam.risk_points({"kind": r["kind"], "level": r["level"]}), r["points"], r)
+            self.assertGreater(r["points"], 0, r)
+        for r in fx["no_points"]:
+            self.assertEqual(self.cam.risk_points(r), 0, r)
+        # 每个会扣分的 (kind, level) 都有一句给人看的说法，没有多出来的
+        self.assertEqual({k for k, v in self.cam.RISK_WEIGHTS.items() if v > 0}, {(r["kind"], r["level"]) for r in fx["rules"]})
 
     def test_risk_log(self):
         """环境评分：每条扣几分、分数变了记一笔、界面上的“分数变化”。"""

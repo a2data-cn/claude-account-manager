@@ -2589,7 +2589,8 @@ def note_incident(data, acc, new_usage):
     acc.setdefault("incidents", []).insert(0, {
         "at": now_iso(), "kind": kind, "error": err,
         "region": {k: reg.get(k) for k in ("loc", "ip", "org", "asn", "city", "ip_type", "reg_loc", "warp", "colo", "skew", "lookup_mode", "checked_at")},
-        "env": {k: env.get(k) for k in ("tz", "locale", "dns", "proxy", "tunnel")},
+        # hosts、creds_mode：hosts 文件有没有改 Claude 的域名、凭据文件别人读不读得到（出问题时一起记下）
+        "env": {k: env.get(k) for k in ("tz", "locale", "dns", "proxy", "tunnel", "hosts", "creds_mode")},
         "sessions": session_count(), "active": (data.get("active") or {}).get("claude_code") == acc["id"], "risk_score": score})
     acc["incidents"] = acc["incidents"][:INCIDENT_KEEP]
 
@@ -3046,6 +3047,9 @@ def risk_prompt_before_launch(store, ask=input, interactive=None):
     err = sys.stderr
     if tier == "ok":
         print(color(f"[cam] 环境评分 {sc['score']}/100：{sc['label']}", "d"), file=err)
+        for r in risks:  # 官方状态页有公告：不扣分，启动前还是说一声（不然撞上官方故障会以为是自己这边的问题）
+            if r["kind"] == "status" and r["level"] in ("warn", "bad"):
+                print(color(f"[cam]   · {r['text']}。{r['advice']}", "y"), file=err)
         return True
     print(color(f"[cam] 环境评分 {sc['score']}/100：{sc['label']}", "r" if tier == "strong" else "y"), file=err)
     for r in risks:
@@ -4244,7 +4248,7 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "risk_log": risk_log_view(data), "sessions": sessions_brief(),
+            "risk_score": risk_score(risks), "risk_log": risk_log_view(data), "risk_rules": risk_rules(), "sessions": sessions_brief(),
             "desktop_app": desk_app, "attention": attention_view(), "generated_at": now_iso()}
 
 
@@ -5294,8 +5298,14 @@ def diagnostic_text(rep):
     def env_line(e):
         px = e.get("proxy") or []
         tun = e.get("tunnel")
-        return (f"时区 {e.get('tz') or '未知'} · 语言 {e.get('locale') or '未知'} · 代理 {'；'.join(px) if px else '无'} · "
+        line = (f"时区 {e.get('tz') or '未知'} · 语言 {e.get('locale') or '未知'} · 代理 {'；'.join(px) if px else '无'} · "
                 f"VPN {tun[0] + '（' + tun[1] + '）' if tun else '无'} · DNS {'、'.join(dns_name(d) for d in e.get('dns') or []) or '未知'}")
+        if "hosts" in e:  # 旧版本记的现场没有这两项，没有就不写
+            hs = [h for h in e.get("hosts") or [] if isinstance(h, dict)]
+            line += " · hosts 文件" + ("把 " + "、".join(f"{h.get('host')} 指到了 {h.get('ip')}" for h in hs) if hs else "没动 Claude 的域名")
+        if e.get("creds_mode"):
+            line += f" · 凭据文件权限 0{e['creds_mode']}（别的用户读得到）"
+        return line
 
     L = [f"# cam 账号诊断：{a['label']}" + (f"（{a['email']}）" if a.get("email") and a["email"] != a["label"] else ""),
          f"生成于 {_when(rep['generated_at'])} · 本机 {rep['host']}（{rep['platform']}）· cam {rep['cam_version']} · 不含任何密钥", "",
@@ -5340,16 +5350,16 @@ def diagnostic_text(rep):
     L.append(f"- {env_line(env)}")
     L.append(f"- 环境评分 {sc['score']}/100（{sc['label']}）")
     L += [f"- [{ {'bad': '风险', 'warn': '注意', 'info': '提示', 'ok': '正常'}.get(r['level'], r['level'])}] {r['text']}"
-          + (f" −{r['points']} 分" if r.get("points") else "")
+          + (f" −{r['points']} 分" if r.get("points") else " 只提醒，不扣分" if r.get("notice") else "")
           + (f"（{r['advice']}）" if r.get("advice") else "") for r in rep["risks"]]
-    rl = rep.get("risk_log") or {}
-    if rl.get("changes"):
-        L += ["", "## 环境评分的变化"]
-        L += [f"- {_when(c['at']) if c.get('at') else '现在'}：{risk_change_line(c)}" for c in rl["changes"]]
-        L.append(f"- 从 {_when(rl['since'])} 开始记录")
     sp = rep.get("status_page") or {}
     if sp.get("text") or sp.get("description"):
         L.append(f"- Anthropic 状态页：{sp.get('text') or sp.get('description')}")
+    rl = rep.get("risk_log") or {}
+    L += ["", "## 环境评分的变化"]  # 分数什么时候变的、多了 / 少了哪条、当时出口换没换：账号出问题时对着时间看
+    L += [f"- {_when(c['at']) if c.get('at') else '现在'}：{risk_change_line(c)}" for c in rl.get("changes") or []]
+    L.append(f"- 从 {_when(rl['since'])} 开始记录" + ("" if rl.get("changes") else "，之后分数没变过") if rl.get("since")
+             else "- 还没开始记录（开着 cam serve、桌面版或菜单栏 / 托盘小工具时，每次环境检测后分数变了就记一笔）")
     L += ["", "## 最近切换"]
     L += [f"- {_when(e['at'])} → {e['to']}" + ("（这个号）" if e.get("this") else "") for e in rep["switches"][-15:]] or ["- 没有切换记录"]
     L += ["", "## 本机", f"- 正在跑的 claude 会话：{rep.get('sessions') or 0} 个"
@@ -5793,14 +5803,20 @@ def make_handler(store, token):
                 if method == "GET" and parts == ["env-purge"]:  # 彻底清理要先给人看的：移走哪些、能不能恢复
                     return self._send(200, env_purge_view(store))
                 if method == "POST" and parts == ["env-purge"]:
-                    # {"purge": true, "confirm": "彻底清理"}：移走整个 Claude Code 配置（要带上这四个字，免得误点）；{"restore": true}：放回去
+                    # {"purge": true, "confirm": "彻底清理"}：移走整个 Claude Code 配置（要带上这四个字，免得误点），
+                    # 再带 drop_backups: true 把以前留下的备份删掉、no_backup: true 这次的也不留（都恢复不了）；
+                    # {"restore": true}：放回去；{"drop_backups": true, "confirm": "删除备份"}：只删以前留下的备份，不清理
                     b = self._body()
                     if b.get("restore") is True:
                         return self._send(200, env_purge_restore(store))
+                    if b.get("purge") is not True and b.get("drop_backups") is True:
+                        if b.get("confirm") != "删除备份":
+                            raise CamError("要删除备份请带 drop_backups: true 和 confirm: “删除备份”")
+                        return self._send(200, {"dropped": env_purge_drop_backups(store)})
                     if b.get("purge") is not True or b.get("confirm") != "彻底清理":
                         raise CamError("要彻底清理请带 purge: true 和 confirm: “彻底清理”")
-                    dest = env_purge(store)
-                    return self._send(200, {"backup": dest, **purge_env_result(dest)})
+                    return self._send(200, env_purge_run(store, drop_backups=b.get("drop_backups") is True,
+                                                         keep_backup=b.get("no_backup") is not True))
                 if method == "GET" and parts == ["update"]:  # 只有脚本版有：桌面版的服务返回 404，面板据此隐藏“检查更新”
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     if (q.get("saved") or [""])[0]:
@@ -6921,6 +6937,15 @@ def cmd_set(store, args):
 
 def cmd_risk(store, args):
     """查看 / 设置 cam claude 启动前的风险提醒档位，以及外部 IP 查询（隐私）设置。"""
+    if getattr(args, "rules", False):  # 扣分规则：每个信号扣几分，哪些只提醒不扣分
+        rr = risk_rules()
+        print("环境评分 100 分起扣，每个信号扣几分（只提醒，不拦任何操作）：")
+        for r in rr["rules"]:
+            print(f"  −{r['points']:<3} {r['text']}")
+        print("只提醒、不扣分的：")
+        for t in rr["notices"]:
+            print(f"  · {t}")
+        return
     if args.on or args.off or args.confirm is not None or args.strong is not None:
         p = save_risk_prefs(store, prompt=True if args.on else False if args.off else None,
                             confirm=args.confirm, strong=args.strong)
@@ -6954,6 +6979,9 @@ def cmd_risk(store, args):
             print(f"  −{pts:<3} {r['text']}")
         if not lost:
             print("  没有扣分的项")
+        for r in risk_items(data):  # 关注项：Anthropic 那边的状况，标出来但不扣分
+            if r.get("notice"):
+                print(f"  关注 {r['text']}（只提醒，不扣分）")
         rl = risk_log_view(data)
         if rl["changes"]:
             print("最近的分数变化（新的在前）：")
@@ -7686,6 +7714,47 @@ def env_removed_by_fix():
     return keys
 
 
+# shell / PowerShell 配置里给 claude 起的别名、同名函数：bash / zsh 的 alias claude=…、claude() {…}、function claude…，
+# fish 的 alias claude …、function claude，PowerShell 的 function claude、Set-Alias / New-Alias claude
+CLAUDE_WRAP_RE = re.compile(
+    r"^\s*(?:(?P<alias>alias\s+(?:-g\s+)?claude(?:=|\s)|(?:Set|New)-Alias\s+(?:-Name\s+)?claude(?:\s|$))"
+    r"|(?:function\s+)?claude\s*\(\s*\)|function\s+claude(?:\s|\{|$))", re.I)
+CLAUDE_WRAP_OURS_RE = re.compile(r"\bcam(?:\.py|\.cmd)?[\"']?\s+claude\b")  # 指到 cam claude 的是 cam 自己的用法，不提
+
+
+def claude_wrap_findings():
+    """终端配置里给 claude 定义的别名、同名函数：在终端里敲 claude，运行的是它，不是直接运行 Claude Code。
+    很多是自己加的（自己的项目、常用参数），所以只是“提示”：说在哪个文件第几行，不显示内容（里面可能带着 Key）；
+    指到 cam claude 的不提。函数看定义那行和后面几行。"""
+    files = [os.path.expanduser(p) for p in SHELL_FILES]
+    if IS_WIN or os.environ.get("CAM_TEST_PS_PROFILES"):
+        files += powershell_profiles()
+    files += powershell_system_profiles()
+    out, seen = [], set()
+    for path in files:
+        real = os.path.realpath(path)
+        if not os.path.isfile(path) or real in seen:
+            continue
+        seen.add(real)
+        lines = (read_text_file(path)[0] or "").splitlines()
+        for n, line in enumerate(lines, 1):
+            m = CLAUDE_WRAP_RE.match(line)
+            if not m:
+                continue
+            body = [line]
+            if not m.group("alias"):  # 函数：看到它的右花括号（fish / PowerShell 的 end、}）为止，最多十几行
+                for nxt in lines[n:n + 12]:
+                    body.append(nxt)
+                    if nxt.strip() in ("}", "end"):
+                        break
+            if CLAUDE_WRAP_OURS_RE.search(" ".join(body)):
+                continue
+            kind = "别名" if m.group("alias") else "同名函数"
+            out.append(_finding("info", f"{short_path(path)} 第 {n} 行给 claude 定义了{kind}：在终端里敲 claude，运行的是它，不是直接运行 Claude Code",
+                                "是你自己加的（自己的项目、常用参数）就没事；不记得加过的话打开这个文件看看它做了什么，不认识就把这一行删掉"))
+    return out
+
+
 def override_findings():
     """会让 Claude Code 不用订阅登录的设置，一句一条（cam doctor、cam env install 用）。"""
     return [f["text"] for f in env_findings()[0] if f["fix"] is not None or f["level"] != "info"]
@@ -7722,7 +7791,8 @@ def env_findings():
             f = _env_finding(k, f"环境变量 {env_shown(k, os.environ.get(k))} 只在当前这个终端里有：{ENV_WHAT[k]}", "", None, cloud_on())
             f["advice"] = "不是在配置文件里设的（可能是这次手动 export 的，或者打开终端的程序带的）：关掉终端重开就没了，重开还在就看看是哪个程序设的"
             out.append(f)
-    return out + ca_findings() + hook_findings() + mcp_findings() + owner_findings() + relay_tool_findings(), live
+    return (out + ca_findings() + hook_findings() + mcp_findings() + owner_findings() + relay_tool_findings()
+            + claude_wrap_findings()), live
 
 
 def install_kind(real):
@@ -8919,10 +8989,11 @@ def env_purge_view(store):
     有没有能恢复的上一次，有没有 claude 在跑。"""
     move = [{"path": short_path(p), "size": human_size(path_size(p))} for p, _ in purge_targets()]
     env = [{"text": f["text"], "admin": needs_admin(f)} for f in purge_env_items()]
-    last = next(((d, m) for d, m in env_purge_backups(store) if not m.get("restored_at")), None)
+    last = next(((d, m) for d, m in env_purge_backups(store) if not (m or {}).get("restored_at")), None)
     procs = running_claude_processes()
-    return {"move": move, "env": env, "keychain": use_keychain() and keychain_exists(), "restore_at": last[1].get("at") if last else None,
-            "running": None if isinstance(procs, ProcsUnknown) else len(procs)}
+    b = purge_backup_size(store)  # 以前留下的备份：几份、多大（确认框里可以勾“同时删掉”，也可以单独删）
+    return {"move": move, "env": env, "keychain": use_keychain() and keychain_exists(), "restore_at": (last[1] or {}).get("at") if last else None,
+            "running": None if isinstance(procs, ProcsUnknown) else len(procs), "backups": {"count": b["count"], "size": b["size"]}}
 
 
 def env_purge(store, force=False):
@@ -8959,12 +9030,63 @@ def env_purge_backups(store):
     return out
 
 
+def purge_backup_size(store):
+    """彻底清理留下的备份一共几份、多大：{"count", "bytes", "size"}。每次彻底清理都把整个配置搬进去、一直留着，
+    会话记录多的话一份就是几个 GB。"""
+    dirs = [d for d, _ in env_purge_backups(store)]
+    total = sum(path_size(d) for d in dirs)
+    return {"count": len(dirs), "bytes": total, "size": human_size(total)}
+
+
+def env_purge_drop_backups(store, keep=()):
+    """把彻底清理留下的备份删掉（删了恢复不了）：env-backups 里每一份彻底清理的备份，连同它第二步留的那份 -fix 备份
+    （别处的中转设置改之前的样子）。keep 里的目录不删。只删 cam 数据目录 env-backups 正下方、env_purge_backups 认得的真目录，
+    是链接的、不在那下面的一律不碰。返回 {"removed": 几份, "freed": 多大, "left": [没删掉的]}。"""
+    root = os.path.realpath(os.path.join(store.root, "env-backups"))
+
+    def ours(d):
+        return os.path.isdir(d) and not os.path.islink(d) and os.path.dirname(os.path.realpath(d)) == root
+    removed, freed, left = 0, 0, []
+    keep = {os.path.realpath(k) for k in keep if k}
+    for d, m in env_purge_backups(store):
+        if os.path.realpath(d) in keep:
+            continue
+        if not ours(d):
+            left.append(short_path(d))
+            continue
+        size, fb = path_size(d), (m or {}).get("fix_backup")
+        _rmtree_quiet(d)
+        if os.path.lexists(d):  # 里面有文件被占用，没删干净
+            left.append(short_path(d))
+            continue
+        removed, freed = removed + 1, freed + size
+        if fb and str(fb).endswith("-fix") and ours(fb) and os.path.realpath(fb) not in keep:
+            freed += path_size(fb)
+            _rmtree_quiet(fb)
+    return {"removed": removed, "freed": human_size(freed), "left": left}
+
+
+def env_purge_run(store, force=False, drop_backups=False, keep_backup=True):
+    """面板的“确认彻底清理”：env_purge，再按勾选的删备份。drop_backups：把以前留下的备份删掉；keep_backup=False：这次的也不留
+    （搬进备份目录的配置、第二步的备份都删掉，恢复不了；当前登录已经先存进 cam 了）。
+    返回 {"backup": 备份目录或 None, "done", "failed", "dropped": {...} 或 None, "kept_backup"}。"""
+    dest = env_purge(store, force)
+    res = {"backup": dest, **purge_env_result(dest), "dropped": None, "kept_backup": True}
+    if drop_backups or not keep_backup:
+        res["dropped"] = env_purge_drop_backups(store, keep=(dest,) if keep_backup else ())
+    if not keep_backup:
+        res["kept_backup"] = os.path.lexists(dest)  # 删不掉（文件被占用）时那一份还在
+        if not res["kept_backup"]:
+            res["backup"] = None
+    return res
+
+
 def env_purge_restore(store, force=False):
     """把最近一次彻底清理移走的放回去，第二步清掉的中转设置也改回去（env_fix_undo 那一次）。现在那份（清理后新生成的）不删，
     改名留着（加 .before-restore-时间）。返回 {"restored": [...], "kept": [...], "failed": [...], "notes": [...], "backup"}。"""
     if claude_may_be_running() and not force:
         raise CamError("有 claude 在运行（或者看不出来）：先退出所有 claude 再恢复")
-    last = next(((d, m) for d, m in env_purge_backups(store) if not m.get("restored_at")), None)
+    last = next(((d, m) for d, m in env_purge_backups(store) if not (m or {}).get("restored_at")), None)
     if not last:
         raise CamError("没有可以恢复的彻底清理（cam env clean --purge 移走的配置都在 cam 数据目录的 env-backups 里）")
     d, m = last
@@ -9192,13 +9314,39 @@ def cmd_env_clean(store, args):
             print(color("· ", "d") + x)
         print("新开一个终端再用 claude；当前登录是彻底清理前的那个号")
         return
+    drop, no_backup = getattr(args, "drop_backups", False), getattr(args, "no_backup", False)
+    if no_backup and not args.purge:
+        raise CamError("--no-backup 要和 --purge 一起用")
+    if drop and not args.purge:  # 只删以前彻底清理留下的备份，不清理
+        b = purge_backup_size(store)
+        if not b["count"]:
+            print("没有彻底清理留下的备份。")
+            return
+        print(f"将删除以前彻底清理留下的 {b['count']} 份备份（共 {b['size']}），删了恢复不了：")
+        for d, _ in env_purge_backups(store):
+            print(f"  {d}")
+        if not args.apply:
+            print(color("\n这只是预演，加 --apply 才会执行。", "y"))
+            return
+        if not args.yes:
+            if not sys.stdin.isatty():
+                raise CamError("非交互环境请加 -y 确认")
+            if not confirm("确定删除这些备份？删了恢复不了"):
+                print("已取消")
+                return
+        r = env_purge_drop_backups(store)
+        print(color(f"✓ 已删除 {r['removed']} 份备份，腾出 {r['freed']}", "g"))
+        for x in r["left"]:
+            print(color("✗ ", "r") + f"没删掉（里面有文件被占用）：{x}")
+        return
     cfg = claude_config_dir()
     cache = [os.path.join(cfg, n) for n in CACHE_ITEMS if os.path.lexists(os.path.join(cfg, n))]
     if args.purge:
         root_real = os.path.realpath(store.root)
         if root_real == os.path.realpath(cfg) or root_real.startswith(os.path.realpath(cfg) + os.sep):
             raise CamError(f"cam 的数据目录 {store.root} 在 {cfg} 里面，不能整体移走")
-        print("将把整个 Claude Code 配置移到备份目录（不删除，随时可以移回来）：")
+        print("将把整个 Claude Code 配置直接删除（--no-backup：不留备份，恢复不了）：" if no_backup
+              else "将把整个 Claude Code 配置移到备份目录（不删除，随时可以移回来）：")
         for p, _ in purge_targets():
             print(f"  {p}（{human_size(path_size(p))}）")
         if use_keychain():
@@ -9211,6 +9359,12 @@ def cmd_env_clean(store, args):
                 print(f"  · {f['text']}" + (color("  [要管理员确认]", "y") if needs_admin(f) else ""))
             if any(needs_admin(f) for f in env_items):
                 print(color("  要管理员权限的几项：Windows 会弹一次“是否允许此应用对你的设备进行更改”，点“是”", "y"))
+        if drop:
+            b = purge_backup_size(store)
+            print(f"\n还会删掉以前彻底清理留下的 {b['count']} 份备份（共 {b['size']}），删了恢复不了。" if b["count"]
+                  else "\n没有以前留下的备份要删。")
+        if no_backup:
+            print(color("这次清掉的也不留备份：删了恢复不了，cam env clean --restore 也放不回来。", "y"))
     else:
         print("将删除这些可以重新生成的缓存：" if cache else "没有需要清理的缓存。")
         for p in cache:
@@ -9229,7 +9383,7 @@ def cmd_env_clean(store, args):
     if args.purge and not args.yes:
         if not sys.stdin.isatty():
             raise CamError("非交互环境请加 -y 确认")
-        if not confirm("确定要把整个 Claude Code 配置移走？"):
+        if not confirm("确定要把整个 Claude Code 配置删除、不留备份？恢复不了" if no_backup else "确定要把整个 Claude Code 配置移走？"):
             print("已取消")
             return
     kc = None
@@ -9252,6 +9406,14 @@ def cmd_env_clean(store, args):
             print(color("✓ 已清理：", "g") + x)
         for x in env["failed"]:
             print(color("✗ ", "r") + f"{x['text']}：{x['error']}")
+        if drop or no_backup:  # 删备份：以前留下的，--no-backup 时连这次的
+            r = env_purge_drop_backups(store, keep=() if no_backup else (dest,))
+            print(color(f"✓ 已删除 {r['removed']} 份备份，腾出 {r['freed']}", "g"))
+            for x in r["left"]:
+                print(color("✗ ", "r") + f"没删掉（里面有文件被占用）：{x}")
+        if no_backup and not os.path.lexists(dest):
+            print("  这次没留备份，恢复不了；当前登录已经存进 cam，cam switch 能切回来")
+            return
         print("  要恢复：cam env clean --restore（或者自己把里面的 claude-config 移回 " + cfg + "，claude.json 移回 " + claude_json_file() + "）")
         return
     for p in cache:
@@ -9392,9 +9554,11 @@ AUTH_DOWN_ADVICE = ("登录大约每 8 小时要续一次，这些地址连不�
                     "先检查网络或代理设置。")
 PROXY_DOWN_ADVICE = ("代理软件多半没开、已经退出，或者端口改了。设着代理但它没在运行时，走它的请求（Claude Code、cam）都会失败。"
                      "打开代理软件，或者把这个代理设置去掉（环境变量在启动终端的配置文件里删，系统代理在系统的网络设置里关）。")
-RATE_LIMIT_ADVICE = "Anthropic 那边在限流（短时间请求太多），不是网络或账号的问题；过几分钟再试。"
-OVERLOAD_ADVICE = "Anthropic 那边负载太高，不是网络或账号的问题；稍后再试，可查看 status.claude.com。"
-STATUS_ADVICE = "这是 Anthropic 那边的故障，不是本机或账号的问题；等恢复后再试，详情见 status.claude.com。"
+RATE_LIMIT_ADVICE = "Anthropic 那边在限流（短时间请求太多），不是网络或账号的问题，只提醒、不扣环境评分；过几分钟再试。"
+OVERLOAD_ADVICE = "Anthropic 那边负载太高，不是网络或账号的问题，只提醒、不扣环境评分；稍后再试，可查看 status.claude.com。"
+SERVER_ERROR_ADVICE = "多半是 Anthropic 那边的故障，不是本机环境的问题，只提醒、不扣环境评分；稍后再试，可查看 status.claude.com。"
+DNS_VIA_PROXY_ADVICE = "请求走的是代理，域名由代理解析，本机解析不了不影响使用，不扣分。"
+STATUS_ADVICE = "这是 Anthropic 那边的故障，不是本机或账号的问题，只提醒、不扣环境评分；等恢复后再试，详情见 status.claude.com。"
 # 默认路由走这些接口就当作 VPN / 隧道（macOS utun、Linux tun/wg、各家 VPN 客户端）
 TUNNEL_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec", "tailscale", "zt", "nebula", "proton", "nordlynx",
                    "mullvad", "clash", "mihomo", "sing", "hysteria", "surge")
@@ -9776,15 +9940,118 @@ def proxy_parts():
             + [f"系统设置 {mask_proxy(p)}" for p in system_proxy()])
 
 
+# ---- 域名有没有被人动过手脚（木马、来路不明的“加速器 / 中转工具”常改 hosts 文件，把 Claude 的域名指到自己的服务器，
+# 流量连同登录凭据就送过去了）。只读本机，不改任何东西
+# 这几个域名和它们的子域名：Claude Code 官方文档“Network access requirements”里 Anthropic 自己的那几个
+# （api.anthropic.com、claude.ai、claude.com、platform.claude.com、downloads.claude.ai、bridge.claudeusercontent.com…）
+CLAUDE_DOMAINS = ("anthropic.com", "claude.ai", "claude.com", "claudeusercontent.com")
+HOSTS_MAX = 8  # hosts 文件里最多记几条
+HOSTS_ADVICE = ("正常用不着这样设：发往这个域名的请求（带着登录凭据）会被送到那个地址。可能是第三方中转 / 加速工具写的，也可能是恶意软件改的。"
+                "不是你自己设的就把这几行删掉（Windows：C:\\Windows\\System32\\drivers\\etc\\hosts；macOS / Linux：/etc/hosts，要管理员权限），"
+                "再用杀毒软件查一遍。")
+DNS_SPECIAL_ADVICE = ("装了代理软件（TUN / fake-ip）、安全软件或者家长控制时会这样：是它们在替你解析，不扣分。"
+                      "你没装这类软件的话，检查 hosts 文件和系统的 DNS 设置。")
+
+
+def hosts_file_path():
+    """系统的 hosts 文件在哪。测试用 CAM_TEST_HOSTS 指过去（空字符串：当没有）。"""
+    t = os.environ.get("CAM_TEST_HOSTS")
+    if t is not None:
+        return t or None
+    if IS_WIN:
+        return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", "drivers", "etc", "hosts")
+    return "/etc/hosts"
+
+
+def parse_hosts(text):
+    """hosts 文件里指到 Claude / Anthropic 域名（CLAUDE_DOMAINS 和它们的子域名）的条目 [{"host", "ip"}]，最多 HOSTS_MAX 条。
+    同一个域名只留第一条（系统用的就是第一条）；# 后面是注释。和 Rust 版 health::parse_hosts 一致（tests/shared/hosts.json）。"""
+    out, seen = [], set()
+    for line in text.splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) < 2:
+            continue
+        for name in parts[1:]:
+            h = name.lower().rstrip(".")
+            if h not in seen and any(h == d or h.endswith("." + d) for d in CLAUDE_DOMAINS):
+                seen.add(h)
+                out.append({"host": h, "ip": parts[0]})
+    return out[:HOSTS_MAX]
+
+
+def hosts_overrides():
+    """这台电脑的 hosts 文件里把 Claude / Anthropic 的域名指到了哪（parse_hosts）；没有、读不了返回 []。"""
+    path = hosts_file_path()
+    if not path:
+        return []
+    try:
+        with open(path, "rb") as f:
+            return parse_hosts(f.read(1_000_000).decode("utf-8", errors="replace"))
+    except OSError:
+        return []
+
+
+def addr_special(ip):
+    """解析出来的地址是不是内网 / 保留地址：回环、私有、链路本地、运营商内网（100.64.0.0/10）、测试用的 198.18.0.0/15、
+    0 开头和 224 以上，IPv6 的 ::、::1、fc00::/7、fe80::/10（映射的 IPv4 按 IPv4 看）。Claude 的域名解析成这样，
+    是解析被本机的软件接管了。和 Rust 版 health::addr_special 一致（tests/shared/hosts.json）。"""
+    import ipaddress  # noqa: PLC0415  用到才加载
+    try:
+        a = ipaddress.ip_address(str(ip).split("%", 1)[0])
+    except ValueError:
+        return False
+    if a.version == 6:
+        if a.ipv4_mapped is None:
+            n = int(a)
+            return n <= 1 or (n >> 121) == 0x7E or (n >> 118) == 0x3FA  # ::、::1；fc00::/7；fe80::/10
+        a = a.ipv4_mapped
+    b = a.packed
+    return (b[0] in (0, 10, 127) or b[0] >= 224 or (b[0] == 100 and 64 <= b[1] <= 127) or (b[0] == 169 and b[1] == 254)
+            or (b[0] == 172 and 16 <= b[1] <= 31) or (b[0] == 192 and b[1] == 168) or (b[0] == 198 and b[1] in (18, 19)))
+
+
+CREDS_PERM_ADVICE = ("凭据文件里是登录用的令牌，别的用户读到就能用你的账号。改成只有自己能读：chmod 600 {path}"
+                     "（Claude Code 自己写这个文件时就是 600；被改宽多半是复制、解压或者同步工具造成的）。")
+
+
+def creds_file_mode():
+    """Claude Code 的登录凭据文件（.credentials.json）这台电脑上别的用户读不读得到：读得到返回它的权限（"644" 这样），
+    只有自己能读、没有这个文件（macOS 上登录存在钥匙串里）、Windows（权限不是这么管的）返回 None。只看，不改。"""
+    if IS_WIN:
+        return None
+    try:
+        mode = os.stat(claude_credentials_file()).st_mode & 0o777
+    except OSError:
+        return None
+    return f"{mode:o}" if mode & 0o077 else None
+
+
+def resolve_host(host):
+    """系统解析 host 得到的地址（去重、排好序）。服务检测的 DNS 实测用；单独一个函数，测试好换掉。"""
+    return sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+
+
+def is_ip_literal(host):
+    """host 本身就是一个 IP 地址（不是域名）：这时没有“解析”这回事。"""
+    import ipaddress  # noqa: PLC0415
+    try:
+        ipaddress.ip_address(str(host).strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 def local_env():
     """本机的区域设置、代理和 VPN 快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
-    顶部环境卡和服务检测都用这一份，两边的分数才一致。"""
+    顶部环境卡和服务检测都用这一份，两边的分数才一致。hosts：hosts 文件里把 Claude 的域名指到了哪（没有是 []）；
+    creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 None。"""
     tz = system_timezone()
     lc = system_locale()
     tun = default_route_tunnel()
     return {"tz": tz[0] if tz else None, "tz_cc": tz[1] if tz else [],
             "locale": lc[0] if lc else None, "locale_cc": lc[1] if lc else None, "dns": system_dns_servers(),
-            "proxy": proxy_parts(), "tunnel": list(tun) if tun else None}
+            "proxy": proxy_parts(), "tunnel": list(tun) if tun else None, "hosts": hosts_overrides(),
+            "creds_mode": creds_file_mode()}
 
 
 def proxy_vpn_items(env):
@@ -10265,6 +10532,8 @@ def risk_items(data, include_region=True, note_age=True):
         if at and (now - at).total_seconds() < 3600:
             for it in ss.get("items") or []:
                 add(it["kind"], it["level"], it["text"], it.get("advice", ""), cached=False)
+                if it.get("notice"):
+                    out[-1]["notice"] = True
     changed = parse_iso(reg.get("changed_at"))
     if reg.get("prev_loc") and loc and changed and (now - changed).total_seconds() < REGION_CHANGE_HOURS * 3600:
         # 网络探测不等于账号登录；当前出口已支持时只保留历史，避免恢复后仍因旧出口扣分。
@@ -10306,6 +10575,16 @@ def risk_items(data, include_region=True, note_age=True):
                 "TUN / 代理可能接管 DNS；这里只读取系统配置，未测实际解析出口，不能据此判断 DNS 泄漏或所在地，不扣分。"
                 "解析是否成功请看 DNS 实测项；需要排查旧的手动配置时，可在系统网络设置中恢复自动获取。")
             break
+    hosts = [h for h in (env or {}).get("hosts") or [] if isinstance(h, dict) and h.get("host")]
+    if hosts:  # hosts 文件把 Claude 的域名指到了别处：流量（带着登录凭据）被送去那个地址
+        more = f"（另有 {len(hosts) - 1} 条）" if len(hosts) > 1 else ""
+        out.append({"kind": "hosts", "level": "warn", "text": f"hosts 文件把 {hosts[0]['host']} 指到了 {hosts[0].get('ip')}{more}" + env_old,
+                    "advice": HOSTS_ADVICE})
+    creds_mode = (env or {}).get("creds_mode")
+    if creds_mode:  # 登录凭据文件别的用户也读得到
+        out.append({"kind": "creds_perm", "level": "warn",
+                    "text": f"Claude Code 的登录凭据文件权限是 0{creds_mode}，这台电脑上的其他用户也读得到" + env_old,
+                    "advice": CREDS_PERM_ADVICE.format(path=short_path(claude_credentials_file()))})
     if reg.get("warp"):
         add("warp", "info", "出口经过 Cloudflare WARP / Zero Trust",
             "上面的出口地区是 WARP 的出口，不是本机网络的真实出口；Anthropic 按使用者所在地判断。")
@@ -10318,6 +10597,7 @@ def risk_items(data, include_region=True, note_age=True):
     risk = status_risk(sp) if sp_age is not None and sp_age <= REGION_FRESH_SECS else None  # 一小时前的故障现在多半已经恢复，不再提
     if risk:
         add("status", risk[0], risk[1], STATUS_ADVICE, cached=False)
+        out[-1]["notice"] = True  # 关注项：只提醒，不扣分
     tz = (env["tz"], env.get("tz_cc") or []) if loc and env and env.get("tz") else None
     if tz and loc and tz[1] and loc not in tz[1]:
         zone, home = tz[0], tz[1][0]
@@ -10356,16 +10636,65 @@ def risk_items(data, include_region=True, note_age=True):
 
 
 # 环境风险评分：满分 100，按 (kind, level) 扣分；没列出的 warn 扣 10、bad 扣 30。只是把提醒汇总成一个数，不拦任何操作。
+# 官方状态页的公告（status）不扣分：那是 Anthropic 那边的事，不是这台电脑环境的风险，只当关注项列出来。
 RISK_WEIGHTS = {
     ("region", "warn"): 60, ("region_unknown", "warn"): 30, ("tls", "bad"): 0, ("account_regions", "warn"): 20, ("region_change", "warn"): 15, ("isp", "warn"): 20,
     ("region_mismatch", "warn"): 15, ("timezone", "warn"): 25, ("timezone", "info"): 5,
     ("locale", "info"): 5, ("clock", "warn"): 10, ("warp", "info"): 5, ("vpn", "info"): 10, ("proxy", "info"): 5,
-    ("status", "bad"): 30, ("status", "warn"): 10, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
+    ("status", "bad"): 0, ("status", "warn"): 0, ("api", "bad"): 40, ("api", "warn"): 5, ("web", "bad"): 10,
     ("web", "warn"): 5, ("dns", "bad"): 20, ("accounts", "info"): 0, ("device", "info"): 0, ("scope", "info"): 0,
-    ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15, ("dns_resolver", "warn"): 15,
-    ("dns_resolver", "info"): 0, ("ip_origin", "info"): 5, ("ipv6", "info"): 0, ("dns_servers", "info"): 0,
+    ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15,
+    ("dns_resolver", "info"): 0, ("ip_origin", "info"): 5, ("dns_servers", "info"): 0,
     ("auth", "bad"): 20, ("auth", "warn"): 5, ("proxy_down", "bad"): 0, ("tls_intercept", "warn"): 0,
+    ("hosts", "warn"): 20, ("creds_perm", "warn"): 15,
 }
+# 扣分规则写给人看的说法（面板评分卡里的“扣分规则”、cam risk --rules）：每条对应 RISK_WEIGHTS 里扣分的一项，分数从那里取，
+# 所以界面上列的和实际扣的不会对不上。和 Rust 版 RISK_RULES / RISK_NOTICES 一致（tests/shared/risk_rules.json）
+RISK_RULES = (
+    ("region", "warn", "出口地区不在 Anthropic 支持名单"),
+    ("tor_exit", "warn", "出口 IP 是 Tor 出口节点"),
+    ("api", "bad", "api.anthropic.com 连不上，或者拒绝访问"),
+    ("region_unknown", "warn", "出口地区查不到（连不上 claude.ai 和 Cloudflare）"),
+    ("proxy_ip", "warn", "出口 IP 被数据库标记为代理 / VPN 出口"),
+    ("timezone", "warn", "系统时区指向不支持的地区，出口却在支持地区"),
+    ("isp", "warn", "出口 IP 是机房 / 云服务器"),
+    ("account_regions", "warn", "当前账号 7 天内在多个地区用过"),
+    ("auth", "bad", "续登录的地址都连不上"),
+    ("dns", "bad", "Claude 的域名解析不了，也确实连不上"),
+    ("hosts", "warn", "hosts 文件把 Claude / Anthropic 的域名指到了别处"),
+    ("creds_perm", "warn", "Claude Code 的登录凭据文件别的用户也读得到"),
+    ("ipv6_mismatch", "warn", "IPv4 和 IPv6 的出口不在同一个地区"),
+    ("region_mismatch", "warn", "两个接口看到的出口地区不一致"),
+    ("region_change", "warn", "24 小时内出口换到了不支持的地区"),
+    ("clock", "warn", "本机时钟和服务器相差 2 分钟以上"),
+    ("vpn", "info", "默认路由走 VPN / 隧道"),
+    ("web", "bad", "claude.ai 连不上，或者拒绝访问"),
+    ("proxy", "info", "设了代理（环境变量或系统代理）"),
+    ("warp", "info", "出口经过 Cloudflare WARP / Zero Trust"),
+    ("timezone", "info", "系统时区和出口地区不一致（两边都在支持地区）"),
+    ("locale", "info", "系统语言 / 区域和出口地区不一致"),
+    ("ip_origin", "info", "出口 IP 的注册地和定位不一致（广播 IP）"),
+    ("auth", "warn", "续登录的地址有的连不上"),
+    ("web", "warn", "claude.ai 返回人机验证页，或者少见的状态"),
+    ("api", "warn", "api.anthropic.com 返回少见的状态"),
+)
+# 只提醒、不扣分的（关注项和说明）：不是这台电脑环境的风险
+RISK_NOTICES = (
+    "Anthropic 官方状态页的公告",
+    "官方限流（429）、服务过载（529）、服务端错误（5xx）",
+    "当前登录已过期（账号的事，运行一次 claude 会自动续上）",
+    "出口在支持地区之间变化、系统配的 DNS 和出口地区不一致",
+    "本机解析不了域名但实际连得上（请求走代理）、域名解析成内网 / 保留地址（被本机的软件接管）",
+    "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）",
+)
+
+
+def risk_rules():
+    """给人看的扣分规则：{"rules": [{"points", "text"}]（扣得多的在前，同分按表里的顺序）, "notices": [只提醒不扣分的]}。"""
+    rules = [{"points": RISK_WEIGHTS[(k, level)], "text": text} for k, level, text in RISK_RULES]
+    return {"rules": sorted(rules, key=lambda r: -r["points"]), "notices": list(RISK_NOTICES)}
+
+
 # 服务检测发现的这些问题记进 data["service_status"]，界面顶部的环境卡也列出来（一小时内，或者后台检测证明已经好了为止）
 SERVICE_STATUS_KINDS = ("api", "web", "dns", "tls", "auth", "proxy_down", "tls_intercept")
 RISK_GRADES = (  # (最低分, 档位, 说明)
@@ -10381,8 +10710,9 @@ RISK_LOG_SHOWN = 8   # 界面上列最近几次
 
 
 def risk_points(item):
-    """这一条从环境评分里扣几分（不扣是 0）。规则和 Rust 版 health::risk_points 一致（tests/shared/risk_log.json）。"""
-    if item.get("kind") == "summary":
+    """这一条从环境评分里扣几分（不扣是 0）。带 notice 的是关注项：Anthropic 那边的状况（官方状态页的公告、限流、过载、
+    服务端错误），不是这台电脑环境的风险，照样标出来但不扣分。规则和 Rust 版 health::risk_points 一致（tests/shared/risk_log.json）。"""
+    if item.get("kind") == "summary" or item.get("notice"):
         return 0
     level = item.get("level")
     return RISK_WEIGHTS.get((item.get("kind"), level), {"warn": 10, "bad": 30}.get(level, 0))
@@ -10685,8 +11015,10 @@ def service_check(store=None):
     """
     out = []
 
-    def add(kind, level, text, advice=""):
+    def add(kind, level, text, advice="", notice=False):
         out.append({"kind": kind, "level": level, "text": text, "advice": advice})
+        if notice:  # 关注项：Anthropic 那边的状况，标出来但不扣环境评分（risk_points）
+            out[-1]["notice"] = True
 
     proxies = {k: os.environ[k] for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy")
                if os.environ.get(k)}
@@ -10697,11 +11029,12 @@ def service_check(store=None):
     creds = read_live_credentials()[0] if store is not None else None
     at = oauth_block(creds).get("accessToken") if creds else None
 
-    def resolve(host):
+    def resolve(host):  # (地址, 出错原因, 用了多少毫秒)
+        t0 = time.time()
         try:
-            return sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)}), None
+            return resolve_host(host), None, int((time.time() - t0) * 1000)
         except OSError as e:
-            return None, e
+            return None, e, int((time.time() - t0) * 1000)
 
     def region():
         if store is None:
@@ -10744,14 +11077,22 @@ def service_check(store=None):
     limits.update(dict.fromkeys(proxy_keys, PROXY_PROBE_SECS + 1))
     res = run_parallel(jobs, REGION_CHECK_BUDGET + 2, limits)
     dns_advice = "检查本机 DNS 或代理设置" + ("；设了代理的话通常由代理解析，可忽略" if proxies else "")
+    # 本机解析不了、但这个域名实际连得上（请求走的是代理，域名由代理解析）：不是问题，只说明一下
+    up = {api_host: bool((res["api"] or (0,))[0])}
+    up[web_host] = up.get(web_host, False) or bool((res["web"] or (0,))[0])
     for host in hosts:
-        ips, e = res[f"dns:{host}"] or (None, None)
+        ips, e, ms = res[f"dns:{host}"] or (None, None, None)
+        if ips and not is_ip_literal(host) and any(addr_special(i) for i in ips):  # 解析成了内网 / 保留地址：解析被本机的软件接管了，说明一下
+            add("dns", "info", f"DNS：{host} → {', '.join(ips[:3])}（{ms} ms）是内网 / 保留地址，解析被本机的代理或安全软件接管了", DNS_SPECIAL_ADVICE)
+            continue
         if ips:
-            add("dns", "ok", f"DNS：{host} → {', '.join(ips[:3])}")
-        elif e is not None:
-            add("dns", "bad", f"DNS：{host} 解析失败（{e}）", dns_advice)
+            add("dns", "ok", f"DNS：{host} → {', '.join(ips[:3])}（{ms} ms）")
+            continue
+        why = f"解析失败（{e}）" if e is not None else f"解析超过 {SERVICE_DNS_SECS} 秒没有回应"
+        if up.get(host):
+            add("dns", "info", f"DNS：{host} 本机{why}，但 {host} 连得上", DNS_VIA_PROXY_ADVICE)
         else:
-            add("dns", "bad", f"DNS：{host} 解析超过 {SERVICE_DNS_SECS} 秒没有回应", dns_advice)
+            add("dns", "bad", f"DNS：{host} {why}", dns_advice)
     # 出口地区：claude.ai 在 Cloudflare 后面，/cdn-cgi/trace 会返回它看到的访问者信息
     data = {}
     if store is not None:
@@ -10813,15 +11154,16 @@ def service_check(store=None):
     elif at and st == 200:
         add("api", "ok", f"{api_host}：服务正常，当前登录可用（{ms} ms）")
     elif at and st == 401:
-        add("api", "warn", f"{api_host}：服务可达，但当前登录已过期或无效（{ms} ms）", "运行一次 claude 会自动续登录，不影响切换账号")
+        # 登录过期是账号的事（每 8 小时左右就会过期一次，运行 claude 时自己续上），不是环境的风险：只作说明，不扣分
+        add("api", "info", f"{api_host}：服务可达，但当前登录已过期或无效（{ms} ms）", "运行一次 claude 会自动续登录，不影响切换账号；不扣环境评分")
     elif st == 401:
         add("api", "ok", f"{api_host}：服务可达（未登录，{ms} ms）")
     elif st == 429:
-        add("api", "warn", f"{api_host}：官方在限流（HTTP 429，{ms} ms）", RATE_LIMIT_ADVICE)
+        add("api", "warn", f"{api_host}：官方在限流（HTTP 429，{ms} ms）", RATE_LIMIT_ADVICE, notice=True)
     elif st == 529:
-        add("api", "warn", f"{api_host}：官方服务过载（HTTP 529，{ms} ms）", OVERLOAD_ADVICE)
+        add("api", "warn", f"{api_host}：官方服务过载（HTTP 529，{ms} ms）", OVERLOAD_ADVICE, notice=True)
     elif st >= 500:
-        add("api", "bad", f"{api_host}：服务端错误（HTTP {st}）", "可能是 Anthropic 故障，稍后再试，可查看 status.claude.com")
+        add("api", "bad", f"{api_host}：服务端错误（HTTP {st}）", SERVER_ERROR_ADVICE, notice=True)
     else:
         add("api", "warn", f"{api_host}：HTTP {st}（{msg or '-'}，{ms} ms）", "少见的返回，稍后重试；持续出现请把这一行发给作者")
     if st:
@@ -10839,9 +11181,9 @@ def service_check(store=None):
     elif code in (200, 401, 403):
         add("web", "ok", f"{web_host}：可达（{ms} ms）")
     elif code == 429:
-        add("web", "warn", f"{web_host}：官方在限流（HTTP 429，{ms} ms）", RATE_LIMIT_ADVICE)
+        add("web", "warn", f"{web_host}：官方在限流（HTTP 429，{ms} ms）", RATE_LIMIT_ADVICE, notice=True)
     elif code >= 500:
-        add("web", "bad", f"{web_host}：服务端错误（HTTP {code}）", "稍后再试")
+        add("web", "bad", f"{web_host}：服务端错误（HTTP {code}）", SERVER_ERROR_ADVICE, notice=True)
     else:
         add("web", "warn", f"{web_host}：HTTP {code}（{msg or (raw or '')[:80]}，{ms} ms）", "少见的返回，稍后重试")
     if code:
@@ -10876,25 +11218,30 @@ def service_check(store=None):
     add("scope", "info", "检测范围：本机能看到的信号（出口 IP、IP 类型、IPv4 / IPv6、注册国、运营商、代理 / VPN、WARP、DNS 配置、时钟、时区、系统语言、账号使用地区）",
         "按 Anthropic 官方说明，所在地是结合 IP 和其他信号综合判断的；账号侧本机看不到的信号不在检测范围内，"
         "所以“没有发现风险点”不等于一定合规，只表示本机能查到的都正常。")
-    # 总体结论放最前面：评分 + 档位 + 最严重的一条
+    # 总体结论放最前面：评分 + 档位 + 最严重的一条。关注项（Anthropic 那边的状况）不扣分、不算本机这边的问题：
+    # 本机这边有问题时说最严重的那条，那边也有状况就接在后面；本机这边没问题而那边有状况，写明“本机环境没问题，那边有状况”，级别是“注意”
     sc = risk_score(out)
-    first_bad = next((i for i in out if i["level"] == "bad"), None)
-    first_warn = next((i for i in out if i["level"] == "warn"), None)
-    worst = first_bad or first_warn
+    flagged = [i for i in out if i["level"] in ("bad", "warn")]
+    mine, theirs = [i for i in flagged if not i.get("notice")], [i for i in flagged if i.get("notice")]
+    worst = next((i for i in mine if i["level"] == "bad"), None) or (mine[0] if mine else None)
+    notice = next((i for i in theirs if i["level"] == "bad"), None) or (theirs[0] if theirs else None)
     head = f"总体：{sc['score']}/100，{sc['label']}"
-    if first_bad or sc["grade"] == "high":
+    if (worst and worst["level"] == "bad") or sc["grade"] == "high":
         level = "bad"
-    elif first_warn or sc["grade"] == "medium":
+    elif worst or notice or sc["grade"] == "medium":
         level = "warn"
     else:
         level = "ok"
-    if any(i["kind"] == "env_failed" for i in out):  # 出口这次没测到，别说成“在支持名单内”
-        fine = "；Claude 服务连得上，这次没测到出口地区，先按上一次查到的算，其它没有发现风险点"
+    failed = any(i["kind"] == "env_failed" for i in out)  # 出口这次没测到，别说成“在支持名单内”
+    fine = "这次没测到出口地区，先按上一次查到的算，其它没有发现风险点" if failed else "出口地区在支持名单内，没有发现风险点"
+    theirs_text = f"Anthropic 那边有状况（只提醒，不扣分）：{notice['text']}" if notice else ""
+    if worst:
+        text, advice = f"{head} —— {worst['text']}" + (f"；另外{theirs_text}" if notice else ""), worst["advice"]
+    elif notice:
+        text, advice = f"{head}；本机环境这边{fine}。{theirs_text}", notice["advice"]
     else:
-        fine = "；Claude 服务正常，出口地区在支持名单内，没有发现风险点"
-    out.insert(0, {"kind": "summary", "level": level, "score": sc["score"], "grade": sc["grade"],
-                   "text": head + (f" —— {worst['text']}" if worst else fine),
-                   "advice": worst["advice"] if worst else RISK_SCORE_ADVICE})
+        text, advice = f"{head}；Claude 服务{'连得上' if failed else '正常'}，{fine}", RISK_SCORE_ADVICE
+    out.insert(0, {"kind": "summary", "level": level, "score": sc["score"], "grade": sc["grade"], "text": text, "advice": advice})
     if store is not None:  # 连接问题记下来，界面顶部的环境卡和这里的分数保持一致
         bad = [i for i in out if i["kind"] in SERVICE_STATUS_KINDS and i["level"] in ("warn", "bad")]
         with store.lock():
@@ -12684,6 +13031,9 @@ def main(argv=None):
     e.add_argument("--force", action="store_true", help="有 claude 正在运行时也执行")
     e.add_argument("-y", "--yes", action="store_true", help="--purge 时不再确认")
     e.add_argument("--restore", action="store_true", help="把最近一次 --purge 移走的配置放回去（现在那份改名留着）")
+    e.add_argument("--drop-backups", action="store_true",
+                   help="把以前彻底清理留下的备份删掉（删了恢复不了）；可以和 --purge 一起用，也可以单独用")
+    e.add_argument("--no-backup", action="store_true", help="和 --purge 一起用：这次清掉的配置也不留备份，直接删除（恢复不了）")
     e = esub.add_parser("admin-job", help="（cam 弹出管理员确认后自己调用的，不用手动运行）")
     e.add_argument("job")
     e = esub.add_parser("fix", help="一键清理：第三方中转、API Key 这类设置，多装的几份，旧版本，缓存（先列出来，确认了才改）")
@@ -12703,6 +13053,7 @@ def main(argv=None):
     s.add_argument("--ipapi-key", metavar="KEY", help="ipapi.is 的 key（免费注册，每天 1000 次，可商用），空字符串删除")
     s.add_argument("--ipinfo-token", metavar="TOKEN", help="ipinfo.io 的 token，空字符串删除")
     s.add_argument("--clear-history", action="store_true", help="清除缓存的出口信息、环境评分的变化记录和账号使用地区记录")
+    s.add_argument("--rules", action="store_true", help="列出环境评分的扣分规则：每个信号扣几分，哪些只提醒不扣分")
     s = sub.add_parser("rule", help="切号规则")
     rsub = s.add_subparsers(dest="rule_cmd")
     rsub.add_parser("ls", help="列出规则")

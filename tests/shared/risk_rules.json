@@ -1,0 +1,51 @@
+{
+  "rules": [
+    {"kind": "region", "level": "warn", "points": 60, "text": "出口地区不在 Anthropic 支持名单"},
+    {"kind": "tor_exit", "level": "warn", "points": 40, "text": "出口 IP 是 Tor 出口节点"},
+    {"kind": "api", "level": "bad", "points": 40, "text": "api.anthropic.com 连不上，或者拒绝访问"},
+    {"kind": "region_unknown", "level": "warn", "points": 30, "text": "出口地区查不到（连不上 claude.ai 和 Cloudflare）"},
+    {"kind": "proxy_ip", "level": "warn", "points": 25, "text": "出口 IP 被数据库标记为代理 / VPN 出口"},
+    {"kind": "timezone", "level": "warn", "points": 25, "text": "系统时区指向不支持的地区，出口却在支持地区"},
+    {"kind": "isp", "level": "warn", "points": 20, "text": "出口 IP 是机房 / 云服务器"},
+    {"kind": "account_regions", "level": "warn", "points": 20, "text": "当前账号 7 天内在多个地区用过"},
+    {"kind": "auth", "level": "bad", "points": 20, "text": "续登录的地址都连不上"},
+    {"kind": "dns", "level": "bad", "points": 20, "text": "Claude 的域名解析不了，也确实连不上"},
+    {"kind": "hosts", "level": "warn", "points": 20, "text": "hosts 文件把 Claude / Anthropic 的域名指到了别处"},
+    {"kind": "creds_perm", "level": "warn", "points": 15, "text": "Claude Code 的登录凭据文件别的用户也读得到"},
+    {"kind": "ipv6_mismatch", "level": "warn", "points": 15, "text": "IPv4 和 IPv6 的出口不在同一个地区"},
+    {"kind": "region_mismatch", "level": "warn", "points": 15, "text": "两个接口看到的出口地区不一致"},
+    {"kind": "region_change", "level": "warn", "points": 15, "text": "24 小时内出口换到了不支持的地区"},
+    {"kind": "clock", "level": "warn", "points": 10, "text": "本机时钟和服务器相差 2 分钟以上"},
+    {"kind": "vpn", "level": "info", "points": 10, "text": "默认路由走 VPN / 隧道"},
+    {"kind": "web", "level": "bad", "points": 10, "text": "claude.ai 连不上，或者拒绝访问"},
+    {"kind": "proxy", "level": "info", "points": 5, "text": "设了代理（环境变量或系统代理）"},
+    {"kind": "warp", "level": "info", "points": 5, "text": "出口经过 Cloudflare WARP / Zero Trust"},
+    {"kind": "timezone", "level": "info", "points": 5, "text": "系统时区和出口地区不一致（两边都在支持地区）"},
+    {"kind": "locale", "level": "info", "points": 5, "text": "系统语言 / 区域和出口地区不一致"},
+    {"kind": "ip_origin", "level": "info", "points": 5, "text": "出口 IP 的注册地和定位不一致（广播 IP）"},
+    {"kind": "auth", "level": "warn", "points": 5, "text": "续登录的地址有的连不上"},
+    {"kind": "web", "level": "warn", "points": 5, "text": "claude.ai 返回人机验证页，或者少见的状态"},
+    {"kind": "api", "level": "warn", "points": 5, "text": "api.anthropic.com 返回少见的状态"}
+  ],
+  "notices": [
+    "Anthropic 官方状态页的公告",
+    "官方限流（429）、服务过载（529）、服务端错误（5xx）",
+    "当前登录已过期（账号的事，运行一次 claude 会自动续上）",
+    "出口在支持地区之间变化、系统配的 DNS 和出口地区不一致",
+    "本机解析不了域名但实际连得上（请求走代理）、域名解析成内网 / 保留地址（被本机的软件接管）",
+    "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）"
+  ],
+  "no_points": [
+    {"kind": "status", "level": "bad"},
+    {"kind": "status", "level": "warn"},
+    {"kind": "api", "level": "info"},
+    {"kind": "dns", "level": "info"},
+    {"kind": "api", "level": "bad", "notice": true},
+    {"kind": "api", "level": "warn", "notice": true},
+    {"kind": "web", "level": "bad", "notice": true},
+    {"kind": "region_change", "level": "info"},
+    {"kind": "dns_resolver", "level": "info"},
+    {"kind": "tls_intercept", "level": "warn"},
+    {"kind": "proxy_down", "level": "bad"}
+  ]
+}

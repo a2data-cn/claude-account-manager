@@ -44,8 +44,8 @@ const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 /** 检测结果分组（和手机面板同样的分组） */
 const CHECK_GROUPS: [string, string[]][] = [
-  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "warp"]],
-  ["本机", ["clock", "timezone", "locale", "device"]],
+  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "hosts", "warp"]],
+  ["本机", ["clock", "timezone", "locale", "creds_perm", "device"]],
   ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
   ["账号", ["account_regions", "accounts"]],
 ];
@@ -57,6 +57,7 @@ function CheckRow({ it, cls }: { it: ServiceCheckItem; cls?: string }) {
       <span className="mark">{CHECK_MARK[it.level] || "说明"}</span>
       <span className="v">
         {it.text}
+        {it.notice && <> <span className="chip">只提醒，不扣分</span></>}
         {it.advice && <span className="advice">→ {it.advice}</span>}
       </span>
     </li>
@@ -173,8 +174,9 @@ const ENV_ROWS: [string, string, string[]][] = [
   ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
   ["proxy", "代理 / VPN", ["proxy", "vpn", "proxy_down"]],
   ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
-  ["dns", "DNS", ["dns", "dns_resolver", "dns_servers"]],
+  ["dns", "DNS / hosts", ["dns", "dns_resolver", "dns_servers", "hosts"]],
   ["change", "出口变化", ["region_change"]],
+  ["creds", "登录凭据", ["creds_perm"]], // 凭据文件别的用户也读得到时才有这一行
   ["account", "账号", ["account_regions", "accounts"]],
   ["service", "Claude 服务", ["api", "web", "tls", "status", "auth", "tls_intercept"]],
   ["stale", "检测时间", ["env_stale", "env_failed"]], // 结果是一小时前的、或者最近一次没连上才有这一行
@@ -309,7 +311,7 @@ function ScoreCard({ state }: { state: State }) {
     iptype: reg?.lookup_mode === "off" ? "外部 IP 查询已关闭，没有类型信息" : reg?.ip_type ? IP_TYPE[reg.ip_type] : "数据源没有标记",
     proxy: "未检出显式代理或默认隧道；TUN 分流仍可能生效",
     local: "没发现和出口地区不一致的设置",
-    dns: "没发现问题",
+    dns: "没发现问题，hosts 文件没动过 Claude 的域名",
     change: reg?.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${reg.prev_loc} 换到 ${reg.loc}，已过了观察期` : "最近没变",
     account: "当前账号最近没在多个地区用过",
     service: "正常",
@@ -367,6 +369,7 @@ function ScoreCard({ state }: { state: State }) {
                             <div key={i}>
                               {x.text}
                               {!!x.points && <span className={`chip ${x.points >= 20 ? "st-error" : "st-warn"}`}>−{x.points} 分</span>}
+                              {!x.points && x.notice && <span className="chip">只提醒，不扣分</span>}
                               {x.advice && <span className="advice">{x.advice}</span>}
                             </div>
                           ))
@@ -386,6 +389,20 @@ function ScoreCard({ state }: { state: State }) {
       <p className="hint">
         100 分起扣，每条后面标着扣几分；90 以上低风险，70–89 有风险，70 以下高风险。{has && sc ? sc.advice : ""}
       </p>
+      {!!state.risk_rules?.rules?.length && (
+        <details className="score-rules">
+          <summary>扣分规则（{state.risk_rules.rules.length} 条）</summary>
+          <ul>
+            {state.risk_rules.rules.map((r, i) => (
+              <li key={i}>
+                <b>−{r.points}</b>
+                <span>{r.text}</span>
+              </li>
+            ))}
+          </ul>
+          {!!state.risk_rules.notices?.length && <p className="hint">只提醒、不扣分的：{state.risk_rules.notices.join("；")}。</p>}
+        </details>
+      )}
     </div>
   );
 }
@@ -661,6 +678,8 @@ export default function App() {
   // 环境有风险时把环境状态卡放到最上面，没风险时放到账号详情下面
   const risky = !!(state?.risk_score && state.region?.status && state.risk_score.grade !== "low");
   const firstRisk = (state?.risks ?? []).find((x) => x.level === "bad" || x.level === "warn")?.text;
+  // Anthropic 那边的严重状况（官方状态页的故障、服务端错误）不扣分，分数看不出来：单独提醒一句
+  const outage = (state?.risks ?? []).find((x) => x.notice && x.level === "bad");
   // 一天之内刚降下来的：说一声是从几分降的，原因在环境页的“分数变化”里
   const lastCh = state?.risk_log?.changes?.[0];
   const scoreDrop =
@@ -890,6 +909,14 @@ export default function App() {
                 {scoreDrop}
                 {firstRisk ? ` · ${firstRisk}` : ""}
               </span>
+              <button type="button" className="btn quiet" onClick={() => setTab("env")}>
+                查看详情
+              </button>
+            </div>
+          )}
+          {outage && (
+            <div className="notice env-brief medium" role="status">
+              <span className="n-text">{outage.text} · 这是 Anthropic 那边的状况，不是本机环境的问题，不扣环境评分</span>
               <button type="button" className="btn quiet" onClick={() => setTab("env")}>
                 查看详情
               </button>
