@@ -844,7 +844,7 @@ class CamTest(unittest.TestCase):
             self.assertEqual(sorted(json.loads(u)["output_tokens"] for _, _, u, _ in rows()), [1, 2, 3, 4])
             self.assertIsNone(starts[-1])
             # 缓存文件坏了：当没有
-            with open(cache, "w") as f:
+            with open(cache, "w", encoding="utf-8") as f:
                 f.write("{不是 json")
             restart()
             self.assertEqual(len(rows()), 4)
