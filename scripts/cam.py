@@ -5521,6 +5521,18 @@ def mini_html():
     return panel_html("mini.html")
 
 
+def flag_font():
+    """面板用的国旗字体 web/flags.woff2（Twemoji 国旗，CC-BY 4.0）：Windows 自带的字体显示不了国旗时面板才来取。找不到返回 None。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(here, "..", "web", "flags.woff2"), os.path.join(here, "flags.woff2")):
+        try:
+            with open(p, "rb") as f:
+                return f.read()
+        except OSError:
+            continue
+    return None
+
+
 def server_token(store):
     p = os.path.join(store.root, "server-token")
     try:
@@ -5665,9 +5677,9 @@ def make_handler(store, token):
             if os.environ.get("CAM_VERBOSE"):
                 super().log_message(fmt, *args)
 
-        def _send(self, code, obj=None, ctype="application/json; charset=utf-8", raw=None):
+        def _send(self, code, obj=None, ctype="application/json; charset=utf-8", raw=None, cache="no-store"):
             body = raw if raw is not None else json.dumps(obj, ensure_ascii=False).encode()
-            gz = len(body) > GZIP_MIN_BYTES and accepts_gzip(self.headers.get("Accept-Encoding"))
+            gz = len(body) > GZIP_MIN_BYTES and not ctype.startswith("font/") and accepts_gzip(self.headers.get("Accept-Encoding"))
             if gz:  # 面板页面 180 多 KB，压缩后 60 多 KB：手机、隔着 Tailscale 打开快不少
                 import gzip  # noqa: PLC0415
                 body = gzip.compress(body, 5)
@@ -5677,7 +5689,7 @@ def make_handler(store, token):
                 self.send_header("Content-Encoding", "gzip")
                 self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Frame-Options", "DENY")  # 面板记着令牌：不能被别的网页用 iframe 套起来骗点
@@ -5712,6 +5724,11 @@ def make_handler(store, token):
                 return self._send(200, raw=mini_html().encode(), ctype="text/html; charset=utf-8")
             if method == "GET" and path == "/manifest.webmanifest":
                 return self._send(200, MANIFEST, ctype="application/manifest+json")
+            if method == "GET" and path == "/flags.woff2":  # 国旗字体：不带密钥，不用令牌；woff2 本来就压缩过，不再 gzip，浏览器缓存一天
+                font = flag_font()
+                if font is None:
+                    return self._send(404, {"error": "not found"})
+                return self._send(200, raw=font, ctype="font/woff2", cache="public, max-age=86400")
             if not path.startswith("/api/"):
                 return self._send(404, {"error": "not found"})
             if not self._authed():

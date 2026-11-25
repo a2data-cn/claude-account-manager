@@ -488,6 +488,8 @@ details.src[open] summary::before { content: "▾"; }
 .kv .bad { color: var(--hot); font-weight: 600; }
 .kv .chip { vertical-align: 1px; margin-left: 4px; }
 .flag { font-size: 15px; margin-right: 5px; }
+/* 系统字体显示不了国旗时（Windows 上的 Edge、Chrome，桌面版）换成自带的国旗字体，见脚本开头“国旗”那一段 */
+.flagfont .flag { font-family: "CamFlags", var(--sans); }
 .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--muted); }
 .dot.ok { background: var(--live); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--hot); }
 /* 评分：大圆环在左，右边每个信号一行 */
@@ -1123,6 +1125,29 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   "use strict";
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // ---- 国旗：Windows 自带的表情字体里没有国旗，Edge、Chrome 会把国旗显示成两个字母（JP）。先在画布上试一下：
+  // 彩色字形不跟着填充色变，白字黑字画出来一样就是能显示；显示不了才加载自带的国旗字体（web/flags.woff2，
+  // Twemoji 国旗，CC-BY 4.0），只用在国旗这几个字符上。Mac、iPhone、Windows 上的 Firefox 照旧用系统的
+  const colorGlyph = (text) => {
+    const c = document.createElement("canvas");
+    c.width = c.height = 1;
+    const x = c.getContext("2d", { willReadFrequently: true });
+    x.textBaseline = "top";
+    x.font = '100px "Twemoji Mozilla", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif';
+    x.scale(0.01, 0.01);
+    const draw = (fill) => { x.clearRect(0, 0, 100, 100); x.fillStyle = fill; x.fillText(text, 0, 0); return x.getImageData(0, 0, 1, 1).data.join(","); };
+    const white = draw("#fff"), black = draw("#000");
+    return white === black && !black.startsWith("0,0,0,");
+  };
+  try {
+    if (!colorGlyph("\u{1F1E8}\u{1F1ED}")) {
+      const st = document.createElement("style");
+      st.textContent = '@font-face { font-family: "CamFlags"; src: url("/flags.woff2") format("woff2"); unicode-range: U+1F1E6-1F1FF; font-display: swap; }';
+      document.head.appendChild(st);
+      document.documentElement.classList.add("flagfont");
+    }
+  } catch (_) { /* 画布用不了：照旧用系统字体 */ }
 
   // ---- 后端：脚本版 cam serve 和桌面版内置服务提供同一套 HTTP API
   let token = "";

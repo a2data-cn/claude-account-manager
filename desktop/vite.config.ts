@@ -9,6 +9,7 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     proxy: { "/api": "http://127.0.0.1:8787" },
+    fs: { allow: [".."] }, // 国旗字体在仓库的 web/flags.woff2，和网页面板共用一份
   },
   build: { target: "es2021", outDir: "dist", emptyOutDir: true },
 });

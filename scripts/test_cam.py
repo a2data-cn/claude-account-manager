@@ -1000,6 +1000,38 @@ class CamTest(unittest.TestCase):
         self.assertFalse(self.cam.accepts_gzip("deflate, br"))
         self.assertFalse(self.cam.accepts_gzip(None))
 
+    def test_flag_font_for_browsers_without_flags(self):
+        """Windows 上的 Edge、Chrome 和桌面版显示不了国旗：面板先在画布上试，显示不了才去取自带的国旗字体。
+        字体不用令牌、不再 gzip、能缓存；桌面版的面板服务和桌面版界面用的是同一个文件。"""
+        store = self.cam.Store()
+        token = self.cam.server_token(store)
+        srv = self.cam.ThreadingServer(("127.0.0.1", 0), self.cam.make_handler(store, token))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/flags.woff2", headers={"Accept-Encoding": "gzip"})
+        with opener.open(req) as r:
+            body, h = r.read(), r.headers
+        with open(os.path.join(ROOT, "web", "flags.woff2"), "rb") as f:
+            self.assertEqual(body, f.read())
+        self.assertTrue(body.startswith(b"wOF2"))
+        self.assertEqual(h.get("Content-Type"), "font/woff2")
+        self.assertIsNone(h.get("Content-Encoding"))
+        self.assertIn("max-age", h.get("Cache-Control"))
+        panel = self.cam.panel_html()
+        self.assertIn('url("/flags.woff2")', panel)
+        self.assertIn('classList.add("flagfont")', panel)
+        self.assertIn('.flagfont .flag { font-family: "CamFlags"', panel)
+        with open(os.path.join(ROOT, "desktop", "src-tauri", "src", "server.rs"), encoding="utf-8") as f:
+            rs = f.read()
+        self.assertIn('include_bytes!("../../../web/flags.woff2")', rs)
+        self.assertIn('path == "/flags.woff2"', rs)
+        with open(os.path.join(ROOT, "desktop", "src", "flags.ts"), encoding="utf-8") as f:
+            self.assertIn('from "../../web/flags.woff2"', f.read())
+        with open(os.path.join(ROOT, "desktop", "src", "main.tsx"), encoding="utf-8") as f:
+            self.assertIn("loadFlagFontIfNeeded();", f.read())
+
     def test_completion_scripts_and_account_names(self):
         """Tab 补全：第一个词补子命令，switch / open 这些后面补账号名（cam _names，只读账号库）。"""
         store = self.cam.Store()

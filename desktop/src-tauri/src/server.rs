@@ -10,6 +10,8 @@ use std::thread::JoinHandle;
 use tiny_http::{Header, Request, Response, Server};
 
 const PANEL: &str = include_str!("../../../web/panel.html");
+/// 国旗字体（Twemoji 国旗，CC-BY 4.0）：Windows 自带的字体显示不了国旗时面板才来取，不用令牌
+const FLAGS: &[u8] = include_bytes!("../../../web/flags.woff2");
 const MANIFEST: &str = r##"{"name":"Claude 账号管理","short_name":"Claude 账号","start_url":"/","display":"standalone","background_color":"#F4F2EC","theme_color":"#F4F2EC"}"##;
 
 pub type OnChange = Arc<dyn Fn() + Send + Sync>;
@@ -92,6 +94,9 @@ fn handle(mut req: Request, token: &str, on_change: &OnChange) {
             "text/html; charset=utf-8",
             PANEL.as_bytes().to_vec(),
         );
+    }
+    if method == "GET" && path == "/flags.woff2" {
+        return send(req, 200, "font/woff2", FLAGS.to_vec());
     }
     if method == "GET" && path == "/manifest.webmanifest" {
         return send(

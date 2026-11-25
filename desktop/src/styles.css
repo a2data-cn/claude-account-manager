@@ -475,6 +475,8 @@ details.src[open] summary::before { content: "▾"; }
 .kv .bad { color: var(--hot); font-weight: 600; }
 .kv .chip { vertical-align: 1px; margin-left: 4px; }
 .flag { font-size: 15px; margin-right: 5px; }
+/* 系统字体显示不了国旗时（Windows 上的 Edge、Chrome，桌面版）换成自带的国旗字体，见脚本开头“国旗”那一段 */
+.flagfont .flag { font-family: "CamFlags", var(--sans); }
 .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; background: var(--muted); }
 .dot.ok { background: var(--live); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--hot); }
 /* 评分：大圆环在左，右边每个信号一行 */

@@ -520,6 +520,8 @@ API 账号填了 Admin Key 后会显示本月花费。
 
 实现参考了 [matsumotory/claude-desktop-switcher](https://github.com/matsumotory/claude-desktop-switcher) 的目录隔离与进程检查、[jspanji/Swivel](https://github.com/jspanji/Swivel) 的退出后保存与会话保护、[nyxon-tech/claude-switcher](https://github.com/nyxon-tech/claude-switcher) 的登录文件范围与 Windows 路径处理。这些项目均采用 MIT 许可；这里借鉴方法，没有复制它们的源码。更多设计与限制见 [设计说明](docs/DESIGN.md)。
 
+Windows 上显示国旗用的字体 `web/flags.woff2` 取自 [country-flag-emoji-polyfill](https://github.com/talkjs/country-flag-emoji-polyfill)（TalkJS，MIT 许可），图形来自 [Twemoji](https://github.com/twitter/twemoji)（Copyright Twitter, Inc and other contributors，按 [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) 使用，未修改）。面板打开时先在画布上试一下系统字体能不能画出国旗（Mac、iPhone、Android、Windows 上的 Firefox 能），能就用系统的，不能才从本机的面板服务取这个字体，不连外网。
+
 本地额度缓存格式参考了 [ajipurn/claude-profiles 的 UsageReader](https://github.com/ajipurn/claude-profiles/blob/main/Sources/ClaudeProfilesCore/UsageReader.swift)，本项目独立实现解析。该仓库未声明开源许可，未复制其源码；它已归档，后续维护迁往 `agent-profiles`。
 
 ## 本地账号库与邮箱
@@ -610,6 +612,7 @@ scripts/build-desktop-*  桌面版一键编译脚本
 extras/swiftbar/      macOS 菜单栏小工具
 extras/windows-tray/  Windows 托盘小工具（PowerShell 画图标和菜单，菜单内容和菜单栏小工具同一份）
 web/panel.html        Web 面板（手机 / 浏览器），脚本版和桌面版共用
+web/flags.woff2       国旗字体：Windows 自带的字体没有国旗，Edge、Chrome 和桌面版显示不了时面板才用它（Twemoji 国旗，CC-BY 4.0）
 desktop/              Tauri 桌面版
 desktop/src-tauri/engine/  核心逻辑 crate cam-engine，与 cam.py 对应的 Rust 实现，不依赖 Tauri
 tests/shared/         两边共用的测试数据（身份识别、账号查找、切号规则、自动续期、编辑账号和到期日、环境检测没连上时怎么算、官方状态页、服务检测、桌面版状态、提醒、每天最高用量、7 天额度的节奏、本机消耗的汇总、会话页（上下文窗口、会话状态、记录的摘要和组成）、Windows 查询的解析）
