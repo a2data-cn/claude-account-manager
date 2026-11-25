@@ -189,6 +189,13 @@ if (-not $created) { exit 0 }
 [void][CamTray.Native]::ShowWindow([CamTray.Native]::GetConsoleWindow(), 0)
 [void][CamTray.Native]::SetProcessDPIAware()  # 高分屏上图标按实际大小画，不发虚
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# 兜底：事件处理里漏接的异常不弹 WinForms 的“未处理的异常”对话框（那个框点“退出”托盘就没了），记成一条通知，托盘照常运行。
+# 要在建任何窗口、菜单之前设
+try { [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException) } catch { }
+[System.Windows.Forms.Application]::add_ThreadException({
+  param($s, $e)
+  try { Add-Note "托盘小工具出错了" $e.Exception.Message } catch { }
+})
 
 $Here = $PSScriptRoot
 $TrayPy = Join-Path $Here "cam_tray.py"
@@ -591,17 +598,17 @@ function Set-Menu($items) {
   $again = New-Object System.Windows.Forms.ToolStripMenuItem("重启托盘小工具")
   $again.ToolTipText = "退出再重新打开：显示不对、点了没反应时用"
   $again.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
-  $again.Add_Click({ try { Restart-Tray } catch { Add-Note "托盘小工具没能重启" $_.Exception.Message } })
+  $again.Add_Click({ Invoke-AfterMenu "restart" })
   [void]$script:menu.Items.Add($again)
   $quit = New-Object System.Windows.Forms.ToolStripMenuItem("退出托盘小工具")
   $quit.ToolTipText = "只退出这一次，下次登录 Windows 时还会自动运行"
   $quit.Padding = New-Object System.Windows.Forms.Padding(0, 3, 0, 3)
-  $quit.Add_Click({ Stop-Tray })
+  $quit.Add_Click({ Invoke-AfterMenu "quit" })
   [void]$script:menu.Items.Add($quit)
 }
 
 function Stop-Tray {
-  foreach ($t in @($script:poll, $script:tick, $script:anim, $script:lightTick)) { if ($t) { $t.Stop() } }
+  foreach ($t in @($script:poll, $script:tick, $script:anim, $script:lightTick, $script:afterMenu)) { if ($t) { $t.Stop() } }
   $script:notify.Visible = $false
   $script:notify.Dispose()
   [System.Windows.Forms.Application]::Exit()
@@ -620,6 +627,7 @@ function Restart-Tray {
 
 # 这个文件被 cam update 换成新版本后，自己重启一次。重启了返回 $true
 function Restart-IfUpdated {
+  if ($script:menu -and $script:menu.Visible) { return $false }  # 菜单开着：下一分钟再说，不在人家点菜单的时候退出
   # 文件暂时不在（cam update 正在替换）就当没变；Get-Item 找不到文件默认只是提醒、进不了 catch，要加 -ErrorAction Stop
   try { $t = (Get-Item -LiteralPath $Self -ErrorAction Stop).LastWriteTimeUtc } catch { return $false }
   if ($t -eq $SelfTime) { return $false }
@@ -627,16 +635,37 @@ function Restart-IfUpdated {
   return $true
 }
 
-# ---- 托盘图标
-$script:menu = New-Object System.Windows.Forms.ContextMenuStrip
-Set-MenuLook $script:menu
-[CamTray.Look]::Round($script:menu)
-$script:menu.Add_Closed({
+# ---- 菜单收起以后再做的事：换上新菜单、退出、重启。
+# 不能在菜单项的 Click、菜单的 Closed 里当场做：WinForms 接着还要收起子菜单，那时旧菜单项（连同它的子菜单）已经被释放了，
+# 就会弹“无法访问已释放的对象（ToolStripDropDownMenu）”的错误框。所以记下要做什么，等这一轮点击处理完（50 毫秒后）再做
+$script:afterAction = $null
+$script:afterMenu = New-Object System.Windows.Forms.Timer
+$script:afterMenu.Interval = 50
+$script:afterMenu.Add_Tick({
+  $script:afterMenu.Stop()
+  $a = $script:afterAction; $script:afterAction = $null
+  if ($a -eq "quit") { Stop-Tray; return }
+  if ($a -eq "restart") {
+    try { Restart-Tray } catch { Add-Note "托盘小工具没能重启" $_.Exception.Message }
+    return
+  }
+  if ($script:menu.Visible) { return }  # 又打开了：等它下次收起
   if ($script:pending) {
     $items = $script:pending; $script:pending = $null
     try { Set-Menu $items } catch { Add-Note "托盘小工具出错了" $_.Exception.Message }
   }
 })
+function Invoke-AfterMenu([string]$action) {
+  if ($action) { $script:afterAction = $action }
+  $script:afterMenu.Stop()
+  $script:afterMenu.Start()
+}
+
+# ---- 托盘图标
+$script:menu = New-Object System.Windows.Forms.ContextMenuStrip
+Set-MenuLook $script:menu
+[CamTray.Look]::Round($script:menu)
+$script:menu.Add_Closed({ if ($script:pending) { Invoke-AfterMenu "" } })
 Set-Menu @(@{ text = "正在读取账号…"; dim = $true })
 
 $script:notify = New-Object System.Windows.Forms.NotifyIcon

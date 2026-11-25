@@ -2531,13 +2531,27 @@ class CamTest(unittest.TestCase):
 
     def test_windows_tray_menu_can_restart_itself(self):
         """托盘右键菜单最下面有“重启托盘小工具”和“退出托盘小工具”。重启：先放开“只许一个在运行”的锁、起一个新的，再退出自己；
-        文件更新后自己重启走的是同一条路。文件存成带 BOM 的 UTF-8（Windows PowerShell 5.1 读不带 BOM 的会把中文读乱）。"""
+        文件更新后自己重启走的是同一条路。退出、重启、换菜单都等菜单收起以后再做；漏接的异常变成通知，不弹对话框。
+        文件存成带 BOM 的 UTF-8（Windows PowerShell 5.1 读不带 BOM 的会把中文读乱）。"""
         with open(os.path.join(HERE, "..", "extras", "windows-tray", "cam-tray.ps1"), "rb") as f:
             raw = f.read()
         self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
         text = raw.decode("utf-8-sig")
         self.assertLess(text.index('ToolStripMenuItem("重启托盘小工具")'), text.index('ToolStripMenuItem("退出托盘小工具")'))
-        self.assertIn("$again.Add_Click({ try { Restart-Tray } catch {", text)
+        # 点了菜单项不当场退出 / 重启，菜单的 Closed 里也不当场换菜单：WinForms 接着还要收起子菜单，那时已经释放了就弹
+        # “无法访问已释放的对象（ToolStripDropDownMenu）”的错误框（用户在 Windows 上遇到过）。都交给菜单收起以后的单次定时器
+        self.assertIn('$again.Add_Click({ Invoke-AfterMenu "restart" })', text)
+        self.assertIn('$quit.Add_Click({ Invoke-AfterMenu "quit" })', text)
+        closed = text[text.index("$script:menu.Add_Closed("):]
+        closed = closed[:closed.index("\n")]
+        self.assertIn("Invoke-AfterMenu", closed)
+        self.assertNotIn("Set-Menu", closed)
+        after = text[text.index("$script:afterMenu.Add_Tick("):text.index("function Invoke-AfterMenu")]
+        for call in ("Stop-Tray", "Restart-Tray", "Set-Menu $items", "if ($script:menu.Visible) { return }"):
+            self.assertIn(call, after)
+        # 兜底：漏接的异常不弹 WinForms 的“未处理的异常”对话框，记成通知；要在建菜单之前设
+        self.assertLess(text.index("SetUnhandledExceptionMode"), text.index("New-Object System.Windows.Forms.ContextMenuStrip"))
+        self.assertIn("add_ThreadException(", text)
         restart = text[text.index("function Restart-Tray {"):text.index("function Restart-IfUpdated {")]
         self.assertLess(restart.index("$Mutex.ReleaseMutex()"), restart.index("Start-Process"))
         self.assertLess(restart.index("Start-Process"), restart.index("Stop-Tray"))
@@ -2545,6 +2559,7 @@ class CamTest(unittest.TestCase):
         updated = updated[:updated.index("\n}\n")]
         self.assertIn("Restart-Tray", updated)
         self.assertNotIn("Start-Process", updated)
+        self.assertLess(updated.index("$script:menu.Visible"), updated.index("Restart-Tray"))  # 菜单开着时不自己重启
 
     @unittest.skipUnless(os.name == "nt", "只在 Windows 上用 PowerShell 真跑")
     def test_windows_tray_powershell_draws_icons(self):
