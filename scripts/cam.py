@@ -23,6 +23,7 @@
   cam update [--check]             手动更新（git 快进；更新后自检不过就退回原来的版本）
   cam verify                       按 SHA256SUMS 校验代码文件是否完整
   cam doctor [--json] [--offline]  全面体检：账号登录、Claude 服务、本机 Claude Code、cam 自己、聊天机器人
+  cam regions [日本|JP]            Anthropic 支持哪些国家和地区，当前出口在不在里面
 
 第一次用：docs/QUICKSTART.md（快速开始）
 """
@@ -4255,7 +4256,7 @@ def public_state(store, data):
             "platform": platform.system(), "active": data["active"], "accounts": accs,
             "warning": (data.get("live_mismatch") or data.get("live_unverified") or {}).get("message"),
             "pending_switch": pending_switch_view(data), "region": region_view(data), "risks": risks,
-            "risk_score": risk_score(risks), "risk_log": risk_log_view(data), "risk_rules": risk_rules(), "sessions": sessions_brief(),
+            "risk_score": risk_score(risks), "risk_log": risk_log_view(data), "risk_rules": risk_rules(), "regions": regions_info(), "sessions": sessions_brief(),
             "desktop_app": desk_app, "attention": attention_view(), "generated_at": now_iso()}
 
 
@@ -6956,6 +6957,38 @@ def cmd_set(store, args):
     print(f"已更新 {acc['label']}")
 
 
+def cmd_regions(store, args):
+    """cam regions [名字或代码]：Anthropic 支持哪些国家和地区、当前出口在不在里面；跟一个词就只查那一个。不联网。"""
+    q = (args.query or "").strip()
+    if q:
+        code = region_lookup(q)
+        if not code:
+            print(f"认不出“{q}”：用两位国家 / 地区代码查，比如 JP、SG、US、HK")
+            return 1
+        how = ("在 Anthropic 支持名单内" if code in SUPPORTED_REGIONS else
+               "是支持国家的海外属地，按所属国家算，支持" if code in REGION_DEPENDENCIES else "不在 Anthropic 支持名单内")
+        print(f"{region_label(code)} {how}")
+        if code == "UA":
+            print(UA_REGION_NOTE)
+        return 0
+    info = regions_info()
+    print(f"Anthropic 支持的国家和地区：{len(info['supported'])} 个（{REGIONS_CHECKED} 对着官方名单核对：{REGIONS_URL}）")
+    print("不支持：" + "、".join(region_label(c) for c in REGIONS_UNSUPPORTED))
+    v = region_view(store.load())
+    if v["status"]:
+        print(f"当前出口（{fmt_ago(v['checked_at'])}检测的）：claude.ai 看到 {region_label(v['loc'])}，"
+              + ("支持" if v["status"] == "supported" else "不支持" if v["status"] == "unsupported" else "查不到"))
+        for d in v["domains"]:
+            print(f"  {d['host']} 看到 {region_label(d['loc'])}，" + ("支持" if d["status"] == "supported" else "不支持"))
+    else:
+        print("当前出口：还没检测过（cam doctor 或面板里点“重新检测”）")
+    print()
+    for n in REGION_NOTES:
+        print("· " + n)
+    print("查某一个地区：cam regions 日本（或者 cam regions JP）")
+    return 0
+
+
 def cmd_risk(store, args):
     """查看 / 设置 cam claude 启动前的风险提醒档位，以及外部 IP 查询（隐私）设置。"""
     if getattr(args, "rules", False):  # 扣分规则：每个信号扣几分，哪些只提醒不扣分
@@ -9477,13 +9510,28 @@ IQ IE IL IT JM JP JO KZ KE KI KW KG LA LV LB LS LR LY LI LT LU MG MW MY MV ML MT
 MZ NA NR NP NL NZ NI NE NG MK NO OM PK PW PS PA PG PY PE PH PL PT QA RO RW KN LC VC WS SM ST SA SN RS SC SL SG
 SK SI SO SB ZA KR SS ES LK SD SR SE CH TW TJ TZ TH TL TG TO TT TN TR TM TV UG UA AE GB US UY UZ VU VA VN ZM ZW
 """.split())
-# 官方名单写的是国家；这些属地按所属国家看待（美国、英国、法国、荷兰、丹麦、芬兰、挪威、新西兰、澳大利亚）
+# 官方名单写的是国家；这些属地按所属国家看待（美国、英国、法国、荷兰、丹麦、芬兰、挪威、新西兰、澳大利亚）。
+# 香港、澳门不是属地，不在名单里就是不支持
 REGION_DEPENDENCIES = set("""
-PR GU VI AS MP GI IM JE GG BM KY FK VG RE GP MQ GF YT NC PF PM WF BL MF AW CW SX BQ GL FO AX SJ CK NU TK CX CC NF
+PR GU VI AS MP UM GI IM JE GG BM KY FK VG AI MS TC SH IO PN GS RE GP MQ GF YT NC PF PM WF BL MF TF AW CW SX BQ GL FO AX
+SJ BV CK NU TK CX CC NF HM
 """.split())
+REGIONS_CHECKED = "2026-10"  # 上面的名单是哪个月对着官方页面核对的
+REGIONS_URL = "https://www.anthropic.com/supported-countries"
+# 地区卡上的几条说明（cam regions 也打印）。和 Rust 版 REGION_NOTES 一致（tests/shared/regions.json）
+REGION_NOTES = (
+    "名单以 Anthropic 官方公布的为准，claude.ai、Claude Code 和 API 用同一份；没在名单里的就是不支持。",
+    "支持国家的海外属地（波多黎各、关岛、直布罗陀等）按所属国家算；香港、澳门不在名单里，不支持。",
+    "乌克兰在名单里，但被占领的克里米亚、顿涅茨克、卢甘斯克、赫尔松、扎波罗热地区不支持；IP 只能定位到国家，这里分不出来。",
+    "2025 年 9 月 4 日起，被不支持地区的公司直接或间接控股超过 50% 的企业也不能用；这是账号层面的，本机查不出来。",
+    "Anthropic 按使用者实际所在地判断，不只看出口 IP；这里只看本机能看到的出口，只提醒，不拦任何操作。",
+)
+REGIONS_UNSUPPORTED = ("CN", "HK", "MO", "RU", "BY", "IR", "KP", "SY", "CU", "VE", "AF", "MM", "YE", "XK")  # 不在名单里的国家和地区
+UA_REGION_NOTE = "乌克兰被占领的克里米亚、顿涅茨克、卢甘斯克、赫尔松、扎波罗热地区不在支持范围内；IP 只能定位到国家，这里分不出来。"
 # 给提示用的中文名，只收常见的
 REGION_NAMES = {"CN": "中国大陆", "HK": "香港", "MO": "澳门", "RU": "俄罗斯", "IR": "伊朗", "KP": "朝鲜", "SY": "叙利亚",
-                "CU": "古巴", "BY": "白俄罗斯", "VE": "委内瑞拉", "AF": "阿富汗", "MM": "缅甸", "YE": "也门", "T1": "Tor 出口",
+                "CU": "古巴", "BY": "白俄罗斯", "VE": "委内瑞拉", "AF": "阿富汗", "MM": "缅甸", "YE": "也门", "XK": "科索沃",
+                "UA": "乌克兰", "T1": "Tor 出口",
                 "US": "美国", "JP": "日本", "SG": "新加坡", "TW": "台湾", "KR": "韩国", "GB": "英国", "DE": "德国",
                 "FR": "法国", "NL": "荷兰", "CA": "加拿大", "AU": "澳大利亚", "MY": "马来西亚", "TH": "泰国", "VN": "越南",
                 "ID": "印尼", "PH": "菲律宾", "IN": "印度", "AE": "阿联酋", "TR": "土耳其"}
@@ -9492,6 +9540,12 @@ REGION_ADVICE = {
     "unsupported": "按 Anthropic 政策这个地区不提供服务，继续使用可能导致账号被限制或封禁。Anthropic 按使用者实际所在地判断，不按出口 IP：人在支持地区的话，多半是代理 / VPN 把出口带到了这里，查一下它的设置。",
     "unknown": "连不上 Cloudflare，判断不了出口地区。检查网络或代理后重新检测。",
 }
+DOMAIN_REGION_ADVICE = ("Claude Code 的请求发往 api.anthropic.com，续登录走 platform.claude.com，Anthropic 在这几处看到的是各自的出口。"
+                        "多半是代理按域名分流了，或者 IPv4 / IPv6 走了不同出口。几个出口都在支持地区就不影响使用；"
+                        "同一账号的请求来自不同地区，是常见的风控信号之一。")
+DOMAIN_REGION_BAD_ADVICE = ("Claude Code 的请求发往 api.anthropic.com，续登录走 platform.claude.com，这里看到的出口不在支持名单内，"
+                            "按 Anthropic 政策这个地区不提供服务。Anthropic 按使用者实际所在地判断：人在支持地区的话，"
+                            "多半是代理 / VPN 只接管了一部分地址，查一下它的设置；人在不支持地区的话，风险与出口无关。")
 
 
 STATUS_URL = os.environ.get("CAM_STATUS_URL", "https://status.anthropic.com/api/v2/status.json")
@@ -9604,6 +9658,21 @@ def region_status(loc):
     return "supported" if loc in SUPPORTED_REGIONS or loc in REGION_DEPENDENCIES else "unsupported"
 
 
+def regions_info():
+    """支持地区卡用的名单和说明（不联网）：{"supported", "dependencies", "unsupported", "notes", "checked", "url"}，
+    代码都是 ISO 3166-1 两位字母。和 Rust 版 health::regions_info 一致（tests/shared/regions.json）。"""
+    return {"supported": sorted(SUPPORTED_REGIONS), "dependencies": sorted(REGION_DEPENDENCIES), "unsupported": list(REGIONS_UNSUPPORTED),
+            "notes": list(REGION_NOTES), "checked": REGIONS_CHECKED, "url": REGIONS_URL}
+
+
+def region_lookup(q):
+    """cam regions 后面跟的词 → 地区代码：两位字母当代码，否则按 REGION_NAMES 里的中文名找（可以只写开头）。认不出返回 None。"""
+    q = str(q or "").strip()
+    if re.fullmatch(r"[A-Za-z]{2}", q):
+        return q.upper()
+    return next((c for c, n in REGION_NAMES.items() if q and (n == q or n.startswith(q))), None)
+
+
 def region_message(loc, status):
     if status == "unknown":
         return "出口地区：查不到"
@@ -9653,9 +9722,10 @@ def _age_secs(iso):
 # --------------------------------------------------------------------------- 检测进度
 # “重新检测”要走的步骤（界面上进度卡的每一行）：键 → 写给人看的名字，顺序就是显示的顺序。两个版本一致（tests/shared/progress.json）
 SERVICE_STEPS = (
-    ("local", "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"),
+    ("local", "本机设置和安全项：时区、语言、DNS、hosts、代理、Wi-Fi、命令历史、钩子"),
     ("dns", "解析 Claude 的域名"),
     ("exit", "出口 IP 和地区"),
+    ("domains", "Claude Code 的 API、续登录的地址看到的地区"),
     ("isp", "运营商、IP 类型、注册国"),
     ("stack", "IPv4 / IPv6 出口"),
     ("plain", "没加密的网页有没有被改动"),
@@ -9668,7 +9738,7 @@ SERVICE_STEPS = (
     ("score", "汇总结果，算环境评分"),
 )
 LOOKUP_STEPS = ("isp", "stack", "plain")  # “外部 IP 查询”关掉时不做的几步
-REGION_STEPS = ("local", "exit", "isp", "stack", "plain", "status")  # check_region 里做的几步
+REGION_STEPS = ("local", "exit", "domains", "isp", "stack", "plain", "status")  # check_region 里做的几步
 PROGRESS_KEEP = 6  # 留着最近几次检测的进度
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,40}$")
 
@@ -9885,12 +9955,27 @@ def detect_region(timeout=6, cfg=None, prev=None, prog=None):
     out = exit_trace(timeout, fallback=not off)
     prog.finish("exit", bool(out), "没查到")
     if not out:
-        for k in ("isp", "stack"):
+        for k in ("domains", "isp", "stack"):
             prog.skip(k, "出口没查到，这一步没做")
         return None
     out.update({k: None for k in META_FIELDS + STACK_FIELDS})
     out["lookup_mode"] = cfg["mode"]
+    # Claude Code 用的 API、续登录的地址各自看到的出口地区：问的是 Anthropic 自己的地址，“外部 IP 查询”关掉也照问
+    doms = domain_trace_urls()
+    dom_jobs = {f"dom:{h}": tracked(prog, "domains", lambda u=u: trace_only(u), lambda v: bool(v and v[1]), "没查到")
+                for h, u in doms}
+    if not doms:
+        prog.skip("domains", "没有别的地址要问")
+
+    def domains(res):
+        return [{"host": h, "ip": res[f"dom:{h}"][0], "loc": res[f"dom:{h}"][1]} for h, _ in doms
+                if res.get(f"dom:{h}") and res[f"dom:{h}"][1]]
     if off:
+        try:
+            res = run_parallel(dom_jobs, META_BUDGET_SECS) if dom_jobs else {}
+        finally:
+            prog.expire(("domains",))
+        out["domains"] = domains(res)
         return out
     prev = prev or {}
     age = _age_secs(prev.get("meta_at"))
@@ -9899,7 +9984,7 @@ def detect_region(timeout=6, cfg=None, prev=None, prog=None):
     t0 = time.monotonic()
     # 没有 IPv6 的网络很常见，IPv6 那一问答不上来不算这一步没成
     jobs = {"v4": tracked(prog, "stack", lambda: trace_only(CF_TRACE4_URL), bool, "没查到"),
-            "v6": tracked(prog, "stack", lambda: trace_only(CF_TRACE6_URL))}
+            "v6": tracked(prog, "stack", lambda: trace_only(CF_TRACE6_URL)), **dom_jobs}
     if not reuse:
         jobs["meta"] = tracked(prog, "isp", lambda: fetch_exit_meta(cfg), bool, "没查到")
         if not cfg["ipapi_key"]:  # 带 key 的 ipapi.is 自己会给注册国
@@ -9909,7 +9994,8 @@ def detect_region(timeout=6, cfg=None, prev=None, prog=None):
     try:
         res = run_parallel(jobs, META_BUDGET_SECS)
     finally:
-        prog.expire(("isp", "stack"))
+        prog.expire(("domains", "isp", "stack"))
+    out["domains"] = domains(res)
     if reuse:
         out.update({k: prev.get(k) for k in META_FIELDS})
     else:
@@ -10049,6 +10135,19 @@ def fetch_ip_registration(ip, timeout=5):
         return None
     c = str((j or {}).get("country") or "").strip().upper() if isinstance(j, dict) else ""
     return c if len(c) == 2 else None
+
+
+def domain_trace_urls():
+    """除了 claude.ai，还要问出口地区的 Anthropic 地址 [(主机, trace 地址)]：Claude Code 用的 API、续登录的地址。
+    代理可能按域名分流，Anthropic 在这几处看到的出口不一定一样。和 claude.ai（或彼此）是同一个地址的不重复问。"""
+    seen = {urllib.parse.urlparse(CLAUDE_WEB_BASE).netloc}
+    out = []
+    for base in (API_BASE, TOKEN_URLS[0] if TOKEN_URLS else ""):
+        u = urllib.parse.urlparse(base)
+        if u.scheme in ("http", "https") and u.netloc and u.netloc not in seen:
+            seen.add(u.netloc)
+            out.append((u.hostname, f"{u.scheme}://{u.netloc}/cdn-cgi/trace"))
+    return out
 
 
 def trace_only(url, timeout=4):
@@ -10213,14 +10312,238 @@ def creds_file_mode():
     return f"{mode:o}" if mode & 0o077 else None
 
 
+# ---- 安全项（只看、不改、不显示内容）：命令历史里留着的密钥、Claude Code 设成不问就执行、会自动运行命令的钩子和 MCP 服务器、
+# ~/.claude.json 的权限、正在运行的远程控制软件、对局域网开放的 cam 面板和本机代理。都在 local_env 里查，和出口一起缓存。
+# 规则和 Rust 版一致（tests/shared/security.json）
+KEY_RE = re.compile(r"sk-ant-([a-z]+)[0-9]{0,3}-[A-Za-z0-9_-]{16,}")
+KEY_KINDS = {"api": "API Key", "admin": "管理 Key", "sid": "网页登录凭据", "oat": "登录凭据", "ort": "登录凭据"}
+HISTORY_SCAN_BYTES = 4 * 1024 * 1024  # 每个历史文件只看最后这么多
+HISTORY_FILES = (".bash_history", ".zsh_history", ".histfile", ".sh_history", ".local/share/fish/fish_history",
+                 ".local/share/powershell/PSReadLine/ConsoleHost_history.txt")
+HOOK_RUNNERS = ("python", "python3", "py", "node", "bash", "sh", "zsh", "fish", "pwsh", "powershell", "cmd", "npx", "npm",
+                "uvx", "uv", "bunx", "bun", "deno", "env", "sudo", "exec", "nohup", "run")
+# 远程控制软件：(进程名，小写、不带 .exe) → 给人看的名字
+REMOTE_APPS = (("todesk", "ToDesk"), ("todesk_service", "ToDesk"), ("sunloginclient", "向日葵"), ("awesun", "向日葵"),
+               ("teamviewer", "TeamViewer"), ("teamviewer_service", "TeamViewer"), ("teamviewerd", "TeamViewer"),
+               ("anydesk", "AnyDesk"), ("rustdesk", "RustDesk"), ("quickassist", "Windows 快速助手"),
+               ("remoting_host", "Chrome 远程桌面"), ("remoting_me2me_host", "Chrome 远程桌面"), ("srserver", "Splashtop"),
+               ("parsecd", "Parsec"), ("winvnc", "VNC"), ("tvnserver", "VNC"), ("x11vnc", "VNC"), ("xrdp", "xrdp"))
+LAN_PROBE_SECS = 1  # 拿本机的局域网地址连面板、代理的端口，最多等多久
+AUTO_RUN_SHOWN = 6  # 钩子、MCP 服务器各列几个名字
+ACTIVE_SESSIONS_TIP = "到 claude.ai 的“设置 → 账号 → 活动会话”（claude.ai/settings/account）看看登录着的设备，有不认识的就结束它。"
+HISTORY_KEY_ADVICE = ("在命令行里直接写的密钥会被记进历史文件，拿到这台电脑、备份或同步盘的人都能看到。先关掉所有终端窗口（不然退出时又写回去），"
+                      "再删掉带 sk-ant- 的那几行：macOS / Linux 运行 sed -i.bak '/sk-ant-/d' 文件路径（改前留一份 .bak，确认没问题再删掉它，"
+                      "里面还有密钥）；Windows 在 PowerShell 里运行 $p = (Get-PSReadLineOption).HistorySavePath; "
+                      "(Get-Content $p) -notmatch 'sk-ant-' | Set-Content $p。API Key 和管理 Key 长期有效，到 Console 的 API Keys 页面作废后新建一个；"
+                      "登录凭据会自动过期换新，不放心就" + ACTIVE_SESSIONS_TIP[:-1] + "，再重新登录。cam 不会替你改这些文件。")
+PERM_BYPASS_ADVICE = ("这样 Claude Code 跑任何命令、改任何文件都不再问你。它读到的网页、文件、代码仓库里要是藏着恶意指令（提示注入），"
+                      "可能直接删文件或把密钥发出去。只在虚拟机、容器这类隔离环境里这样用；平时去掉这一项，常用的命令在 permissions.allow 里单独放行。")
+PANEL_LAN_ADVICE = ("面板走的是没加密的 HTTP，地址里带着访问令牌，拿到令牌就能查看、切换你的账号。没加密的 Wi-Fi 上别人能截到；"
+                    "有加密的网络上同一个网络的人也能打开面板的页面（没有令牌进不去）。不用手机看就关掉局域网访问"
+                    "（cam serve 不加 --lan，桌面版在设置里关掉“允许局域网访问”）；在外面要用，换成 Tailscale 这类组网工具。")
+PROXY_LAN_ADVICE = ("代理软件里的“允许局域网连接（Allow LAN）”开着：同一个网络里的人能借你的代理上网，流量从你的出口出去。"
+                    "家里、公司的网络一般不要紧，只提醒、不扣分；连公共 Wi-Fi 时最好关掉，要给手机用就给代理设上用户名和密码。")
+CONFIG_PERM_ADVICE = ("这个文件里有账号邮箱、组织、项目列表和 MCP 服务器的配置（可能带着密钥）。电脑只有你自己用就不要紧，只提醒、不扣分；"
+                      "要收紧的话：chmod 600 {path}")
+AUTO_RUN_ADVICE = ("钩子会在 Claude Code 的特定时刻自动运行命令，MCP 服务器是 Claude Code 能调用的外部程序，都能读写你的文件。"
+                   "看看有没有不是你自己加的：钩子在 Claude Code 的 settings.json 的 hooks 里（在 Claude Code 里输入 /hooks 也能看），"
+                   "MCP 服务器用 claude mcp list 查、claude mcp remove 名字 删。只列出来，不扣分。")
+REMOTE_APP_ADVICE = ("远程控制软件开着时，别人拿到设备代码和密码就能连进来，直接用你登录着的 Claude 网页和 Claude Code。不用时退出，"
+                     "别把代码和密码告诉别人；自称客服、要你装远程软件“帮你处理”的，多半是骗子。只列出来，不扣分。")
+
+
+def scan_keys(text):
+    """一段文字里有几行带着 Claude 的密钥（sk-ant- 开头）、都是哪几类：{"count", "kinds"}（KEY_KINDS 里的说法，去重排好序）。
+    只数不留：密钥本身不出这个函数。"""
+    count, kinds = 0, set()
+    for line in str(text or "").splitlines():
+        found = KEY_RE.findall(line)
+        if found:
+            count += 1
+            kinds.update(KEY_KINDS.get(k, "密钥") for k in found)
+    return {"count": count, "kinds": sorted(kinds)}
+
+
+def history_files():
+    """要看的命令历史文件：bash / zsh / fish / PowerShell 的，HISTFILE 指的，macOS 终端按窗口存的 ~/.zsh_sessions。
+    测试用 CAM_TEST_HISTORY 直接给文件列表（用系统的路径分隔符隔开，空字符串：一个都不看）。"""
+    t = os.environ.get("CAM_TEST_HISTORY")
+    if t is not None:
+        return [p for p in t.split(os.pathsep) if p]
+    h = home()
+    paths = [os.path.join(h, *n.split("/")) for n in HISTORY_FILES]
+    if os.environ.get("HISTFILE"):
+        paths.append(os.path.expanduser(os.environ["HISTFILE"]))
+    if IS_WIN and os.environ.get("APPDATA"):
+        paths.append(os.path.join(os.environ["APPDATA"], "Microsoft", "Windows", "PowerShell", "PSReadLine", "ConsoleHost_history.txt"))
+    try:
+        sessions = sorted(n for n in os.listdir(os.path.join(h, ".zsh_sessions")) if n.endswith(".history"))
+    except OSError:
+        sessions = []
+    paths += [os.path.join(h, ".zsh_sessions", n) for n in sessions[:50]]
+    return list(dict.fromkeys(paths))
+
+
+def history_keys():
+    """命令历史里留着 Claude 密钥的文件：[{"path", "count", "kinds"}]，没有是 []。每个文件只读最后 HISTORY_SCAN_BYTES。"""
+    out = []
+    for p in history_files():
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - HISTORY_SCAN_BYTES))
+                raw = f.read()
+        except OSError:
+            continue
+        r = scan_keys(raw.decode("utf-8", "replace"))
+        if r["count"]:
+            out.append({"path": short_path(p), "count": r["count"], "kinds": r["kinds"]})
+    return out
+
+
+def hook_name(cmd):
+    """钩子命令给人看的名字：跳过解释器（python3、node、bash…）、选项和 X=1 这样的变量，取第一个真正的程序 / 脚本的文件名。
+    命令里别的东西（参数里可能有密钥）不显示。"""
+    for tok in str(cmd or "").split():
+        t = tok.strip("\"'")
+        if not t or t.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+            continue
+        base = re.split(r"[\\/]", t)[-1]
+        low = base.lower()
+        low = low[:-4] if low.endswith(".exe") else low
+        if low in HOOK_RUNNERS or re.fullmatch(r"python3\.[0-9]+", low):
+            continue
+        return base[:40] or "?"
+    return "?"
+
+
+def settings_security(docs):
+    """Claude Code 的几份设置（[(路径, 内容)]）里和安全有关的：(设成不问就执行的那份的路径或 None, ["事件 → 钩子名"]（去重，
+    cam 自己装的红绿灯钩子不算）)。"""
+    bypass, hooks = None, []
+    for path, s in docs:
+        if not isinstance(s, dict):
+            continue
+        perms = s.get("permissions")
+        if bypass is None and isinstance(perms, dict) and perms.get("defaultMode") == "bypassPermissions":
+            bypass = path
+        hk = s.get("hooks")
+        for event, groups in (hk.items() if isinstance(hk, dict) else ()):
+            for g in groups if isinstance(groups, list) else ():
+                for h in (g.get("hooks") if isinstance(g, dict) else None) or ():
+                    cmd = h.get("command") if isinstance(h, dict) and h.get("type", "command") == "command" else None
+                    if cmd and not HOOK_MARK.search(str(cmd)):  # cam 自己装的（红绿灯）不算
+                        hooks.append(f"{event} → {hook_name(cmd)}")
+    return bypass, list(dict.fromkeys(hooks))
+
+
+def mcp_servers(d):
+    """~/.claude.json 的内容里配的 MCP 服务器：([所有项目都能用的名字]（排好序）, 只在某个项目里用的个数)。"""
+    if not isinstance(d, dict):
+        return [], 0
+    names = sorted(d["mcpServers"]) if isinstance(d.get("mcpServers"), dict) else []
+    projects = d.get("projects") if isinstance(d.get("projects"), dict) else {}
+    local = sum(len(p["mcpServers"]) for p in projects.values() if isinstance(p, dict) and isinstance(p.get("mcpServers"), dict))
+    return names, local
+
+
+def auto_run_info():
+    """Claude Code 会自动运行的东西：{"hooks": [前几个], "hooks_n", "mcp": [前几个], "mcp_n", "mcp_local"}；都没有是 None。"""
+    docs = []
+    for p in [os.path.join(claude_config_dir(), n) for n in ("settings.json", "settings.local.json")] + managed_settings_paths():
+        try:
+            docs.append((short_path(p), read_json(p, None)))
+        except CamError:
+            continue
+    bypass, hooks = settings_security(docs)
+    try:
+        names, local = mcp_servers(read_json(claude_json_file(), {}))
+    except CamError:
+        names, local = [], 0
+    info = None
+    if hooks or names or local:
+        info = {"hooks": hooks[:AUTO_RUN_SHOWN], "hooks_n": len(hooks), "mcp": names[:AUTO_RUN_SHOWN], "mcp_n": len(names),
+                "mcp_local": local}
+    return bypass, info
+
+
+def config_file_mode():
+    """~/.claude.json 这台电脑上别的用户读不读得到：读得到返回它的权限（"644" 这样），否则 None（Windows 不看）。只看，不改。"""
+    if IS_WIN:
+        return None
+    try:
+        mode = os.stat(claude_json_file()).st_mode & 0o777
+    except OSError:
+        return None
+    return f"{mode:o}" if mode & 0o077 else None
+
+
+def remote_apps(names):
+    """进程名 → 正在运行的远程控制软件（REMOTE_APPS 里的说法，去重，按表里的顺序）。进程名不分大小写、可以带路径和 .exe；
+    Linux 的进程名最长 15 个字，被截短的也认。"""
+    seen = set()
+    for n in names:
+        b = re.split(r"[\\/]", str(n or "").strip())[-1].lower()
+        b = b[:-4] if b.endswith(".exe") else b
+        for key, label in REMOTE_APPS:
+            if b and (b == key or (len(b) == 15 and key.startswith(b))):
+                seen.add(label)
+    return [label for label in dict.fromkeys(label for _, label in REMOTE_APPS) if label in seen]
+
+
+def process_names():
+    """本机在跑的进程名（远程控制软件那一项用），查不出来是 []。测试用 CAM_TEST_PROCS="ToDesk.exe,foo"。"""
+    t = os.environ.get("CAM_TEST_PROCS")
+    if t is not None:
+        return [x for x in t.split(",") if x]
+    try:
+        if IS_WIN:
+            return [name for _, _, name, _ in windows_processes(WIN_PROCS_SECS)]
+        return subprocess.run(["ps", "-A", "-o", "comm="], capture_output=True, text=True, timeout=10).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
+def lan_exposed():
+    """对局域网开放的 cam 面板和本机代理：{"panel": 端口或 None, "proxy": ["127.0.0.1:7890", …]}。
+    面板的候选：桌面版设置里开着内置面板和局域网访问的端口、带 --lan 的 cam serve；代理的候选：设在本机（127.0.0.1 / localhost）的。
+    拿本机的局域网地址去连这些端口，连得上就是对局域网开着（防火墙拦不拦这里看不出来）。
+    测试用 CAM_TEST_LAN_IP 指定局域网地址（空字符串：没有局域网地址），这时不看进程表里的 cam serve。"""
+    test_ip = os.environ.get("CAM_TEST_LAN_IP")
+    ips = ([test_ip] if test_ip else []) if test_ip is not None else lan_ips()
+    out = {"panel": None, "proxy": []}
+    if not ips:
+        return out
+    panel = []
+    try:
+        d = read_json(os.path.join(cam_home(), "desktop.json"), {})
+        if isinstance(d, dict) and d.get("server_enabled") and d.get("lan", True):
+            panel.append(int(d.get("port") or 8787))
+    except (CamError, ValueError, TypeError):
+        pass
+    if test_ip is None:
+        panel += [serve_port_of(cmd) for _, cmd in process_table() if _is_cam_serve(cmd) and re.search(r"\s--lan(\s|$)", cmd)]
+    eps = proxy_endpoints([(k, os.environ[k]) for k in PROXY_ENV_KEYS if os.environ.get(k)] + [("系统设置", p) for p in system_proxy()])
+    proxy = [(h, p) for _, h, p in eps if h.lower() in ("127.0.0.1", "localhost", "::1")]
+    jobs = {f"panel:{p}": (lambda p=p: port_open(ips[0], p, LAN_PROBE_SECS)) for p in dict.fromkeys(panel)}
+    jobs.update({f"proxy:{h}:{p}": (lambda p=p: port_open(ips[0], p, LAN_PROBE_SECS)) for h, p in proxy})
+    if not jobs:
+        return out
+    res = run_parallel(jobs, LAN_PROBE_SECS + 1)
+    out["panel"] = next((p for p in dict.fromkeys(panel) if res.get(f"panel:{p}") == ""), None)
+    out["proxy"] = [f"{h}:{p}" for h, p in proxy if res.get(f"proxy:{h}:{p}") == ""]
+    return out
+
+
 # ---- 连着的 Wi-Fi 加没加密：开放网络（不要密码）和早就被破解的 WEP，同一个 Wi-Fi 上的人能看到、改动没加密的流量。
 # 只读系统自己报的连接信息：Linux 问 NetworkManager（nmcli），macOS 问 system_profiler，Windows 问 netsh；
 # 有线、没连 Wi-Fi、读不出来都是 None（不显示，不乱报）。规则和 Rust 版一致（tests/shared/wifi.json）
 WIFI_SECS = 8
 WIFI_REUSE_SECS = 600  # 同一张网上多久之内不重查（macOS 的 system_profiler 要一两秒）
 WIFI_OPEN_WORDS = ("open", "none", "--", "开放", "开放式", "无", "offen", "ouvert", "ouverte", "abierta", "abierto", "aperta", "aberta")
-WIFI_ADVICE = ("同一个 Wi-Fi 上的人能看到、改动没加密的流量。Claude 的连接是 HTTPS、有证书校验，内容看不到也改不了；"
-               "但别在这种网络上忽略证书警告，也别开着 cam 面板的局域网访问。条件允许就换成要密码的 Wi-Fi，或者用手机热点。")
+WIFI_ADVICE = ("同一个 Wi-Fi 上的人能看到、改动没加密的流量。公司、商场那种连上后要在网页里登录的 Wi-Fi，系统里也显示没加密，所以只扣 5 分。"
+               "Claude 的连接是 HTTPS、有证书校验，内容看不到也改不了；但别在这种网络上忽略证书警告，也别开着 cam 面板的局域网访问。"
+               "条件允许就换成要密码的 Wi-Fi，或者用手机热点。")
 _WIFI = {"net": None, "t": 0.0, "v": None}
 
 
@@ -10406,14 +10729,18 @@ def is_ip_literal(host):
 def local_env():
     """本机的区域设置、代理和 VPN 快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
     顶部环境卡和服务检测都用这一份，两边的分数才一致。hosts：hosts 文件里把 Claude 的域名指到了哪（没有是 []）；
-    creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 None；wifi：连着的 Wi-Fi 的名字和加没加密，有线、没查到是 None。"""
+    creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 None；wifi：连着的 Wi-Fi 的名字和加没加密，有线、没查到是 None。
+    安全项：history_keys（命令历史里留着密钥的文件）、perm_bypass（设成不问就执行的那份设置）、auto_run（钩子和 MCP 服务器）、
+    config_mode（~/.claude.json 别人也读得到时的权限）、remote（在跑的远程控制软件）、lan（对局域网开放的面板和代理）。"""
     tz = system_timezone()
     lc = system_locale()
     tun = default_route_tunnel()
+    bypass, auto_run = auto_run_info()
     return {"tz": tz[0] if tz else None, "tz_cc": tz[1] if tz else [],
             "locale": lc[0] if lc else None, "locale_cc": lc[1] if lc else None, "dns": system_dns_servers(),
             "proxy": proxy_parts(), "tunnel": list(tun) if tun else None, "hosts": hosts_overrides(),
-            "creds_mode": creds_file_mode(), "wifi": wifi_info()}
+            "creds_mode": creds_file_mode(), "wifi": wifi_info(), "history_keys": history_keys(), "perm_bypass": bypass,
+            "auto_run": auto_run, "config_mode": config_file_mode(), "remote": remote_apps(process_names()), "lan": lan_exposed()}
 
 
 def proxy_vpn_items(env):
@@ -10669,7 +10996,7 @@ def region_view(data):
         return {"loc": None, "loc_name": None, "ip": None, "status": None, "checked_at": None, "message": "还没有检测过出口地区", "advice": "",
                 "warp": False, "prev_loc": None, "changed_at": None, "org": None, "asn": None, "city": None, "ip_type": None,
                 "reg_loc": None, "reg_loc_name": None, "meta_source": None, "lookup_mode": None, "failed_at": None, "fail_count": 0,
-                "plain_http": None, "wifi": None}
+                "plain_http": None, "wifi": None, "domains": []}
     status = region_status(c.get("loc"))
     return {"loc": c.get("loc"), "loc_name": region_name(c.get("loc")), "ip": c.get("ip"), "status": status, "checked_at": c["checked_at"],
             "message": region_message(c.get("loc"), status), "advice": REGION_ADVICE[status],
@@ -10682,7 +11009,10 @@ def region_view(data):
             "plain_http": (c.get("plain_http") or {}).get("ok") if isinstance(c.get("plain_http"), dict) else None,
             # 连着的 Wi-Fi：{"ssid", "security": open / wep / wpa}；有线、没查到是 None
             "wifi": (lambda w: {"ssid": w.get("ssid"), "security": w.get("security")} if isinstance(w, dict) and w.get("security") else None)(
-                (c.get("env") or {}).get("wifi") if isinstance(c.get("env"), dict) else None)}
+                (c.get("env") or {}).get("wifi") if isinstance(c.get("env"), dict) else None),
+            # Claude Code 用的 API、续登录的地址各自看到的出口：[{"host", "ip", "loc", "status"}]，没问到是 []
+            "domains": [dict(d, status=region_status(d["loc"])) for d in c.get("domains") or []
+                        if isinstance(d, dict) and d.get("loc") and d.get("host")]}
 
 
 def net_fingerprint():
@@ -10802,6 +11132,7 @@ def check_region(store, max_age=300, note=True, prog=None):
         now = now_iso()
         if r.get("loc") or not old.get("loc"):
             reg = {k: r.get(k) for k in ("loc", "ip", "colo", "ms", "skew") + META_FIELDS + STACK_FIELDS}
+            reg["domains"] = r.get("domains") or []
             reg.update(warp=bool(r.get("warp")), lookup_mode=cfg["mode"], env=old.get("env"), env_at=old.get("env_at"),
                        checked_at=now, net=res["net"] or "")
             last = old.get("loc") or old.get("last_loc")  # 中间失败过一次也和最后一次知道的出口比
@@ -10930,6 +11261,14 @@ def risk_items(data, include_region=True, note_age=True):
             f"出口地区判定不一致：trace 接口看到 {region_label(loc)}，meta 接口看到 {region_label(reg['meta_loc'])}",
             "多半是 IPv4 和 IPv6 走了不同出口，或代理只分流了一部分流量。这种情况下服务端看到的地区可能和你以为的不一样，"
             "先统一出口再判断。")
+    doms = [d for d in reg.get("domains") or [] if isinstance(d, dict) and d.get("loc") and d.get("host")]
+    diff = [d for d in doms if loc and d["loc"] != loc]
+    if diff:  # Claude Code 用的 API、续登录的地址看到的出口和 claude.ai 看到的不一样
+        bad = region_status(loc) == "supported" and any(region_status(d["loc"]) != "supported" for d in diff)
+        seen = "，".join(f"{d['host']} 看到的是 {region_label(d['loc'])}" for d in diff)
+        add("domain_region", "bad" if bad else "warn",
+            f"Anthropic 几处地址看到的出口地区不一样：claude.ai 看到的是 {region_label(loc)}，{seen}" + ("，不在支持名单内" if bad else ""),
+            DOMAIN_REGION_BAD_ADVICE if bad else DOMAIN_REGION_ADVICE)
     ip_type = reg.get("ip_type")
     if ip_type == "tor":
         add("tor_exit", "warn", f"出口 IP 是 Tor 出口节点（{reg.get('org') or '?'}）",
@@ -10975,6 +11314,44 @@ def risk_items(data, include_region=True, note_age=True):
         out.append({"kind": "creds_perm", "level": "warn",
                     "text": f"Claude Code 的登录凭据文件权限是 0{creds_mode}，这台电脑上的其他用户也读得到" + env_old,
                     "advice": CREDS_PERM_ADVICE.format(path=short_path(claude_credentials_file()))})
+    hist = [h for h in (env or {}).get("history_keys") or [] if isinstance(h, dict) and h.get("count")]
+    if hist:  # 命令历史里留着密钥：只说在哪、几处，不显示内容
+        kinds = sorted({k for h in hist for k in h.get("kinds") or []})
+        where = "、".join(f"{h.get('path')}（{h['count']} 处）" for h in hist[:3]) + (f"等 {len(hist)} 个文件" if len(hist) > 3 else "")
+        what = f"（{'、'.join(kinds)}）" if kinds else ""
+        out.append({"kind": "history_key", "level": "warn", "text": f"命令历史里留着 Claude 的密钥{what}：{where}" + env_old,
+                    "advice": HISTORY_KEY_ADVICE})
+    if (env or {}).get("perm_bypass"):
+        out.append({"kind": "perm_bypass", "level": "warn",
+                    "text": f"Claude Code 设成了不问就执行：{env['perm_bypass']} 里 permissions.defaultMode 是 bypassPermissions" + env_old,
+                    "advice": PERM_BYPASS_ADVICE})
+    lan = (env or {}).get("lan") if isinstance((env or {}).get("lan"), dict) else {}
+    if lan.get("panel"):  # 面板地址里带着令牌、走的是 HTTP：Wi-Fi 没加密时同一网络的人能截到
+        open_wifi = isinstance(wifi, dict) and wifi.get("security") in ("open", "wep")
+        out.append({"kind": "panel_lan", "level": "warn" if open_wifi else "info",
+                    "text": f"cam 面板（{lan['panel']} 端口）开着局域网访问" + ("，连着的 Wi-Fi 又没加密" if open_wifi else "") + env_old,
+                    "advice": PANEL_LAN_ADVICE})
+    if lan.get("proxy"):
+        out.append({"kind": "proxy_lan", "level": "info",
+                    "text": f"本机代理 {'、'.join(lan['proxy'])} 对局域网开放：同一个网络里的人能借它上网" + env_old, "advice": PROXY_LAN_ADVICE})
+    if (env or {}).get("config_mode"):
+        out.append({"kind": "config_perm", "level": "info",
+                    "text": f"{short_path(claude_json_file())} 的权限是 0{env['config_mode']}，这台电脑上的其他用户也读得到" + env_old,
+                    "advice": CONFIG_PERM_ADVICE.format(path=short_path(claude_json_file()))})
+    ar = (env or {}).get("auto_run")
+    if isinstance(ar, dict) and (ar.get("hooks_n") or ar.get("mcp_n") or ar.get("mcp_local")):
+        parts = []
+        for n, names, what in ((ar.get("hooks_n"), ar.get("hooks"), "个钩子"), (ar.get("mcp_n"), ar.get("mcp"), "个 MCP 服务器")):
+            if n:
+                names = names or []
+                parts.append(f"{n} {what}（{'、'.join(names)}{' 等' if n > len(names) else ''}）")
+        if ar.get("mcp_local"):
+            parts.append(f"另有 {ar['mcp_local']} 个只在某个项目里用的 MCP 服务器")
+        out.append({"kind": "auto_run", "level": "info", "text": "Claude Code 会自动运行的：" + "；".join(parts) + env_old,
+                    "advice": AUTO_RUN_ADVICE})
+    if (env or {}).get("remote"):
+        out.append({"kind": "remote_app", "level": "info", "text": f"正在运行远程控制软件：{'、'.join(env['remote'])}" + env_old,
+                    "advice": REMOTE_APP_ADVICE})
     if reg.get("warp"):
         add("warp", "info", "出口经过 Cloudflare WARP / Zero Trust",
             "上面的出口地区是 WARP 的出口，不是本机网络的真实出口；Anthropic 按使用者所在地判断。")
@@ -11014,7 +11391,8 @@ def risk_items(data, include_region=True, note_age=True):
         if len(locs) > 1:
             add("account_regions", "warn",
                 f"当前账号“{acc['label']}”{ACCOUNT_REGION_DAYS} 天内从 {len(locs)} 个地区使用过：{'、'.join(region_label(l) for l in locs)}",
-                "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。", cached=False)
+                "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。"
+                "不是你自己用的话，" + ACTIVE_SESSIONS_TIP, cached=False)
     n = sum(1 for a in data.get("accounts") or [] if a.get("kind") == "claude_code")
     if n >= 2:
         add("accounts", "info", f"本机保存了 {n} 个 Claude Code 账号",
@@ -11036,12 +11414,16 @@ RISK_WEIGHTS = {
     ("tor_exit", "warn"): 40, ("proxy_ip", "warn"): 25, ("ipv6_mismatch", "warn"): 15,
     ("dns_resolver", "info"): 0, ("ip_origin", "info"): 5, ("dns_servers", "info"): 0,
     ("auth", "bad"): 20, ("auth", "warn"): 5, ("proxy_down", "bad"): 0, ("tls_intercept", "warn"): 0,
-    ("hosts", "warn"): 20, ("creds_perm", "warn"): 15, ("http_tamper", "warn"): 10, ("wifi", "warn"): 10,
+    ("hosts", "warn"): 20, ("creds_perm", "warn"): 15, ("http_tamper", "warn"): 10, ("wifi", "warn"): 5,
+    ("domain_region", "bad"): 60, ("domain_region", "warn"): 15, ("history_key", "warn"): 5, ("perm_bypass", "warn"): 5,
+    ("panel_lan", "warn"): 5, ("panel_lan", "info"): 0, ("proxy_lan", "info"): 0, ("config_perm", "info"): 0,
+    ("auto_run", "info"): 0, ("remote_app", "info"): 0,
 }
 # 扣分规则写给人看的说法（面板评分卡里的“扣分规则”、cam risk --rules）：每条对应 RISK_WEIGHTS 里扣分的一项，分数从那里取，
 # 所以界面上列的和实际扣的不会对不上。和 Rust 版 RISK_RULES / RISK_NOTICES 一致（tests/shared/risk_rules.json）
 RISK_RULES = (
     ("region", "warn", "出口地区不在 Anthropic 支持名单"),
+    ("domain_region", "bad", "Claude Code 用的 API 或续登录的地址看到的出口不在支持名单（claude.ai 看到的在）"),
     ("tor_exit", "warn", "出口 IP 是 Tor 出口节点"),
     ("api", "bad", "api.anthropic.com 连不上，或者拒绝访问"),
     ("region_unknown", "warn", "出口地区查不到（连不上 claude.ai 和 Cloudflare）"),
@@ -11056,8 +11438,12 @@ RISK_RULES = (
     ("ipv6_mismatch", "warn", "IPv4 和 IPv6 的出口不在同一个地区"),
     ("region_mismatch", "warn", "两个接口看到的出口地区不一致"),
     ("region_change", "warn", "24 小时内出口换到了不支持的地区"),
+    ("domain_region", "warn", "Anthropic 几处地址（claude.ai、API、续登录）看到的出口地区不一样"),
     ("clock", "warn", "本机时钟和服务器相差 2 分钟以上"),
-    ("wifi", "warn", "连着的 Wi-Fi 没有加密（开放网络），或者用的是 WEP"),
+    ("wifi", "warn", "连着的 Wi-Fi 没有加密（开放网络，包括要在网页里登录的），或者用的是 WEP"),
+    ("history_key", "warn", "命令历史里留着 Claude 的密钥（sk-ant- 开头）"),
+    ("perm_bypass", "warn", "Claude Code 设成了不问就执行（bypassPermissions）"),
+    ("panel_lan", "warn", "cam 面板开着局域网访问，连着的 Wi-Fi 又没加密"),
     ("http_tamper", "warn", "这张网在改动没加密的网页（公共 Wi-Fi 的登录页，或者有人往里塞东西）"),
     ("vpn", "info", "默认路由走 VPN / 隧道"),
     ("web", "bad", "claude.ai 连不上，或者拒绝访问"),
@@ -11078,6 +11464,8 @@ RISK_NOTICES = (
     "出口在支持地区之间变化、系统配的 DNS 和出口地区不一致",
     "本机解析不了域名但实际连得上（请求走代理）、域名解析成内网 / 保留地址（被本机的软件接管）",
     "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）",
+    "cam 面板开着局域网访问（Wi-Fi 有加密时）、本机代理对局域网开放、~/.claude.json 别的用户也读得到",
+    "会自动运行命令的钩子和 MCP 服务器、正在运行的远程控制软件（只列出来，看看有没有不是你装的）",
 )
 
 
@@ -11534,7 +11922,12 @@ def service_check(store=None, prog=None):
         kept = f"；这次没连上，这是{fmt_ago(r['checked_at'])}查到的" if r.get("failed_at") and r.get("checked_at") else ""
         add("region", "ok" if status == "supported" else "warn",
             f"{region_message(r['loc'], status)}（IP {r.get('ip')}" + (f"，{r['city']}" if r.get("city") else "")
-            + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms{kept}）", REGION_ADVICE[status])
+            + f"，Cloudflare 节点 {r.get('colo')}，{r.get('ms')} ms{kept}）",
+            REGION_ADVICE[status] + (UA_REGION_NOTE if r["loc"] == "UA" else ""))
+        doms = [d for d in r.get("domains") or [] if isinstance(d, dict) and d.get("loc")]
+        if doms and all(d["loc"] == r["loc"] for d in doms):  # 不一样的那条由 risk_items 给（domain_region）
+            add("domain_region", "ok", f"{'、'.join(d['host'] for d in doms)} 看到的出口地区也是 {region_label(r['loc'])}",
+                "Claude Code 的请求发往 api.anthropic.com，续登录走 platform.claude.com；这几处看到的地区和 claude.ai 一致。")
         fail = region_fail_item(r)
         if fail:  # 和顶部环境卡同一条，两边分数才一致
             out.append(fail)
@@ -13509,6 +13902,8 @@ def main(argv=None):
     s.add_argument("--ipinfo-token", metavar="TOKEN", help="ipinfo.io 的 token，空字符串删除")
     s.add_argument("--clear-history", action="store_true", help="清除缓存的出口信息、环境评分的变化记录和账号使用地区记录")
     s.add_argument("--rules", action="store_true", help="列出环境评分的扣分规则：每个信号扣几分，哪些只提醒不扣分")
+    s = sub.add_parser("regions", help="Anthropic 支持哪些国家和地区，当前出口在不在里面（跟一个名字或代码只查那一个）")
+    s.add_argument("query", nargs="?", help="国家 / 地区名或两位代码，比如 日本、JP")
     s = sub.add_parser("rule", help="切号规则")
     rsub = s.add_subparsers(dest="rule_cmd")
     rsub.add_parser("ls", help="列出规则")
@@ -13650,6 +14045,8 @@ def main(argv=None):
             cmd_rule(store, args)
         elif c == "risk":
             cmd_risk(store, args)
+        elif c == "regions":
+            return cmd_regions(store, args)
         elif c == "json":
             print(json.dumps(public_state(store, store.load()), ensure_ascii=False, indent=2))
         elif c == "update":

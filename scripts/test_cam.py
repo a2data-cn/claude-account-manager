@@ -303,6 +303,9 @@ class CamTest(unittest.TestCase):
         os.environ["CAM_TEST_DNS"] = "192.168.1.1"
         os.environ["CAM_TEST_HOSTS"] = ""  # 不读这台电脑真的 hosts 文件
         os.environ["CAM_TEST_WIFI"] = ""  # 不查这台电脑真的 Wi-Fi
+        os.environ["CAM_TEST_PROCS"] = ""  # 不看这台电脑真的进程（远程控制软件那一项）
+        os.environ["CAM_TEST_LAN_IP"] = ""  # 不拿真的局域网地址去连面板、代理的端口
+        os.environ.pop("HISTFILE", None)  # 命令历史只看临时主目录里的
         os.environ["CAM_TEST_PROXY"] = ""  # 不读本机的系统代理设置（macOS 上开着系统代理时结果会变）
         os.environ["CAM_TEST_TZ"] = "America/New_York=US"  # 跑测试的机器时区不定，固定成和 mock 出口一致
         os.environ["CAM_TEST_ROUTE_IF"] = ""
@@ -333,6 +336,7 @@ class CamTest(unittest.TestCase):
         with open(self.cj_path, "w") as f:
             json.dump({"numStartups": 42, "projects": {"/work/x": {"allowedTools": ["Bash"]}},
                        "mcpServers": {"m": {"command": "x"}}}, f)
+        os.chmod(self.cj_path, 0o600)  # Claude Code 自己写这个文件时就是 600
         MockAnthropic.calls = []
         MockAnthropic.tokens = {}
         MockAnthropic.refresh_map = {}
@@ -3716,10 +3720,10 @@ foreach ($dark in @($false, $true)) {{
         a_id, b_id = self._two_accounts()  # 当前登录 B
         store = self.cam.Store()
         self.cam.check_region(store)
-        # 没有风险时只有“账号数”这条 info
+        # 没有风险时只有两条 info：~/.claude.json 里配着 MCP 服务器 m（只列出来），账号数
         st = self.cam.public_state(store, self.data())
         risks = st["risks"]
-        self.assertEqual([r["kind"] for r in risks], ["accounts"])
+        self.assertEqual([r["kind"] for r in risks], ["auto_run", "accounts"])
         self.assertEqual((st["risk_score"]["score"], st["risk_score"]["grade"]), (100, "low"))
         self.assertTrue(all(set(r) == {"kind", "level", "text", "advice", "points"} for r in risks))
         # 出口从 US 变到 HK：不在名单 + 出口变化；当前账号 B 记了两个地区
@@ -5744,7 +5748,7 @@ foreach ($dark in @($false, $true)) {{
             cam.check_region(store, max_age=0)
         st = cam.public_state(store, self.data())
         item = next(r for r in st["risks"] if r["kind"] == "wifi")
-        self.assertEqual((item["level"], item["points"]), ("warn", 10))
+        self.assertEqual((item["level"], item["points"]), ("warn", 5))
         self.assertIn("“Cafe Free”没有加密", item["text"])
         self.assertEqual(st["region"]["wifi"], {"ssid": "Cafe Free", "security": "open"})
         with mock.patch.dict(os.environ, {"CAM_TEST_WIFI": "wpa:Home"}):
@@ -5754,6 +5758,98 @@ foreach ($dark in @($false, $true)) {{
         self.assertEqual(st["region"]["wifi"], {"ssid": "Home", "security": "wpa"})
         cam.check_region(store, max_age=0)  # 测试里默认：没连 Wi-Fi
         self.assertIsNone(cam.public_state(store, self.data())["region"]["wifi"])
+
+    def test_security_checks_show_up_after_a_check(self):
+        """命令历史里的密钥、不问就执行、钩子和 MCP、远程控制软件：环境检测记下来、面板的状态里带着、按规则扣分；
+        密钥本身、钩子命令的参数都不出现在结果里。去掉以后再检测就没有了。"""
+        cam = self.cam
+        self._two_accounts()
+        store = cam.Store()
+        fake = "sk-ant-api03-" + "q" * 24
+        hist = os.path.join(self.tmp, ".zsh_history")
+        with open(hist, "w") as f:
+            f.write(f": 1700000000:0;export ANTHROPIC_API_KEY={fake}\n: 1700000001:0;claude\n")
+        settings = os.path.join(self.tmp, ".claude", "settings.json")
+        with open(settings, "w") as f:
+            json.dump({"permissions": {"defaultMode": "bypassPermissions"},
+                       "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python3 ~/hooks/done.py --token abc123"}]}]}}, f)
+        with mock.patch.dict(os.environ, {"CAM_TEST_PROCS": "explorer.exe,ToDesk.exe"}):
+            cam.check_region(store, max_age=0)
+        st = cam.public_state(store, self.data())
+        got = {r["kind"]: r for r in st["risks"]}
+        self.assertEqual((got["history_key"]["level"], got["history_key"]["points"]), ("warn", 5))
+        self.assertIn("命令历史里留着 Claude 的密钥（API Key）：", got["history_key"]["text"])
+        self.assertIn(".zsh_history（1 处）", got["history_key"]["text"])
+        self.assertIn("sed -i.bak '/sk-ant-/d'", got["history_key"]["advice"])
+        self.assertEqual((got["perm_bypass"]["level"], got["perm_bypass"]["points"]), ("warn", 5))
+        self.assertEqual((got["auto_run"]["level"], got["auto_run"]["points"]), ("info", 0))
+        self.assertIn("1 个钩子（Stop → done.py）；1 个 MCP 服务器（m）", got["auto_run"]["text"])
+        self.assertEqual((got["remote_app"]["level"], got["remote_app"]["text"]), ("info", "正在运行远程控制软件：ToDesk"))
+        dumped = json.dumps(st, ensure_ascii=False)
+        self.assertNotIn(fake, dumped)
+        self.assertNotIn("abc123", dumped)
+        self.assertEqual(st["risk_score"]["score"], 90)
+        os.remove(hist)
+        with open(settings, "w") as f:
+            json.dump({}, f)
+        cam.check_region(store, max_age=0)
+        kinds = {r["kind"] for r in cam.public_state(store, self.data())["risks"]}
+        self.assertFalse(kinds & {"history_key", "perm_bypass", "remote_app"})
+        self.assertIn("auto_run", kinds)  # ~/.claude.json 里还配着 MCP 服务器 m
+
+    def test_lan_exposed_panel_and_proxy(self):
+        """对局域网开着的面板和本机代理：拿本机的局域网地址连得上才算，只听 127.0.0.1 的不算；
+        桌面版设置里关了局域网访问的面板不算。"""
+        cam = self.cam
+        ips = cam.lan_ips()
+        if not ips:
+            self.skipTest("这台电脑没有局域网地址")
+
+        def listener(host):
+            s = socket.socket()
+            s.bind((host, 0))
+            s.listen(5)
+            self.addCleanup(s.close)
+            return s.getsockname()[1]
+        open_port, local_only, panel_port = listener("0.0.0.0"), listener("127.0.0.1"), listener("0.0.0.0")
+        os.makedirs(cam.cam_home(), exist_ok=True)
+        desk = os.path.join(cam.cam_home(), "desktop.json")
+        with open(desk, "w") as f:
+            json.dump({"server_enabled": True, "port": panel_port}, f)  # 没写 lan：桌面版默认开着
+        env = {"CAM_TEST_LAN_IP": ips[0], "HTTPS_PROXY": f"http://127.0.0.1:{open_port}", "ALL_PROXY": f"socks5://127.0.0.1:{local_only}"}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(cam.lan_exposed(), {"panel": panel_port, "proxy": [f"127.0.0.1:{open_port}"]})
+            with open(desk, "w") as f:
+                json.dump({"server_enabled": True, "lan": False, "port": panel_port}, f)
+            self.assertEqual(cam.lan_exposed()["panel"], None)
+        self.assertEqual(cam.lan_exposed(), {"panel": None, "proxy": []})  # 测试里默认没有局域网地址
+
+    def test_api_sees_a_different_region(self):
+        """Claude Code 用的 API 地址看到的出口和 claude.ai 不一样：记下来，不在名单里的扣 60 分；一样的话服务检测里说一声。"""
+        cam = self.cam
+        self._two_accounts()
+        store = cam.Store()
+
+        class OtherExit(MockAnthropic):
+            trace_loc = "CN"
+        srv = QuietServer(("127.0.0.1", 0), OtherExit)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        other = f"http://127.0.0.1:{srv.server_address[1]}"
+        with mock.patch.object(cam, "API_BASE", other):
+            self.assertEqual(cam.domain_trace_urls(), [("127.0.0.1", other + "/cdn-cgi/trace")])
+            cam.check_region(store, max_age=0)
+            st = cam.public_state(store, self.data())
+            self.assertEqual(st["region"]["domains"], [{"host": "127.0.0.1", "ip": "1.2.3.4", "loc": "CN", "status": "unsupported"}])
+            item = next(r for r in st["risks"] if r["kind"] == "domain_region")
+            self.assertEqual((item["level"], item["points"]), ("bad", 60))
+            self.assertIn("claude.ai 看到的是 US（美国），127.0.0.1 看到的是 CN（中国大陆），不在支持名单内", item["text"])
+            OtherExit.trace_loc = "US"
+            items = cam.service_check(store)
+            ok = next(i for i in items if i["kind"] == "domain_region")
+            self.assertEqual((ok["level"], ok["text"]), ("ok", "127.0.0.1 看到的出口地区也是 US（美国）"))
+        self.assertEqual(cam.domain_trace_urls(), [])  # 测试里 API、续登录和 claude.ai 是同一个地址：不重复问
 
     def test_service_check_reports_progress(self):
         """“重新检测”的进度：带着 run 检测时，/api/progress 说得出每一步在做还是做完了；做完后每一步都有结论。
@@ -5799,7 +5895,8 @@ foreach ($dark in @($false, $true)) {{
         self.assertTrue(res["v"]["items"])
         v, st = states("flow-run-1")
         self.assertTrue(v["done"])
-        want = [(k, "skip" if k == "tls" else "ok") for k, _ in cam.service_steps(False, False)]  # 测试里的假接口不是 HTTPS
+        # 测试里的假接口不是 HTTPS；API、续登录和 claude.ai 是同一个地址，不用另问出口
+        want = [(k, "skip" if k in ("tls", "domains") else "ok") for k, _ in cam.service_steps(False, False)]
         self.assertEqual([(s["key"], s["state"]) for s in v["steps"]], want)
         self.assertEqual([s["label"] for s in v["steps"]], [label for _, label in cam.service_steps(False, False)])
         for s in v["steps"]:
@@ -5810,11 +5907,11 @@ foreach ($dark in @($false, $true)) {{
         self.assertTrue(get("/api/service-check")["items"])
         self.assertTrue(get("/api/service-check?run=a%20b")["items"])
         self.assertEqual(get("/api/progress?run=a%20b")["steps"], [])
-        # 关掉外部 IP 查询：没有问第三方的那几步
+        # 关掉外部 IP 查询：没有问第三方的那几步（Anthropic 几处地址看到的出口照问）
         self.assertEqual(self.run_cam("risk", "--ip-lookup", "off"), 0)
         get("/api/service-check?run=flow-run-2")
         v, st = states("flow-run-2")
-        self.assertEqual(list(st), ["local", "dns", "exit", "api", "web", "auth", "tls", "status", "score"])
+        self.assertEqual(list(st), ["local", "dns", "exit", "domains", "api", "web", "auth", "tls", "status", "score"])
         self.assertTrue(v["done"])
 
     def test_plain_http_tampering_is_flagged(self):
@@ -6118,7 +6215,7 @@ foreach ($dark in @($false, $true)) {{
         self.assertTrue(v["done"])
         self.assertEqual([s["key"] for s in v["steps"]],
                          ["usage"] + [k for k, _ in cam.service_steps(False, False)] + ["release", "accounts", "claude_code", "cam"])
-        self.assertEqual({s["key"]: s["state"] for s in v["steps"] if s["state"] != "ok"}, {"tls": "skip"})
+        self.assertEqual({s["key"]: s["state"] for s in v["steps"] if s["state"] != "ok"}, {"tls": "skip", "domains": "skip"})
         self.assertEqual(len({s["label"] for s in v["steps"]}), len(v["steps"]))  # 没有两行同名的
         prog = cam.CheckProgress()
         cam.full_checkup(cam.Store(), offline=True, prog=prog)
@@ -7366,6 +7463,63 @@ class SharedFixtureTest(unittest.TestCase):
             self.assertEqual((got["level"], self.cam.risk_points(got), got["text"]), (c["expect"]["level"], c["expect"]["points"], c["expect"]["text"]), c["name"])
             self.assertIn(c["expect"]["advice_has"], got["advice"], c["name"])
             self.assertEqual(self.cam.risk_score(items)["score"], c["expect"]["score"], c["name"])
+
+    def test_security(self):
+        """安全项：命令历史里的密钥怎么数、钩子叫什么、设置里的不问就执行、MCP 服务器、远程控制软件，以及它们在环境里怎么提醒、扣几分；
+        Anthropic 几处地址看到的出口地区不一样时那一条。"""
+        import datetime as dt
+        cam, fx = self.cam, shared("security.json")
+        for c in fx["scan_keys"]:
+            self.assertEqual(cam.scan_keys(c["text"]), c["want"], c["name"])
+        for cmd, want in fx["hook_name"]:
+            self.assertEqual(cam.hook_name(cmd), want, cmd)
+        for c in fx["settings"]:
+            self.assertEqual(cam.settings_security(c["docs"]), (c["bypass"], c["hooks"]), c["name"])
+        for c in fx["mcp"]:
+            self.assertEqual(cam.mcp_servers(c["doc"]), (c["names"], c["local"]), c["name"])
+        for c in fx["remote_apps"]:
+            self.assertEqual(cam.remote_apps(c["names"]), c["want"], c["name"])
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        kinds = ("history_key", "perm_bypass", "panel_lan", "proxy_lan", "config_perm", "auto_run", "remote_app", "wifi")
+        for c in fx["risk"]:
+            items = cam.risk_items({"region": {"loc": "US", "checked_at": now, "env": c["env"]}}, note_age=False)
+            got = [{"kind": i["kind"], "level": i["level"], "text": i["text"], "points": cam.risk_points(i), "advice_head": i["advice"][:12]}
+                   for i in items if i["kind"] in kinds]
+            self.assertEqual(got, c["want"], c["name"])
+            self.assertEqual(cam.risk_score(items)["score"], c["score"], c["name"])
+        c = fx["config_perm"]
+        got = next(i for i in cam.risk_items({"region": {"loc": "US", "checked_at": now, "env": c["env"]}}, note_age=False)
+                   if i["kind"] == "config_perm")
+        self.assertEqual((got["level"], cam.risk_points(got)), (c["level"], c["points"]))
+        self.assertIn(c["text_has"], got["text"])
+        self.assertIn(c["advice_has"], got["advice"])
+        for c in fx["domains"]:
+            reg = {"loc": c["loc"], "checked_at": now, "env": {"proxy": [], "tunnel": None}}
+            if c["domains"] is not None:
+                reg["domains"] = c["domains"]
+            items = cam.risk_items({"region": reg}, note_age=False)
+            got = [{"level": i["level"], "text": i["text"], "points": cam.risk_points(i), "advice_head": i["advice"][:14]}
+                   for i in items if i["kind"] == "domain_region"]
+            self.assertEqual(got, c["want"], c["name"])
+            self.assertEqual(cam.region_view({"region": reg})["domains"], c["view"], c["name"])
+            self.assertEqual(cam.risk_score(items)["score"], c["score"], c["name"])
+
+    def test_regions(self):
+        """支持地区：给界面的名单和说明、每个地区算不算支持、地区的写法。"""
+        fx = shared("regions.json")
+        info = self.cam.regions_info()
+        self.assertEqual(info, {k: fx[k] for k in info})
+        self.assertEqual(len(info["supported"]), 185)
+        self.assertFalse(set(info["supported"]) & set(info["unsupported"]))
+        self.assertFalse(set(info["dependencies"]) & set(info["unsupported"]))
+        for code, want in fx["status"]:
+            self.assertEqual(self.cam.region_status(code), want, code)
+        for code, want in fx["labels"]:
+            self.assertEqual(self.cam.region_label(code), want, code)
+        self.assertEqual(self.cam.region_lookup("日本"), "JP")
+        self.assertEqual(self.cam.region_lookup("香"), "HK")
+        self.assertEqual(self.cam.region_lookup("jp"), "JP")
+        self.assertIsNone(self.cam.region_lookup("火星"))
 
     def test_wifi_security(self):
         """连着的 Wi-Fi 加没加密：三个系统各自的输出怎么读、加密方式怎么归类、开放网络和 WEP 在环境里怎么提醒。"""

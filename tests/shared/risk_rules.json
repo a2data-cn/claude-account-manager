@@ -1,6 +1,7 @@
 {
   "rules": [
     {"kind": "region", "level": "warn", "points": 60, "text": "出口地区不在 Anthropic 支持名单"},
+    {"kind": "domain_region", "level": "bad", "points": 60, "text": "Claude Code 用的 API 或续登录的地址看到的出口不在支持名单（claude.ai 看到的在）"},
     {"kind": "tor_exit", "level": "warn", "points": 40, "text": "出口 IP 是 Tor 出口节点"},
     {"kind": "api", "level": "bad", "points": 40, "text": "api.anthropic.com 连不上，或者拒绝访问"},
     {"kind": "region_unknown", "level": "warn", "points": 30, "text": "出口地区查不到（连不上 claude.ai 和 Cloudflare）"},
@@ -15,11 +16,15 @@
     {"kind": "ipv6_mismatch", "level": "warn", "points": 15, "text": "IPv4 和 IPv6 的出口不在同一个地区"},
     {"kind": "region_mismatch", "level": "warn", "points": 15, "text": "两个接口看到的出口地区不一致"},
     {"kind": "region_change", "level": "warn", "points": 15, "text": "24 小时内出口换到了不支持的地区"},
+    {"kind": "domain_region", "level": "warn", "points": 15, "text": "Anthropic 几处地址（claude.ai、API、续登录）看到的出口地区不一样"},
     {"kind": "clock", "level": "warn", "points": 10, "text": "本机时钟和服务器相差 2 分钟以上"},
-    {"kind": "wifi", "level": "warn", "points": 10, "text": "连着的 Wi-Fi 没有加密（开放网络），或者用的是 WEP"},
     {"kind": "http_tamper", "level": "warn", "points": 10, "text": "这张网在改动没加密的网页（公共 Wi-Fi 的登录页，或者有人往里塞东西）"},
     {"kind": "vpn", "level": "info", "points": 10, "text": "默认路由走 VPN / 隧道"},
     {"kind": "web", "level": "bad", "points": 10, "text": "claude.ai 连不上，或者拒绝访问"},
+    {"kind": "wifi", "level": "warn", "points": 5, "text": "连着的 Wi-Fi 没有加密（开放网络，包括要在网页里登录的），或者用的是 WEP"},
+    {"kind": "history_key", "level": "warn", "points": 5, "text": "命令历史里留着 Claude 的密钥（sk-ant- 开头）"},
+    {"kind": "perm_bypass", "level": "warn", "points": 5, "text": "Claude Code 设成了不问就执行（bypassPermissions）"},
+    {"kind": "panel_lan", "level": "warn", "points": 5, "text": "cam 面板开着局域网访问，连着的 Wi-Fi 又没加密"},
     {"kind": "proxy", "level": "info", "points": 5, "text": "设了代理（环境变量或系统代理）"},
     {"kind": "warp", "level": "info", "points": 5, "text": "出口经过 Cloudflare WARP / Zero Trust"},
     {"kind": "timezone", "level": "info", "points": 5, "text": "系统时区和出口地区不一致（两边都在支持地区）"},
@@ -35,7 +40,9 @@
     "当前登录已过期（账号的事，运行一次 claude 会自动续上）",
     "出口在支持地区之间变化、系统配的 DNS 和出口地区不一致",
     "本机解析不了域名但实际连得上（请求走代理）、域名解析成内网 / 保留地址（被本机的软件接管）",
-    "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）"
+    "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）",
+    "cam 面板开着局域网访问（Wi-Fi 有加密时）、本机代理对局域网开放、~/.claude.json 别的用户也读得到",
+    "会自动运行命令的钩子和 MCP 服务器、正在运行的远程控制软件（只列出来，看看有没有不是你装的）"
   ],
   "no_points": [
     {"kind": "status", "level": "bad"},
@@ -48,6 +55,16 @@
     {"kind": "region_change", "level": "info"},
     {"kind": "dns_resolver", "level": "info"},
     {"kind": "tls_intercept", "level": "warn"},
-    {"kind": "proxy_down", "level": "bad"}
+    {"kind": "proxy_down", "level": "bad"},
+    {"kind": "tls", "level": "bad"},
+    {"kind": "accounts", "level": "info"},
+    {"kind": "device", "level": "info"},
+    {"kind": "scope", "level": "info"},
+    {"kind": "dns_servers", "level": "info"},
+    {"kind": "panel_lan", "level": "info"},
+    {"kind": "proxy_lan", "level": "info"},
+    {"kind": "config_perm", "level": "info"},
+    {"kind": "auto_run", "level": "info"},
+    {"kind": "remote_app", "level": "info"}
   ]
 }

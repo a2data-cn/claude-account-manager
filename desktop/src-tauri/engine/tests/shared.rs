@@ -957,3 +957,123 @@ fn session_cases() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn security_cases() {
+    use cam_engine::health::{hook_name, mcp_servers, remote_apps, scan_keys, settings_security};
+    let fx = fixture("security.json");
+    let head =
+        |v: &Value, n: usize| -> String { v.as_str().unwrap_or("").chars().take(n).collect() };
+    for c in cases(&fx, "scan_keys") {
+        assert_eq!(
+            scan_keys(c["text"].as_str().unwrap()),
+            c["want"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "hook_name") {
+        assert_eq!(json!(hook_name(c[0].as_str().unwrap())), c[1], "{}", c[0]);
+    }
+    for c in cases(&fx, "settings") {
+        let docs: Vec<(String, Value)> = c["docs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| (d[0].as_str().unwrap().to_string(), d[1].clone()))
+            .collect();
+        let (bypass, hooks) = settings_security(&docs);
+        assert_eq!(json!(bypass), c["bypass"], "{}", c["name"]);
+        assert_eq!(json!(hooks), c["hooks"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "mcp") {
+        let (names, local) = mcp_servers(&c["doc"]);
+        assert_eq!(json!(names), c["names"], "{}", c["name"]);
+        assert_eq!(json!(local), c["local"], "{}", c["name"]);
+    }
+    for c in cases(&fx, "remote_apps") {
+        let names: Vec<String> = c["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(json!(remote_apps(&names)), c["want"], "{}", c["name"]);
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let kinds = [
+        "history_key",
+        "perm_bypass",
+        "panel_lan",
+        "proxy_lan",
+        "config_perm",
+        "auto_run",
+        "remote_app",
+        "wifi",
+    ];
+    for c in cases(&fx, "risk") {
+        let data = json!({"region": {"loc": "US", "checked_at": now, "env": c["env"]}});
+        let items = risk_items(&data, true, false);
+        let got: Vec<Value> = items
+            .iter()
+            .filter(|i| kinds.contains(&i["kind"].as_str().unwrap_or("")))
+            .map(|i| {
+                json!({"kind": i["kind"], "level": i["level"], "text": i["text"],
+                       "points": risk_points(i), "advice_head": head(&i["advice"], 12)})
+            })
+            .collect();
+        assert_eq!(json!(got), c["want"], "{}", c["name"]);
+        assert_eq!(risk_score(&items)["score"], c["score"], "{}", c["name"]);
+    }
+    let c = &fx["config_perm"];
+    let data = json!({"region": {"loc": "US", "checked_at": now, "env": c["env"]}});
+    let items = risk_items(&data, true, false);
+    let got = items.iter().find(|i| i["kind"] == "config_perm").unwrap();
+    assert_eq!(got["level"], c["level"]);
+    assert_eq!(json!(risk_points(got)), c["points"]);
+    assert!(got["text"]
+        .as_str()
+        .unwrap()
+        .contains(c["text_has"].as_str().unwrap()));
+    assert!(got["advice"]
+        .as_str()
+        .unwrap()
+        .contains(c["advice_has"].as_str().unwrap()));
+    for c in cases(&fx, "domains") {
+        let mut reg =
+            json!({"loc": c["loc"], "checked_at": now, "env": {"proxy": [], "tunnel": null}});
+        if !c["domains"].is_null() {
+            reg["domains"] = c["domains"].clone();
+        }
+        let data = json!({ "region": reg });
+        let items = risk_items(&data, true, false);
+        let got: Vec<Value> = items
+            .iter()
+            .filter(|i| i["kind"] == "domain_region")
+            .map(|i| {
+                json!({"level": i["level"], "text": i["text"], "points": risk_points(i),
+                       "advice_head": head(&i["advice"], 14)})
+            })
+            .collect();
+        assert_eq!(json!(got), c["want"], "{}", c["name"]);
+        assert_eq!(region_view(&data)["domains"], c["view"], "{}", c["name"]);
+        assert_eq!(risk_score(&items)["score"], c["score"], "{}", c["name"]);
+    }
+}
+
+#[test]
+fn regions_cases() {
+    use cam_engine::health::{region_label, region_status, regions_info};
+    let fx = fixture("regions.json");
+    let info = regions_info();
+    for (k, v) in info.as_object().unwrap() {
+        assert_eq!(v, &fx[k], "{}", k);
+    }
+    assert_eq!(info["supported"].as_array().unwrap().len(), 185);
+    for c in cases(&fx, "status") {
+        assert_eq!(json!(region_status(c[0].as_str())), c[1], "{}", c[0]);
+    }
+    for c in cases(&fx, "labels") {
+        assert_eq!(json!(region_label(c[0].as_str())), c[1], "{}", c[0]);
+    }
+}

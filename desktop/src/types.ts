@@ -202,6 +202,7 @@ export interface State {
   risk_score?: RiskScore | null; // 据 risks 算的环境风险评分
   risk_log?: RiskLog | null; // 环境评分最近是怎么变的（后台每次环境检测后分数变了就记一笔）
   risk_rules?: RiskRules | null; // 扣分规则：每个信号扣几分，哪些只提醒不扣分（后台按实际扣分的那张表给的）
+  regions?: RegionsInfo | null; // 支持地区卡：Anthropic 支持的国家和地区名单、说明（旧版后台没有）
   sessions?: SessionsBrief | null; // 本机开着的 claude 会话：几个、有没有在执行、几个在回答 / 等你确认（标题旁的红绿灯用）
   attention?: { count: number; text: string; since?: string | null } | null; // Claude Code 弹着权限确认在等你（cam 的钩子记的）
   desktop_app?: DesktopApp | null; // 有桌面版的号时才有
@@ -292,6 +293,7 @@ export interface RegionInfo {
   org?: string | null; // 出口 IP 的运营商
   plain_http?: boolean | null; // 没加密的网页有没有被中途改动：true 没被改，false 被改了，null 没测
   wifi?: { ssid?: string | null; security: "open" | "wep" | "wpa" } | null; // 连着的 Wi-Fi 加没加密；有线、没查到是 null
+  domains?: { host: string; ip?: string | null; loc: string; status: "supported" | "unsupported" }[]; // Claude Code 用的 API、续登录的地址各自看到的出口
   city?: string | null;
   ip_type?: "residential" | "hosting" | "proxy" | "tor" | "mobile" | null; // 数据库判定的 IP 类型，null = 数据源没有标记
   meta_source?: string | null; // 运营商信息来自哪家（ipapi.is / ipinfo.io / Cloudflare / ip-api.com），界面上注明来源
@@ -378,4 +380,14 @@ export interface CheckProgress {
   steps: CheckStep[];
   done: boolean;
   ms: number;
+}
+
+/** 支持地区卡用的名单和说明（代码都是 ISO 3166-1 两位字母） */
+export interface RegionsInfo {
+  supported: string[]; // Anthropic 官方名单里的国家和地区
+  dependencies: string[]; // 支持国家的海外属地，按所属国家算
+  unsupported: string[]; // 不在名单里的（卡上列出来）
+  notes: string[]; // 几条说明
+  checked: string; // 哪个月对着官方名单核对的
+  url: string; // 官方名单的地址
 }

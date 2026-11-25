@@ -31,12 +31,46 @@ pub const SUPPORTED_REGIONS: &[&str] = &[
     "CH", "TW", "TJ", "TZ", "TH", "TL", "TG", "TO", "TT", "TN", "TR", "TM", "TV", "UG", "UA", "AE",
     "GB", "US", "UY", "UZ", "VU", "VA", "VN", "ZM", "ZW",
 ];
-/// 官方名单写的是国家；这些属地按所属国家看待（美国、英国、法国、荷兰、丹麦、芬兰、挪威、新西兰、澳大利亚）
+/// 官方名单写的是国家；这些属地按所属国家看待（美国、英国、法国、荷兰、丹麦、芬兰、挪威、新西兰、澳大利亚）。
+/// 香港、澳门不是属地，不在名单里就是不支持
 pub const REGION_DEPENDENCIES: &[&str] = &[
-    "PR", "GU", "VI", "AS", "MP", "GI", "IM", "JE", "GG", "BM", "KY", "FK", "VG", "RE", "GP", "MQ",
-    "GF", "YT", "NC", "PF", "PM", "WF", "BL", "MF", "AW", "CW", "SX", "BQ", "GL", "FO", "AX", "SJ",
-    "CK", "NU", "TK", "CX", "CC", "NF",
+    "PR", "GU", "VI", "AS", "MP", "UM", "GI", "IM", "JE", "GG", "BM", "KY", "FK", "VG", "AI", "MS",
+    "TC", "SH", "IO", "PN", "GS", "RE", "GP", "MQ", "GF", "YT", "NC", "PF", "PM", "WF", "BL", "MF",
+    "TF", "AW", "CW", "SX", "BQ", "GL", "FO", "AX", "SJ", "BV", "CK", "NU", "TK", "CX", "CC", "NF",
+    "HM",
 ];
+/// 上面的名单是哪个月对着官方页面核对的
+pub const REGIONS_CHECKED: &str = "2026-10";
+pub const REGIONS_URL: &str = "https://www.anthropic.com/supported-countries";
+/// 不在名单里的国家和地区（地区卡上列出来）
+pub const REGIONS_UNSUPPORTED: &[&str] = &[
+    "CN", "HK", "MO", "RU", "BY", "IR", "KP", "SY", "CU", "VE", "AF", "MM", "YE", "XK",
+];
+/// 地区卡上的几条说明（cam regions 也打印）。与 cam.py 的 REGION_NOTES 一致（tests/shared/regions.json）
+pub const REGION_NOTES: &[&str] = &[
+    "名单以 Anthropic 官方公布的为准，claude.ai、Claude Code 和 API 用同一份；没在名单里的就是不支持。",
+    "支持国家的海外属地（波多黎各、关岛、直布罗陀等）按所属国家算；香港、澳门不在名单里，不支持。",
+    "乌克兰在名单里，但被占领的克里米亚、顿涅茨克、卢甘斯克、赫尔松、扎波罗热地区不支持；IP 只能定位到国家，这里分不出来。",
+    "2025 年 9 月 4 日起，被不支持地区的公司直接或间接控股超过 50% 的企业也不能用；这是账号层面的，本机查不出来。",
+    "Anthropic 按使用者实际所在地判断，不只看出口 IP；这里只看本机能看到的出口，只提醒，不拦任何操作。",
+];
+const UA_REGION_NOTE: &str = "乌克兰被占领的克里米亚、顿涅茨克、卢甘斯克、赫尔松、扎波罗热地区不在支持范围内；IP 只能定位到国家，这里分不出来。";
+const DOMAIN_REGION_ADVICE: &str = "Claude Code 的请求发往 api.anthropic.com，续登录走 platform.claude.com，Anthropic 在这几处看到的是各自的出口。\
+    多半是代理按域名分流了，或者 IPv4 / IPv6 走了不同出口。几个出口都在支持地区就不影响使用；\
+    同一账号的请求来自不同地区，是常见的风控信号之一。";
+const DOMAIN_REGION_BAD_ADVICE: &str = "Claude Code 的请求发往 api.anthropic.com，续登录走 platform.claude.com，这里看到的出口不在支持名单内，\
+    按 Anthropic 政策这个地区不提供服务。Anthropic 按使用者实际所在地判断：人在支持地区的话，\
+    多半是代理 / VPN 只接管了一部分地址，查一下它的设置；人在不支持地区的话，风险与出口无关。";
+
+/// 支持地区卡用的名单和说明（不联网），代码都是 ISO 3166-1 两位字母。与 cam.py 的 regions_info 一致（tests/shared/regions.json）
+pub fn regions_info() -> Value {
+    let mut sup: Vec<&str> = SUPPORTED_REGIONS.to_vec();
+    sup.sort_unstable();
+    let mut dep: Vec<&str> = REGION_DEPENDENCIES.to_vec();
+    dep.sort_unstable();
+    json!({"supported": sup, "dependencies": dep, "unsupported": REGIONS_UNSUPPORTED,
+           "notes": REGION_NOTES, "checked": REGIONS_CHECKED, "url": REGIONS_URL})
+}
 /// 给提示用的中文名，只收常见的
 pub const REGION_NAMES: &[(&str, &str)] = &[
     ("CN", "中国大陆"),
@@ -52,6 +86,8 @@ pub const REGION_NAMES: &[(&str, &str)] = &[
     ("AF", "阿富汗"),
     ("MM", "缅甸"),
     ("YE", "也门"),
+    ("XK", "科索沃"),
+    ("UA", "乌克兰"),
     ("T1", "Tor 出口"),
     ("US", "美国"),
     ("JP", "日本"),
@@ -618,9 +654,13 @@ pub fn parse_trace(txt: &str, t0: Instant) -> Value {
 /// “重新检测”要走的步骤（界面上进度卡的每一行）：键 → 写给人看的名字，顺序就是显示的顺序。
 /// 与 cam.py 的 SERVICE_STEPS 一致（tests/shared/progress.json）
 pub const SERVICE_STEPS: &[(&str, &str)] = &[
-    ("local", "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"),
+    (
+        "local",
+        "本机设置和安全项：时区、语言、DNS、hosts、代理、Wi-Fi、命令历史、钩子",
+    ),
     ("dns", "解析 Claude 的域名"),
     ("exit", "出口 IP 和地区"),
+    ("domains", "Claude Code 的 API、续登录的地址看到的地区"),
     ("isp", "运营商、IP 类型、注册国"),
     ("stack", "IPv4 / IPv6 出口"),
     ("plain", "没加密的网页有没有被改动"),
@@ -635,7 +675,9 @@ pub const SERVICE_STEPS: &[(&str, &str)] = &[
 /// “外部 IP 查询”关掉时不做的几步
 const LOOKUP_STEPS: &[&str] = &["isp", "stack", "plain"];
 /// check_region 里做的几步
-const REGION_STEPS: &[&str] = &["local", "exit", "isp", "stack", "plain", "status"];
+const REGION_STEPS: &[&str] = &[
+    "local", "exit", "domains", "isp", "stack", "plain", "status",
+];
 /// 留着最近几次检测的进度
 const PROGRESS_KEEP: usize = 6;
 
@@ -951,7 +993,7 @@ fn detect_region_prog(cfg: &LookupConfig, prev: &Value, prog: &Progress) -> Opti
     let traced = exit_trace(Duration::from_secs(6), !off);
     prog.finish("exit", traced.is_some(), "没查到");
     let Some(mut out) = traced else {
-        for k in ["isp", "stack"] {
+        for k in ["domains", "isp", "stack"] {
             prog.skip(k, "出口没查到，这一步没做");
         }
         return None;
@@ -960,7 +1002,39 @@ fn detect_region_prog(cfg: &LookupConfig, prev: &Value, prog: &Progress) -> Opti
         out[*k] = Value::Null;
     }
     out["lookup_mode"] = json!(cfg.mode);
+    // Claude Code 用的 API、续登录的地址各自看到的出口地区：问的是 Anthropic 自己的地址，“外部 IP 查询”关掉也照问
+    let doms = domain_trace_urls();
+    if doms.is_empty() {
+        prog.skip("domains", "没有别的地址要问");
+    }
+    let dom_jobs: Vec<(String, TraceJob)> = doms
+        .into_iter()
+        .map(|(h, u)| {
+            let job = tracked(
+                prog,
+                "domains",
+                "没查到",
+                |v: &Option<(Option<String>, Option<String>)>| {
+                    v.as_ref().is_some_and(|x| x.1.is_some())
+                },
+                move || trace_only(&u),
+            );
+            (h, job)
+        })
+        .collect();
+    let domains = |end: Instant| -> Value {
+        let got: Vec<Value> = dom_jobs
+            .iter()
+            .filter_map(|(h, j)| match wait_job(j, end).flatten() {
+                Some((ip, Some(loc))) => Some(json!({"host": h, "ip": ip, "loc": loc})),
+                _ => None,
+            })
+            .collect();
+        json!(got)
+    };
     if off {
+        out["domains"] = domains(Instant::now() + meta_budget());
+        prog.expire(&["domains"]);
         return Some(out);
     }
     let ip = s(&out, "ip").unwrap_or("").to_string();
@@ -1019,7 +1093,8 @@ fn detect_region_prog(cfg: &LookupConfig, prev: &Value, prog: &Progress) -> Opti
     let v6 = wait_job(&j6, end).flatten();
     let meta = jm.and_then(|j| wait_job(&j, end)).flatten();
     let rdap = jr.and_then(|j| wait_job(&j, end)).flatten();
-    prog.expire(&["isp", "stack"]);
+    out["domains"] = domains(end);
+    prog.expire(&["domains", "isp", "stack"]);
     if reuse {
         for k in META_FIELDS {
             out[*k] = prev.get(*k).cloned().unwrap_or(Value::Null);
@@ -1219,6 +1294,45 @@ pub fn fetch_ip_registration(ip: &str, timeout: Duration) -> Option<String> {
 }
 
 /// 只用某一个协议（IPv4 或 IPv6 的 IP 直连）访问 Cloudflare trace，返回 (ip, loc) 或 None（该协议不可用）。
+type TraceJob = mpsc::Receiver<Option<(Option<String>, Option<String>)>>;
+
+/// 除了 claude.ai，还要问出口地区的 Anthropic 地址 [(主机, trace 地址)]：Claude Code 用的 API、续登录的地址。
+/// 代理可能按域名分流，Anthropic 在这几处看到的出口不一定一样。和 claude.ai（或彼此）是同一个地址的不重复问。
+/// 与 cam.py 的 domain_trace_urls 一致。
+pub fn domain_trace_urls() -> Vec<(String, String)> {
+    let netloc = |u: &url::Url| -> Option<String> {
+        let h = u.host_str()?;
+        Some(match u.port() {
+            Some(p) => format!("{}:{}", h, p),
+            None => h.to_string(),
+        })
+    };
+    let mut seen: Vec<String> = url::Url::parse(&crate::usage::web_base())
+        .ok()
+        .and_then(|u| netloc(&u))
+        .into_iter()
+        .collect();
+    let mut out = Vec::new();
+    let token = crate::usage::token_urls()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    for base in [crate::usage::api_base(), token] {
+        let Ok(u) = url::Url::parse(&base) else {
+            continue;
+        };
+        let Some(nl) = netloc(&u) else { continue };
+        if (u.scheme() == "http" || u.scheme() == "https") && !seen.contains(&nl) {
+            out.push((
+                u.host_str().unwrap_or("").to_string(),
+                format!("{}://{}/cdn-cgi/trace", u.scheme(), nl),
+            ));
+            seen.push(nl);
+        }
+    }
+    out
+}
+
 pub fn trace_only(url: &str) -> Option<(Option<String>, Option<String>)> {
     if url.is_empty() {
         return None;
@@ -1462,13 +1576,615 @@ fn tilde_path(p: &std::path::Path) -> String {
     }
 }
 
+// ---- 安全项（只看、不改、不显示内容）：命令历史里留着的密钥、Claude Code 设成不问就执行、会自动运行命令的钩子和 MCP 服务器、
+// ~/.claude.json 的权限、正在运行的远程控制软件、对局域网开放的 cam 面板和本机代理。都在 local_env 里查，和出口一起缓存。
+// 与 cam.py 的同名函数一致（tests/shared/security.json）
+
+const KEY_KINDS: &[(&str, &str)] = &[
+    ("api", "API Key"),
+    ("admin", "管理 Key"),
+    ("sid", "网页登录凭据"),
+    ("oat", "登录凭据"),
+    ("ort", "登录凭据"),
+];
+/// 每个历史文件只看最后这么多
+const HISTORY_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+const HISTORY_FILES: &[&str] = &[
+    ".bash_history",
+    ".zsh_history",
+    ".histfile",
+    ".sh_history",
+    ".local/share/fish/fish_history",
+    ".local/share/powershell/PSReadLine/ConsoleHost_history.txt",
+];
+const HOOK_RUNNERS: &[&str] = &[
+    "python",
+    "python3",
+    "py",
+    "node",
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
+    "npx",
+    "npm",
+    "uvx",
+    "uv",
+    "bunx",
+    "bun",
+    "deno",
+    "env",
+    "sudo",
+    "exec",
+    "nohup",
+    "run",
+];
+/// 远程控制软件：(进程名，小写、不带 .exe) → 给人看的名字
+const REMOTE_APPS: &[(&str, &str)] = &[
+    ("todesk", "ToDesk"),
+    ("todesk_service", "ToDesk"),
+    ("sunloginclient", "向日葵"),
+    ("awesun", "向日葵"),
+    ("teamviewer", "TeamViewer"),
+    ("teamviewer_service", "TeamViewer"),
+    ("teamviewerd", "TeamViewer"),
+    ("anydesk", "AnyDesk"),
+    ("rustdesk", "RustDesk"),
+    ("quickassist", "Windows 快速助手"),
+    ("remoting_host", "Chrome 远程桌面"),
+    ("remoting_me2me_host", "Chrome 远程桌面"),
+    ("srserver", "Splashtop"),
+    ("parsecd", "Parsec"),
+    ("winvnc", "VNC"),
+    ("tvnserver", "VNC"),
+    ("x11vnc", "VNC"),
+    ("xrdp", "xrdp"),
+];
+/// 拿本机的局域网地址连面板、代理的端口，最多等多久
+const LAN_PROBE_SECS: u64 = 1;
+/// 钩子、MCP 服务器各列几个名字
+const AUTO_RUN_SHOWN: usize = 6;
+const ACTIVE_SESSIONS_TIP: &str = "到 claude.ai 的“设置 → 账号 → 活动会话”（claude.ai/settings/account）看看登录着的设备，有不认识的就结束它。";
+const HISTORY_KEY_ADVICE: &str = "在命令行里直接写的密钥会被记进历史文件，拿到这台电脑、备份或同步盘的人都能看到。先关掉所有终端窗口（不然退出时又写回去），\
+    再删掉带 sk-ant- 的那几行：macOS / Linux 运行 sed -i.bak '/sk-ant-/d' 文件路径（改前留一份 .bak，确认没问题再删掉它，\
+    里面还有密钥）；Windows 在 PowerShell 里运行 $p = (Get-PSReadLineOption).HistorySavePath; \
+    (Get-Content $p) -notmatch 'sk-ant-' | Set-Content $p。API Key 和管理 Key 长期有效，到 Console 的 API Keys 页面作废后新建一个；\
+    登录凭据会自动过期换新，不放心就到 claude.ai 的“设置 → 账号 → 活动会话”（claude.ai/settings/account）看看登录着的设备，有不认识的就结束它，再重新登录。\
+    cam 不会替你改这些文件。";
+const PERM_BYPASS_ADVICE: &str = "这样 Claude Code 跑任何命令、改任何文件都不再问你。它读到的网页、文件、代码仓库里要是藏着恶意指令（提示注入），\
+    可能直接删文件或把密钥发出去。只在虚拟机、容器这类隔离环境里这样用；平时去掉这一项，常用的命令在 permissions.allow 里单独放行。";
+const PANEL_LAN_ADVICE: &str = "面板走的是没加密的 HTTP，地址里带着访问令牌，拿到令牌就能查看、切换你的账号。没加密的 Wi-Fi 上别人能截到；\
+    有加密的网络上同一个网络的人也能打开面板的页面（没有令牌进不去）。不用手机看就关掉局域网访问\
+    （cam serve 不加 --lan，桌面版在设置里关掉“允许局域网访问”）；在外面要用，换成 Tailscale 这类组网工具。";
+const PROXY_LAN_ADVICE: &str = "代理软件里的“允许局域网连接（Allow LAN）”开着：同一个网络里的人能借你的代理上网，流量从你的出口出去。\
+    家里、公司的网络一般不要紧，只提醒、不扣分；连公共 Wi-Fi 时最好关掉，要给手机用就给代理设上用户名和密码。";
+const CONFIG_PERM_ADVICE: &str = "这个文件里有账号邮箱、组织、项目列表和 MCP 服务器的配置（可能带着密钥）。电脑只有你自己用就不要紧，只提醒、不扣分；\
+    要收紧的话：chmod 600 ";
+const AUTO_RUN_ADVICE: &str = "钩子会在 Claude Code 的特定时刻自动运行命令，MCP 服务器是 Claude Code 能调用的外部程序，都能读写你的文件。\
+    看看有没有不是你自己加的：钩子在 Claude Code 的 settings.json 的 hooks 里（在 Claude Code 里输入 /hooks 也能看），\
+    MCP 服务器用 claude mcp list 查、claude mcp remove 名字 删。只列出来，不扣分。";
+const REMOTE_APP_ADVICE: &str = "远程控制软件开着时，别人拿到设备代码和密码就能连进来，直接用你登录着的 Claude 网页和 Claude Code。不用时退出，\
+    别把代码和密码告诉别人；自称客服、要你装远程软件“帮你处理”的，多半是骗子。只列出来，不扣分。";
+
+/// 一行里的 Claude 密钥（sk-ant-种类[0-3 位数字]-至少 16 个字母数字_-）的种类，从左往右、不重叠。与 cam.py 的 KEY_RE 一致。
+fn key_kinds_in(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(off) = line[i..].find("sk-ant-") {
+        let start = i + off;
+        let mut j = start + 7;
+        let k0 = j;
+        while j < b.len() && b[j].is_ascii_lowercase() {
+            j += 1;
+        }
+        let kind = &line[k0..j];
+        let d0 = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        let ok_head = !kind.is_empty() && j - d0 <= 3 && j < b.len() && b[j] == b'-';
+        if ok_head {
+            let body0 = j + 1;
+            let mut e = body0;
+            while e < b.len() && (b[e].is_ascii_alphanumeric() || b[e] == b'_' || b[e] == b'-') {
+                e += 1;
+            }
+            if e - body0 >= 16 {
+                out.push(kind.to_string());
+                i = e;
+                continue;
+            }
+        }
+        i = start + 1;
+    }
+    out
+}
+
+/// 一段文字里有几行带着 Claude 的密钥、都是哪几类：{count, kinds}（KEY_KINDS 里的说法，去重排好序）。只数不留。
+pub fn scan_keys(text: &str) -> Value {
+    let mut count = 0;
+    let mut kinds: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let found = key_kinds_in(line);
+        if !found.is_empty() {
+            count += 1;
+            for k in found {
+                let name = KEY_KINDS
+                    .iter()
+                    .find(|(c, _)| *c == k)
+                    .map(|(_, n)| *n)
+                    .unwrap_or("密钥")
+                    .to_string();
+                if !kinds.contains(&name) {
+                    kinds.push(name);
+                }
+            }
+        }
+    }
+    kinds.sort();
+    json!({"count": count, "kinds": kinds})
+}
+
+/// 要看的命令历史文件：bash / zsh / fish / PowerShell 的，HISTFILE 指的，macOS 终端按窗口存的 ~/.zsh_sessions。
+/// 测试用 CAM_TEST_HISTORY 直接给文件列表（用系统的路径分隔符隔开，空字符串：一个都不看）。
+fn history_files() -> Vec<std::path::PathBuf> {
+    if let Some(t) = std::env::var_os("CAM_TEST_HISTORY") {
+        return std::env::split_paths(&t)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+    }
+    let h = home_dir();
+    let mut paths: Vec<std::path::PathBuf> = HISTORY_FILES
+        .iter()
+        .map(|n| n.split('/').fold(h.clone(), |p, part| p.join(part)))
+        .collect();
+    if let Some(f) = std::env::var_os("HISTFILE").filter(|f| !f.is_empty()) {
+        let f = std::path::PathBuf::from(f);
+        paths.push(match f.strip_prefix("~") {
+            Ok(rest) => h.join(rest),
+            Err(_) => f,
+        });
+    }
+    if cfg!(windows) {
+        if let Some(a) = std::env::var_os("APPDATA").filter(|a| !a.is_empty()) {
+            paths.push(
+                std::path::PathBuf::from(a)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("PowerShell")
+                    .join("PSReadLine")
+                    .join("ConsoleHost_history.txt"),
+            );
+        }
+    }
+    let mut sessions: Vec<String> = std::fs::read_dir(h.join(".zsh_sessions"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".history"))
+                .collect()
+        })
+        .unwrap_or_default();
+    sessions.sort();
+    paths.extend(
+        sessions
+            .iter()
+            .take(50)
+            .map(|n| h.join(".zsh_sessions").join(n)),
+    );
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for p in paths {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// 命令历史里留着 Claude 密钥的文件：[{path, count, kinds}]，没有是空的。每个文件只读最后 HISTORY_SCAN_BYTES。
+fn history_keys() -> Vec<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut out = Vec::new();
+    for p in history_files() {
+        let Ok(mut f) = std::fs::File::open(&p) else {
+            continue;
+        };
+        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut raw = Vec::new();
+        if f.seek(SeekFrom::Start(size.saturating_sub(HISTORY_SCAN_BYTES)))
+            .is_err()
+            || f.read_to_end(&mut raw).is_err()
+        {
+            continue;
+        }
+        let r = scan_keys(&String::from_utf8_lossy(&raw));
+        if r["count"].as_u64().unwrap_or(0) > 0 {
+            out.push(json!({"path": tilde_path(&p), "count": r["count"], "kinds": r["kinds"]}));
+        }
+    }
+    out
+}
+
+/// 钩子命令给人看的名字：跳过解释器（python3、node、bash…）、选项和 X=1 这样的变量，取第一个真正的程序 / 脚本的文件名。
+/// 命令里别的东西（参数里可能有密钥）不显示。与 cam.py 的 hook_name 一致。
+pub fn hook_name(cmd: &str) -> String {
+    for tok in cmd.split_whitespace() {
+        let t = tok.trim_matches(|c| c == '"' || c == '\'');
+        let is_var = t.split_once('=').is_some_and(|(k, _)| {
+            let mut ch = k.chars();
+            ch.next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && ch.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        if t.is_empty() || t.starts_with('-') || is_var {
+            continue;
+        }
+        let base = t.rsplit(['/', '\\']).next().unwrap_or("");
+        let low = base.to_lowercase();
+        let low = low.strip_suffix(".exe").unwrap_or(&low);
+        let py_ver = low
+            .strip_prefix("python3.")
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()));
+        if HOOK_RUNNERS.contains(&low) || py_ver {
+            continue;
+        }
+        let name: String = base.chars().take(40).collect();
+        return if name.is_empty() { "?".into() } else { name };
+    }
+    "?".into()
+}
+
+/// 这条钩子是不是 cam 自己装的（红绿灯）。与 cam.py 的 HOOK_MARK 一致。
+fn is_cam_hook(cmd: &str) -> bool {
+    let c = cmd.strip_suffix('\n').unwrap_or(cmd);
+    [
+        "cam.py hook",
+        "cam.py\" hook",
+        "cam.py' hook",
+        "cam_hook.py",
+        "cam_hook.py\"",
+        "cam_hook.py'",
+    ]
+    .iter()
+    .any(|end| c.ends_with(end))
+}
+
+/// Claude Code 的几份设置（[(路径, 内容)]）里和安全有关的：(设成不问就执行的那份的路径, ["事件 → 钩子名"]（去重，
+/// cam 自己装的红绿灯钩子不算）)。与 cam.py 的 settings_security 一致。
+pub fn settings_security(docs: &[(String, Value)]) -> (Option<String>, Vec<String>) {
+    let mut bypass = None;
+    let mut hooks: Vec<String> = Vec::new();
+    for (path, doc) in docs {
+        let Some(obj) = doc.as_object() else { continue };
+        if bypass.is_none()
+            && obj
+                .get("permissions")
+                .and_then(|p| s(p, "defaultMode"))
+                .is_some_and(|m| m == "bypassPermissions")
+        {
+            bypass = Some(path.clone());
+        }
+        let Some(hk) = obj.get("hooks").and_then(|h| h.as_object()) else {
+            continue;
+        };
+        for (event, groups) in hk {
+            for g in groups.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                for h in g
+                    .get("hooks")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[])
+                {
+                    if !h.is_object() || s(h, "type").unwrap_or("command") != "command" {
+                        continue;
+                    }
+                    let Some(cmd) = s(h, "command").filter(|c| !c.is_empty()) else {
+                        continue;
+                    };
+                    let line = format!("{} → {}", event, hook_name(cmd));
+                    if !is_cam_hook(cmd) && !hooks.contains(&line) {
+                        hooks.push(line);
+                    }
+                }
+            }
+        }
+    }
+    (bypass, hooks)
+}
+
+/// ~/.claude.json 的内容里配的 MCP 服务器：([所有项目都能用的名字]（排好序）, 只在某个项目里用的个数)。
+pub fn mcp_servers(d: &Value) -> (Vec<String>, usize) {
+    let Some(obj) = d.as_object() else {
+        return (Vec::new(), 0);
+    };
+    let mut names: Vec<String> = obj
+        .get("mcpServers")
+        .and_then(|m| m.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    let local = obj
+        .get("projects")
+        .and_then(|p| p.as_object())
+        .map(|p| {
+            p.values()
+                .filter_map(|v| v.get("mcpServers").and_then(|m| m.as_object()))
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0);
+    (names, local)
+}
+
+/// 系统级的托管设置（企业管理员下发）。测试用 CAM_MANAGED_SETTINGS 指过去。与 cam.py 的 managed_settings_paths 一致。
+fn managed_settings_paths() -> Vec<std::path::PathBuf> {
+    if let Some(t) = std::env::var_os("CAM_MANAGED_SETTINGS") {
+        return std::env::split_paths(&t)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+    }
+    if cfg!(target_os = "macos") {
+        return vec!["/Library/Application Support/ClaudeCode/managed-settings.json".into()];
+    }
+    if cfg!(windows) {
+        let env_or = |k: &str, d: &str| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| d.into())
+        };
+        return vec![
+            env_or("ProgramFiles", r"C:\Program Files")
+                .join("ClaudeCode")
+                .join("managed-settings.json"),
+            env_or("ProgramData", r"C:\ProgramData")
+                .join("ClaudeCode")
+                .join("managed-settings.json"),
+        ];
+    }
+    vec!["/etc/claude-code/managed-settings.json".into()]
+}
+
+/// Claude Code 会自动运行的东西：(设成不问就执行的那份设置, {hooks: [前几个], hooks_n, mcp: [前几个], mcp_n, mcp_local}；都没有是 null)。
+fn auto_run_info() -> (Option<String>, Value) {
+    let dir = crate::claude::claude_config_dir();
+    let mut docs = Vec::new();
+    for p in [dir.join("settings.json"), dir.join("settings.local.json")]
+        .into_iter()
+        .chain(managed_settings_paths())
+    {
+        if let Ok(doc) = read_json(&p) {
+            docs.push((tilde_path(&p), doc.unwrap_or(Value::Null)));
+        }
+    }
+    let (bypass, hooks) = settings_security(&docs);
+    let (names, local) = match read_json(&crate::claude::claude_json_file()) {
+        Ok(d) => mcp_servers(&d.unwrap_or(Value::Null)),
+        Err(_) => (Vec::new(), 0),
+    };
+    let info = if hooks.is_empty() && names.is_empty() && local == 0 {
+        Value::Null
+    } else {
+        json!({"hooks": hooks.iter().take(AUTO_RUN_SHOWN).collect::<Vec<_>>(), "hooks_n": hooks.len(),
+               "mcp": names.iter().take(AUTO_RUN_SHOWN).collect::<Vec<_>>(), "mcp_n": names.len(), "mcp_local": local})
+    };
+    (bypass, info)
+}
+
+/// ~/.claude.json 这台电脑上别的用户读不读得到：读得到返回它的权限（"644" 这样），否则 None（Windows 不看）。只看，不改。
+fn config_file_mode() -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(crate::claude::claude_json_file())
+            .ok()?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode & 0o077 != 0 {
+            return Some(format!("{:o}", mode));
+        }
+    }
+    None
+}
+
+/// 进程名 → 正在运行的远程控制软件（REMOTE_APPS 里的说法，去重，按表里的顺序）。进程名不分大小写、可以带路径和 .exe；
+/// Linux 的进程名最长 15 个字，被截短的也认。与 cam.py 的 remote_apps 一致。
+pub fn remote_apps(names: &[String]) -> Vec<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for n in names {
+        let b = n
+            .trim()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
+        let b = b.strip_suffix(".exe").unwrap_or(&b);
+        for (key, label) in REMOTE_APPS {
+            if !b.is_empty() && (b == *key || (b.chars().count() == 15 && key.starts_with(b))) {
+                seen.push(label);
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for (_, label) in REMOTE_APPS {
+        if seen.contains(label) && !out.iter().any(|o| o == label) {
+            out.push(label.to_string());
+        }
+    }
+    out
+}
+
+/// 本机在跑的进程名（远程控制软件那一项用），查不出来是空的。测试用 CAM_TEST_PROCS="ToDesk.exe,foo"。
+fn process_names() -> Vec<String> {
+    if let Ok(t) = std::env::var("CAM_TEST_PROCS") {
+        return t
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+            .collect();
+    }
+    if cfg!(windows) {
+        return win_processes(Duration::from_secs(3))
+            .map(|rows| rows.into_iter().map(|r| r.2).collect())
+            .unwrap_or_default();
+    }
+    run_text("ps", &["-A", "-o", "comm="])
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// 进程表里带 --lan 的 cam serve 听的端口（没写 --port 就是 8787）。与 cam.py 的 _is_cam_serve / serve_port_of 一致。
+fn lan_serve_ports() -> Vec<u16> {
+    let cmds: Vec<String> = if cfg!(windows) {
+        win_processes(Duration::from_secs(3))
+            .map(|rows| rows.into_iter().map(|r| r.3).collect())
+            .unwrap_or_default()
+    } else {
+        run_text("ps", &["-A", "-o", "args="])
+            .lines()
+            .map(String::from)
+            .collect()
+    };
+    cmds.iter()
+        .filter(|c| is_cam_serve(c) && has_lan_flag(c))
+        .map(|c| serve_port_of(c))
+        .collect()
+}
+
+fn is_cam_serve(cmd: &str) -> bool {
+    cmd.match_indices("cam.py").any(|(i, m)| {
+        let rest = &cmd[i + m.len()..];
+        let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
+        let trimmed = rest.trim_start();
+        trimmed.len() < rest.len()
+            && trimmed
+                .strip_prefix("serve")
+                .is_some_and(|after| after.is_empty() || after.starts_with(char::is_whitespace))
+    })
+}
+
+fn has_lan_flag(cmd: &str) -> bool {
+    cmd.match_indices("--lan").any(|(i, m)| {
+        let before = cmd[..i].chars().last();
+        let after = cmd[i + m.len()..].chars().next();
+        before.is_some_and(char::is_whitespace) && after.is_none_or(char::is_whitespace)
+    })
+}
+
+fn serve_port_of(cmd: &str) -> u16 {
+    for (i, m) in cmd.match_indices("--port") {
+        let rest = &cmd[i + m.len()..];
+        let digits = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+        if digits.len() == rest.len() {
+            continue;
+        }
+        let n: String = digits.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(p) = n.parse::<u16>() {
+            return p;
+        }
+    }
+    8787
+}
+
+/// 默认路由用的本机 IPv4 地址（局域网地址），没有是 None。
+fn lan_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("10.255.255.255:1").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+}
+
+/// 对局域网开放的 cam 面板和本机代理：{panel: 端口或 null, proxy: ["127.0.0.1:7890", …]}。
+/// 面板的候选：桌面版设置里开着内置面板和局域网访问的端口、带 --lan 的 cam serve；代理的候选：设在本机（127.0.0.1 / localhost）的。
+/// 拿本机的局域网地址去连这些端口，连得上就是对局域网开着。测试用 CAM_TEST_LAN_IP（空：没有局域网地址），这时不看进程表。
+/// 与 cam.py 的 lan_exposed 一致。
+fn lan_exposed() -> Value {
+    let test_ip = std::env::var("CAM_TEST_LAN_IP").ok();
+    let ip = match &test_ip {
+        Some(t) => Some(t.clone()).filter(|t| !t.is_empty()),
+        None => lan_ip(),
+    };
+    let Some(ip) = ip else {
+        return json!({"panel": null, "proxy": []});
+    };
+    let mut panel: Vec<u16> = Vec::new();
+    let root = std::env::var_os("CAM_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".claude-accounts"));
+    if let Ok(Some(d)) = read_json(&root.join("desktop.json")) {
+        let on = |k: &str, dflt: bool| d.get(k).and_then(|v| v.as_bool()).unwrap_or(dflt);
+        if on("server_enabled", false) && on("lan", true) {
+            let port = d
+                .get("port")
+                .and_then(|v| v.as_u64())
+                .filter(|p| *p > 0 && *p < 65536);
+            panel.push(port.unwrap_or(8787) as u16);
+        }
+    }
+    if test_ip.is_none() {
+        panel.extend(lan_serve_ports());
+    }
+    let mut uniq: Vec<u16> = Vec::new();
+    for p in panel {
+        if !uniq.contains(&p) {
+            uniq.push(p);
+        }
+    }
+    let entries: Vec<(String, String)> = PROXY_ENV_KEYS
+        .iter()
+        .filter_map(|k| {
+            std::env::var(k)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| (k.to_string(), v))
+        })
+        .chain(
+            system_proxy()
+                .into_iter()
+                .map(|p| ("系统设置".to_string(), p)),
+        )
+        .collect();
+    let proxy: Vec<(String, u16)> = proxy_endpoints(&entries)
+        .into_iter()
+        .filter(|(_, h, _)| matches!(h.to_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1"))
+        .map(|(_, h, p)| (h, p))
+        .collect();
+    let probe = |port: u16| {
+        let ip = ip.clone();
+        spawn_job(move || port_open(&ip, port, Duration::from_secs(LAN_PROBE_SECS)))
+    };
+    let pj: Vec<(u16, mpsc::Receiver<String>)> = uniq.iter().map(|p| (*p, probe(*p))).collect();
+    let xj: Vec<(String, mpsc::Receiver<String>)> = proxy
+        .iter()
+        .map(|(h, p)| (format!("{}:{}", h, p), probe(*p)))
+        .collect();
+    let end = Instant::now() + Duration::from_secs(LAN_PROBE_SECS + 1);
+    let open = |rx: &mpsc::Receiver<String>| wait_job(rx, end).is_some_and(|w| w.is_empty());
+    let panel = pj.iter().find(|(_, rx)| open(rx)).map(|(p, _)| *p);
+    let proxy: Vec<String> = xj
+        .iter()
+        .filter(|(_, rx)| open(rx))
+        .map(|(n, _)| n.clone())
+        .collect();
+    json!({"panel": panel, "proxy": proxy})
+}
+
 /// 本机的区域设置、代理和 VPN 快照，和出口一起缓存，免得界面每次刷新都去跑系统命令。
 /// 顶部环境卡和服务检测都用这一份，两边的分数才一致。hosts：hosts 文件里把 Claude 的域名指到了哪（没有是空的）；
 /// creds_mode：登录凭据文件别的用户也读得到时是它的权限，正常是 null。
+/// 安全项：history_keys（命令历史里留着密钥的文件）、perm_bypass（设成不问就执行的那份设置）、auto_run（钩子和 MCP 服务器）、
+/// config_mode（~/.claude.json 别人也读得到时的权限）、remote（在跑的远程控制软件）、lan（对局域网开放的面板和代理）。
 pub fn local_env() -> Value {
     let tz = system_timezone();
     let lc = system_locale();
     let tun = default_route_tunnel();
+    let (bypass, auto_run) = auto_run_info();
     json!({
         "tz": tz.as_ref().map(|t| t.0.clone()), "tz_cc": tz.as_ref().map(|t| t.1.clone()).unwrap_or_default(),
         "locale": lc.as_ref().map(|l| l.0.clone()), "locale_cc": lc.as_ref().and_then(|l| l.1.clone()),
@@ -1476,7 +2192,9 @@ pub fn local_env() -> Value {
         "tunnel": tun.map(|(n, k)| json!([n, k])),
         "hosts": hosts_overrides(),
         "creds_mode": creds_file_mode(),
-        "wifi": wifi_info()
+        "wifi": wifi_info(),
+        "history_keys": history_keys(), "perm_bypass": bypass, "auto_run": auto_run,
+        "config_mode": config_file_mode(), "remote": remote_apps(&process_names()), "lan": lan_exposed()
     })
 }
 
@@ -2254,7 +2972,7 @@ pub fn region_view(data: &Value) -> Value {
                       "message": "还没有检测过出口地区", "advice": "", "warp": false, "prev_loc": null, "changed_at": null,
                       "org": null, "asn": null, "city": null, "ip_type": null, "reg_loc": null, "reg_loc_name": null,
                       "meta_source": null, "lookup_mode": null, "failed_at": null, "fail_count": 0,
-                      "plain_http": null, "wifi": null});
+                      "plain_http": null, "wifi": null, "domains": []});
     };
     let loc = s(&c, "loc").map(String::from);
     let status = region_status(loc.as_deref());
@@ -2272,8 +2990,27 @@ pub fn region_view(data: &Value) -> Value {
         "plain_http": c.get("plain_http").and_then(|p| p.get("ok")).and_then(|v| v.as_bool()),
         // 连着的 Wi-Fi：{ssid, security: open / wep / wpa}；有线、没查到是 null
         "wifi": c.get("env").and_then(|e| e.get("wifi")).filter(|w| s(w, "security").is_some())
-            .map(|w| json!({"ssid": w.get("ssid"), "security": w.get("security")}))
+            .map(|w| json!({"ssid": w.get("ssid"), "security": w.get("security")})),
+        // Claude Code 用的 API、续登录的地址各自看到的出口：[{host, ip, loc, status}]，没问到是 []
+        "domains": region_domains(&c).iter().map(|d| {
+            let mut d = d.clone();
+            d["status"] = json!(region_status(s(&d, "loc")));
+            d
+        }).collect::<Vec<_>>()
     })
+}
+
+/// 上次检测记下的 Anthropic 几处地址看到的出口里问到了地区的那些（旧缓存没有这一段是空的）
+fn region_domains(reg: &Value) -> Vec<Value> {
+    reg.get("domains")
+        .and_then(|d| d.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|d| s(d, "loc").is_some() && s(d, "host").is_some())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 离 iso 那个时间过了几秒；没有、看不懂是 None
@@ -2514,6 +3251,7 @@ fn check_region_with(store: &Store, max_age: i64, note: bool, prog: &Progress) -
         for k in META_FIELDS.iter().chain(STACK_FIELDS) {
             reg[*k] = r.get(*k).cloned().unwrap_or(Value::Null);
         }
+        reg["domains"] = r.get("domains").cloned().unwrap_or_else(|| json!([]));
         // 中间失败过一次也和最后一次知道的出口比，出口变化不漏报（与 cam.py 一致）
         let last = s(&old, "loc")
             .or_else(|| s(&old, "last_loc"))
@@ -2665,6 +3403,177 @@ fn resolved_by_trace(item: &Value) -> bool {
 /// 再加一条 env_stale 说明怎么重新检测；官方状态页的故障过了一小时不再算数。note_age=false 不标（调用方自己说了是多久前的）。
 /// 最近一次检测没连上（failed_at）：出口还按上一次查到的算，另加一条 region_fail_item 说明。
 /// 与 cam.py 的 risk_items 一致。
+/// 环境快照里的安全项变成提醒：命令历史里的密钥、不问就执行、对局域网开放的面板和代理、~/.claude.json 的权限、
+/// 钩子和 MCP 服务器、远程控制软件。只说在哪、几处，不显示内容。与 cam.py 的 risk_items 里同一段一致（tests/shared/security.json）。
+fn security_items(env: Option<&Value>, env_old: &str, add: &dyn Fn(&str, &str, String, &str)) {
+    let Some(env) = env else { return };
+    let hist: Vec<&Value> = env
+        .get("history_keys")
+        .and_then(|h| h.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|h| h.get("count").and_then(|c| c.as_u64()).unwrap_or(0) > 0)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !hist.is_empty() {
+        let mut kinds: Vec<&str> = hist
+            .iter()
+            .flat_map(|h| {
+                h.get("kinds")
+                    .and_then(|k| k.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut wh = hist
+            .iter()
+            .take(3)
+            .map(|h| {
+                format!(
+                    "{}（{} 处）",
+                    s(h, "path").unwrap_or("None"),
+                    h.get("count").and_then(|c| c.as_u64()).unwrap_or(0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        if hist.len() > 3 {
+            wh += &format!("等 {} 个文件", hist.len());
+        }
+        let what = if kinds.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", kinds.join("、"))
+        };
+        add(
+            "history_key",
+            "warn",
+            format!("命令历史里留着 Claude 的密钥{}：{}{}", what, wh, env_old),
+            HISTORY_KEY_ADVICE,
+        );
+    }
+    if let Some(p) = s(env, "perm_bypass").filter(|p| !p.is_empty()) {
+        add(
+            "perm_bypass",
+            "warn",
+            format!(
+                "Claude Code 设成了不问就执行：{} 里 permissions.defaultMode 是 bypassPermissions{}",
+                p, env_old
+            ),
+            PERM_BYPASS_ADVICE,
+        );
+    }
+    let lan = env.get("lan").filter(|l| l.is_object());
+    if let Some(port) = lan.and_then(|l| l.get("panel")).and_then(|p| p.as_u64()) {
+        let open_wifi = env
+            .get("wifi")
+            .and_then(|w| s(w, "security"))
+            .is_some_and(|x| x == "open" || x == "wep");
+        add(
+            "panel_lan",
+            if open_wifi { "warn" } else { "info" },
+            format!(
+                "cam 面板（{} 端口）开着局域网访问{}{}",
+                port,
+                if open_wifi {
+                    "，连着的 Wi-Fi 又没加密"
+                } else {
+                    ""
+                },
+                env_old
+            ),
+            PANEL_LAN_ADVICE,
+        );
+    }
+    let proxies: Vec<&str> = lan
+        .and_then(|l| l.get("proxy"))
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    if !proxies.is_empty() {
+        add(
+            "proxy_lan",
+            "info",
+            format!(
+                "本机代理 {} 对局域网开放：同一个网络里的人能借它上网{}",
+                proxies.join("、"),
+                env_old
+            ),
+            PROXY_LAN_ADVICE,
+        );
+    }
+    if let Some(mode) = s(env, "config_mode").filter(|m| !m.is_empty()) {
+        let path = tilde_path(&crate::claude::claude_json_file());
+        add(
+            "config_perm",
+            "info",
+            format!(
+                "{} 的权限是 0{}，这台电脑上的其他用户也读得到{}",
+                path, mode, env_old
+            ),
+            &format!("{}{}", CONFIG_PERM_ADVICE, path),
+        );
+    }
+    if let Some(ar) = env.get("auto_run").filter(|a| a.is_object()) {
+        let n = |k: &str| ar.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let names = |k: &str| -> Vec<&str> {
+            ar.get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                .unwrap_or_default()
+        };
+        let mut parts = Vec::new();
+        for (cnt, list, what) in [
+            (n("hooks_n"), names("hooks"), "个钩子"),
+            (n("mcp_n"), names("mcp"), "个 MCP 服务器"),
+        ] {
+            if cnt > 0 {
+                parts.push(format!(
+                    "{} {}（{}{}）",
+                    cnt,
+                    what,
+                    list.join("、"),
+                    if cnt as usize > list.len() {
+                        " 等"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+        }
+        if n("mcp_local") > 0 {
+            parts.push(format!(
+                "另有 {} 个只在某个项目里用的 MCP 服务器",
+                n("mcp_local")
+            ));
+        }
+        if !parts.is_empty() {
+            add(
+                "auto_run",
+                "info",
+                format!("Claude Code 会自动运行的：{}{}", parts.join("；"), env_old),
+                AUTO_RUN_ADVICE,
+            );
+        }
+    }
+    let remote: Vec<&str> = env
+        .get("remote")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    if !remote.is_empty() {
+        add(
+            "remote_app",
+            "info",
+            format!("正在运行远程控制软件：{}{}", remote.join("、"), env_old),
+            REMOTE_APP_ADVICE,
+        );
+    }
+}
+
 pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Value> {
     let now = chrono::Utc::now();
     let reg = data.get("region").cloned().unwrap_or_else(|| json!({}));
@@ -2807,6 +3716,45 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
                 format!("出口地区判定不一致：trace 接口看到 {}，meta 接口看到 {}", region_label(Some(l)), region_label(Some(m))),
                 "多半是 IPv4 和 IPv6 走了不同出口，或代理只分流了一部分流量。这种情况下服务端看到的地区可能和你以为的不一样，\
                  先统一出口再判断。",
+            );
+        }
+    }
+    // Claude Code 用的 API、续登录的地址看到的出口和 claude.ai 看到的不一样
+    if let Some(l) = loc.as_deref() {
+        let diff: Vec<Value> = region_domains(&reg)
+            .into_iter()
+            .filter(|d| s(d, "loc") != Some(l))
+            .collect();
+        if !diff.is_empty() {
+            let bad = region_status(Some(l)) == "supported"
+                && diff
+                    .iter()
+                    .any(|d| region_status(s(d, "loc")) != "supported");
+            let seen = diff
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{} 看到的是 {}",
+                        s(d, "host").unwrap_or(""),
+                        region_label(s(d, "loc"))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("，");
+            add(
+                "domain_region",
+                if bad { "bad" } else { "warn" },
+                format!(
+                    "Anthropic 几处地址看到的出口地区不一样：claude.ai 看到的是 {}，{}{}",
+                    region_label(Some(l)),
+                    seen,
+                    if bad { "，不在支持名单内" } else { "" }
+                ),
+                if bad {
+                    DOMAIN_REGION_BAD_ADVICE
+                } else {
+                    DOMAIN_REGION_ADVICE
+                },
             );
         }
     }
@@ -2983,6 +3931,7 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
             ),
         );
     }
+    security_items(env.as_ref(), &env_old, &add_plain);
     if reg.get("warp").and_then(|v| v.as_bool()).unwrap_or(false) {
         add(
             "warp",
@@ -3099,7 +4048,10 @@ pub fn risk_items(data: &Value, include_region: bool, note_age: bool) -> Vec<Val
                     locs.len(),
                     locs.iter().map(|l| region_label(Some(l))).collect::<Vec<_>>().join("、")
                 ),
-                "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。",
+                &format!(
+                    "同一账号短时间在多个地区使用（出差、VPN、多人共用）是常见的风控触发点，可能被要求重新验证或限制使用。不是你自己用的话，{}",
+                    ACTIVE_SESSIONS_TIP
+                ),
             );
         }
     }
@@ -3178,7 +4130,17 @@ const RISK_WEIGHTS: &[(&str, &str, i64)] = &[
     ("hosts", "warn", 20),
     ("creds_perm", "warn", 15),
     ("http_tamper", "warn", 10),
-    ("wifi", "warn", 10),
+    ("wifi", "warn", 5),
+    ("domain_region", "bad", 60),
+    ("domain_region", "warn", 15),
+    ("history_key", "warn", 5),
+    ("perm_bypass", "warn", 5),
+    ("panel_lan", "warn", 5),
+    ("panel_lan", "info", 0),
+    ("proxy_lan", "info", 0),
+    ("config_perm", "info", 0),
+    ("auto_run", "info", 0),
+    ("remote_app", "info", 0),
 ];
 /// (最低分, 档位, 说明)
 const RISK_GRADES: &[(i64, &str, &str)] = &[
@@ -3226,6 +4188,11 @@ pub fn risk_points(item: &Value) -> i64 {
 /// 所以界面上列的和实际扣的不会对不上。与 cam.py 的 RISK_RULES / RISK_NOTICES 一致（tests/shared/risk_rules.json）
 const RISK_RULES: &[(&str, &str, &str)] = &[
     ("region", "warn", "出口地区不在 Anthropic 支持名单"),
+    (
+        "domain_region",
+        "bad",
+        "Claude Code 用的 API 或续登录的地址看到的出口不在支持名单（claude.ai 看到的在）",
+    ),
     ("tor_exit", "warn", "出口 IP 是 Tor 出口节点"),
     ("api", "bad", "api.anthropic.com 连不上，或者拒绝访问"),
     (
@@ -3256,11 +4223,31 @@ const RISK_RULES: &[(&str, &str, &str)] = &[
     ("ipv6_mismatch", "warn", "IPv4 和 IPv6 的出口不在同一个地区"),
     ("region_mismatch", "warn", "两个接口看到的出口地区不一致"),
     ("region_change", "warn", "24 小时内出口换到了不支持的地区"),
+    (
+        "domain_region",
+        "warn",
+        "Anthropic 几处地址（claude.ai、API、续登录）看到的出口地区不一样",
+    ),
     ("clock", "warn", "本机时钟和服务器相差 2 分钟以上"),
     (
         "wifi",
         "warn",
-        "连着的 Wi-Fi 没有加密（开放网络），或者用的是 WEP",
+        "连着的 Wi-Fi 没有加密（开放网络，包括要在网页里登录的），或者用的是 WEP",
+    ),
+    (
+        "history_key",
+        "warn",
+        "命令历史里留着 Claude 的密钥（sk-ant- 开头）",
+    ),
+    (
+        "perm_bypass",
+        "warn",
+        "Claude Code 设成了不问就执行（bypassPermissions）",
+    ),
+    (
+        "panel_lan",
+        "warn",
+        "cam 面板开着局域网访问，连着的 Wi-Fi 又没加密",
     ),
     (
         "http_tamper",
@@ -3294,6 +4281,8 @@ const RISK_NOTICES: &[&str] = &[
     "出口在支持地区之间变化、系统配的 DNS 和出口地区不一致",
     "本机解析不了域名但实际连得上（请求走代理）、域名解析成内网 / 保留地址（被本机的软件接管）",
     "HTTPS 被公司网关或安全软件解密、本机设的代理没开（连不上的那几项已经扣了）",
+    "cam 面板开着局域网访问（Wi-Fi 有加密时）、本机代理对局域网开放、~/.claude.json 别的用户也读得到",
+    "会自动运行命令的钩子和 MCP 服务器、正在运行的远程控制软件（只列出来，看看有没有不是你装的）",
 ];
 
 /// 给人看的扣分规则：{rules: [{points, text}]（扣得多的在前，同分按表里的顺序）, notices: [只提醒不扣分的]}。
@@ -3579,8 +4568,9 @@ const WIFI_OPEN_WORDS: &[&str] = &[
     "aperta",
     "aberta",
 ];
-const WIFI_ADVICE: &str = "同一个 Wi-Fi 上的人能看到、改动没加密的流量。Claude 的连接是 HTTPS、有证书校验，内容看不到也改不了；\
-                           但别在这种网络上忽略证书警告，也别开着 cam 面板的局域网访问。条件允许就换成要密码的 Wi-Fi，或者用手机热点。";
+const WIFI_ADVICE: &str = "同一个 Wi-Fi 上的人能看到、改动没加密的流量。公司、商场那种连上后要在网页里登录的 Wi-Fi，系统里也显示没加密，所以只扣 5 分。\
+                           Claude 的连接是 HTTPS、有证书校验，内容看不到也改不了；但别在这种网络上忽略证书警告，也别开着 cam 面板的局域网访问。\
+                           条件允许就换成要密码的 Wi-Fi，或者用手机热点。";
 
 /// 系统报的加密方式归成三类："open"（没加密）、"wep"、"wpa"（WPA / WPA2 / WPA3、企业版 802.1X、OWE 都算加密了）；认不出来是 None。
 pub fn wifi_security_class(raw: &str) -> Option<&'static str> {
@@ -4540,8 +5530,29 @@ pub fn service_check_prog(store: &Store, prog: &Progress) -> Vec<Value> {
                     r.get("ms").and_then(|v| v.as_u64()).unwrap_or(0),
                     kept
                 ),
-                region_advice(status),
+                &format!(
+                    "{}{}",
+                    region_advice(status),
+                    if l == "UA" { UA_REGION_NOTE } else { "" }
+                ),
             );
+            // 几处地址看到的地区都一样时说一声；不一样的那条由 risk_items 给（domain_region）
+            let doms = region_domains(&r);
+            if !doms.is_empty() && doms.iter().all(|d| s(d, "loc") == Some(l)) {
+                add(
+                    "domain_region",
+                    "ok",
+                    format!(
+                        "{} 看到的出口地区也是 {}",
+                        doms.iter()
+                            .map(|d| s(d, "host").unwrap_or(""))
+                            .collect::<Vec<_>>()
+                            .join("、"),
+                        region_label(Some(l))
+                    ),
+                    "Claude Code 的请求发往 api.anthropic.com，续登录走 platform.claude.com；这几处看到的地区和 claude.ai 一致。",
+                );
+            }
             // 和顶部环境卡同一条，两边分数才一致
             if let Some(f) = region_fail_item(&r) {
                 add(

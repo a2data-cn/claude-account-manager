@@ -30,3 +30,8 @@ export function Ico({ name }: { name: IconName }) {
     </span>
   );
 }
+
+/** 不带小方块的图标（比如搜索框里的放大镜），颜色、大小由外面的样式定 */
+export function IconSvg({ name }: { name: IconName }) {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" dangerouslySetInnerHTML={{ __html: PATHS[name] }} />;
+}

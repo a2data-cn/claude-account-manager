@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Ico } from "./components/Icon";
+import { Ico, IconSvg } from "./components/Icon";
 import { api, command, inTauri, onEvent } from "./api";
 import { copyText } from "./clipboard";
 import { ago, fmtTime } from "./format";
@@ -23,7 +23,7 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { AccountVault } from "./components/AccountVault";
 import { Rules } from "./components/Rules";
 import { StatusLight } from "./components/StatusLight";
-import type { Account, CheckProgress, CheckStep, RegionInfo, RiskChange, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
+import type { Account, CheckProgress, CheckStep, RegionInfo, RegionsInfo, RiskChange, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
 
 /** 页签：账号 / 用量 / 会话 / 环境 / 设置，和网页面板一样；“账号资料与邮箱”是标题栏右边的按钮，打开后占整页 */
 type Tab = "accounts" | "usage" | "sessions" | "env" | "settings";
@@ -44,8 +44,9 @@ const KIND_ORDER = ["claude_code", "claude_desktop", "claude_web", "api"];
 const CHECK_MARK: Record<ServiceCheckItem["level"], string> = { ok: "正常", bad: "异常", warn: "注意", info: "说明" };
 /** 检测结果分组（和手机面板同样的分组） */
 const CHECK_GROUPS: [string, string[]][] = [
-  ["网络", ["dns", "region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "hosts", "warp", "wifi", "http_tamper"]],
-  ["本机", ["clock", "timezone", "locale", "creds_perm", "device"]],
+  ["网络", ["dns", "region", "domain_region", "isp", "ip_origin", "ip_origin_unknown", "ipv6", "dns_servers", "proxy", "vpn", "proxy_down", "proxy_up", "region_change", "region_mismatch", "proxy_ip", "tor_exit", "ipv6_mismatch", "dns_resolver", "hosts", "warp", "wifi", "http_tamper"]],
+  ["本机", ["clock", "timezone", "locale", "device"]],
+  ["安全", ["creds_perm", "history_key", "perm_bypass", "panel_lan", "proxy_lan", "config_perm", "remote_app", "auto_run"]],
   ["服务", ["api", "web", "auth", "tls_chain", "tls_intercept", "status"]],
   ["账号", ["account_regions", "accounts"]],
 ];
@@ -266,14 +267,15 @@ function Flag({ cc }: { cc?: string | null }) {
 
 /** 评分卡上的行：每行归并哪些风险项；没有风险项时显示“正常”的那句 */
 const ENV_ROWS: [string, string, string[]][] = [
-  ["region", "出口地区", ["region", "region_unknown", "region_mismatch", "ipv6_mismatch", "warp"]],
+  ["region", "出口地区", ["region", "region_unknown", "region_mismatch", "domain_region", "ipv6_mismatch", "warp"]],
   ["iptype", "IP 类型", ["tor_exit", "proxy_ip", "isp", "ip_origin", "ip_origin_unknown"]],
   ["proxy", "代理 / VPN", ["proxy", "vpn", "proxy_down"]],
   ["local", "时区 / 语言", ["timezone", "locale", "clock"]],
   ["dns", "DNS / hosts", ["dns", "dns_resolver", "dns_servers", "hosts"]],
   ["netsafe", "这张网", ["wifi", "http_tamper"]], // Wi-Fi 加没加密、没加密的网页有没有被中途改动；都没查到时没有这一行
   ["change", "出口变化", ["region_change"]],
-  ["creds", "登录凭据", ["creds_perm"]], // 凭据文件别的用户也读得到时才有这一行
+  // 安全：凭据和配置文件的权限、命令历史里的密钥、不问就执行、对局域网开着的面板和代理、钩子和 MCP、远程控制软件
+  ["security", "安全", ["creds_perm", "history_key", "perm_bypass", "panel_lan", "proxy_lan", "config_perm", "remote_app", "auto_run"]],
   ["account", "账号", ["account_regions", "accounts"]],
   ["service", "Claude 服务", ["api", "web", "tls", "status", "auth", "tls_intercept"]],
   ["stale", "检测时间", ["env_stale", "env_failed"]], // 结果是一小时前的、或者最近一次没连上才有这一行
@@ -412,6 +414,7 @@ function ScoreCard({ state }: { state: State }) {
     netsafe: [reg?.wifi?.security === "wpa" ? "Wi-Fi 已加密" : "", reg?.plain_http === true ? "没加密的网页没被中途改动" : ""].filter(Boolean).join(" · "),
     change: reg?.prev_loc && reg.changed_at ? `${ago(reg.changed_at)}从 ${reg.prev_loc} 换到 ${reg.loc}，已过了观察期` : "最近没变",
     account: "当前账号最近没在多个地区用过",
+    security: reg?.status ? "命令历史里没有密钥，没设成不问就执行，面板和代理没对局域网开着" : "",
     service: "正常",
   };
   const used = new Set<ServiceCheckItem>();
@@ -575,6 +578,198 @@ function Loading() {
   );
 }
 
+/** 支持地区卡的地区中文名：浏览器自带的 Intl.DisplayNames，几个常说的按 cam 的叫法 */
+const REGION_ZH: Record<string, string> = { CN: "中国大陆", HK: "香港", MO: "澳门", TW: "台湾", XK: "科索沃" };
+const REGION_EXTRA = ["AQ", "EH"]; // 名单里都没有的另外两个（南极洲、西撒哈拉）：搜得到，结果是不在名单里
+const REGION_WHERE: Record<string, string> = { "api.anthropic.com": "Claude Code 的请求发到这里", "platform.claude.com": "续登录走这里" };
+let regionDN: { zh?: Intl.DisplayNames; en?: Intl.DisplayNames } | null = null;
+function regionNames() {
+  if (!regionDN) {
+    regionDN = {};
+    try {
+      regionDN.zh = new Intl.DisplayNames(["zh-CN"], { type: "region" });
+    } catch {
+      /* 老浏览器没有：用代码 */
+    }
+    try {
+      regionDN.en = new Intl.DisplayNames(["en"], { type: "region" });
+    } catch {
+      /* 同上 */
+    }
+  }
+  return regionDN;
+}
+function regionZh(code: string): string {
+  if (REGION_ZH[code]) return REGION_ZH[code];
+  try {
+    return regionNames().zh?.of(code) || code;
+  } catch {
+    return code;
+  }
+}
+function regionEn(code: string): string {
+  try {
+    return regionNames().en?.of(code) || "";
+  } catch {
+    return "";
+  }
+}
+function regionVerdict(info: RegionsInfo, code: string): [string, string] {
+  if (info.supported.includes(code)) return ["c-ok", code === "UA" ? "支持（被占领地区除外）" : "支持"];
+  if (info.dependencies.includes(code)) return ["c-ok", "支持：海外属地，按所属国家算"];
+  return ["st-error", "不在支持名单"];
+}
+function regionMatches(info: RegionsInfo, q: string): string[] {
+  q = q.trim();
+  if (!q) return [];
+  const all = [...new Set([...info.supported, ...info.dependencies, ...info.unsupported, ...REGION_EXTRA])];
+  const up = q.toUpperCase();
+  const low = q.toLowerCase();
+  const score = (c: string) => {
+    const zh = regionZh(c);
+    const en = regionEn(c).toLowerCase();
+    if (c === up) return 0;
+    if (zh === q) return 1;
+    if (zh.startsWith(q)) return 2;
+    if (zh.includes(q)) return 3;
+    if (en.startsWith(low)) return 4;
+    if (low.length >= 3 && en.includes(low)) return 5;
+    return 9;
+  };
+  return all
+    .map((c) => [score(c), c] as [number, string])
+    .filter(([n]) => n < 9)
+    .sort((a, b) => a[0] - b[0] || a[1].localeCompare(b[1]))
+    .slice(0, 8)
+    .map(([, c]) => c);
+}
+
+/** 支持地区卡：当前出口在不在名单里（claude.ai、Claude Code 用的 API、续登录的地址各自看到的）、不支持的地区、查一个地区、几条说明 */
+function RegionsCard({ state }: { state: State }) {
+  const [q, setQ] = useState("");
+  const info = state.regions;
+  if (!info?.supported?.length) return null; // 旧版后台没有
+  const reg = state.region;
+  const doms = reg?.domains ?? [];
+  const seen = (loc: string, status?: string | null) => (
+    <>
+      <Flag cc={loc} />
+      {regionZh(loc)}（{loc}）<span className={`chip ${status === "supported" ? "c-ok" : "st-error"}`}>{status === "supported" ? "支持" : "不在名单"}</span>
+    </>
+  );
+  const hits = regionMatches(info, q);
+  return (
+    <div className="cards one">
+      <div className="panel ecard c-regions">
+        <h3>
+          <Ico name="pin" />
+          支持地区 <span className="chip">{info.supported.length} 个国家和地区</span>
+        </h3>
+        <dl className="kv">
+          <dt>claude.ai</dt>
+          <dd>
+            <span className="v">
+              {reg?.loc ? (
+                <>
+                  {seen(reg.loc, reg.status)}
+                  <span className="sub">网页版，也是“出口 IP”卡上的那个出口</span>
+                </>
+              ) : (
+                "还没检测过"
+              )}
+            </span>
+          </dd>
+          {doms.map((d) => (
+            <Fragment key={d.host}>
+              <dt>{d.host}</dt>
+              <dd>
+                <span className="v">
+                  {seen(d.loc, d.status)}
+                  {REGION_WHERE[d.host] && <span className="sub">{REGION_WHERE[d.host]}</span>}
+                </span>
+              </dd>
+            </Fragment>
+          ))}
+          {!!reg?.loc && !doms.length && (
+            <>
+              <dt>API、续登录</dt>
+              <dd>
+                <span className="v">下次检测时一起查</span>
+              </dd>
+            </>
+          )}
+          <dt>不支持</dt>
+          <dd>
+            <span className="v">
+              <span className="rg-chips">
+                {info.unsupported.map((c) => (
+                  <span className="chip" key={c}>
+                    <Flag cc={c} />
+                    {regionZh(c)}
+                  </span>
+                ))}
+              </span>
+            </span>
+          </dd>
+        </dl>
+        <label className="rg-search">
+          <IconSvg name="search" />
+          <input
+            type="search"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="查一个国家或地区：日本、Japan、JP"
+            aria-label="查一个国家或地区在不在支持名单里"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+        </label>
+        <div className="rg-result" aria-live="polite">
+          {!q.trim() ? (
+            <p className="hint">输入国家或地区的中文名、英文名或两位代码，马上告诉你在不在名单里</p>
+          ) : !hits.length ? (
+            <p className="hint">没找到“{q.trim()}”：换个写法试试，比如“日本”“Japan”“JP”</p>
+          ) : (
+            <ul className="rg-hits">
+              {hits.map((c) => {
+                const [cls, txt] = regionVerdict(info, c);
+                return (
+                  <li key={c}>
+                    <Flag cc={c} />
+                    <b>{regionZh(c)}</b>
+                    <small>
+                      {c}
+                      {regionEn(c) ? " · " + regionEn(c) : ""}
+                    </small>
+                    <span className={`chip ${cls}`}>{txt}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+        {!!info.notes?.length && (
+          <details className="rg-notes">
+            <summary>几条说明（{info.notes.length} 条）</summary>
+            <ul>
+              {info.notes.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          </details>
+        )}
+        <p className="hint">
+          名单 {info.checked} 对着{" "}
+          <a href={info.url} target="_blank" rel="noopener">
+            Anthropic 官方名单
+          </a>
+          核对；官方改了名单，更新 cam 就能拿到。只提醒，不拦任何操作。
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /** 环境区块：出口 IP 一张卡、环境评分一张卡（每个信号一行），点“重新检测”在下面展开完整检测结果。只提醒，不拦 */
 function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
   const ready = !!(state.region?.status && state.risk_score);
@@ -595,7 +790,7 @@ function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
     <section className="block" id="env" aria-label="环境状态">
       <div className="sec-head">
         <h2>环境</h2>
-        <span className="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区。只提醒，不拦任何操作</span>
+        <span className="hint">本机能看到的信号：出口 IP、IP 类型、代理 / VPN、时区语言、出口变化、账号地区、安全项。只提醒，不拦任何操作</span>
         <EnvActs label={ready ? "重新检测" : "立即检测"} sc={sc} />
       </div>
       {sc.progress && <ProgressCard title="环境检测" p={sc.progress} />}
@@ -604,6 +799,7 @@ function EnvCard({ state, sc }: { state: State; sc: ServiceCheckState }) {
         <ScoreCard state={state} />
         {hasLog && <ScoreLogCard state={state} />}
       </div>
+      <RegionsCard state={state} />
       <div id="env-result" ref={result}>
         {sc.items && sc.kept && <ProgressKept title="环境检测" p={sc.kept} />}
         {sc.items && <CheckList items={sc.items} />}

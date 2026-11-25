@@ -1,0 +1,65 @@
+{
+  "_说明": "安全项和 Anthropic 几处地址看到的出口地区：两个版本按同一份数据测（scripts/test_cam.py、engine/tests/shared.rs）。密钥都是假的",
+  "scan_keys": [
+    {"name": "没有密钥", "text": "ls -la\ncd ~/work\n", "want": {"count": 0, "kinds": []}},
+    {"name": "一行一个 API Key", "text": "export ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxx\nclaude\n", "want": {"count": 1, "kinds": ["API Key"]}},
+    {"name": "同一行两个，算一行", "text": "curl -H 'x-api-key: sk-ant-api03-xxxxxxxxxxxxxxxxxxxx' -H 'admin: sk-ant-admin01-xxxxxxxxxxxxxxxxxxxx'\n", "want": {"count": 1, "kinds": ["API Key", "管理 Key"]}},
+    {"name": "登录凭据和网页登录凭据", "text": "echo sk-ant-oat01-xxxxxxxxxxxxxxxxxxxx\necho sk-ant-ort01-xxxxxxxxxxxxxxxxxxxx\nset sk=sk-ant-sid01-xxxxxxxxxxxxxxxxxxxx\n", "want": {"count": 3, "kinds": ["登录凭据", "网页登录凭据"]}},
+    {"name": "不认识的种类", "text": "TOKEN=sk-ant-usr-xxxxxxxxxxxxxxxxxxxx run\n", "want": {"count": 1, "kinds": ["密钥"]}},
+    {"name": "太短的不算", "text": "sk-ant-api03-short\nsk-ant-\n", "want": {"count": 0, "kinds": []}},
+    {"name": "fish 历史的格式", "text": "- cmd: export ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxx\n  when: 1700000000\n", "want": {"count": 1, "kinds": ["API Key"]}},
+    {"name": "Windows 换行", "text": "$env:ANTHROPIC_API_KEY='sk-ant-api03-xxxxxxxxxxxxxxxxxxxx'\r\nclaude\r\n", "want": {"count": 1, "kinds": ["API Key"]}}
+  ],
+  "hook_name": [
+    ["python3 ~/.claude/hooks/notify.py --quiet", "notify.py"],
+    ["/usr/local/bin/rocktor-sync", "rocktor-sync"],
+    ["node \"C:\\Users\\me\\hooks\\guard.js\"", "guard.js"],
+    ["bash -c 'echo done'", "echo"],
+    ["FOO=1 BAR=2 ~/bin/run-check.sh", "run-check.sh"],
+    ["npx -y @acme/hook-tool", "hook-tool"],
+    ["uv run tools/lint.py", "lint.py"],
+    ["python3.12 x.py", "x.py"],
+    ["pwsh.exe -File C:\\hooks\\a.ps1", "a.ps1"],
+    ["", "?"],
+    ["   ", "?"],
+    ["sudo -n /opt/x/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+  ],
+  "settings": [
+    {"name": "不问就执行 + 钩子（cam 自己的红绿灯不算）", "docs": [["~/.claude/settings.json", {"permissions": {"defaultMode": "bypassPermissions", "allow": ["Bash"]}, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "/usr/local/bin/rocktor-sync"}]}], "PermissionRequest": [{"matcher": "", "hooks": [{"type": "command", "command": "python3 /home/me/cam/scripts/cam.py hook"}]}], "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "node ~/h/log.js"}, {"type": "command", "command": "node ~/h/log.js"}]}]}}]], "bypass": "~/.claude/settings.json", "hooks": ["Stop → rocktor-sync", "PostToolUse → log.js"]},
+    {"name": "普通模式、没有钩子", "docs": [["~/.claude/settings.json", {"permissions": {"defaultMode": "acceptEdits"}}]], "bypass": null, "hooks": []},
+    {"name": "托管设置里的不问就执行；写坏的、不是对象的跳过", "docs": [["~/.claude/settings.json", null], ["~/.claude/settings.local.json", [1, 2]], ["/etc/claude-code/managed-settings.json", {"permissions": {"defaultMode": "bypassPermissions"}, "hooks": {"SessionStart": [{"hooks": [{"type": "prompt", "prompt": "hi"}, {"command": "~/x/start.sh"}]}], "Bad": "not a list"}}]], "bypass": "/etc/claude-code/managed-settings.json", "hooks": ["SessionStart → start.sh"]}
+  ],
+  "mcp": [
+    {"name": "用户级 + 项目里的", "doc": {"mcpServers": {"zeta": {}, "alpha": {}}, "projects": {"/a": {"mcpServers": {"p1": {}, "p2": {}}}, "/b": {}, "/c": {"mcpServers": {}}}}, "names": ["alpha", "zeta"], "local": 2},
+    {"name": "没有", "doc": {"numStartups": 3}, "names": [], "local": 0},
+    {"name": "不是对象", "doc": [1], "names": [], "local": 0}
+  ],
+  "remote_apps": [
+    {"name": "Windows：带 .exe，大小写不同", "names": ["svchost.exe", "ToDesk.exe", "ToDesk_Service.exe", "TeamViewer_Service.exe"], "want": ["ToDesk", "TeamViewer"]},
+    {"name": "macOS：完整路径", "names": ["/Applications/AnyDesk.app/Contents/MacOS/AnyDesk", "/usr/sbin/cfprefsd", "/Applications/SunloginClient.app/Contents/MacOS/SunloginClient"], "want": ["向日葵", "AnyDesk"]},
+    {"name": "Linux：进程名被截到 15 个字", "names": ["remoting_me2me_", "x11vnc", "systemd", "rustdesk"], "want": ["RustDesk", "Chrome 远程桌面", "VNC"]},
+    {"name": "名字只是包含的不算", "names": ["mytodesk", "anydesk-helper", "teamviewerish", ""], "want": []},
+    {"name": "没有", "names": [], "want": []}
+  ],
+  "risk": [
+    {"name": "命令历史里有密钥：扣 5 分，说在哪几处，不显示内容", "env": {"proxy": [], "tunnel": null, "history_keys": [{"path": "~/.zsh_history", "count": 2, "kinds": ["API Key"]}, {"path": "~/.bash_history", "count": 1, "kinds": ["登录凭据", "API Key"]}]}, "want": [{"kind": "history_key", "level": "warn", "text": "命令历史里留着 Claude 的密钥（API Key、登录凭据）：~/.zsh_history（2 处）、~/.bash_history（1 处）", "points": 5, "advice_head": "在命令行里直接写的密钥会"}], "score": 95},
+    {"name": "历史文件超过 3 个", "env": {"proxy": [], "tunnel": null, "history_keys": [{"path": "~/h0", "count": 1, "kinds": []}, {"path": "~/h1", "count": 1, "kinds": []}, {"path": "~/h2", "count": 1, "kinds": []}, {"path": "~/h3", "count": 1, "kinds": []}, {"path": "~/h4", "count": 1, "kinds": []}]}, "want": [{"kind": "history_key", "level": "warn", "text": "命令历史里留着 Claude 的密钥：~/h0（1 处）、~/h1（1 处）、~/h2（1 处）等 5 个文件", "points": 5, "advice_head": "在命令行里直接写的密钥会"}], "score": 95},
+    {"name": "不问就执行：扣 5 分", "env": {"proxy": [], "tunnel": null, "perm_bypass": "~/.claude/settings.json"}, "want": [{"kind": "perm_bypass", "level": "warn", "text": "Claude Code 设成了不问就执行：~/.claude/settings.json 里 permissions.defaultMode 是 bypassPermissions", "points": 5, "advice_head": "这样 Claude Co"}], "score": 95},
+    {"name": "面板开着局域网、Wi-Fi 没加密：扣 5 分", "env": {"proxy": [], "tunnel": null, "lan": {"panel": 8787, "proxy": []}, "wifi": {"ssid": "Cafe", "security": "open"}}, "want": [{"kind": "wifi", "level": "warn", "text": "连着的 Wi-Fi“Cafe”没有加密（开放网络）", "points": 5, "advice_head": "同一个 Wi-Fi 上的"}, {"kind": "panel_lan", "level": "warn", "text": "cam 面板（8787 端口）开着局域网访问，连着的 Wi-Fi 又没加密", "points": 5, "advice_head": "面板走的是没加密的 HT"}], "score": 90},
+    {"name": "面板开着局域网、Wi-Fi 有加密：只提示", "env": {"proxy": [], "tunnel": null, "lan": {"panel": 8788, "proxy": []}, "wifi": {"ssid": "Home", "security": "wpa"}}, "want": [{"kind": "panel_lan", "level": "info", "text": "cam 面板（8788 端口）开着局域网访问", "points": 0, "advice_head": "面板走的是没加密的 HT"}], "score": 100},
+    {"name": "本机代理对局域网开放：只提示", "env": {"proxy": [], "tunnel": null, "lan": {"panel": null, "proxy": ["127.0.0.1:7890", "localhost:7891"]}}, "want": [{"kind": "proxy_lan", "level": "info", "text": "本机代理 127.0.0.1:7890、localhost:7891 对局域网开放：同一个网络里的人能借它上网", "points": 0, "advice_head": "代理软件里的“允许局域网"}], "score": 100},
+    {"name": "钩子和 MCP 服务器：只列出来", "env": {"proxy": [], "tunnel": null, "auto_run": {"hooks": ["Stop → a", "Stop → b"], "hooks_n": 3, "mcp": ["m1"], "mcp_n": 1, "mcp_local": 2}}, "want": [{"kind": "auto_run", "level": "info", "text": "Claude Code 会自动运行的：3 个钩子（Stop → a、Stop → b 等）；1 个 MCP 服务器（m1）；另有 2 个只在某个项目里用的 MCP 服务器", "points": 0, "advice_head": "钩子会在 Claude "}], "score": 100},
+    {"name": "只有项目里的 MCP", "env": {"proxy": [], "tunnel": null, "auto_run": {"hooks": [], "hooks_n": 0, "mcp": [], "mcp_n": 0, "mcp_local": 1}}, "want": [{"kind": "auto_run", "level": "info", "text": "Claude Code 会自动运行的：另有 1 个只在某个项目里用的 MCP 服务器", "points": 0, "advice_head": "钩子会在 Claude "}], "score": 100},
+    {"name": "远程控制软件：只列出来", "env": {"proxy": [], "tunnel": null, "remote": ["ToDesk", "向日葵"]}, "want": [{"kind": "remote_app", "level": "info", "text": "正在运行远程控制软件：ToDesk、向日葵", "points": 0, "advice_head": "远程控制软件开着时，别人"}], "score": 100},
+    {"name": "都没有", "env": {"proxy": [], "tunnel": null, "history_keys": [], "perm_bypass": null, "lan": {"panel": null, "proxy": []}, "auto_run": null, "remote": [], "config_mode": null}, "want": [], "score": 100}
+  ],
+  "config_perm": {"env": {"proxy": [], "tunnel": null, "config_mode": "644"}, "level": "info", "points": 0, "text_has": "的权限是 0644，这台电脑上的其他用户也读得到", "advice_has": "chmod 600"},
+  "domains": [
+    {"name": "几处一致：没有这一条", "loc": "US", "domains": [{"host": "api.anthropic.com", "ip": "1.1.1.1", "loc": "US"}, {"host": "platform.claude.com", "ip": "1.1.1.1", "loc": "US"}], "want": [], "view": [{"host": "api.anthropic.com", "ip": "1.1.1.1", "loc": "US", "status": "supported"}, {"host": "platform.claude.com", "ip": "1.1.1.1", "loc": "US", "status": "supported"}], "score": 100},
+    {"name": "API 看到的不在名单：60 分", "loc": "US", "domains": [{"host": "api.anthropic.com", "ip": "2.2.2.2", "loc": "CN"}, {"host": "platform.claude.com", "ip": "1.1.1.1", "loc": "US"}], "want": [{"level": "bad", "text": "Anthropic 几处地址看到的出口地区不一样：claude.ai 看到的是 US（美国），api.anthropic.com 看到的是 CN（中国大陆），不在支持名单内", "points": 60, "advice_head": "Claude Code 的请"}], "view": [{"host": "api.anthropic.com", "ip": "2.2.2.2", "loc": "CN", "status": "unsupported"}, {"host": "platform.claude.com", "ip": "1.1.1.1", "loc": "US", "status": "supported"}], "score": 40},
+    {"name": "几处都在名单但不一样：15 分", "loc": "US", "domains": [{"host": "api.anthropic.com", "ip": "3.3.3.3", "loc": "JP"}, {"host": "platform.claude.com", "ip": "4.4.4.4", "loc": "SG"}], "want": [{"level": "warn", "text": "Anthropic 几处地址看到的出口地区不一样：claude.ai 看到的是 US（美国），api.anthropic.com 看到的是 JP（日本），platform.claude.com 看到的是 SG（新加坡）", "points": 15, "advice_head": "Claude Code 的请"}], "view": [{"host": "api.anthropic.com", "ip": "3.3.3.3", "loc": "JP", "status": "supported"}, {"host": "platform.claude.com", "ip": "4.4.4.4", "loc": "SG", "status": "supported"}], "score": 85},
+    {"name": "claude.ai 看到的不在名单、API 的在：不一样 15 分，加上地区 60 分", "loc": "HK", "domains": [{"host": "api.anthropic.com", "ip": "5.5.5.5", "loc": "US"}], "want": [{"level": "warn", "text": "Anthropic 几处地址看到的出口地区不一样：claude.ai 看到的是 HK（香港），api.anthropic.com 看到的是 US（美国）", "points": 15, "advice_head": "Claude Code 的请"}], "view": [{"host": "api.anthropic.com", "ip": "5.5.5.5", "loc": "US", "status": "supported"}], "score": 25},
+    {"name": "没问到地区的跳过", "loc": "US", "domains": [{"host": "api.anthropic.com", "ip": null, "loc": null}, {"loc": "CN"}], "want": [], "view": [], "score": 100},
+    {"name": "旧缓存没有这一段", "loc": "US", "domains": null, "want": [], "view": [], "score": 100}
+  ]
+}

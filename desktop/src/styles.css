@@ -507,6 +507,23 @@ details.src[open] summary::before { content: "▾"; }
 .score-rules li b { font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
 .score-rules li span { color: var(--muted); overflow-wrap: anywhere; }
 .score-rules .hint { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
+/* 支持地区卡：当前出口（三处地址各自看到的）、不支持的地区、查一个地区、几条说明 */
+.cards.one { grid-template-columns: minmax(0, 1fr); margin-top: 14px; }
+.rg-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.rg-chips .chip { font-weight: 500; }
+.rg-chips .flag, .rg-hits .flag { font-size: 13px; margin-right: 1px; }
+.rg-search { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 7px 11px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.rg-search:focus-within { border-color: var(--ink); }
+.rg-search svg { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; }
+.rg-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font: inherit; font-size: 13.5px; color: var(--ink); padding: 0; }
+.rg-result { margin-top: 8px; font-size: 13px; min-height: 1.5em; }
+.rg-result .hint { margin: 0; }
+.rg-hits { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.rg-hits li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; line-height: 1.5; }
+.rg-hits small { color: var(--muted); }
+.rg-notes { margin-top: 12px; font-size: 12.5px; }
+.rg-notes summary { cursor: pointer; color: var(--muted); }
+.rg-notes ul { margin: 8px 0 0; padding-left: 1.2em; display: grid; gap: 4px; line-height: 1.55; color: var(--muted); }
 .score-ring svg { width: 92px; height: 92px; display: block; }
 .score-ring circle { fill: none; stroke-width: 6; }
 .score-ring .rt { stroke: var(--track); }

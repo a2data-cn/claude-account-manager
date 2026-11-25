@@ -7,7 +7,7 @@
    "want": [
     [
      "local",
-     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+     "本机设置和安全项：时区、语言、DNS、hosts、代理、Wi-Fi、命令历史、钩子"
     ],
     [
      "dns",
@@ -16,6 +16,10 @@
     [
      "exit",
      "出口 IP 和地区"
+    ],
+    [
+     "domains",
+     "Claude Code 的 API、续登录的地址看到的地区"
     ],
     [
      "isp",
@@ -61,7 +65,7 @@
    "want": [
     [
      "local",
-     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+     "本机设置和安全项：时区、语言、DNS、hosts、代理、Wi-Fi、命令历史、钩子"
     ],
     [
      "dns",
@@ -70,6 +74,10 @@
     [
      "exit",
      "出口 IP 和地区"
+    ],
+    [
+     "domains",
+     "Claude Code 的 API、续登录的地址看到的地区"
     ],
     [
      "isp",
@@ -119,7 +127,7 @@
    "want": [
     [
      "local",
-     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+     "本机设置和安全项：时区、语言、DNS、hosts、代理、Wi-Fi、命令历史、钩子"
     ],
     [
      "dns",
@@ -128,6 +136,10 @@
     [
      "exit",
      "出口 IP 和地区"
+    ],
+    [
+     "domains",
+     "Claude Code 的 API、续登录的地址看到的地区"
     ],
     [
      "api",
@@ -161,7 +173,7 @@
    "want": [
     [
      "local",
-     "本机设置：时区、语言、DNS、hosts、代理、Wi-Fi"
+     "本机设置和安全项：时区、语言、DNS、hosts、代理、Wi-Fi、命令历史、钩子"
     ],
     [
      "dns",
@@ -170,6 +182,10 @@
     [
      "exit",
      "出口 IP 和地区"
+    ],
+    [
+     "domains",
+     "Claude Code 的 API、续登录的地址看到的地区"
     ],
     [
      "api",

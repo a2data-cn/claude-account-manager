@@ -42,6 +42,9 @@ struct Mock {
     plain_calls: usize,
     /// /cdn-cgi/trace 返回的地区，空表示 US
     trace_loc: String,
+    /// 经 localhost 来的 /cdn-cgi/trace（Host 头是 localhost:…）返回的地区，空表示和 trace_loc 一样：
+    /// 测 Claude Code 用的 API 地址看到的出口和 claude.ai 不一样
+    localhost_trace_loc: String,
     trace_warp: bool,
     /// 服务器时间相对本机的偏差（秒）
     trace_ts_offset: i64,
@@ -176,7 +179,16 @@ fn mock_base() -> &'static str {
                 }
                 // /cf/…：Cloudflare 自己的 trace（claude.ai 没回音时的备用），节点写成 LAX 好区分
                 if path == "/cdn-cgi/trace" || path == "/cf/cdn-cgi/trace" {
-                    let loc = if m.trace_loc.is_empty() { "US".to_string() } else { m.trace_loc.clone() };
+                    let via_localhost = req.headers().iter().any(|h| {
+                        h.field.equiv("Host") && h.value.as_str().starts_with("localhost")
+                    });
+                    let loc = if via_localhost && !m.localhost_trace_loc.is_empty() {
+                        m.localhost_trace_loc.clone()
+                    } else if m.trace_loc.is_empty() {
+                        "US".to_string()
+                    } else {
+                        m.trace_loc.clone()
+                    };
                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() + m.trace_ts_offset as f64;
                     let warp = if m.trace_warp { "on" } else { "off" };
                     let ip = if m.trace_ip.is_empty() { "1.2.3.4".to_string() } else { m.trace_ip.clone() };
@@ -437,6 +449,9 @@ impl Env {
         std::env::set_var("CAM_TEST_DNS", "192.168.1.1");
         std::env::set_var("CAM_TEST_HOSTS", ""); // 不读这台电脑真的 hosts 文件
         std::env::set_var("CAM_TEST_WIFI", ""); // 不查这台电脑真的 Wi-Fi
+        std::env::set_var("CAM_TEST_HISTORY", ""); // 不读这台电脑真的命令历史
+        std::env::set_var("CAM_TEST_PROCS", ""); // 不看这台电脑真的进程（远程控制软件那一项）
+        std::env::set_var("CAM_TEST_LAN_IP", ""); // 不拿真的局域网地址去连面板、代理的端口
         std::env::set_var("CAM_TEST_PROXY", ""); // 不读本机的系统代理设置
         std::env::set_var("CAM_TEST_TZ", "America/New_York=US"); // 跑测试的机器时区不定，固定成和假出口一致
         std::env::set_var("CAM_TEST_ROUTE_IF", "");
@@ -457,6 +472,12 @@ impl Env {
                 .to_string(),
         )
         .unwrap();
+        // Claude Code 自己写这个文件时就是只有自己能读
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(e.cj(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         e
     }
     fn cj(&self) -> PathBuf {
@@ -1984,6 +2005,7 @@ fn service_check_reports_progress() {
         ("local", "ok"),
         ("dns", "ok"),
         ("exit", "ok"),
+        ("domains", "skip"), // 测试里 API、续登录和 claude.ai 是同一个地址，不用另问出口
         ("isp", "ok"),
         ("stack", "ok"),
         ("plain", "ok"),
@@ -2025,13 +2047,120 @@ fn service_check_reports_progress() {
         .iter()
         .map(|s| s["key"].as_str().unwrap())
         .collect();
+    // 关掉外部 IP 查询：没有问第三方的那几步（Anthropic 几处地址看到的出口照问）
     assert_eq!(
         keys,
-        ["local", "dns", "exit", "api", "web", "auth", "tls", "status", "score"]
+        ["local", "dns", "exit", "domains", "api", "web", "auth", "tls", "status", "score"]
     );
 }
 
 /// 明文网页有没有被中途改动：被带去登录页、被塞了内容就标“注意”、扣 10 分；原样就没有这一条；“外部 IP 查询”关掉时不测。
+#[test]
+fn security_checks_show_up_after_a_check() {
+    // 命令历史里的密钥、不问就执行、钩子、远程控制软件：环境检测记下来、面板的状态里带着、按规则扣分；
+    // 密钥本身、钩子命令的参数都不出现在结果里。去掉以后再检测就没有了。和 cam.py 的同名用例一致
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    let fake = format!("sk-ant-api03-{}", "q".repeat(24));
+    let hist = e.root.join("zsh_history");
+    std::fs::write(
+        &hist,
+        format!(
+            ": 1700000000:0;export ANTHROPIC_API_KEY={}\n: 1700000001:0;claude\n",
+            fake
+        ),
+    )
+    .unwrap();
+    let settings = e.root.join("claude/settings.json");
+    std::fs::write(
+        &settings,
+        json!({"permissions": {"defaultMode": "bypassPermissions"},
+               "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "python3 ~/hooks/done.py --token abc123"}]}]}})
+        .to_string(),
+    )
+    .unwrap();
+    std::env::set_var("CAM_TEST_HISTORY", &hist);
+    std::env::set_var("CAM_TEST_PROCS", "explorer.exe,ToDesk.exe");
+    check_region(&store, 0).unwrap();
+    std::env::set_var("CAM_TEST_HISTORY", "");
+    std::env::set_var("CAM_TEST_PROCS", "");
+    let st = public_state(&store, &e.data());
+    let risks = st["risks"].as_array().unwrap();
+    let hk = by_kind(risks, "history_key").unwrap();
+    assert_eq!((&hk["level"], &hk["points"]), (&json!("warn"), &json!(5)));
+    let text = hk["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("命令历史里留着 Claude 的密钥（API Key）："),
+        "{}",
+        text
+    );
+    assert!(text.ends_with("zsh_history（1 处）"), "{}", text);
+    let pb = by_kind(risks, "perm_bypass").unwrap();
+    assert_eq!((&pb["level"], &pb["points"]), (&json!("warn"), &json!(5)));
+    let ar = by_kind(risks, "auto_run").unwrap();
+    assert_eq!((&ar["level"], &ar["points"]), (&json!("info"), &json!(0)));
+    assert_eq!(
+        ar["text"],
+        "Claude Code 会自动运行的：1 个钩子（Stop → done.py）"
+    );
+    let ra = by_kind(risks, "remote_app").unwrap();
+    assert_eq!(ra["text"], "正在运行远程控制软件：ToDesk");
+    let dumped = st.to_string();
+    assert!(!dumped.contains(&fake));
+    assert!(!dumped.contains("abc123"));
+    assert_eq!(st["risk_score"]["score"], 90);
+    std::fs::write(&settings, "{}").unwrap();
+    check_region(&store, 0).unwrap();
+    let st = public_state(&store, &e.data());
+    for k in ["history_key", "perm_bypass", "remote_app", "auto_run"] {
+        assert!(
+            by_kind(st["risks"].as_array().unwrap(), k).is_none(),
+            "{}",
+            k
+        );
+    }
+}
+
+#[test]
+fn api_sees_a_different_region() {
+    // Claude Code 用的 API 地址看到的出口和 claude.ai 不一样：记下来，不在名单里的扣 60 分；一样的话服务检测里说一声。
+    // 假接口按 Host 头区分：经 localhost 来的算 API 那边
+    let e = Env::new();
+    e.two_accounts(later());
+    let store = Store::new();
+    let api = mock_base().replace("127.0.0.1", "localhost");
+    std::env::set_var("CAM_API_BASE", &api);
+    mock().lock().unwrap().localhost_trace_loc = "CN".into();
+    check_region(&store, 0).unwrap();
+    let st = public_state(&store, &e.data());
+    assert_eq!(
+        st["region"]["domains"],
+        json!([{"host": "localhost", "ip": "1.2.3.4", "loc": "CN", "status": "unsupported"}])
+    );
+    let item = by_kind(st["risks"].as_array().unwrap(), "domain_region")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (&item["level"], &item["points"]),
+        (&json!("bad"), &json!(60))
+    );
+    assert!(item["text"].as_str().unwrap().contains(
+        "claude.ai 看到的是 US（美国），localhost 看到的是 CN（中国大陆），不在支持名单内"
+    ));
+    mock().lock().unwrap().localhost_trace_loc = "US".into();
+    let items = service_check(&store);
+    let ok = by_kind(&items, "domain_region").unwrap();
+    assert_eq!(
+        (&ok["level"], &ok["text"]),
+        (
+            &json!("ok"),
+            &json!("localhost 看到的出口地区也是 US（美国）")
+        )
+    );
+    std::env::set_var("CAM_API_BASE", mock_base());
+}
+
 #[test]
 fn plain_http_tampering_is_flagged() {
     let e = Env::new();

@@ -1,0 +1,48 @@
+{
+  "_说明": "支持地区：regions_info() 给界面的名单和说明（两个版本一字不差），status 是 region_status(代码) 的结果，labels 是 region_label(代码)。",
+  "supported": ["AD", "AE", "AG", "AL", "AM", "AO", "AR", "AT", "AU", "AZ", "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BN", "BO", "BR", "BS", "BT", "BW", "BZ", "CA", "CD", "CF", "CG", "CH", "CI", "CL", "CM", "CO", "CR", "CV", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG", "ER", "ES", "ET", "FI", "FJ", "FM", "FR", "GA", "GB", "GD", "GE", "GH", "GM", "GN", "GQ", "GR", "GT", "GW", "GY", "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IN", "IQ", "IS", "IT", "JM", "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KR", "KW", "KZ", "LA", "LB", "LC", "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MG", "MH", "MK", "ML", "MN", "MR", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA", "NE", "NG", "NI", "NL", "NO", "NP", "NR", "NZ", "OM", "PA", "PE", "PG", "PH", "PK", "PL", "PS", "PT", "PW", "PY", "QA", "RO", "RS", "RW", "SA", "SB", "SC", "SD", "SE", "SG", "SI", "SK", "SL", "SM", "SN", "SO", "SR", "SS", "ST", "SV", "SZ", "TD", "TG", "TH", "TJ", "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "US", "UY", "UZ", "VA", "VC", "VN", "VU", "WS", "ZA", "ZM", "ZW"],
+  "dependencies": ["AI", "AS", "AW", "AX", "BL", "BM", "BQ", "BV", "CC", "CK", "CW", "CX", "FK", "FO", "GF", "GG", "GI", "GL", "GP", "GS", "GU", "HM", "IM", "IO", "JE", "KY", "MF", "MP", "MQ", "MS", "NC", "NF", "NU", "PF", "PM", "PN", "PR", "RE", "SH", "SJ", "SX", "TC", "TF", "TK", "UM", "VG", "VI", "WF", "YT"],
+  "unsupported": ["CN", "HK", "MO", "RU", "BY", "IR", "KP", "SY", "CU", "VE", "AF", "MM", "YE", "XK"],
+  "notes": [
+    "名单以 Anthropic 官方公布的为准，claude.ai、Claude Code 和 API 用同一份；没在名单里的就是不支持。",
+    "支持国家的海外属地（波多黎各、关岛、直布罗陀等）按所属国家算；香港、澳门不在名单里，不支持。",
+    "乌克兰在名单里，但被占领的克里米亚、顿涅茨克、卢甘斯克、赫尔松、扎波罗热地区不支持；IP 只能定位到国家，这里分不出来。",
+    "2025 年 9 月 4 日起，被不支持地区的公司直接或间接控股超过 50% 的企业也不能用；这是账号层面的，本机查不出来。",
+    "Anthropic 按使用者实际所在地判断，不只看出口 IP；这里只看本机能看到的出口，只提醒，不拦任何操作。"
+  ],
+  "checked": "2026-10",
+  "url": "https://www.anthropic.com/supported-countries",
+  "status": [
+    ["US", "supported"],
+    ["CN", "unsupported"],
+    ["HK", "unsupported"],
+    ["MO", "unsupported"],
+    ["XK", "unsupported"],
+    ["UA", "supported"],
+    ["PR", "supported"],
+    ["AI", "supported"],
+    ["MS", "supported"],
+    ["TC", "supported"],
+    ["SH", "supported"],
+    ["UM", "supported"],
+    ["TF", "supported"],
+    ["HM", "supported"],
+    ["BV", "supported"],
+    ["GS", "supported"],
+    ["IO", "supported"],
+    ["PN", "supported"],
+    ["AQ", "unsupported"],
+    ["EH", "unsupported"],
+    ["TW", "supported"],
+    ["SG", "supported"],
+    ["", "unknown"],
+    [null, "unknown"]
+  ],
+  "labels": [
+    ["XK", "XK（科索沃）"],
+    ["UA", "UA（乌克兰）"],
+    ["CN", "CN（中国大陆）"],
+    ["AI", "AI"],
+    [null, "未知"]
+  ]
+}

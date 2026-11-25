@@ -1,5 +1,5 @@
 {
-  "_说明": "连着的 Wi-Fi 加没加密：wifi_security_class(系统报的加密方式) → open / wep / wpa / null；三个系统的解析函数 → {ssid, security} 或 null；risk：env.wifi 是 open / wep 时环境里出一条 wifi（注意，10 分）。两个版本一致。",
+  "_说明": "连着的 Wi-Fi 加没加密：wifi_security_class(系统报的加密方式) → open / wep / wpa / null；三个系统的解析函数 → {ssid, security} 或 null；risk：env.wifi 是 open / wep 时环境里出一条 wifi（注意，5 分）。两个版本一致。",
   "class": [
     ["WPA2", "wpa"],
     ["WPA1 WPA2", "wpa"],
@@ -67,8 +67,8 @@
     {"name": "不是 JSON", "text": "Wi-Fi: off", "expect": null}
   ],
   "risk": [
-    {"name": "开放网络：注意，扣 10 分", "wifi": {"ssid": "Cafe Free", "security": "open"}, "expect": {"text": "连着的 Wi-Fi“Cafe Free”没有加密（开放网络）", "points": 10, "score": 90, "advice_has": "证书警告"}},
-    {"name": "WEP、不知道名字", "wifi": {"ssid": null, "security": "wep"}, "expect": {"text": "连着的 Wi-Fi用的是 WEP 加密：早就被破解了，和没加密差不多", "points": 10, "score": 90, "advice_has": "手机热点"}},
+    {"name": "开放网络：注意，扣 5 分", "wifi": {"ssid": "Cafe Free", "security": "open"}, "expect": {"text": "连着的 Wi-Fi“Cafe Free”没有加密（开放网络）", "points": 5, "score": 95, "advice_has": "证书警告"}},
+    {"name": "WEP、不知道名字", "wifi": {"ssid": null, "security": "wep"}, "expect": {"text": "连着的 Wi-Fi用的是 WEP 加密：早就被破解了，和没加密差不多", "points": 5, "score": 95, "advice_has": "手机热点"}},
     {"name": "加密的：没有这一条", "wifi": {"ssid": "HomeNet", "security": "wpa"}, "expect": null},
     {"name": "有线 / 没查到", "wifi": null, "expect": null}
   ]
