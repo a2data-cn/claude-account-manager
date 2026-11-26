@@ -62,6 +62,10 @@ export interface Account {
   /** claude_desktop：default 表示绑定本机已有的 Claude 登录，否则是独立配置目录 */
   desktop_profile?: string | null;
   days_left: number | null;
+  /** claude_code：这份登录本身什么时候到期（约 30 天一次，Claude Code 自动续期不会延长，到期要重新登录）；老版本存的没有 */
+  login_expires_at?: string | null;
+  /** 离登录到期还有几天（向上取整），0 是已经到期 */
+  login_days_left?: number | null;
   api_key_hint?: string | null;
   has_admin_key?: boolean;
   has_session_key?: boolean;

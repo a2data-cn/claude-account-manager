@@ -221,6 +221,12 @@ Windows 托盘小工具（`extras/windows-tray`）不另写一套：`cam_tray.py
   - 切换到一个 access token 过期的号时，切换前在同一把锁里先换新（见“切换流程”第 3 步），换不了就不切。
 - **拉用量前先核对**：先请求 `/api/oauth/profile`，返回的 uuid / 邮箱和账号记录的不一致（凭据被旧会话覆盖了），就不拿这份凭据查用量，直接报错。资料和用量两个请求各最多等 `USAGE_TIMEOUT` = 12 秒；资料那个等了 `USAGE_GIVE_UP` = 5 秒以上还没连上（断网、代理节点挂了）就不接着读用量（也是白等同样久），一下就失败的（连接被重置）才接着试。
 
+**登录本身的有效期**：Claude Code 登录时在凭据里存 `refreshTokenExpiresAt`（毫秒，token 接口回复的 `refresh_token_expires_in`，没给按 30 天），续 access token 时取原来的和新给的里更早的（原来没有就还是没有），所以续期延不了它，到期只能重新登录；它在剩 3 天以内时提示正在用的号。cam：
+  - `login_exp_valid` / `login_expiry_ms(oauth 块)`：和 Claude Code 一样只认 2025-01-01 以后、10 年以内的数字；access token 比它还晚 3 天以上才过期的不算（Claude Code 这时也不提示）。`login_days` 向上取整，到期是 0。规则在 `tests/shared/login_expiry.json`
+  - 数据在各号保存的登录里，accounts.json 不存。`/api/state` 每个号带 `login_expires_at`（ISO）、`login_days_left`；`with_login_expiry(store, data)` 给账号带上 `login_expires_at`（毫秒）和 `login_days_left`，供 `due_alerts`（后台）和 `account_health` 用：剩 `LOGIN_SOON_DAYS` = 7 天以内 `login_expiring`（注意），到期 `login_expired`（异常，这时 `login_invalid` / `stale` / `live_expired` 不再另报）；提醒在剩 3 天、1 天、到期各一次（`<id>|login|<毫秒>|3/1/over`），不在用的号也提醒
+  - 续期（`renew_saved_login`、核对暂存登录时的续期）按同一条规则改 `refreshTokenExpiresAt`（`set_renewed_login_expiry`）
+  - **重新登录不在用的号**（`cam login 名字`，名字 / id / 邮箱正好是一个已保存的 Claude Code 号、又不是当前号）：`relogin_aside` 在 `<数据目录>/relogin/login-xxxx`（0700）里跑 `claude auth login`，环境带 `CLAUDE_CONFIG_DIR` 和 `CLAUDE_SECURESTORAGE_CONFIG_DIR` 指向它；登录读 `<目录>/.credentials.json`，macOS 上读钥匙串的 `Claude Code-credentials-<目录路径 NFC 的 sha256 前 8 位>`；身份看 `<目录>/.claude.json` 的 `oauthAccount`，没有就问 `/api/oauth/profile`；和这个号对不上、或登录期间它成了当前号就不存。存用 `file_credentials`（和导入一样），最后删目录和钥匙串那一条；上次被打断留下的超过一小时的目录下次删。当前登录、正在跑的会话不受影响。菜单栏 / 托盘子菜单的“重新登录…”就是开终端跑 `cam login <id>`
+
 **添加账号（`cam login`）**：先像 `cam` 一样把当前登录存回它的账号（没见过的号自动导入），再运行 `claude auth login` 换号登录，最后导入新登录（已有的号就更新）。直接 `/login` 的话，当前账号在上次保存之后续过的 token 还没存进来，换号后就作废了。当前登录认不出是谁的（会被暂存，见“暂存认不出主人的登录”）时不换号，免得丢掉它。
 
 ## 并发与锁

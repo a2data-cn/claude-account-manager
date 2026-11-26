@@ -228,29 +228,40 @@ class VaultTest(unittest.TestCase):
         body = ('Your verification code is 123456. <a href="https://claude.ai/magic-link?token=example">Sign in</a> '
                 'https://claude.ai.evil.test/auth?code=bad https://evil.test/auth?code=bad '
                 'https://user@claude.ai/auth?code=bad https://claude.ai:invalid/auth?code=bad')
-        summary = mailbox._summary("1", "Claude <noreply@mail.anthropic.com>", "Sign in to Claude", received, body, since)
+        summary = mailbox._item("1", "Claude <noreply@mail.anthropic.com>", "Sign in to Claude", received, body, since, False)
         self.assertEqual(summary["codes"], ["123456"])
         self.assertEqual(summary["verification_links"], ["https://claude.ai/magic-link?token=example"])
+        self.assertTrue(summary["official"] and summary["login"])
+        self.assertEqual((summary["sender"], summary["sender_name"]), ("noreply@mail.anthropic.com", "Claude"))
         self.assertNotIn("body", summary)
-        self.assertIsNone(mailbox._summary("1", "fake@anthropic.com.evil.test", "Sign in", received, body, since))
-        self.assertIsNone(mailbox._summary("1", "noreply@claude.ai", "Sign in", received - dt.timedelta(hours=2), body, since))
+        self.assertLessEqual(len(summary["preview"]), 160)
+        self.assertIsNone(mailbox._item("1", "fake@anthropic.com.evil.test", "Sign in", received, body, since, False))
+        self.assertIsNone(mailbox._item("1", "noreply@claude.ai", "Sign in", received - dt.timedelta(hours=2), body, since, False))
+        # 看全部邮件时别人发的也列出来，但不从里面找验证码和链接
+        other = mailbox._item("1", "fake@anthropic.com.evil.test", "Sign in", received, body, since, True)
+        self.assertEqual((other["official"], other["login"], other["codes"], other["verification_links"]), (False, False, [], []))
+        # email.claude.com 发的欢迎信也算官方邮件，只是没有验证码
+        welcome = mailbox._item("2", "Claude Team <no-reply@email.claude.com>", "Welcome to Claude", received,
+                                "<style>p{color:#123456}</style><p>Let's get you set up.</p>", since, False)
+        self.assertEqual((welcome["official"], welcome["login"], welcome["codes"]), (True, False, []))
+        self.assertEqual(welcome["preview"], "Let's get you set up.")
 
     def test_verification_link_token_digits_are_not_one_time_codes(self):
         since = mailbox._now() - dt.timedelta(minutes=15)
         link = "https://claude.ai/magic-link?token=123456"
         for body in ("Sign in using " + link, '<a href="' + link + '">Verify sign in</a>'):
-            summary = mailbox._summary("1", "noreply@anthropic.com", "Sign in to Claude", mailbox._now(), body, since)
+            summary = mailbox._item("1", "noreply@anthropic.com", "Sign in to Claude", mailbox._now(), body, since, False)
             self.assertEqual(summary["codes"], [])
             self.assertEqual(summary["verification_links"], [link])
-        summary = mailbox._summary("1", "noreply@anthropic.com", "Sign in to Claude", mailbox._now(),
-                                   "Your code is 654321. " + link, since)
+        summary = mailbox._item("1", "noreply@anthropic.com", "Sign in to Claude", mailbox._now(),
+                                "Your code is 654321. " + link, since, False)
         self.assertEqual(summary["codes"], ["654321"])
 
     def test_login_summary_rejects_multiple_from_addresses(self):
         since = mailbox._now() - dt.timedelta(minutes=15)
         for sender in ("noreply@anthropic.com, attacker@evil.test", "noreply@anthropic.com, noreply@claude.ai"):
-            self.assertIsNone(mailbox._summary("1", sender, "Sign in to Claude", mailbox._now(),
-                                               "Verification code: 123456", since))
+            self.assertIsNone(mailbox._item("1", sender, "Sign in to Claude", mailbox._now(),
+                                            "Verification code: 123456", since, False))
 
     def test_gmail_and_outlook_return_summaries_only_and_never_write_mail(self):
         for provider in ("gmail", "outlook"):
@@ -286,10 +297,11 @@ class VaultTest(unittest.TestCase):
         entry_id = self.add("imap", password="app-password", config={"imap_host": "imap.example.com"})
         raw = b"From: noreply@anthropic.com\r\nSubject: Sign in to Claude\r\nContent-Type: text/plain\r\n\r\nVerification code: 123456"
         internal = dt.datetime.now(dt.timezone.utc).strftime('%d-%b-%Y %H:%M:%S')
-        meta = f'1 (RFC822.SIZE {len(raw)} INTERNALDATE "{internal} +0000")'.encode()
+        head = raw.split(b"Content-Type")[0] + b"\r\n"
+        meta = f'1 (UID 1 RFC822.SIZE {len(raw)} INTERNALDATE "{internal} +0000" BODY[HEADER.FIELDS (FROM SUBJECT)] {{{len(head)}}}'.encode()
         client = mock.Mock()
         client.select.return_value = ("OK", [b"1"])
-        client.uid.side_effect = [("OK", [b"1"]), ("OK", [meta]), ("OK", [(b"body", raw), b")"])]
+        client.uid.side_effect = [("OK", [b"1"]), ("OK", [(meta, head), b")"]), ("OK", [(b"body", raw), b")"])]
         if sys.version_info >= (3, 9):
             with mock.patch.object(mailbox.imaplib, "IMAP4_SSL", return_value=client) as factory:
                 result = mailbox.messages(self.store, entry_id, {})
@@ -300,6 +312,10 @@ class VaultTest(unittest.TestCase):
                 result = mailbox.messages(self.store, entry_id, {})
             self.assertTrue(factory.call_args.args[2].check_hostname)
         self.assertEqual(result["status"], "found")
+        self.assertEqual(result["messages"][0]["codes"], ["123456"])
+        search = client.uid.call_args_list[0].args
+        self.assertIn('"claude.com"', search)
+        self.assertTrue(all("PEEK" in call.args[-1] for call in client.uid.call_args_list[1:]))
         client.select.assert_called_once_with("INBOX", readonly=True)
         self.assertIn("BODY.PEEK", client.uid.call_args_list[-1].args[-1])
         self.assertFalse(any(call.args[0].lower() in ("store", "copy", "delete", "expunge") for call in client.uid.call_args_list))
@@ -307,7 +323,7 @@ class VaultTest(unittest.TestCase):
 
     def test_messages_missing_imap_settings_and_invalid_since(self):
         entry_id = self.add("imap", password="example")
-        with self.assertRaisesRegex(mailbox.MailboxError, "主机名"):
+        with self.assertRaisesRegex(mailbox.MailboxError, "收信服务器"):
             mailbox.messages(self.store, entry_id, {})
         with self.assertRaisesRegex(mailbox.MailboxError, "since"):
             mailbox.messages(self.store, entry_id, {"since": "not-a-date"})
@@ -326,7 +342,7 @@ class VaultTest(unittest.TestCase):
         vault.save_entry(self.store, {"id": entry_id, "label": "now allowed"})
         self.assertEqual(vault.get_entry(self.store, entry_id)["label"], "now allowed")
 
-    def test_message_candidate_limit_and_one_hour_lookback(self):
+    def test_message_candidate_limit_and_seven_day_lookback(self):
         entry_id = self.add("gmail")
         vault.save_secret(self.store, entry_id, {"access_token": "access", "expires_at": time.time() + 3600})
         ids = [{"id": str(i)} for i in range(50)]
@@ -339,8 +355,12 @@ class VaultTest(unittest.TestCase):
                 return {"sizeEstimate": mailbox._MAX_MESSAGE + 1}
             return {"messages": ids}
         with mock.patch.object(mailbox, "_http_json", side_effect=fake_http):
-            with self.assertRaisesRegex(mailbox.MailboxError, "最近 1 小时"):
+            with self.assertRaisesRegex(mailbox.MailboxError, "最近 7 天"):
                 mailbox.messages(self.store, entry_id, {"since": "2000-01-01T00:00:00Z"})
+            with self.assertRaisesRegex(mailbox.MailboxError, "最近 7 天"):
+                mailbox.messages(self.store, entry_id, {"since": mailbox._iso(mailbox._now() - dt.timedelta(days=8))})
+            with self.assertRaisesRegex(mailbox.MailboxError, "all"):
+                mailbox.messages(self.store, entry_id, {"all": "yes"})
             self.assertEqual(urls, [])
             since = mailbox._iso(mailbox._now() - dt.timedelta(minutes=30))
             result = mailbox.messages(self.store, entry_id, {"since": since})
@@ -349,6 +369,118 @@ class VaultTest(unittest.TestCase):
         query = next(url for url in urls if "messages?" in url)
         stamp = int(urllib.parse.parse_qs(urllib.parse.urlparse(query).query)["q"][0].split("after:")[1].split()[0])
         self.assertLessEqual(abs(time.time() - stamp - 1800), 2)
+
+    def test_detect_shared_fixture(self):
+        path = os.path.join(os.path.dirname(__file__), os.pardir, "tests", "shared", "mail_detect.json")
+        with open(path, encoding="utf-8") as f:
+            cases = json.load(f)["cases"]
+        for case in cases:
+            with self.subTest(email=case["email"]):
+                if case["expect"] is None:
+                    with self.assertRaises(mailbox.MailboxError):
+                        mailbox.detect(case["email"])
+                    continue
+                got = mailbox.detect(case["email"])
+                self.assertEqual({k: got[k] for k in case["expect"]}, case["expect"])
+                self.assertEqual(got["imap_port"], 993)
+                self.assertTrue(got["note"])
+
+    def test_oauth_client_id_is_shared_between_entries_of_the_same_kind(self):
+        first = vault.save_entry(self.store, {"label": "a", "email": "a@outlook.com", "provider": "outlook",
+                                              "config": {"client_id": "my-app", "tenant": "consumers"}})["entries"][-1]["id"]
+        second = vault.save_entry(self.store, {"label": "b", "email": "b@outlook.com", "provider": "outlook", "config": {}})["entries"][-1]["id"]
+        gmail = vault.save_entry(self.store, {"label": "c", "email": "c@gmail.com", "provider": "gmail", "config": {}})["entries"][-1]["id"]
+        self.assertEqual(mailbox._entry(self.store, second)["config"]["client_id"], "my-app")
+        self.assertEqual(mailbox._entry(self.store, second)["config"]["tenant"], "consumers")
+        self.assertEqual(mailbox._entry(self.store, first)["config"]["client_id"], "my-app")
+        self.assertFalse(mailbox._entry(self.store, gmail)["config"].get("client_id"))
+        with self.assertRaisesRegex(mailbox.MailboxError, "Client ID"):
+            mailbox.connect(self.store, gmail)
+        self.assertFalse(vault.get_entry(self.store, second)["config"].get("client_id"))  # 借用不写回账号库
+
+    def test_all_mail_lists_everyone_but_only_reads_official_bodies(self):
+        entry_id = self.add("gmail")
+        vault.save_secret(self.store, entry_id, {"access_token": "access", "expires_at": time.time() + 3600})
+        login = "Your Claude verification code is 123456."
+        now_ms = str(time.time() * 1000)
+        def head(sender, subject):
+            return [{"name": "From", "value": sender}, {"name": "Subject", "value": subject}]
+        urls = []
+        def fake_http(method, url, **kwargs):
+            urls.append(url)
+            if url.endswith("/profile"):
+                return {"emailAddress": "person@example.com"}
+            if "/messages?" in url:
+                return {"messages": [{"id": "a1"}, {"id": "b2"}, {"id": "bad id"}]}
+            if "/a1?format=metadata" in url:
+                return {"sizeEstimate": 100, "internalDate": now_ms, "snippet": "Your Claude code &amp; link", "payload": {"headers": head("Anthropic <noreply@mail.anthropic.com>", "Sign in")}}
+            if "/a1?format=full" in url:
+                return {"sizeEstimate": 100, "internalDate": now_ms, "snippet": "x", "payload": {"mimeType": "text/plain", "headers": head("noreply@mail.anthropic.com", "Sign in"),
+                        "body": {"data": base64.urlsafe_b64encode(login.encode()).decode()}}}
+            if "/b2?format=metadata" in url:
+                return {"sizeEstimate": 100, "internalDate": now_ms, "snippet": "Hello &#39;friend&#39;", "payload": {"headers": head("Friend <f@example.org>", "Hi")}}
+            raise AssertionError(url)
+        with mock.patch.object(mailbox, "_http_json", side_effect=fake_http):
+            result = mailbox.messages(self.store, entry_id, {"all": True, "since": mailbox._iso(mailbox._now() - dt.timedelta(days=7))})
+        self.assertTrue(result["all"])
+        by_id = {m["id"]: m for m in result["messages"]}
+        self.assertEqual(set(by_id), {"a1", "b2"})
+        self.assertEqual(by_id["a1"]["codes"], ["123456"])
+        self.assertEqual((by_id["b2"]["official"], by_id["b2"]["codes"], by_id["b2"]["preview"]), (False, [], "Hello 'friend'"))
+        self.assertIn("in%3Ainbox", next(u for u in urls if "/messages?" in u))
+        self.assertFalse(any("/b2?format=full" in u for u in urls))
+
+    def test_detail_returns_original_html_without_scripts(self):
+        entry_id = self.add("outlook")
+        vault.save_secret(self.store, entry_id, {"access_token": "access", "expires_at": time.time() + 3600})
+        page = ('<html><head><meta http-equiv="refresh" content="0;url=https://evil.test"><base href="https://evil.test/"></head>'
+                '<body onload="x()"><script>steal()</script><p style="color:red">Sign in to Claude</p>'
+                '<a href="https://claude.ai/magic-link?token=t">Sign in</a><iframe src="https://evil.test"></iframe>'
+                '<form action="https://evil.test"><input></form><img src="https://cdn.example/logo.png"></body></html>')
+        calls = []
+        def fake_http(method, url, **kwargs):
+            calls.append((method, url, kwargs.get("headers")))
+            if "/v1.0/me?" in url:
+                return {"mail": "person@example.com"}
+            return {"id": "AAMk-1=", "from": {"emailAddress": {"name": "Anthropic", "address": "noreply@mail.anthropic.com"}},
+                    "subject": "Your secure link to Claude", "receivedDateTime": mailbox._iso(mailbox._now()),
+                    "body": {"contentType": "html", "content": page}}
+        with mock.patch.object(mailbox, "_http_json", side_effect=fake_http):
+            detail = mailbox.message(self.store, entry_id, {"id": "AAMk-1="})
+            with self.assertRaisesRegex(mailbox.MailboxError, "编号"):
+                mailbox.message(self.store, entry_id, {"id": "../me/sendMail"})
+        self.assertTrue(all(method == "GET" for method, _, _ in calls))
+        for bad in ("<script", "steal()", "http-equiv", "<base", "<iframe", "<form"):
+            self.assertNotIn(bad, detail["html"])
+        self.assertIn('style="color:red"', detail["html"])
+        self.assertIn("https://cdn.example/logo.png", detail["html"])
+        self.assertEqual(detail["verification_links"], ["https://claude.ai/magic-link?token=t"])
+        self.assertTrue(detail["official"] and detail["login"])
+        self.assertEqual(detail["sender_name"], "Anthropic")
+
+    def test_imap_detail_is_read_only_and_outlook_password_refusal_is_explained(self):
+        entry_id = self.add("imap", password="pw", config={"imap_host": "outlook.office365.com"})
+        raw = (b"From: Friend <f@example.org>\r\nSubject: Hi\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n"
+               b"--b\r\nContent-Type: text/plain\r\n\r\nplain body\r\n--b\r\nContent-Type: text/html\r\n\r\n<b>rich</b><script>x</script>\r\n--b--\r\n")
+        internal = dt.datetime.now(dt.timezone.utc).strftime('%d-%b-%Y %H:%M:%S')
+        client = mock.Mock()
+        client.select.return_value = ("OK", [b"1"])
+        client.uid.side_effect = [("OK", [f'7 (UID 7 RFC822.SIZE {len(raw)} INTERNALDATE "{internal} +0000")'.encode()]), ("OK", [(b"7 (BODY[]<0> {1}", raw), b")"])]
+        with mock.patch.object(mailbox, "_imap_connection", return_value=client):
+            detail = mailbox.message(self.store, entry_id, {"id": "7"})
+            with self.assertRaisesRegex(mailbox.MailboxError, "编号"):
+                mailbox.message(self.store, entry_id, {"id": "7:*"})
+        self.assertEqual((detail["text"].strip(), detail["official"]), ("plain body", False))
+        self.assertIn("<b>rich</b>", detail["html"])
+        self.assertNotIn("<script", detail["html"])
+        self.assertTrue(all("PEEK" in call.args[-1] or "RFC822.SIZE" in call.args[-1] for call in client.uid.call_args_list))
+        client.select.assert_called_with("INBOX", readonly=True)
+        refusing = mock.Mock()
+        refusing.login.side_effect = mailbox.imaplib.IMAP4.error(b"AUTHENTICATE failed.")
+        with mock.patch.object(mailbox, "_imap_connection", return_value=refusing):
+            with self.assertRaisesRegex(mailbox.MailboxError, "Outlook 授权"):
+                mailbox.messages(self.store, entry_id, {})
+        refusing.logout.assert_called()
 
     def test_sql_parameters_and_invalid_secret_fields(self):
         entry_id = self.add(password="safe")

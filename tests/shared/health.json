@@ -1,5 +1,5 @@
 {
-  "_说明": "账号健康状态：account_health(账号, 有没有保存凭据, 剩余天数) → level（ok / info / warn / error）、label（正常 / 注意 / 异常）和问题种类。Python 与 Rust 两边按同一份数据跑。",
+  "_说明": "账号健康状态：account_health(账号, 有没有保存凭据, 剩余天数) → level（ok / info / warn / error）、label（正常 / 注意 / 异常）和问题种类。Claude Code 号带着 login_days_left（登录还剩几天，0 是到期了，由 with_login_expiry 算好）时也看登录有效期。Python 与 Rust 两边按同一份数据跑。",
   "cases": [
     {
       "name": "Claude Code 正常",
@@ -427,6 +427,161 @@
         "label": "正常",
         "kinds": [
           "pending_login"
+        ]
+      }
+    },
+    {
+      "name": "登录有效期：还剩 8 天，正常",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 8,
+        "usage": {}
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "登录有效期：还剩 7 天，注意",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 7,
+        "usage": {}
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "login_expiring"
+        ]
+      }
+    },
+    {
+      "name": "登录有效期：还剩 1 天，注意",
+      "has_creds": true,
+      "days_left": 20,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 1,
+        "usage": {}
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "login_expiring"
+        ]
+      }
+    },
+    {
+      "name": "登录有效期：到期了，异常；“登录已失效”不再另说",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 0,
+        "usage": {
+          "error": "登录已失效（invalid_grant），需要用这个账号重新登录 Claude Code 后 cam import"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "login_expired"
+        ]
+      }
+    },
+    {
+      "name": "登录有效期：到期了，后台没续的“过期了”也不另说",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 0,
+        "usage": {
+          "error": "登录已过期。后台不会替它续登录（避免和 Claude Code 抢 refresh token），手动刷新一次或切换到这个账号即可"
+        }
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "login_expired"
+        ]
+      }
+    },
+    {
+      "name": "登录有效期：到期了，订阅也过期了，两样都说",
+      "has_creds": true,
+      "days_left": -2,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 0,
+        "usage": {}
+      },
+      "expect": {
+        "level": "error",
+        "label": "异常",
+        "kinds": [
+          "expired",
+          "login_expired"
+        ]
+      }
+    },
+    {
+      "name": "登录有效期：不知道（null）就不说",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": null,
+        "usage": {}
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "登录有效期：网页号带着这一项也不看",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_web",
+        "login_days_left": 0,
+        "usage": {}
+      },
+      "expect": {
+        "level": "ok",
+        "label": "正常",
+        "kinds": []
+      }
+    },
+    {
+      "name": "登录有效期：快到期，用量也拿不到，两样都说",
+      "has_creds": true,
+      "days_left": null,
+      "account": {
+        "kind": "claude_code",
+        "login_days_left": 3,
+        "usage": {
+          "error": "网络错误：timed out"
+        }
+      },
+      "expect": {
+        "level": "warn",
+        "label": "注意",
+        "kinds": [
+          "network",
+          "login_expiring"
         ]
       }
     }

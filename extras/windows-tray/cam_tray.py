@@ -39,7 +39,9 @@ LEVELS = {cam_menu.GREEN: "green", cam_menu.YELLOW: "yellow", cam_menu.RED: "red
 
 # 托盘图标的样式：macOS 菜单栏的五种，加上 Windows 才有的“数字方块”（托盘图标旁边不能写字，要看数字只能画在图标里）。
 # 没选过时用数字方块（以前的样子）；在 Mac 上选的样式这里也认
-TRAY_STYLES = (("badge", "数字方块（图标里写 5 小时 %）"),) + tuple(cam_menu.ICON_STYLES)
+# 红绿灯在托盘上画成“左边三颗小灯、右边写 5 小时 %”（托盘图标外面不能写字，Mac 上的红绿灯不变，旁边的字由菜单栏写）
+TRAY_LABELS = {"lamp": "红绿灯（三颗小灯 + 5 小时 %）"}
+TRAY_STYLES = (("badge", "数字方块（图标里写 5 小时 %）"),) + tuple((k, TRAY_LABELS.get(k, t)) for k, t in cam_menu.ICON_STYLES)
 SHORT = {"badge": "数字方块", "bars": "信号格", "lamp": "红绿灯", "ring": "圆环", "rings": "双环", "twobar": "两根小条"}
 FRAMES, FRAME_MS = cam_menu.FRAMES, int(cam_menu.FRAME * 1000)  # 动画和菜单栏流式模式一样：0.25 秒一帧，8 帧两秒一圈
 
@@ -258,16 +260,56 @@ def icon_dir():
 
 
 ICON_KEEP = 400  # 画额度的样式每个百分比一张图，攒多了删掉最早的（每张几百字节）
+LAMP_DOT = 0.27  # 红绿灯 + 数字：三颗小灯的直径占图标边长的比例（16 像素时 4.3 像素）
+
+
+def lamp_layout(px):
+    """红绿灯 + 数字的排法：(小灯直径, 小灯圆心 x, 数字从哪个 x 开始)，单位是像素。数字由 cam-tray.ps1 写在右边那块里。"""
+    dia = px * LAMP_DOT
+    cx = dia / 2 + px * 0.02
+    return dia, cx, round(cx + dia / 2 + px * 0.06, 2)
+
+
+def lamp_dots(dark, level, kind, phase, px):
+    """红绿灯 + 数字左边那列三颗小灯（上红、中橙、下绿），画在整格托盘图标里，右边空着。
+    颜色和闪法照菜单栏的红绿灯（cam_menu.status_icon）：亮着的那颗是彩色，别的是淡淡的点；
+    工作中（pulse）亮着的那颗一亮一灭，灭的时候留三成五的颜色；等你确认（blink）三颗一起闪、快一倍。数字不闪，随时看得清。"""
+    dia, cx, _ = lamp_layout(px)
+    r = dia / 2
+    gap = (px - 3 * dia) / 2
+    ink = cam_menu.GLYPH[dark]
+    if kind == "pulse":
+        lit = (phase % 0.5) < 0.25
+    elif kind == "blink":
+        lit = (phase % 0.25) < 0.125
+    else:
+        lit = True
+
+    def dot(cy):
+        return lambda x, y: (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+    shapes = []
+    for i, lv in enumerate(("bad", "busy", "ok")):
+        color = cam_menu.FILL[{"busy": "warn"}.get(lv, lv)][dark]
+        if lv == level or kind == "blink":
+            tone = (*color, 1.0 if lit else 0.35)
+        else:
+            tone = (*ink[:3], ink[3] * 0.3)
+        shapes.append((dot(r + i * (dia + gap)), tone))
+    return cam_menu._png(px, px, cam_menu._raster(px, px, shapes))
 
 
 def icon_file(style, level, kind, phase, p5, p7, dark, px):
     """画一帧托盘图标存成 PNG，返回路径。和 macOS 菜单栏是同一套画法（cam_menu.status_icon），只是按屏幕的实际像素画：
-    图标的长边等于托盘图标的大小（红绿灯竖着、两根小条横着，cam-tray.ps1 摆到正中）。"""
+    图标的长边等于托盘图标的大小（红绿灯竖着、两根小条横着，cam-tray.ps1 摆到正中）。
+    style="lampdots" 是红绿灯 + 数字左边的三颗小灯（lamp_dots），整格大小。"""
     d = icon_dir()
     path = os.path.join(d, f"{style}-{level}-{kind or 'still'}-{phase:.3f}-{p5}-{p7}-{'d' if dark else 'l'}-{px}.png")
     if not os.path.exists(path):
-        w, h = cam_menu.icon_size(style)
-        png = cam_menu.status_icon(int(dark), level, kind, phase, style, p5, p7, k=px / max(w, h))
+        if style == "lampdots":
+            png = lamp_dots(int(dark), level, kind, phase, px)
+        else:
+            w, h = cam_menu.icon_size(style)
+            png = cam_menu.status_icon(int(dark), level, kind, phase, style, p5, p7, k=px / max(w, h))
         tmp = f"{path}.{os.getpid()}.tmp"
         with open(tmp, "wb") as f:
             f.write(png)
@@ -283,19 +325,25 @@ def icon_file(style, level, kind, phase, p5, p7, dark, px):
 
 def icon_of(data, light, badge, level, px):
     """托盘图标：{"style", "kind", "ms", "frames": [PNG 路径…]}，有动画时 8 帧轮着放；数字方块要写字，由 cam-tray.ps1 自己画：
-    {"style": "badge", "kind", "ms", "text", "level"}。kind 是红绿灯的动画：pulse = 工作中，blink = 等你确认，空 = 不动。"""
+    {"style": "badge", "kind", "ms", "text", "level"}。kind 是红绿灯的动画：pulse = 工作中，blink = 等你确认，空 = 不动。
+    红绿灯有 5 小时的数时画成左边三颗小灯（frames）+ 右边的数字：多给 "text"（用了百分之几，满了写“满”）、
+    "text_at"（数字从哪个像素开始）和 "dark"（任务栏是深色就写白字），字由 cam-tray.ps1 写；还没有数时是原来的大红绿灯。"""
     kind = light[2] if light else ""
     style = tray_style(data)
     if style == "badge" or not light:  # 还没有账号时只有数字方块那种“!”
         return {"style": "badge", "kind": kind, "ms": FRAME_MS, "text": badge, "level": level}
     shown = cam_menu.title_account(data["accounts"], next(
         (a for a in data["accounts"] if a["id"] == data["active"].get("claude_code")), None))
-    q = style in cam_menu.QUOTA_STYLES  # 画额度的样式才要数，取整（图按参数存）
+    q = style in cam_menu.QUOTA_STYLES or style == "lamp"  # 画额度的样式和红绿灯才要数，取整（图按参数存）
     p5 = cam_menu.pct(shown, "five_hour") if q and shown else None
     p7 = cam_menu.pct(shown, "seven_day") if q and shown else None
     p5, p7 = (round(p5) if p5 is not None else None), (round(p7) if p7 is not None else None)
     dark = taskbar_dark()
     phases = [i / FRAMES for i in range(FRAMES)] if kind else [0.0]
+    if style == "lamp" and p5 is not None:
+        return {"style": style, "kind": kind, "ms": FRAME_MS, "text": "满" if p5 >= 100 else str(max(p5, 0)),
+                "text_at": lamp_layout(px)[2], "dark": dark,
+                "frames": [icon_file("lampdots", light[0], kind, ph, None, None, dark, px) for ph in phases]}
     return {"style": style, "kind": kind, "ms": FRAME_MS,
             "frames": [icon_file(style, light[0], kind, ph, p5, p7, dark, px) for ph in phases]}
 

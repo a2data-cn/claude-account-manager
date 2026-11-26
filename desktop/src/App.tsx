@@ -20,7 +20,8 @@ import { setPref, usePrefs } from "./prefs";
 import { PhoneAccess } from "./components/PhoneAccess";
 import { Privacy } from "./components/Privacy";
 import { ThemeToggle } from "./components/ThemeToggle";
-import { AccountVault } from "./components/AccountVault";
+import { AccountVault, type VaultWaitFor } from "./components/AccountVault";
+import type { VaultState } from "./vault";
 import { Rules } from "./components/Rules";
 import { StatusLight } from "./components/StatusLight";
 import type { Account, CheckProgress, CheckStep, RegionInfo, RegionsInfo, RiskChange, ServiceCheckItem, State, SwitchResult, UsageSamples } from "./types";
@@ -884,6 +885,27 @@ export default function App() {
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToastMsg(null), bad ? 5000 : 2600);
   }, []);
+  // 账号卡上点了“重新登录”：这个号绑了能收信的邮箱、账号库也解锁着，就打开“账号资料与邮箱”开始等登录邮件
+  const [vaultWait, setVaultWait] = useState<VaultWaitFor | null>(null);
+  useEffect(() => {
+    const onRelogin = async (event: Event) => {
+      const a = (event as CustomEvent<{ id: string; email: string }>).detail;
+      try {
+        const vs = await api<VaultState>("GET", "/api/vault");
+        if (!vs.unlocked) return;
+        const email = (a.email || "").toLowerCase();
+        const hit = vs.entries.find((e) => (e.account_id === a.id || (!!email && e.email.toLowerCase() === email)) && e.connected && e.provider !== "credential");
+        if (!hit) return;
+        setVault(true);
+        setVaultWait({ account_id: a.id, email: a.email || "", at: Date.now() });
+        toast(`邮箱 ${hit.email} 已经开始等登录邮件，来了直接在这里点`);
+      } catch {
+        /* 账号库没装或读不了：只复制命令 */
+      }
+    };
+    window.addEventListener("cam-relogin", onRelogin);
+    return () => window.removeEventListener("cam-relogin", onRelogin);
+  }, [toast]);
 
   /** 操作接口直接给回来的新状态 */
   const putState = useCallback((s: State) => {
@@ -1140,7 +1162,7 @@ export default function App() {
       </div>
 
       {vault ? (
-        <AccountVault accounts={state?.accounts || []} onAccountsChanged={putState} toast={toast} />
+        <AccountVault accounts={state?.accounts || []} onAccountsChanged={putState} toast={toast} waitFor={vaultWait} />
       ) : tab === "usage" ? (
         <div className="pane" role="tabpanel" id="pane-usage" aria-labelledby="tab-usage">
           {state ? <LocalUsage accounts={state.accounts} stamp={state.generated_at} /> : <Loading />}

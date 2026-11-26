@@ -384,8 +384,37 @@ function New-BadgeFrame([string]$level, [string]$badge, [double]$bg = 1.0, [doub
   return $f
 }
 
-# cam_tray.py 画好的一帧（PNG）：长边等于托盘图标大小，摆到正中（红绿灯竖着、两根小条横着）
-function New-PngFrame([string]$file) {
+# 红绿灯 + 数字的数字：写在图标右边那块（从 $left 像素到右边），竖着居中；两位数在 16 像素里挤不下时横向压一点。
+# 透明底上写字，字的颜色跟任务栏：深色任务栏白字、浅色黑字
+function Add-TrayText($g, [string]$text, [bool]$dark, [double]$left) {
+  $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+  $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+  $cjk = -not ($text -match '^[\x20-\x7E]*$')  # “满”用雅黑
+  $family = if ($cjk) { "Microsoft YaHei" } else { "Segoe UI" }
+  $em = if ($text.Length -ge 2) { $IconPx * 0.68 } else { $IconPx * 0.78 }
+  $style = [System.Drawing.FontStyle]::Bold
+  $font = New-Object System.Drawing.Font($family, [single]$em, $style, [System.Drawing.GraphicsUnit]::Pixel)
+  $color = if ($dark) { [System.Drawing.Color]::FromArgb(240, 255, 255, 255) } else { [System.Drawing.Color]::FromArgb(230, 0, 0, 0) }
+  $brush = New-Object System.Drawing.SolidBrush($color)
+  $fmt = New-Object System.Drawing.StringFormat([System.Drawing.StringFormat]::GenericTypographic)  # 不留左右空白，宽度算得准
+  $size = $g.MeasureString($text, $font, (New-Object System.Drawing.PointF(0, 0)), $fmt)
+  $area = $IconPx - $left
+  $sx = [Math]::Min(1.0, $area / [Math]::Max(1.0, $size.Width))
+  # 竖着按字的样子居中：数字的中线在基线上方约 0.35 个字号（汉字约 0.38），基线在行顶往下 ascent 处
+  $ff = $font.FontFamily
+  $asc = $em * $ff.GetCellAscent($style) / $ff.GetEmHeight($style)
+  $mid = if ($cjk) { 0.38 } else { 0.35 }
+  $top = $IconPx / 2 + $mid * $em - $asc
+  $g.TranslateTransform([single]($left + ($area - $size.Width * $sx) / 2), [single]$top)
+  $g.ScaleTransform([single]$sx, [single]1)
+  $g.DrawString($text, $font, $brush, [single]0, [single]0, $fmt)
+  $g.ResetTransform()
+  $fmt.Dispose(); $brush.Dispose(); $font.Dispose()
+}
+
+# cam_tray.py 画好的一帧（PNG）：长边等于托盘图标大小，摆到正中（红绿灯竖着、两根小条横着）。
+# 红绿灯 + 数字：PNG 是整格、只有左边三颗小灯，$text（5 小时用了百分之几）在这里写到右边，从 $textAt 像素开始
+function New-PngFrame([string]$file, [string]$text = "", [bool]$dark = $true, [double]$textAt = 0) {
   $bytes = [System.IO.File]::ReadAllBytes($file)
   $ms = New-Object System.IO.MemoryStream(, $bytes)
   $img = [System.Drawing.Image]::FromStream($ms)
@@ -395,6 +424,7 @@ function New-PngFrame([string]$file) {
   $x = [Math]::Floor(($IconPx - $img.Width) / 2)
   $y = [Math]::Floor(($IconPx - $img.Height) / 2)
   $g.DrawImage($img, [int]$x, [int]$y, $img.Width, $img.Height)  # 给定宽高：按像素画，不按 PNG 里记的 dpi 缩放
+  if ($text) { Add-TrayText $g $text $dark $textAt }
   $f = New-Frame $bmp
   $g.Dispose(); $bmp.Dispose(); $img.Dispose(); $ms.Dispose()
   return $f
@@ -419,7 +449,7 @@ function Set-TrayIcon($spec) {
   if ($spec.style -ne "badge" -and @($spec.frames).Count) {
     $made = @{}
     foreach ($file in @($spec.frames)) {
-      if (-not $made.ContainsKey($file)) { $made[$file] = New-PngFrame $file }
+      if (-not $made.ContainsKey($file)) { $made[$file] = New-PngFrame $file ([string]$spec.text) ([bool]$spec.dark) ([double]$spec.text_at) }
     }
     $new = @(@($spec.frames) | ForEach-Object { $made[$_] })
     $own = @($made.Values)

@@ -191,6 +191,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }  /* 
 .t-verdict.warn, .t-exp.warn { color: var(--warn); font-weight: 600; }
 .t-verdict.hot, .t-exp.hot { color: var(--hot); font-weight: 600; }
 .t-exp { margin-top: auto; padding-top: 6px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--muted); }
+.t-exp + .t-exp { margin-top: 0; padding-top: 2px; border-top: 0; }  /* 到期日下面再一行“登录还剩 N 天” */
 /* 有额度的号的汇总：5 小时、7 天平均已用；有号照现在的速度会在重置前用完时多一行提醒 */
 .sumbar { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px 22px; align-items: center; margin-bottom: 12px; }
 .sumbar .sb-t b { display: block; font-size: 13.5px; font-weight: 650; }
@@ -286,10 +287,11 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }  /* 
 .mbp-item svg, .mbp-sys svg { display: block; flex: none; }
 .mbp-sys { display: inline-flex; align-items: center; gap: 10px; flex: none; opacity: .85; }
 .mb-pulse .mb-lit { animation: mbPulse 1s step-end infinite; }  /* 在回答：彩色那段每秒闪一次（和插件一个节奏） */
-.mb-blink svg { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪 */
+.mb-blink svg:not(.mb-keep), .mb-blink .mb-dot { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪（Windows 托盘的红绿灯 + 数字只闪灯，数字不闪） */
+.mb-blink .mb-d-bad { fill: var(--mb-bad); } .mb-blink .mb-d-busy { fill: var(--mb-warn); } .mb-blink .mb-d-ok { fill: var(--mb-ok); }  /* 等你确认时三颗灯一起亮着闪 */
 @keyframes mbPulse { 50% { opacity: .35; } }
 @keyframes mbBlink { 50% { opacity: .25; } }
-@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg, .mb-blink .mb-dot { animation: none; } }
 .mb-opts { display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; align-items: center; margin-top: 14px; }
 .mb-opts .k { font-size: 12px; color: var(--muted); }
 .mb-opts .seg-mini { justify-self: start; }
@@ -802,29 +804,91 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
 }
 /* Claude 服务检测结果 */
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-/* 本地账号库与邮箱 */
+/* 本地账号库与邮箱：左边邮箱和表单，右边邮件列表（在自己的框里上下滑），点开看原邮件 */
 .vault .panel + .panel { margin-top: 14px; }
-.vault h3 { margin: 0 0 12px; font: 650 15px var(--sans); }
-.vault-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin: 12px 0; }
-.vault-entry { display: grid; gap: 3px; text-align: left; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--surface); cursor: pointer; min-width: 0; }
-.vault-entry.sel { border-color: var(--accent); }
-.vault-entry span, .vault-entry small { color: var(--muted); overflow-wrap: anywhere; }
+.vault h3 { margin: 0; font: 650 15px var(--sans); }
+.vault-grid { display: grid; grid-template-columns: minmax(280px, 380px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.vault-grid .panel + .panel { margin-top: 0; }
+.vault-side { display: grid; gap: 14px; min-width: 0; }
+.vm-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.vm-head .spacer { flex: 1; }
+.vault-list { display: grid; gap: 6px; margin: 0 0 10px; max-height: 280px; overflow-y: auto; }
+.vault-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; row-gap: 1px; align-items: center; text-align: left; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 11px; background: var(--surface); color: var(--ink); font: inherit; cursor: pointer; min-width: 0; }
+.vault-entry b { grid-column: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.vault-entry span:not(.chip) { grid-column: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vault-entry .chip { grid-column: 2; grid-row: 1 / span 2; }
+.vault-entry.sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.vault-entry:hover:not(.sel) { border-color: var(--muted); }
 .vault-actions, .vault-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.vault-inline select { flex: 1 1 220px; }
+.vault-inline select { flex: 1 1 200px; }
 .vault-actions .check { margin: 0; font-size: 12px; }
-.vault-form, .vault-unlock { margin-top: 12px; }
+.vault-form h3 { margin-bottom: 10px; overflow-wrap: anywhere; }
+.vault-form details.src { margin: 4px 0 10px; }
+.vault-form details.src > summary { font-size: 12.5px; }
+.vault-form details.src[open] > summary { margin-bottom: 8px; }
+.vdetect { margin: -4px 0 10px; padding: 7px 10px; border-radius: var(--radius-sm); background: var(--paper); line-height: 1.55; }
+.vguide ol, .vguide ul { margin: 6px 0; padding-left: 20px; font-size: 12.5px; line-height: 1.7; }
+.vguide li + li { margin-top: 2px; }
+.vault-unlock { margin-top: 12px; max-width: 440px; }
 .vault-revealed { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0 0; }
+.vault-revealed:empty { display: none; }
 .vault-revealed code { overflow-wrap: anywhere; white-space: pre-wrap; }
 .vault-revealed small { width: 100%; color: var(--muted); }
-.vault-messages { display: grid; gap: 8px; }
-.vault-message { border: 1px solid var(--line); padding: 10px 12px; border-radius: var(--radius-sm); display: grid; gap: 6px; overflow-wrap: anywhere; }
-.vault-message small { color: var(--muted); }
-.vault-code { font: 600 16px ui-monospace, monospace; letter-spacing: .08em; }
+.vault-mail { min-width: 0; }
+.vm-filter { width: 150px; min-width: 0; font: inherit; font-size: 12.5px; padding: 4px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); color: var(--ink); }
+.vm-tools { margin-bottom: 8px; }
+.vm-tools .spacer { flex: 1; }
+.vm-body { max-height: min(72vh, 760px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -4px; padding: 0 4px; }
+.vm-scope { margin: 0 0 8px; }
+.vm-scope .bad { color: var(--hot); }
+.vault-messages { display: grid; gap: 0; }
+.vm-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 6px; border-top: 1px solid var(--line); }
+.vm-row:first-child { border-top: 0; }
+.vm-row.new { background: var(--live-soft); border-radius: var(--radius-sm); }
+.vm-main { display: grid; gap: 6px; min-width: 0; }
+.vm-ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.vault-mail h3 { display: inline-flex; align-items: center; gap: 7px; }
+.vault-mail h3 .vm-ico { color: var(--accent); }
+.vm-subj { all: unset; cursor: pointer; font-weight: 650; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; display: flex; gap: 7px; align-items: flex-start; }
+.vm-subj .vm-ico { margin-top: 2px; color: var(--muted); }
+.vm-row.official .vm-subj .vm-ico { color: var(--accent); }
+.vm-subj:hover, .vm-subj:focus-visible { color: var(--accent); }
+.vm-meta { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.vm-meta .chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.vm-row .vm-meta { flex-wrap: nowrap; }
+.vm-row .vm-meta .chip:first-child { flex: 0 1 auto; min-width: 0; }
+.vm-row .vm-meta .chip:not(:first-child) { flex: none; }
+.vm-prev { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.vm-more { all: unset; cursor: pointer; color: var(--ok); font-size: 13px; font-weight: 600; white-space: nowrap; padding: 4px 2px; }
+.vm-more:hover, .vm-more:focus-visible { text-decoration: underline; }
+.vault-code { font: 650 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .08em; }
+.vm-empty { display: grid; gap: 6px; justify-items: center; text-align: center; padding: 48px 16px; color: var(--muted); font-size: 13px; }
+.vm-empty b { color: var(--ink); font-size: 14px; }
+.vm-empty.bad b { color: var(--hot); }
+.vm-detail { display: grid; gap: 10px; }
+.vm-dhead { display: flex; align-items: center; gap: 8px; }
+.vm-dhead .spacer { flex: 1; }
+.vm-detail h4 { margin: 0; font: 650 16px/1.4 var(--sans); overflow-wrap: anywhere; }
+.vm-frame { width: 100%; height: min(62vh, 680px); border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; }
+.vm-link { flex: 1 1 220px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.vm-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.6 var(--sans); background: var(--paper); border-radius: var(--radius-sm); padding: 12px; }
 .vault .notice { flex-wrap: wrap; gap: 8px; }
+@media (max-width: 900px) {  /* 窄屏：邮箱列表 → 邮件列表 → 表单，不用滑过整张表单才看到邮件 */
+  .vault-grid { display: flex; flex-direction: column; align-items: stretch; }
+  .vault-side { display: contents; }
+  .vault-boxes { order: 1; } .vault-mail { order: 2; } .vault-form { order: 3; }
+  .vm-body { max-height: none; overflow: visible; }
+  .vm-filter { flex: 1 1 120px; }
+}
+@media (max-width: 520px) {
+  .vm-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .vm-more { justify-self: start; }
+}
 </style>
 </head>
 <body>
 <svg class="sprite" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.2"/><path d="M4.5 7l7.5 6 7.5-6"/></symbol>
 <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c-3.2 3-3.2 15 0 18M12 3c3.2 3 3.2 15 0 18"/></symbol>
 <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M7.5 9.5l3 2.5-3 2.5"/><path d="M13 15h3.5"/></symbol>
 <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 2.8v5.4c0 4.4-3 8.2-7 9.8-4-1.6-7-5.4-7-9.8V5.8L12 3z"/><path d="M9 12l2 2 4-4"/></symbol>
@@ -869,7 +933,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   <div class="pane" role="tabpanel" id="pane-accounts" aria-labelledby="tab-accounts">
     <section class="block vault" id="vault-block" hidden aria-label="账号资料与邮箱">
       <div class="sec-head"><h2>账号资料与邮箱</h2><span class="spacer"></span><button class="btn" type="button" id="v-reload">重新读取</button><button class="btn" type="button" id="v-close">收起</button></div>
-      <p class="hint">账号资料保存在本机 SQLite 账号库，密码和邮箱授权加密保存。首次授权后，可自动读取 Claude 登录邮件；Claude 登录、回跳和多因素验证仍由你完成。手机发起邮箱授权时，请在运行服务的电脑浏览器完成授权。</p>
+      <p class="hint">邮箱和密码用主密码加密，存在这台电脑的账号库里，不经过别人的服务器。cam 只读邮件，不发信、不删信、不标成已读；Claude 的登录链接和验证码还是你自己点。手机上发起邮箱授权时，要在运行 cam 的那台电脑上完成。</p>
       <div id="v-error" class="notice" role="alert" hidden></div>
       <div id="v-content"></div>
     </section>
@@ -1478,6 +1542,18 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (d <= ALERT_SOON_DAYS) return { cls: "warn", text: d === 0 ? `今天到期${date ? `（${date}）` : ""}` : `到期 ${date} · 还有 ${d} 天` };
     return { cls: "", text: `到期 ${date}` };
   }
+  // Claude Code 号这份登录本身的有效期（约 30 天，Claude Code 续期不会延长，到期要重新登录）。没有这一项的（老版本存的）不显示
+  const LOGIN_SOON_DAYS = 7;
+  function loginInfo(a) {
+    const n = a.login_days_left;
+    if (a.kind !== "claude_code" || typeof n !== "number") return null;
+    const t = new Date(a.login_expires_at || ""), when = isNaN(t) ? "" : `${t.getMonth() + 1}月${t.getDate()}日 ${pad2(t.getHours())}:${pad2(t.getMinutes())}`;
+    if (n <= 0) return { n, cls: "hot", tile: "登录到期了，要重新登录", text: `已经到期${when ? `（${when}）` : ""}，要重新登录才能用` };
+    return { n, cls: n <= LOGIN_SOON_DAYS ? "warn" : "", tile: `登录还剩 ${n} 天`, text: `还剩 ${n} 天${when ? `（${when} 到期）` : ""}` };
+  }
+  // 命令行参数：有空格、引号之类的用单引号包起来
+  const shellArg = (s) => /^[A-Za-z0-9_.\-一-鿿]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
+  const reloginCmd = (a) => `cam login ${shellArg(a.label || a.id)}`;
   // 7 天额度的节奏线：虚线是匀速用到重置正好用完，实线是实际已用（采样点 + 现在这个数），比匀速快的部分涂浅黄，
   // 点线按速度往后推（重置前用完的标黄、画到用完那一点；用不完的画到重置时还剩多少）。big：详情里带坐标轴的大图
   function paceSvg(a, big) {
@@ -1579,7 +1655,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   function tile(a, sel) {
     const h = a.health || {};
     const sub = a.email && a.email !== a.label ? mail(a.email) : KIND[a.kind];
-    const rings = quotaRings(a), v = verdict(a, false), ex = expiryLine(a);
+    const rings = quotaRings(a), v = verdict(a, false), ex = expiryLine(a), li = loginInfo(a);
     const meter = rings.length ? `<span class="t-rings">${rings.map(ringBox).join("")}</span>${a.pace ? `<span class="t-spark">${paceSvg(a, false)}</span>` : ""}` : tileMeter(a);
     return `<button type="button" class="tile${sel ? " sel" : ""}${a.is_active ? " live" : ""}${h.level === "error" ? " bad" : ""}"
       data-act="select" data-id="${esc(a.id)}" aria-pressed="${sel}">
@@ -1588,7 +1664,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       <span class="t-chips">${statusChips(a, true)}</span>
       ${sessionLine(a)}${meter}
       ${v ? `<span class="t-verdict ${v.cls}">${esc(v.text)}</span>` : ""}
-      ${ex ? `<span class="t-exp ${ex.cls}">${esc(ex.text)}</span>` : ""}
+      ${ex ? `<span class="t-exp ${ex.cls}">${esc(ex.text)}</span>` : ""}${li && li.cls ? `<span class="t-exp ${li.cls}">${esc(li.tile)}</span>` : ""}
     </button>`;
   }
   function detailView(a) {
@@ -1607,9 +1683,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         ? "网页版账号默认不读取用量。填写 sessionKey 后可以自动获取，或者在“编辑”里手动记录到期日。"
         : a.kind === "api" && !a.has_admin_key ? "填写 Admin Key 后可以显示本月花费。" : "还没有用量数据，点“刷新”。"}</div>`;
     }
-    const due = dueInfo(a);
+    const due = dueInfo(a), li = loginInfo(a);
     const info = [
       ["类型", esc(KIND[a.kind]) + (a.org_name ? " · " + esc(a.org_name) : "")],
+      li ? ["登录有效期", `<span class="${li.cls === "hot" ? "due-now" : li.cls === "warn" ? "due-soon" : ""}">${esc(li.text)}</span>`
+        + `<span class="sub">每次登录约 30 天有效，Claude Code 自动续期不会延长；${li.n > 0 ? "到期前" : ""}重新登录：<code>${esc(reloginCmd(a))}</code>${a.is_active ? "（或在 claude 里 /login）" : "（现在在用的登录不动）"}</span>`] : null,
       due ? ["到期", `<span class="${due.cls}">${due.short}${m.expires_at ? "（" + esc(m.expires_at) + "）" : ""}</span>${m.auto_renew ? " · 自动续期" : ""}`] : null,
       m.price ? ["价格", esc(m.price)] : null,
       a.kind === "api" && a.api_key_hint ? ["Key", esc(a.api_key_hint) + (u.key_valid === true ? " · 有效" : u.key_valid === false ? " · 无效" : "")] : null,
@@ -1630,6 +1708,8 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (a.kind === "claude_code" && !a.is_active) acts.push(`<button class="btn primary" data-act="switch" data-id="${esc(a.id)}">切换到这个账号</button>`);
     if (a.kind === "claude_web") acts.push(`<button class="btn primary" data-act="open" data-id="${esc(a.id)}">在电脑上打开</button>`);
     if (a.kind === "claude_desktop") acts.push(`<button class="btn primary" data-act="open" data-id="${esc(a.id)}">${a.is_active ? "重新打开" : "切换桌面版"}</button>`);
+    const relogin = a.kind === "claude_code" && ((li && li.n <= LOGIN_SOON_DAYS) || (h.issues || []).some((i) => ["login_invalid", "no_credentials", "login_expired"].includes(i.kind)));
+    if (relogin) acts.push(`<button class="btn${h.level === "error" ? " primary" : ""}" data-act="relogin" data-id="${esc(a.id)}" title="复制 ${esc(reloginCmd(a))}，到终端里运行，在浏览器里登录这个号">重新登录</button>`);
     acts.push(`<button class="btn" data-act="refresh" data-id="${esc(a.id)}">${a.kind === "claude_desktop" ? "读取本地额度" : "刷新"}</button>`);
     acts.push(`<button class="btn" data-act="edit" data-id="${esc(a.id)}">编辑</button>`);
     if (state.backend === "python") acts.push(`<button class="btn${h.level === "error" ? " primary" : ""}" data-act="diag" data-id="${esc(a.id)}" title="下载一份诊断报告：现在的问题、出问题时的现场（出口 IP、环境）、用过的出口、当前环境和风险项，不含密钥">导出诊断</button>`);
@@ -2395,7 +2475,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   const MB_TEXT = [["name", "名字"], ["five", "5 小时 %"], ["seven", "7 天 %"], ["sessions", "在回答的会话数"]];
   const TRAY_ICONS = [["badge", "数字方块"], ...MB_ICONS];  // Windows 托盘：多一种数字方块（托盘图标旁边不能写字）
   let lightNow = { lv: "ok", anim: "" }, mbSet = null, mbBusy = false;
-  function mbIcon(style, lv, p5, p7) {
+  function mbIcon(style, lv, p5, p7, tray) {
     const tone = `var(--mb-${lv === "bad" ? "bad" : lv === "busy" ? "warn" : "ok"})`, q5 = p5 == null ? 100 : Math.max(0, Math.min(100, p5));
     const trk = (r, w) => `<circle cx="8" cy="8" r="${r}" fill="none" stroke="var(--mb-track)" stroke-width="${w}"/>`;
     const arc = (r, w, p, c, cls) => {
@@ -2406,6 +2486,12 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (style === "badge") {  // Windows 托盘的数字方块：底色跟着 5 小时额度（70% 以下绿、70–89% 黄、90% 以上红），写着百分比
       const c = p5 == null ? "#6E6E73" : p5 >= 90 ? "#BF3B33" : p5 >= 70 ? "#B87A08" : "#1F8A4C", t = p5 == null ? "C" : p5 >= 100 ? "满" : String(Math.round(p5));
       return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect class="mb-lit" width="16" height="16" rx="4" fill="${c}"/><text x="8" y="12" text-anchor="middle" font-size="${t.length >= 2 ? 10.5 : 12.5}" font-weight="700" fill="#fff" font-family="Segoe UI, system-ui, sans-serif">${t}</text></svg>`;
+    }
+    if (style === "lamp" && tray && p5 != null) {  // Windows 托盘的红绿灯：左边三颗小灯、右边写 5 小时用了百分之几（照 cam_tray.py 的 lamp_dots 排）；等你确认时只有灯闪，数字不闪
+      const t = p5 >= 100 ? "满" : String(Math.round(Math.max(0, p5))), fit = t.length >= 2 ? ' textLength="10" lengthAdjust="spacingAndGlyphs"' : "";
+      return `<svg class="mb-keep" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${
+        [["bad", 2.16], ["busy", 8], ["ok", 13.84]].map(([l, cy]) => `<circle class="mb-dot mb-d-${l}${l === lv ? " mb-lit" : ""}" cx="2.48" cy="${cy}" r="2.16" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")
+      }<text x="10.8" y="12" text-anchor="middle" font-size="${t.length >= 2 ? 10.5 : 12}" font-weight="700" fill="var(--mb-fg)" font-family="Segoe UI, system-ui, sans-serif"${fit}>${t}</text></svg>`;
     }
     if (style === "lamp") return `<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><rect x=".6" y=".6" width="10.8" height="18.8" rx="4.4" fill="none" stroke="var(--mb-glyph)" stroke-width="1.2"/>${
       [["bad", 4.2], ["busy", 10], ["ok", 15.8]].map(([l, cy]) => `<circle class="${l === lv ? "mb-lit" : ""}" cx="6" cy="${cy}" r="2.5" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")}</svg>`;
@@ -2445,11 +2531,11 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     const wifi = `<svg width="15" height="11" viewBox="0 0 17 12" aria-hidden="true"><path fill="currentColor" d="M8.5 11.2l2.2-2.7a3.4 3.4 0 0 0-4.4 0zM8.5 4.6a6.6 6.6 0 0 1 4.3 1.6l1.2-1.4a8.5 8.5 0 0 0-11 0l1.2 1.4a6.6 6.6 0 0 1 4.3-1.6zM8.5.6a10.7 10.7 0 0 1 7 2.6l1-1.3A12.5 12.5 0 0 0 .5 1.9l1 1.3A10.7 10.7 0 0 1 8.5.6z"/></svg>`;
     const dis = mbBusy ? " disabled" : "";
     box.innerHTML = `<h3><span class="eico"><svg><use href="#i-signal"/></svg></span>样式<span class="hint">图标的颜色和闪法表示状态：绿 = 空闲正常，橙 = 在回答 / 要注意，红 = 要处理；在回答时闪，等你确认时快闪</span></h3>
-      <div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${lightNow.anim ? " mb-" + lightNow.anim : ""}">${mbIcon(mbSet.icon, lightNow.lv, p5, p7)}${t ? `<span>${esc(t)}</span>` : ""}</span>
+      <div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${lightNow.anim ? " mb-" + lightNow.anim : ""}">${mbIcon(mbSet.icon, lightNow.lv, p5, p7, tray)}${t ? `<span>${esc(t)}</span>` : ""}</span>
         <span class="mbp-sys">${wifi}<span>${two(now.getHours())}:${two(now.getMinutes())}</span></span></div>
       <div class="mb-opts"><span class="k">图标</span><span class="seg-mini" role="group" aria-label="${tray ? "托盘图标" : "菜单栏图标"}">${(tray ? TRAY_ICONS : MB_ICONS).map(([v, tt]) => `<button type="button" data-mbicon="${v}" aria-pressed="${mbSet.icon === v}"${dis}>${tt}</button>`).join("")}</span>
         ${tray ? "" : `<span class="k">旁边写什么</span><span class="mbchips" role="group" aria-label="图标旁边写什么">${MB_TEXT.map(([v, tt]) => `<button type="button" data-mbtext="${v}" aria-pressed="${items.includes(v)}"${dis}>${tt}</button>`).join("")}</span>`}</div>
-      <p class="hint" style="margin:10px 0 0">${tray ? "托盘图标右键菜单的“更多”里、卡片小面板的“设置”里也能改。数字方块写着 5 小时额度用了百分之几；别的样式鼠标停在图标上能看到额度。" : "可以多选，都不选就只有图标。菜单栏下拉菜单的“更多”里、卡片小面板的“设置”里也能改。"}</p>`;
+      <p class="hint" style="margin:10px 0 0">${tray ? "托盘图标右键菜单的“更多”里、卡片小面板的“设置”里也能改。数字方块和红绿灯写着 5 小时额度用了百分之几（红绿灯是左边三颗小灯、右边数字，闪的只有灯）；别的样式鼠标停在图标上能看到额度。" : "可以多选，都不选就只有图标。菜单栏下拉菜单的“更多”里、卡片小面板的“设置”里也能改。"}</p>`;
   }
   async function loadMenubar() {
     try { mbSet = await api("GET", "/api/menubar"); } catch (_) { mbSet = null; }  // 桌面版、老版本的 cam serve 没有这个接口
@@ -3326,7 +3412,6 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   }
   $("#a-kind").onchange = syncAddKind;
   // Claude Code 号：起名字 → 拼出 cam login 名字（有空格、引号之类的用单引号包起来）→ 点“复制”贴到终端
-  const shellArg = (s) => /^[A-Za-z0-9_.\-一-鿿]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`;
   function syncAddCmd() { $("#a-cmd").textContent = `cam login ${shellArg($("#a-name0").value.trim() || "工作号")}`; }
   $("#a-name0").addEventListener("input", syncAddCmd);
   function openAdd() {
@@ -3549,6 +3634,13 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         }); break;
       case "refresh": refresh(id, b); break;
       case "diag": exportDiag(id, b); break;
+      case "relogin":  // 浏览器登录要在终端里跑：复制好命令，说清楚怎么做
+        if (a) {
+          const ok = await copyText(reloginCmd(a));
+          const mail = await vaultWaitForAccount(a);  // 绑了邮箱的号：顺便开始等登录邮件
+          toast((ok ? `已复制 ${reloginCmd(a)}：到终端里粘贴运行，在弹出的浏览器里登录 ${a.email || nameOf(a)}。${a.is_active ? "" : "现在在用的登录和正在跑的会话都不受影响。"}`
+            : `到终端里运行 ${reloginCmd(a)}，在弹出的浏览器里登录这个号。`) + (mail ? " " + mail : ""), !ok);
+        } break;
       case "edit": if (a) openEdit(a); break;
       case "rename": if (a) { openEdit(a); setTimeout(() => { $("#f-label").focus(); $("#f-label").select(); }, 60); } break;
       case "select": select(id); break;
@@ -3564,11 +3656,16 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   $("#btn-refresh").onclick = (e) => refresh(null, e.currentTarget);
 
   // ---- 本地加密账号库；秘密仅在显式输入/显示期间留在页面内存，不写 localStorage。
-  const V_PROVIDERS = { credential: "仅保存账号资料", gmail: "Gmail / Google Workspace", outlook: "Outlook / Hotmail / Microsoft 365", imap: "其它企业邮箱（IMAP）" };
+  // 左边：邮箱列表和添加 / 编辑表单（填“邮箱”或“邮箱----密码”，按后缀自动识别收信方式）；右边：邮件列表，点开看原邮件
+  const V_PROVIDERS = { imap: "邮箱密码收信（IMAP）", outlook: "Outlook 授权（在微软页面登录一次）", gmail: "Gmail 授权（在 Google 页面登录一次）", credential: "只保存账号资料，不收信" };
+  const V_LOOKBACK = 7 * 86400000;
   let vaultState = null, vaultSelected = "", vaultBusy = false, vaultMessages = null, vaultRevealed = null;
   let vaultJob = null, vaultJobTimer = null, vaultJobPolling = false, vaultJobUntil = 0;
   let vaultWatch = null, vaultAuto = true, vaultLastCheck = 0, vaultMailEpoch = 0, vaultRevealTimer = null;
+  let vaultMode = "claude", vaultFilter = "", vaultDetail = null, vaultImages = false, vaultReading = false, vaultMailError = "", vaultNew = new Set();
+  let vaultDetected = null, vaultDetectTimer = null, vaultDetectFor = "", vaultExtraDropped = false, vaultProviderTouched = false;
   const vaultActive = () => vaultState && vaultState.entries.find((entry) => entry.id === vaultSelected);
+  const vaultCanRead = (entry) => !!entry && entry.connected && entry.provider !== "credential";
   function vaultError(error, secrets = []) {
     let message = error && error.message || "操作失败，请重试";
     for (const secret of secrets.filter(Boolean)) message = message.split(secret).join("••••");
@@ -3608,15 +3705,48 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     clearTimeout(vaultRevealTimer); vaultRevealed = null;
     if ($("#v-revealed")) $("#v-revealed").textContent = "";
   }
+  function resetVaultMail() {
+    vaultMailEpoch += 1; vaultWatch = null; vaultMessages = null; vaultDetail = null; vaultImages = false; vaultMailError = ""; vaultNew = new Set(); vaultLastCheck = 0;
+  }
   function clearVaultPrivate() {
-    vaultMailEpoch += 1; vaultWatch = null; vaultMessages = null; vaultSelected = ""; stopVaultJob(); hideVaultPassword();
+    resetVaultMail(); vaultSelected = ""; vaultDetected = null; vaultDetectFor = ""; stopVaultJob(); hideVaultPassword();
   }
   function applyVault(next) {
+    const wasLocked = !vaultState || !vaultState.unlocked;
     vaultState = next;
     if (!next.unlocked) clearVaultPrivate();
+    else if (wasLocked && !vaultSelected) {  // 刚解锁：直接选第一个能收信的邮箱，右边马上开始获取
+      const first = next.entries.find(vaultCanRead);
+      if (first) vaultSelected = first.id;
+    }
     renderVault();
+    if (next.unlocked && vaultCanRead(vaultActive()) && !vaultMessages) void vaultReadMail();
   }
   const vField = (id, label, value = "", options = "") => `<div class="field"><label for="${id}">${esc(label)}</label><input id="${id}" value="${esc(value)}" ${options}></div>`;
+  const vaultKindChip = (item) => item.provider === "credential" ? `<span class="chip">只存资料</span>`
+    : item.connected ? `<span class="chip c-ok">能收信</span>` : `<span class="chip st-warn">${item.provider === "imap" ? "没填密码" : "还没授权"}</span>`;
+  const V_MS_GUIDE = `<details class="src vguide"><summary>怎么拿到微软应用 ID（第一次要做，大约 5 分钟）</summary><ol>
+      <li>打开 <code>entra.microsoft.com</code>，用任意一个微软账号登录（个人 Outlook 账号也行；第一次进去如果提示要先建目录或 Azure 免费账号，按提示建好）。</li>
+      <li>左边菜单点“应用注册”（App registrations）→“新注册”（New registration）。</li>
+      <li>名称随便填，比如“cam 收信”；“受支持的帐户类型”选“任何组织目录中的帐户和个人 Microsoft 帐户”。</li>
+      <li>“重定向 URI”平台选“公共客户端/本机（移动和桌面）”，地址填 <code>http://localhost/oauth/callback</code>，点“注册”。</li>
+      <li>进这个应用的“身份验证”（Authentication）页，最下面“允许公共客户端流”选“是”，保存。</li>
+      <li>回到“概述”（Overview），复制“应用程序(客户端) ID”，粘贴到上面的框里，租户保持 <code>common</code>。</li></ol>
+      <p class="hint">只要填一次：以后添加别的 Outlook 邮箱，这里留空就用同一个 ID。授权只申请“读邮件”，cam 不会发信、删信。</p></details>`;
+  const V_GOOGLE_GUIDE = `<details class="src vguide"><summary>怎么拿到 Google 应用 ID（嫌麻烦就改用“邮箱密码收信”，填应用专用密码）</summary><ol>
+      <li>打开 <code>console.cloud.google.com</code>，新建一个项目，名字随便。</li>
+      <li>“API 和服务 → 库”里搜 Gmail API，点“启用”。</li>
+      <li>“API 和服务 → OAuth 同意屏幕”：用户类型选“外部”，填应用名称和你的邮箱；在“测试用户”里加上要收信的 Gmail 地址。</li>
+      <li>“API 和服务 → 凭据 → 创建凭据 → OAuth 客户端 ID”，应用类型选“桌面应用”，创建。</li>
+      <li>把“客户端 ID”和“客户端密钥”分别填到上面两个框，保存后点“连接邮箱并授权”。</li></ol>
+      <p class="hint">应用在“测试”状态时，Google 大约每 7 天要重新授权一次；用应用专用密码收信没有这个限制。只要填一次，别的 Gmail 留空就用同一个。</p></details>`;
+  const V_IMAP_GUIDE = `<details class="src vguide"><summary>常见邮箱的密码怎么填</summary><ul>
+      <li><b>Gmail</b>：不收登录密码。Google 账号打开两步验证，在 <code>myaccount.google.com/apppasswords</code> 生成 16 位应用专用密码填这里。</li>
+      <li><b>Outlook / Hotmail</b>：先直接填登录密码试试；微软不让这个号用密码收信时，收信方式改成“Outlook 授权”。</li>
+      <li><b>QQ 邮箱</b>：网页版 设置 → 账号，开启 IMAP / SMTP 服务，按提示生成授权码，填授权码。</li>
+      <li><b>163 / 126</b>：网页版 设置 → POP3 / SMTP / IMAP，开启 IMAP 后生成客户端授权码，填授权码。</li>
+      <li><b>GMX / mail.com / Onet</b>：网页版设置里先打开 POP3 / IMAP，再填登录密码。</li>
+      <li><b>iCloud</b>：在 <code>account.apple.com</code> 生成 App 专用密码填这里。</li></ul></details>`;
   function renderVault() {
     const root = $("#v-content");
     if (!vaultState) { root.innerHTML = `<div class="panel"><p class="hint">正在读取本地账号库…</p></div>`; return; }
@@ -3629,61 +3759,221 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       syncVaultBusy(); return;
     }
     const entry = vaultActive(), config = entry && entry.config || {};
+    const provider = entry ? entry.provider : (vaultDetected && vaultDetected.provider) || "imap";
     const accountOptions = (state && state.accounts || []).filter((account) => account.kind !== "api").map((account) => `<option value="${esc(account.id)}"${entry && entry.account_id === account.id ? " selected" : ""}>${esc(account.label || account.email || account.id)}</option>`).join("");
-    root.innerHTML = `<div class="vault-actions"><button class="btn" type="button" data-vact="lock" data-vbusy>锁定账号库</button></div>
-      <div class="vault-list">${vaultState.entries.map((item) => `<button type="button" class="vault-entry${item.id === vaultSelected ? " sel" : ""}" data-vact="select" data-vid="${esc(item.id)}" data-vbusy aria-pressed="${item.id === vaultSelected}"><b>${esc(item.label || item.email)}</b><span>${esc(item.email)}</span><small>${esc(V_PROVIDERS[item.provider] || item.provider)}${item.connected ? " · 已保存邮箱授权" : ""}</small></button>`).join("")}
-        <button class="btn" type="button" data-vact="new" data-vbusy>＋ 新增账号资料</button></div>
-      <form class="panel vault-form" id="v-entry-form"><h3>${entry ? "编辑账号资料" : "新增账号资料"}</h3>
-        <div class="row2">${vField("v-label", "名称", entry && entry.label || "", 'maxlength="60"')}${vField("v-email", "邮箱", entry && entry.email || "", 'type="email" required')}</div>
-        <div class="field"><label for="v-account">绑定 Claude 账号（可选）</label><div class="vault-inline"><select id="v-account"><option value="">不绑定</option>${accountOptions}</select><button class="btn" type="button" data-vact="identify" data-vbusy>读取已登录邮箱</button></div></div>
-        <div class="field"><label for="v-provider">邮箱接入方式</label><select id="v-provider">${Object.entries(V_PROVIDERS).map(([provider, label]) => `<option value="${provider}"${provider === (entry && entry.provider || "credential") ? " selected" : ""}>${label}</option>`).join("")}</select></div>
-        ${vField("v-password", "账号密码（可选）" + (entry && entry.has_password ? " · 已保存，留空保留" : ""), "", 'type="password" autocomplete="new-password"')}
+    const imapHost = config.imap_host || (!entry && vaultDetected ? vaultDetected.imap_host : "");
+    root.innerHTML = `<div class="vault-grid"><div class="vault-side">
+      <div class="panel vault-boxes"><div class="vm-head"><h3>邮箱账户</h3><span class="spacer"></span><button class="btn quiet" type="button" data-vact="lock" data-vbusy>锁定</button></div>
+        <div class="vault-list">${vaultState.entries.map((item) => `<button type="button" class="vault-entry${item.id === vaultSelected ? " sel" : ""}" data-vact="select" data-vid="${esc(item.id)}" data-vbusy aria-pressed="${item.id === vaultSelected}"><b>${esc(item.label || item.email)}</b><span>${esc(item.email)}</span>${vaultKindChip(item)}</button>`).join("") || `<p class="hint">还没有邮箱。在下面填邮箱和密码，保存后右边就开始收信。</p>`}</div>
+        <button class="btn" type="button" data-vact="new" data-vbusy${entry ? "" : " hidden"}>＋ 添加邮箱</button></div>
+      <form class="panel vault-form" id="v-entry-form" autocomplete="off"><h3>${entry ? "编辑 " + esc(entry.label || entry.email) : "添加邮箱"}</h3>
+        ${vField("v-email", "邮箱账户（自动识别类型）", entry && entry.email || "", 'required placeholder="邮箱地址，或 邮箱----密码" spellcheck="false" autocapitalize="off"')}
+        <p class="hint vdetect" id="v-detect" hidden></p>
+        ${vField("v-password", "", "", 'type="password" autocomplete="new-password"')}
         ${entry && entry.has_password ? `<label class="check"><input type="checkbox" id="v-clear-password">清除已保存的密码</label>` : ""}
-        <div id="v-oauth-fields" hidden><p class="hint">使用你自己注册的桌面 OAuth 应用。Gmail 包含 Google Workspace；Outlook 包含 Hotmail / Microsoft 365。修改后先保存，再连接邮箱；企业账号可能需要管理员批准。</p>
-          ${vField("v-client", "OAuth Client ID / 应用程序 ID", config.client_id || "", 'autocomplete="off"')}
-          ${vField("v-client-secret", "Client Secret（可选）" + (entry && entry.has_client_secret ? " · 已保存，留空保留" : ""), "", 'type="password" autocomplete="new-password"')}
-          <div id="v-tenant-field">${vField("v-tenant", "租户（默认 common，可填租户 ID 或域名）", config.tenant || "common")}</div>
-          <details class="src"><summary>首次配置 OAuth 应用</summary><p class="hint">Google Cloud：启用 Gmail API，创建“桌面应用”OAuth 客户端，填写客户端 ID 和提供的 Client Secret；应用处于测试状态时加入自己的测试邮箱。Microsoft Entra：选择所需个人 / 组织账号类型，在“移动和桌面应用”添加 <code>http://localhost/oauth/callback</code>，启用公用客户端，填写应用程序 ID；租户默认 common。授权在电脑系统浏览器完成；邮箱授权会申请只读邮件权限，不会自动完成 Claude 登录。</p></details></div>
-        <div id="v-imap-fields" hidden><div class="row2">${vField("v-imap-host", "IMAP 服务器", config.imap_host || "", 'placeholder="imap.example.com"')}${vField("v-imap-port", "TLS 端口", config.imap_port || 993, 'type="number" min="1" max="65535"')}</div>${vField("v-imap-user", "IMAP 用户名", config.imap_username || "", 'placeholder="通常为完整邮箱地址"')}<p class="hint">使用服务器提供的 TLS 端口（通常 993）和应用专用密码。只读收件箱，不标记已读，不内置其它邮箱服务商适配。</p></div>
-        <div class="field"><label for="v-notes">备注</label><textarea id="v-notes" rows="2">${esc(config.notes || "")}</textarea></div>
-        <div class="vault-actions"><button class="btn primary" type="submit" data-vbusy>保存资料</button>${entry && entry.has_password ? `<button class="btn" type="button" data-vact="reveal" data-vbusy>显示已保存密码</button>` : ""}${entry ? `<button class="btn quiet danger" type="button" data-vact="delete" data-vbusy>移除资料</button>` : ""}</div><div class="vault-revealed" id="v-revealed"></div>
-      </form>
-      ${entry && entry.provider !== "credential" ? `<div class="panel vault-mail"><div class="sec-head"><h3>Claude 验证邮件</h3><span class="chip">${entry.connected ? "已保存授权" : "尚未连接"}</span></div><p class="hint">只提取最近的 Claude / Anthropic 登录邮件，最多回溯一小时。验证码和链接不会自动提交；点击验证链接才会按绑定的 Claude 账号打开。</p>
-        <div class="vault-actions">${["gmail", "outlook"].includes(entry.provider) ? `<button class="btn" type="button" data-vact="connect" data-vbusy>${entry.connected ? "重新授权邮箱" : "连接邮箱并授权"}</button>` : ""}<button class="btn" type="button" data-vact="messages" data-vbusy data-vblocked="${entry.connected ? "0" : "1"}">读取最近登录邮件</button><button class="btn primary" type="button" data-vact="wait" data-vbusy data-vblocked="${entry.connected ? "0" : "1"}">等待新验证码</button><button class="btn" type="button" data-vact="cancel-wait" id="v-cancel-wait" hidden>取消等待</button><label class="check"><input type="checkbox" id="v-auto"${vaultAuto ? " checked" : ""}>本页打开时每 30 秒自动读取</label></div>
-        <p class="hint" id="v-wait-status" role="status" hidden>正在等待新验证码，每 5 秒检查一次，最多等待 2 分钟。你可继续在 Claude 中请求登录邮件。</p><div id="v-job" role="status"></div><div id="v-messages"></div></div>` : ""}`;
-    syncVaultProvider(); renderVaultMessages(); syncVaultBusy();
+        <div class="field"><label for="v-provider">收信方式</label><select id="v-provider">${Object.entries(V_PROVIDERS).map(([key, label]) => `<option value="${key}"${key === provider ? " selected" : ""}>${label}</option>`).join("")}</select></div>
+        <div id="v-oauth-fields" hidden>
+          ${vField("v-client", "应用 ID（Client ID）", config.client_id || "", 'autocomplete="off" spellcheck="false" placeholder="留空就用同一种邮箱里填过的那个"')}
+          <div id="v-secret-field">${vField("v-client-secret", "客户端密钥（Client Secret，Google 需要）" + (entry && entry.has_client_secret ? " · 已保存，留空保留" : ""), "", 'type="password" autocomplete="new-password"')}</div>
+          <div id="v-tenant-field">${vField("v-tenant", "租户（一般不用改）", config.tenant || "common")}</div>
+          <div id="v-guide-outlook">${V_MS_GUIDE}</div><div id="v-guide-gmail">${V_GOOGLE_GUIDE}</div></div>
+        <div id="v-imap-fields" hidden><details class="src" id="v-imap-more"${imapHost ? "" : " open"}><summary id="v-imap-sum">收信服务器</summary>
+          <div class="row2">${vField("v-imap-host", "IMAP 服务器", imapHost, 'placeholder="imap.example.com" spellcheck="false"')}${vField("v-imap-port", "TLS 端口", config.imap_port || 993, 'type="number" min="1" max="65535"')}</div>
+          ${vField("v-imap-user", "登录用户名", config.imap_username || "", 'placeholder="留空就用邮箱地址"')}<p class="hint">连接都走 TLS，正常校验证书；只读收件箱，不标记已读。</p></details>${V_IMAP_GUIDE}</div>
+        <details class="src"${entry && (entry.account_id || entry.label !== entry.email || config.notes) ? " open" : ""}><summary>名称、绑定 Claude 账号、备注</summary>
+          ${vField("v-label", "名称（可选）", entry && entry.label !== entry.email ? entry.label : "", 'maxlength="60" placeholder="不填就用邮箱"')}
+          <div class="field"><label for="v-account">绑定 Claude 账号（可选，点登录链接时用这个号的浏览器打开）</label><div class="vault-inline"><select id="v-account"><option value="">不绑定</option>${accountOptions}</select><button class="btn" type="button" data-vact="identify" data-vbusy>读取已登录邮箱</button></div></div>
+          <div class="field"><label for="v-notes">备注</label><textarea id="v-notes" rows="2">${esc(config.notes || "")}</textarea></div></details>
+        <div class="vault-actions"><button class="btn primary" type="submit" data-vbusy>${entry ? "保存" : "保存并开始获取"}</button>${entry && entry.has_password ? `<button class="btn" type="button" data-vact="reveal" data-vbusy>显示已保存密码</button>` : ""}${entry ? `<button class="btn quiet danger" type="button" data-vact="delete" data-vbusy>移除</button>` : ""}</div><div class="vault-revealed" id="v-revealed"></div>
+      </form></div>
+      <section class="panel vault-mail" aria-label="邮件列表"><div class="vm-head"><h3><svg class="vm-ico" aria-hidden="true"><use href="#i-mail"/></svg>邮件列表</h3>
+          <span class="seg-mini" role="group" aria-label="看哪些邮件"><button type="button" data-vact="mode" data-vmode="claude" aria-pressed="${vaultMode === "claude"}">Claude 邮件</button><button type="button" data-vact="mode" data-vmode="all" aria-pressed="${vaultMode === "all"}">全部邮件</button></span>
+          <span class="spacer"></span><span id="v-mail-status"></span><button class="btn" type="button" data-vact="messages" data-vbusy data-vblocked="${vaultCanRead(entry) ? "0" : "1"}">刷新</button></div>
+        <div class="vault-actions vm-tools">${entry && entry.provider !== "credential" ? `${["gmail", "outlook"].includes(entry.provider) ? `<button class="btn${entry.connected ? "" : " primary"}" type="button" data-vact="connect" data-vbusy>${entry.connected ? "重新授权邮箱" : "连接邮箱并授权"}</button>` : ""}<button class="btn${entry.connected ? " primary" : ""}" type="button" data-vact="wait" data-vbusy data-vblocked="${entry.connected ? "0" : "1"}">等新验证码</button><button class="btn" type="button" data-vact="cancel-wait" id="v-cancel-wait" hidden>取消等待</button><label class="check"><input type="checkbox" id="v-auto"${vaultAuto ? " checked" : ""}>每 30 秒自动获取</label>` : ""}<span class="spacer"></span><input type="search" id="v-filter" class="vm-filter" placeholder="筛选邮件" value="${esc(vaultFilter)}" aria-label="筛选邮件"></div>
+        ${entry && entry.provider !== "credential" ? `<p class="hint" id="v-wait-status" role="status" hidden>正在等新的 Claude 邮件，每 5 秒查一次，最多等 2 分钟。现在去让 Claude 发登录邮件就行。</p>` : ""}
+        <div id="v-job" role="status"></div><div id="v-messages" class="vm-body"></div></section></div>`;
+    syncVaultProvider(); renderVaultMessages(); syncVaultWaiting(); syncVaultBusy();
+    if (!entry && vaultDetected) showVaultDetected();
   }
   function syncVaultProvider() {
     const provider = $("#v-provider")?.value;
     if (!provider) return;
-    $("#v-oauth-fields").hidden = !["gmail", "outlook"].includes(provider);
+    const oauth = provider === "gmail" || provider === "outlook";
+    $("#v-oauth-fields").hidden = !oauth;
     $("#v-tenant-field").hidden = provider !== "outlook";
+    $("#v-secret-field").hidden = provider !== "gmail";
+    $("#v-guide-outlook").hidden = provider !== "outlook";
+    $("#v-guide-gmail").hidden = provider !== "gmail";
     $("#v-imap-fields").hidden = provider !== "imap";
     $("#v-imap-host").required = provider === "imap";
     $("#v-imap-port").required = provider === "imap";
-    document.querySelector('label[for="v-password"]').textContent = (provider === "imap" ? "邮箱密码 / 应用专用密码" : "账号密码（可选）") + (vaultActive()?.has_password ? " · 已保存，留空保留" : "");
+    const saved = vaultActive()?.has_password ? " · 已保存，留空保留" : "";
+    $('label[for="v-password"]').textContent = (provider === "imap" ? "密码 / 授权码" : oauth ? "账号密码（可选，只保存，收信用授权）" : "账号密码（可选）") + saved;
+    $("#v-password").placeholder = provider === "imap" ? "邮箱密码；QQ、163 填授权码，Gmail、iCloud 填应用专用密码" : "";
+    syncVaultImapSummary();
   }
+  function syncVaultImapSummary() {
+    const host = $("#v-imap-host")?.value.trim();
+    if ($("#v-imap-sum")) $("#v-imap-sum").textContent = host ? `收信服务器：${host}:${$("#v-imap-port").value || 993}` : "收信服务器（没认出这个邮箱，要自己填）";
+  }
+  function showVaultDetected() {
+    const box = $("#v-detect");
+    if (!box) return;
+    const d = vaultDetected;
+    box.hidden = !d && !vaultExtraDropped;
+    box.innerHTML = (d ? `${d.name ? `认出是 <b>${esc(d.name)}</b>：` : ""}${esc(d.note)}` : "") + (vaultExtraDropped ? `<br>后面的 Client ID / Refresh Token 用不上，已经去掉；Outlook 要授权时用下面的“Outlook 授权”。` : "");
+  }
+  function applyVaultDetected(d) {  // 只在“添加邮箱”时自动改收信方式和服务器；编辑已有的不动用户的设置
+    vaultDetected = d; showVaultDetected();
+    if (vaultActive() || !d || vaultProviderTouched) return;  // 用户自己选过收信方式就不改它
+    $("#v-provider").value = d.provider;
+    $("#v-imap-host").value = d.imap_host || "";
+    $("#v-imap-port").value = d.imap_port || 993;
+    $("#v-imap-more").open = !d.imap_host;
+    syncVaultProvider();
+  }
+  function vaultEmailInput() {
+    const input = $("#v-email");
+    if (!input) return;
+    const raw = input.value;
+    if (raw.includes("----")) {  // 粘贴“邮箱----密码（----Client ID----Refresh Token）”：拆开填好
+      const parts = raw.split("----").map((part) => part.trim());
+      input.value = parts[0];
+      if (parts[1]) { $("#v-password").value = parts[1]; if ($("#v-clear-password")) $("#v-clear-password").checked = false; }
+      vaultExtraDropped = parts.length > 2;
+    } else vaultExtraDropped = false;
+    const email = input.value.trim();
+    clearTimeout(vaultDetectTimer);
+    if (!/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(email)) { vaultDetected = null; vaultDetectFor = ""; showVaultDetected(); return; }
+    if (email === vaultDetectFor) return;
+    vaultProviderTouched = false;
+    vaultDetectTimer = setTimeout(async () => {
+      vaultDetectFor = email;
+      try { const d = await api("POST", "/api/vault/detect", { email }); if ($("#v-email")?.value.trim() === email) applyVaultDetected(d); }
+      catch (_) { vaultDetectFor = ""; }
+    }, 250);
+  }
+  const vmTime = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+  const vmFrom = (m) => m.sender_name && m.sender_name !== m.sender ? `${m.sender_name} <${m.sender}>` : m.sender;
+  function vmActions(m, index, where) {  // 验证码一键复制；Claude 登录链接用绑定的号的浏览器打开
+    return m.codes.map((code) => `<button class="btn vault-code" type="button" data-vact="copy-code" data-vcode="${esc(code)}" title="点一下复制验证码">${esc(code)}</button>`).join("")
+      + m.verification_links.map((link, linkIndex) => vaultUrl(link) ? `<button class="btn primary" type="button" data-vact="verification" data-vwhere="${where}" data-vmessage="${index}" data-vlink="${linkIndex}">打开登录链接${m.verification_links.length > 1 ? " " + (linkIndex + 1) : ""}</button>` : "").join("");
+  }
+  function syncVaultMailStatus() {
+    const box = $("#v-mail-status"), entry = vaultActive();
+    if (!box) return;
+    const count = vaultMessages ? vaultMessages.messages.length : 0;
+    box.innerHTML = !entry ? "" : entry.provider === "credential" ? `<span class="chip">只存资料</span>`
+      : !entry.connected ? `<span class="chip st-warn">${entry.provider === "imap" ? "先填密码" : "先授权"}</span>`
+      : vaultReading ? `<span class="chip live">获取中…</span>`
+      : vaultMailError ? `<span class="chip st-error" title="${esc(vaultMailError)}">没获取到</span>`
+      : vaultMessages ? `<span class="chip c-ok">${count} 封邮件</span>` : `<span class="chip">等待中</span>`;
+  }
+  function vaultMailDoc(detail, images) {
+    const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src ${images ? "https: data:" : "data:"}; font-src ${images ? "https: data:" : "data:"}`;
+    return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><base target="_blank">`
+      + `<style>html{color-scheme:light}body{margin:14px;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#222;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}table{max-width:100%}</style></head><body>${detail.html}</body></html>`;
+  }
+  const vmRemoteImages = (html) => /<img\b[^>]*\bsrc\s*=\s*["']?\s*https?:|url\(\s*["']?\s*https?:/i.test(html || "");
   function renderVaultMessages() {
     const root = $("#v-messages");
+    syncVaultMailStatus();
     if (!root) return;
-    root.innerHTML = vaultMessages ? `<p class="hint">最近检查：${ago(vaultMessages.checked_at)}${vaultMessages.status === "empty" ? " · 暂无匹配的验证邮件" : ""}</p><div class="vault-messages">${vaultMessages.messages.map((message, index) => `<article class="vault-message"><b>${esc(message.subject)}</b><small>${esc(message.sender)} · ${ago(message.received_at)}</small><div class="vault-actions">${message.codes.map((code) => `<button class="btn vault-code" type="button" data-vact="copy-code" data-vcode="${esc(code)}" title="点击复制验证码">${esc(code)}</button>`).join("")}${message.verification_links.map((link, linkIndex) => vaultUrl(link) ? `<button class="btn" type="button" data-vact="verification" data-vmessage="${index}" data-vlink="${linkIndex}">打开验证链接 ${linkIndex + 1}</button>` : "").join("")}</div></article>`).join("")}</div>` : "";
+    const entry = vaultActive();
+    if (!entry) { root.innerHTML = `<div class="vm-empty"><b>还没选邮箱</b><span>左边选一个邮箱，或者填邮箱和密码添加一个，这里就会列出邮件。</span></div>`; return; }
+    if (entry.provider === "credential") { root.innerHTML = `<div class="vm-empty"><b>这个邮箱只保存了账号资料</b><span>要收信，把左边的“收信方式”改成“邮箱密码收信”或授权，保存后就会获取。</span></div>`; return; }
+    if (!entry.connected) { root.innerHTML = `<div class="vm-empty"><b>${entry.provider === "imap" ? "还没填密码" : "还没授权"}</b><span>${entry.provider === "imap" ? "在左边填好密码（或授权码）保存，就开始获取。" : "点上面的“连接邮箱并授权”，在弹出的页面登录一次。"}</span></div>`; return; }
+    if (vaultDetail) {
+      const d = vaultDetail, remote = vmRemoteImages(d.html), images = d.official || vaultImages;
+      root.innerHTML = `<div class="vm-detail"><div class="vm-dhead"><button class="btn quiet" type="button" data-vact="close-mail">‹ 返回列表</button><span class="spacer"></span>${remote && !images ? `<button class="btn" type="button" data-vact="images">显示图片</button>` : ""}</div>
+        <h4>${esc(d.subject || "（没有标题）")}</h4><div class="vm-meta"><span class="chip">${esc(vmFrom(d))}</span>${d.received_at ? `<span class="chip">${esc(vmTime(d.received_at))}</span>` : ""}${d.official ? `<span class="chip c-ok">Claude 官方</span>` : ""}</div>
+        ${d.codes.length || d.verification_links.length ? `<div class="vault-actions">${vmActions(d, -1, "detail")}</div>` : ""}
+        ${d.html ? `<iframe class="vm-frame" title="邮件正文" sandbox="allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer"></iframe>` : `<pre class="vm-text">${esc(d.text || "（这封信没有正文）")}</pre>`}
+        ${remote && !images ? `<p class="hint">为了不被追踪，别人发的邮件先不加载远程图片。</p>` : ""}${d.truncated ? `<p class="hint">邮件太大，只显示了前面一部分。</p>` : ""}</div>`;
+      if (d.html) root.querySelector(".vm-frame").srcdoc = vaultMailDoc(d, images);
+      return;
+    }
+    if (vaultMailError && !vaultMessages) { root.innerHTML = `<div class="vm-empty bad"><b>没获取到邮件</b><span>${esc(vaultMailError)}</span></div>`; return; }
+    if (!vaultMessages) { root.innerHTML = `<div class="vm-empty"><b>${vaultReading ? "正在获取…" : "等待中"}</b><span>${vaultReading ? "第一次连接邮箱要几秒钟。" : "点“刷新”获取最近 7 天的邮件。"}</span></div>`; return; }
+    const words = vaultFilter.trim().toLowerCase();
+    const rows = vaultMessages.messages.map((m, index) => [m, index]).filter(([m]) => !words || [m.subject, m.sender, m.sender_name, m.preview].join(" ").toLowerCase().includes(words));
+    const scope = vaultMessages.all ? "收件箱最近 7 天" : "最近 7 天 Claude / Anthropic 发来的邮件";
+    root.innerHTML = `<p class="hint vm-scope">${esc(scope)} · ${ago(vaultMessages.checked_at)}获取${vaultMailError ? ` · <span class="bad">刚才那次没成功：${esc(vaultMailError)}</span>` : ""}</p>`
+      + (rows.length ? `<div class="vault-messages">${rows.map(([m, index]) => `<article class="vm-row${m.official ? " official" : ""}${vaultNew.has(m.id) ? " new" : ""}">
+          <div class="vm-main"><button class="vm-subj" type="button" data-vact="open-mail" data-vmessage="${index}"><svg class="vm-ico" aria-hidden="true"><use href="#i-mail"/></svg><span>${esc(m.subject || "（没有标题）")}</span></button>
+            <div class="vm-meta"><span class="chip" title="${esc(m.sender)}">${esc(vmFrom(m))}</span><span class="chip">${esc(vmTime(m.received_at))}</span>${vaultNew.has(m.id) ? `<span class="chip live">新</span>` : ""}</div>
+            ${m.preview ? `<p class="vm-prev">${esc(m.preview)}</p>` : ""}${m.codes.length || m.verification_links.length ? `<div class="vault-actions">${vmActions(m, index, "list")}</div>` : ""}</div>
+          <button class="vm-more" type="button" data-vact="open-mail" data-vmessage="${index}">查看详情 ›</button></article>`).join("")}</div>`
+        : `<div class="vm-empty"><b>${words ? "没有符合筛选的邮件" : "没有邮件"}</b><span>${words ? "换个词试试。" : vaultMessages.all ? "收件箱最近 7 天是空的。" : "最近 7 天没有 Claude 发来的邮件；要看别的邮件，切到“全部邮件”。"}</span></div>`);
   }
   async function loadVault() { await vaultRun(async () => applyVault(await api("GET", "/api/vault"))); }
-  async function vaultReadMail(since, quiet = false) {
+  async function vaultReadMail(since, quiet = true) {
+    const entry = vaultActive();
+    if (!vaultCanRead(entry) || vaultBusy) return;
+    const watching = !!since, all = !watching && vaultMode === "all", epoch = vaultMailEpoch;
+    vaultLastCheck = Date.now(); vaultReading = true; renderVaultMessages();
+    let failed = "";
     await vaultRun(async () => {
-      const entry = vaultActive();
-      if (!entry || !entry.connected || entry.provider === "credential") return;
-      const epoch = vaultMailEpoch;
-      vaultLastCheck = Date.now();
-      const result = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/messages`, since ? { since } : {});
-      if (epoch !== vaultMailEpoch || entry.id !== vaultSelected || !vaultState?.unlocked) return;
-      vaultMessages = result; renderVaultMessages();
-      if (since && result.status === "found") { vaultWatch = null; syncVaultWaiting(); }
+      try {
+        const body = { since: since || new Date(Date.now() - V_LOOKBACK + 60000).toISOString() };
+        if (all) body.all = true;
+        const result = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/messages`, body);
+        if (epoch !== vaultMailEpoch || entry.id !== vaultSelected || !vaultState?.unlocked) return;
+        if (watching) {  // 等新验证码：新来的放到列表最上面，标“新”
+          if (result.status !== "found") return;
+          const old = vaultMessages && !vaultMessages.all ? vaultMessages.messages : [];
+          vaultNew = new Set(result.messages.map((m) => m.id));
+          vaultMessages = { ...result, all: false, messages: result.messages.concat(old.filter((m) => !vaultNew.has(m.id))).slice(0, 40) };
+          vaultMode = "claude"; vaultWatch = null; syncVaultWaiting(); toast("收到新的 Claude 邮件"); renderVault();
+          return;
+        }
+        if (vaultMode !== (result.all ? "all" : "claude")) return;
+        vaultMessages = result; vaultMailError = "";
+      } catch (error) { failed = vaultError(error); throw error; }
     }, quiet);
+    if (epoch !== vaultMailEpoch) return;
+    vaultReading = false;
+    if (failed) vaultMailError = failed;
+    renderVaultMessages();
+  }
+  async function vaultOpenMail(index) {
+    const entry = vaultActive(), m = vaultMessages?.messages[index];
+    if (!entry || !m) return;
+    const epoch = vaultMailEpoch;
+    await vaultRun(async () => {
+      const detail = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/message`, { id: m.id });
+      if (epoch !== vaultMailEpoch || entry.id !== vaultSelected) return;
+      vaultDetail = detail; vaultImages = false; renderVaultMessages();
+      $("#v-messages")?.scrollIntoView({ block: "nearest" });
+    });
   }
   function syncVaultWaiting() {
     if ($("#v-cancel-wait")) $("#v-cancel-wait").hidden = !vaultWatch;
     if ($("#v-wait-status")) $("#v-wait-status").hidden = !vaultWatch;
+  }
+  function vaultStartWait() {
+    const entry = vaultActive();
+    if (!vaultCanRead(entry)) return;
+    vaultDetail = null;
+    vaultWatch = { entry_id: entry.id, since: new Date(Date.now() - 30000).toISOString(), until: Date.now() + 120000 };
+    syncVaultWaiting(); renderVaultMessages();
+    void vaultReadMail(vaultMessages ? vaultWatch.since : undefined);  // 列表还没拿到时先拿列表，之后每 5 秒查新邮件
+  }
+  // 账号卡上点“重新登录”：这个号绑了能收信的邮箱、账号库也解锁着，就打开邮件列表开始等登录邮件
+  async function vaultWaitForAccount(account) {
+    let vs;
+    try { vs = await api("GET", "/api/vault"); } catch (_) { return ""; }
+    if (!vs.initialized) return "";
+    const email = (account.email || "").toLowerCase();
+    if (!vs.unlocked) return "解锁“账号资料与邮箱”后，可以在那里直接等登录邮件。";
+    const entry = vs.entries.find((e) => e.account_id === account.id && vaultCanRead(e)) || vs.entries.find((e) => email && e.email.toLowerCase() === email && vaultCanRead(e));
+    if (!entry) return "";
+    showTab("accounts"); $("#vault-block").hidden = false;
+    if (vaultSelected !== entry.id) { resetVaultMail(); hideVaultPassword(); stopVaultJob(); vaultSelected = entry.id; }
+    vaultState = vs; vaultMode = "claude"; renderVault();
+    $("#vault-block").scrollIntoView({ block: "start" });
+    vaultStartWait();
+    return `邮箱 ${entry.email} 已经开始等登录邮件，来了直接在“账号资料与邮箱”里点。`;
   }
   function startVaultJob(job) {
     stopVaultJob(); vaultJob = job; vaultJobUntil = Date.now() + 300000;
@@ -3701,7 +3991,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         if ($("#v-job-status")) $("#v-job-status").textContent = vaultError({ message: result.message || "等待在电脑浏览器完成授权…" });
         if (result.status !== "pending") {
           stopVaultJob();
-          if (result.status === "connected") { applyVault(await api("GET", "/api/vault")); toast("邮箱已连接，可以读取 Claude 验证邮件"); }
+          if (result.status === "connected") { resetVaultMail(); applyVault(await api("GET", "/api/vault")); toast("邮箱已连接，开始获取邮件"); }
         }
       } catch (error) { stopVaultJob(); if ($("#v-job")) $("#v-job").textContent = vaultError(error); try { const latest = await api("GET", "/api/vault"); if (!latest.unlocked) applyVault(latest); } catch (_) {} }
       finally { vaultJobPolling = false; }
@@ -3724,16 +4014,21 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
   $("#v-reload").onclick = loadVault;
   $("#v-close").onclick = () => { $("#vault-block").hidden = true; clearVaultPrivate(); renderVault(); };
   document.addEventListener("change", (event) => {
-    if (event.target.id === "v-provider") syncVaultProvider();
+    if (event.target.id === "v-provider") { vaultProviderTouched = true; syncVaultProvider(); }
     if (event.target.id === "v-auto") vaultAuto = event.target.checked;
     if (event.target.id === "v-clear-password" && event.target.checked) $("#v-password").value = "";
     if (event.target.id === "v-account") {
       const account = state?.accounts.find((item) => item.id === event.target.value);
-      if (account?.email) $("#v-email").value = account.email;
+      if (account?.email && !$("#v-email").value.trim()) { $("#v-email").value = account.email; vaultEmailInput(); }
       if (!$("#v-label").value && account?.label) $("#v-label").value = account.label;
     }
   });
-  document.addEventListener("input", (event) => { if (event.target.id === "v-password" && $("#v-clear-password")) $("#v-clear-password").checked = false; });
+  document.addEventListener("input", (event) => {
+    if (event.target.id === "v-password" && $("#v-clear-password")) $("#v-clear-password").checked = false;
+    if (event.target.id === "v-email") vaultEmailInput();
+    if (event.target.id === "v-imap-host" || event.target.id === "v-imap-port") syncVaultImapSummary();
+    if (event.target.id === "v-filter") { vaultFilter = event.target.value; if (!vaultDetail) renderVaultMessages(); }
+  });
   document.addEventListener("submit", async (event) => {
     if (!["v-auth-form", "v-entry-form"].includes(event.target.id)) return;
     event.preventDefault();
@@ -3742,6 +4037,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       await vaultRun(async () => { applyVault(await api("POST", vaultState.initialized ? "/api/vault/unlock" : "/api/vault/setup", { master_password: $("#v-master").value })); toast("账号库已解锁"); });
       return;
     }
+    vaultEmailInput();  // 万一刚粘贴完“邮箱----密码”就点了保存
     const body = { id: vaultSelected || undefined, label: $("#v-label").value.trim(), email: $("#v-email").value.trim(), provider: $("#v-provider").value, account_id: $("#v-account").value || null,
       config: { client_id: $("#v-client").value.trim(), tenant: $("#v-tenant").value.trim() || "common", imap_host: $("#v-imap-host").value.trim(), imap_port: Number($("#v-imap-port").value) || 993, imap_username: $("#v-imap-user").value.trim(), notes: $("#v-notes").value.trim() }, clear_password: !!$("#v-clear-password")?.checked };
     if ($("#v-password").value) body.password = $("#v-password").value;
@@ -3749,7 +4045,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     await vaultRun(async () => {
       const next = await api("POST", "/api/vault/entries", body);
       const selected = next.entries.find((entry) => entry.id === body.id)?.id || next.entries.find((entry) => entry.email.toLowerCase() === body.email.toLowerCase() && entry.provider === body.provider)?.id || "";
-      clearVaultPrivate(); vaultSelected = selected; applyVault(next); toast("账号资料已保存");
+      clearVaultPrivate(); vaultSelected = selected; vaultExtraDropped = false; applyVault(next);
+      const saved = vaultActive();
+      toast(vaultCanRead(saved) ? "已保存，开始获取邮件" : saved && ["gmail", "outlook"].includes(saved.provider) ? "已保存，点“连接邮箱并授权”登录一次就能收信" : "已保存");
     });
   });
   document.addEventListener("click", async (event) => {
@@ -3757,14 +4055,24 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     if (!button || button.disabled) return;
     const action = button.dataset.vact, entry = vaultActive();
     if (action === "hide") { hideVaultPassword(); return; }
-    if (action === "cancel-wait") { vaultWatch = null; vaultMailEpoch += 1; syncVaultWaiting(); return; }
+    if (action === "cancel-wait") { vaultWatch = null; vaultMailEpoch += 1; vaultReading = false; syncVaultWaiting(); renderVaultMessages(); return; }
+    if (action === "close-mail") { vaultDetail = null; vaultImages = false; renderVaultMessages(); return; }
+    if (action === "images") { vaultImages = true; renderVaultMessages(); return; }
+    if (action === "copy-code") { const ok = await copyText(button.dataset.vcode); toast(ok ? "验证码已复制" : "复制不了，请手动选中复制", !ok); return; }
     if (vaultBusy) return;
     if (action === "select" || action === "new") {
-      vaultMailEpoch += 1; vaultWatch = null; vaultMessages = null; hideVaultPassword(); stopVaultJob();
-      vaultSelected = action === "select" ? button.dataset.vid : ""; vaultLastCheck = 0; renderVault(); return;
+      resetVaultMail(); hideVaultPassword(); stopVaultJob(); vaultDetected = null; vaultDetectFor = ""; vaultExtraDropped = false; vaultProviderTouched = false;
+      vaultSelected = action === "select" ? button.dataset.vid : ""; renderVault();
+      if (action === "new") $("#v-email")?.focus(); else void vaultReadMail();
+      return;
     }
-    if (action === "messages") { await vaultReadMail(); return; }
-    if (action === "wait") { vaultMailEpoch += 1; vaultMessages = null; renderVaultMessages(); vaultWatch = { entry_id: entry.id, since: new Date(Date.now() - 30000).toISOString(), until: Date.now() + 120000 }; syncVaultWaiting(); await vaultReadMail(vaultWatch.since, true); return; }
+    if (action === "mode") {
+      if (vaultMode === button.dataset.vmode) return;
+      vaultMode = button.dataset.vmode; resetVaultMail(); renderVault(); void vaultReadMail(); return;
+    }
+    if (action === "messages") { vaultDetail = null; await vaultReadMail(undefined, false); return; }
+    if (action === "wait") { vaultStartWait(); return; }
+    if (action === "open-mail") { await vaultOpenMail(Number(button.dataset.vmessage)); return; }
     await vaultRun(async () => {
       if (action === "lock") { applyVault(await api("POST", "/api/vault/lock")); toast("账号库已锁定"); }
       else if (action === "identify") {
@@ -3774,7 +4082,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         state = next; render();
         const account = next.accounts.find((item) => item.id === id);
         if (!account?.email) throw Error(next.identity_message || "未识别到已登录邮箱，请先在对应的 Claude 配置中登录");
-        $("#v-email").value = account.email; if (!$("#v-label").value) $("#v-label").value = account.label || account.email;
+        $("#v-email").value = account.email; vaultEmailInput(); if (!$("#v-label").value) $("#v-label").value = account.label || "";
         toast(next.identity_message || "已读取登录邮箱");
       } else if (action === "reveal" && entry) {
         const epoch = vaultMailEpoch;
@@ -3784,9 +4092,9 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         $("#v-revealed").innerHTML = `<code>${esc(vaultRevealed || "未保存密码")}</code><button class="btn" type="button" data-vact="copy-password">复制密码</button><button class="btn" type="button" data-vact="hide">隐藏</button><small>30 秒后自动隐藏；剪贴板由系统管理。</small>`;
         clearTimeout(vaultRevealTimer); vaultRevealTimer = setTimeout(hideVaultPassword, 30000);
       } else if (action === "delete" && entry) {
-        if (!(await askConfirm({ title: "移除账号库资料", ok: "移除", danger: true,
-          body: `移除“${entry.label || entry.email}”的账号库资料和邮箱授权？Claude 账号记录会保留。` }))) return;
-        const next = await api("DELETE", `/api/vault/entries/${encodeURIComponent(entry.id)}`); clearVaultPrivate(); applyVault(next); toast("账号库条目已移除");
+        if (!(await askConfirm({ title: "移除邮箱", ok: "移除", danger: true,
+          body: `移除“${entry.label || entry.email}”保存的密码和邮箱授权？Claude 账号记录会保留。` }))) return;
+        const next = await api("DELETE", `/api/vault/entries/${encodeURIComponent(entry.id)}`); clearVaultPrivate(); applyVault(next); toast("已移除");
       } else if (action === "connect" && entry) {
         const epoch = vaultMailEpoch;
         const job = await api("POST", `/api/vault/entries/${encodeURIComponent(entry.id)}/connect`);
@@ -3795,24 +4103,27 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
         try { await vaultOpen(job.authorization_url, true); } catch (_) { toast("授权已准备好，请点击“在电脑上打开授权页”继续", true); }
       } else if (action === "oauth-open" && vaultJob) await vaultOpen(vaultJob.authorization_url, true);
       else if (action === "verification") {
-        const link = vaultMessages?.messages[Number(button.dataset.vmessage)]?.verification_links[Number(button.dataset.vlink)];
-        if (!entry) throw Error("请先选择验证邮件对应的账号资料");
-        await vaultOpen(link, false, entry.id);
-      } else if (action === "copy-code" || action === "copy-password") {
-        if (!navigator.clipboard) throw Error("当前浏览器无法直接复制，请显式显示后手动复制");
-        await navigator.clipboard.writeText(action === "copy-code" ? button.dataset.vcode : vaultRevealed || ""); toast("已复制");
+        const from = button.dataset.vwhere === "detail" ? vaultDetail : vaultMessages?.messages[Number(button.dataset.vmessage)];
+        const link = from?.verification_links[Number(button.dataset.vlink)];
+        if (!entry) throw Error("请先选择验证邮件对应的邮箱");
+        await vaultOpen(link, false, entry.id); toast("已打开登录链接");
+      } else if (action === "copy-password") {
+        const ok = await copyText(vaultRevealed || ""); toast(ok ? "已复制" : "复制不了，请手动选中复制", !ok);
       }
     });
   });
+  // 每 5 秒看一眼：列表还没拿到就先拿（出错了隔 5 分钟再试，免得密码不对时一直登录被邮箱锁号）；在等新验证码就查新邮件；否则每 30 秒自动获取
   setInterval(() => {
     if (document.hidden || $("#vault-block").hidden || !vaultState?.unlocked || vaultBusy) return;  // 页面在后台时不读邮箱
     const entry = vaultActive();
-    if (!entry?.connected || entry.provider === "credential") return;
+    if (!vaultCanRead(entry)) return;
+    if (vaultWatch && vaultWatch.entry_id !== entry.id) { vaultWatch = null; syncVaultWaiting(); }
+    const gap = vaultMailError ? 300000 : 30000;
+    if (!vaultMessages && !vaultDetail) { if (Date.now() - vaultLastCheck >= (vaultMailError ? gap : 0)) void vaultReadMail(); return; }
     if (vaultWatch) {
-      if (vaultWatch.entry_id !== entry.id) { vaultWatch = null; syncVaultWaiting(); return; }
-      if (Date.now() >= vaultWatch.until) { vaultWatch = null; syncVaultWaiting(); toast("等待已结束，暂未收到新的 Claude 验证邮件"); }
-      else void vaultReadMail(vaultWatch.since, true);
-    } else if (vaultAuto && Date.now() - vaultLastCheck >= 30000) void vaultReadMail(undefined, true);
+      if (Date.now() >= vaultWatch.until) { vaultWatch = null; syncVaultWaiting(); toast("等了 2 分钟，还没收到新的 Claude 邮件"); }
+      else void vaultReadMail(vaultWatch.since);
+    } else if (vaultAuto && !vaultDetail && vaultMode === "claude" && Date.now() - vaultLastCheck >= gap) void vaultReadMail();
   }, 5000);
   document.addEventListener("visibilitychange", () => { if (document.hidden) hideVaultPassword(); });
 

@@ -735,6 +735,7 @@ pub(crate) fn adopt_pending_for(
             .filter(|n| *n != 0)
             .unwrap_or(28800);
         ob["expiresAt"] = json!(chrono::Utc::now().timestamp_millis() + secs * 1000);
+        super::usage::set_renewed_login_expiry(&mut ob, &tok);
         if !p.get("raw").is_some_and(Value::is_object) {
             p["raw"] = json!({});
         }

@@ -876,6 +876,59 @@ fn parked_b_then_on_a(e: &Env, released_secs_ago: Option<i64>) -> (String, Strin
     (a, b)
 }
 
+/// 登录本身的有效期（约 30 天，续期不延长）：状态里显示、快到期标“注意”、提醒，续 access token 时不往后延
+#[test]
+fn login_expiry_shows_reminds_and_is_not_extended_by_renewal() {
+    let e = Env::new();
+    let (a, _b) = e.two_accounts(past());
+    let store = Store::new();
+    let set_exp = |ms: i64| {
+        let mut sec = store.load_secret(&a);
+        sec["claudeAiOauth"]["refreshTokenExpiresAt"] = json!(ms);
+        store.save_secret(&a, &sec).unwrap();
+    };
+    let day = 86_400_000;
+    set_exp(now_ms() + 10 * day);
+    set_refresh(&[("rt-A1", "at-A2", "rt-A2")]);
+    set_tokens(&[("at-A2", "a@x.com"), ("at-B1", "b@x.com")]);
+    refresh_usage(&store, None, true).unwrap();
+    let ob = store.load_secret(&a)["claudeAiOauth"].clone();
+    assert_eq!(ob["refreshToken"], json!("rt-A2"));
+    let exp = ob["refreshTokenExpiresAt"].as_i64().unwrap();
+    assert!(
+        (exp - (now_ms() + 10 * day)).abs() < 60_000,
+        "续期不往后延：{}",
+        exp
+    );
+    let st = public_state(&store, &e.data());
+    let pa = st["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == json!(a))
+        .unwrap()
+        .clone();
+    assert_eq!(pa["login_days_left"], json!(10));
+    assert!(pa["login_expires_at"].as_str().unwrap().ends_with("+00:00"));
+    assert_eq!(pa["health"]["level"], json!("ok"));
+    // 快到期：注意，提醒一次（不在用的号也提醒）
+    set_exp(now_ms() + 2 * day - 60_000);
+    let st = public_state(&store, &e.data());
+    let pa = st["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == json!(a))
+        .unwrap()
+        .clone();
+    assert_eq!(pa["health"]["issues"][0]["kind"], json!("login_expiring"));
+    let mut mem = json!({});
+    let got = cam_engine::alerts::due_alerts_now(&e.data(), &mut mem);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, "A 的登录还剩 2 天");
+    assert!(cam_engine::alerts::due_alerts_now(&e.data(), &mut mem).is_empty());
+}
+
 #[test]
 fn refresh_uses_parked_login_not_the_superseded_one() {
     // 保存的 access token 本地看还没过期（服务端已经不认）

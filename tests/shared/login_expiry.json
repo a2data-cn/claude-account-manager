@@ -1,0 +1,171 @@
+{
+  "_说明": "登录本身的有效期（Claude Code 存的 refreshTokenExpiresAt，约 30 天，续期不会往后延，到期要重新登录）。expiry：login_expiry_ms(oauth 块, now) 认不认这个到期时间；days：login_days(到期, now) 还剩几天（向上取整，到期是 0）；renew：renewed_login_expiry(原来的 oauth 块, 接口回复, now) 续期后的到期时间。时间都是毫秒，Python 版的 now 用秒。",
+  "now_ms": 1795500000000,
+  "expiry": [
+    {
+      "name": "正常：Claude Code 存的到期时间",
+      "ob": {
+        "refreshTokenExpiresAt": 1797395875827,
+        "expiresAt": 1795528800000
+      },
+      "expect": 1797395875827
+    },
+    {
+      "name": "没有这一项（老版本 Claude Code 存的）",
+      "ob": {
+        "expiresAt": 1795500000000
+      },
+      "expect": null
+    },
+    {
+      "name": "不是数字",
+      "ob": {
+        "refreshTokenExpiresAt": "1797395875827"
+      },
+      "expect": null
+    },
+    {
+      "name": "true 不算数字",
+      "ob": {
+        "refreshTokenExpiresAt": true
+      },
+      "expect": null
+    },
+    {
+      "name": "2025 年以前的不算",
+      "ob": {
+        "refreshTokenExpiresAt": 1700000000000
+      },
+      "expect": null
+    },
+    {
+      "name": "正好 2025-01-01 算",
+      "ob": {
+        "refreshTokenExpiresAt": 1735689600000
+      },
+      "expect": 1735689600000
+    },
+    {
+      "name": "10 年以后的不算",
+      "ob": {
+        "refreshTokenExpiresAt": 2110946400000
+      },
+      "expect": null
+    },
+    {
+      "name": "access token 比它晚 3 天以上才过期：不提醒",
+      "ob": {
+        "refreshTokenExpiresAt": 1797395875827,
+        "expiresAt": 1797655075828
+      },
+      "expect": null
+    },
+    {
+      "name": "access token 正好晚 3 天：照常",
+      "ob": {
+        "refreshTokenExpiresAt": 1797395875827,
+        "expiresAt": 1797655075827
+      },
+      "expect": 1797395875827
+    },
+    {
+      "name": "带小数的取整",
+      "ob": {
+        "refreshTokenExpiresAt": 1797395875827.5
+      },
+      "expect": 1797395875827
+    },
+    {
+      "name": "oauth 块不是对象",
+      "ob": null,
+      "expect": null
+    }
+  ],
+  "days": [
+    {
+      "name": "正好 2 天",
+      "exp_ms": 1795672800000,
+      "expect": 2
+    },
+    {
+      "name": "2 天多 1 毫秒算 3 天",
+      "exp_ms": 1795672800001,
+      "expect": 3
+    },
+    {
+      "name": "还剩 1 毫秒算 1 天",
+      "exp_ms": 1795500000001,
+      "expect": 1
+    },
+    {
+      "name": "正好到期",
+      "exp_ms": 1795500000000,
+      "expect": 0
+    },
+    {
+      "name": "过了",
+      "exp_ms": 1795068000000,
+      "expect": 0
+    }
+  ],
+  "renew": [
+    {
+      "name": "接口没给新的：还是原来的",
+      "old": {
+        "refreshTokenExpiresAt": 1797395875827
+      },
+      "tok": {
+        "access_token": "x"
+      },
+      "expect": 1797395875827
+    },
+    {
+      "name": "接口给的更晚：还是原来的（续期不往后延）",
+      "old": {
+        "refreshTokenExpiresAt": 1797395875827
+      },
+      "tok": {
+        "refresh_token_expires_in": 3456000
+      },
+      "expect": 1797395875827
+    },
+    {
+      "name": "接口给的更早：用新的",
+      "old": {
+        "refreshTokenExpiresAt": 1797395875827
+      },
+      "tok": {
+        "refresh_token_expires_in": 86400
+      },
+      "expect": 1795586400000
+    },
+    {
+      "name": "原来没有：接口给了也不加",
+      "old": {},
+      "tok": {
+        "refresh_token_expires_in": 2592000
+      },
+      "expect": null
+    },
+    {
+      "name": "原来的不像样：去掉",
+      "old": {
+        "refreshTokenExpiresAt": 1600000000000
+      },
+      "tok": {
+        "refresh_token_expires_in": 86400
+      },
+      "expect": null
+    },
+    {
+      "name": "接口给的不是数字：还是原来的",
+      "old": {
+        "refreshTokenExpiresAt": 1797395875827
+      },
+      "tok": {
+        "refresh_token_expires_in": "86400"
+      },
+      "expect": 1797395875827
+    }
+  ]
+}

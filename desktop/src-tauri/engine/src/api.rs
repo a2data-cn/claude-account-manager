@@ -67,6 +67,8 @@ fn health_text(kind: &str) -> (&'static str, &'static str, &'static str) {
         "live_expired" => ("info", "用量没更新：当前登录的 access token 过期了，等 Claude Code 自己续", "在 claude 里发一句话它就会续上；cam 不碰当前正在用的登录。"),
         "network" => ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
         "expired" => ("warn", "订阅已过期", "续费后在“编辑”里改到期日；没续的话这个号可能已经降级为免费版。"),
+        "login_expiring" => ("warn", "登录快到期了，到期后要重新登录", "到期前用这个号重新登录一次：菜单栏 / 托盘里点这个号的“重新登录”，或终端运行 cam login 名字（只更新这个号，现在在用的登录不动）；正在用的号也可以直接在 claude 里 /login。Anthropic 规定每次登录大约 30 天有效，Claude Code 自动续期不会延长它，到期只能重新登录。"),
+        "login_expired" => ("error", "登录到期了，要重新登录", "用这个号重新登录一次：菜单栏 / 托盘里点这个号的“重新登录”，或终端运行 cam login 名字（只更新这个号，现在在用的登录不动）。在那之前切换到它也用不了。Anthropic 规定每次登录大约 30 天有效，Claude Code 自动续期不会延长它，到期只能重新登录。"),
         _ => ("warn", "用量获取失败", "稍后再刷新；持续出现请把错误信息发给作者。"),
     }
 }
@@ -234,12 +236,30 @@ pub fn account_health(acc: &Value, has_creds: bool, days: Option<i64>) -> Value 
     if days.is_some_and(|d| d < 0) {
         kinds.push(("expired", None));
     }
+    // 登录本身的有效期（login_days_left 由 usage::with_login_expiry 算好放在账号上）：到期了就是它，
+    // “登录已失效”“过期了没续”不再另说（和 cam.py 一致）
+    let ld = acc
+        .get("login_days_left")
+        .filter(|v| v.is_i64() || v.is_u64())
+        .and_then(|v| v.as_i64());
+    if kind == "claude_code" {
+        if let Some(n) = ld {
+            if n <= 0 {
+                kinds.retain(|(k, _)| !matches!(*k, "login_invalid" | "stale" | "live_expired"));
+                kinds.push(("login_expired", None));
+            } else if n <= super::usage::LOGIN_SOON_DAYS {
+                kinds.push(("login_expiring", None));
+            }
+        }
+    }
     let issues: Vec<Value> = kinds
         .into_iter()
         .map(|(k, detail)| {
             let (level, text, advice) = health_text(k);
             let text = if k == "expired" {
                 format!("订阅已过期 {} 天", -days.unwrap_or(0))
+            } else if k == "login_expiring" {
+                format!("登录还剩 {} 天，到期后要重新登录", ld.unwrap_or(0))
             } else {
                 text.to_string()
             };
@@ -343,12 +363,30 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
                 );
             }
             let dl = days_left(a);
-            let has_creds = s(a, "kind") == Some("claude_code")
-                && store
+            let ob = if s(a, "kind") == Some("claude_code") {
+                store
                     .load_secret(id)
                     .get("claudeAiOauth")
-                    .and_then(|o| s(o, "refreshToken"))
-                    .is_some();
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            let has_creds = s(&ob, "refreshToken").is_some();
+            // 登录本身什么时候到期（约 30 天一次，要重新登录）：没有这一项的是老版本 Claude Code 存的，不显示
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let login_ms = super::usage::login_expiry_ms(&ob, now_ms);
+            let login_left = login_ms.map(|m| super::usage::login_days(m, now_ms));
+            p.insert(
+                "login_expires_at".into(),
+                json!(login_ms
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, false))),
+            );
+            p.insert("login_days_left".into(), json!(login_left));
+            if s(a, "kind") != Some("claude_desktop") {
+                health_account["login_days_left"] = json!(login_left);
+            }
             p.insert(
                 "health".into(),
                 account_health(&health_account, has_creds, dl.as_i64()),
@@ -810,6 +848,10 @@ pub fn route(store: &Store, method: &str, path: &str, body: &Value) -> (u16, Val
         ("POST", ["vault", "entries", id, "connect"]) => super::mailbox::connect(store, id),
         ("GET", ["vault", "oauth", job]) => super::mailbox::oauth_status(store, job),
         ("POST", ["vault", "entries", id, "messages"]) => super::mailbox::messages(store, id, body),
+        ("POST", ["vault", "entries", id, "message"]) => super::mailbox::message(store, id, body),
+        ("POST", ["vault", "detect"]) => {
+            super::mailbox::detect(body["email"].as_str().unwrap_or(""))
+        }
         ("POST", ["vault", "entries", id, "open-verification"]) => {
             super::identity::open_verification(store, id, s(body, "url").ok_or("缺少验证地址")?)
         }

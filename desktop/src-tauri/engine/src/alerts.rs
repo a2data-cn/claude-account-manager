@@ -43,6 +43,8 @@ fn name_of(a: &Value) -> String {
 /// - 当前 Claude Code 号和有额度的网页号：5 小时、7 天额度超过阈值（默认 90%）各提醒一次，每个额度窗口一次
 /// - 有额度的号（Claude Code、网页、桌面版）某个窗口用满了先记下来，过了它的重置时间提醒一次“恢复了”
 /// - 手动填了到期日、没勾自动续期的号：还剩 ALERT_SOON_DAYS 天以内提醒一次，过了到期日再提醒一次
+/// - Claude Code 号的登录（账号上的 login_expires_at，见 usage::with_login_expiry）：还剩 LOGIN_ALERT_DAYS 天以内、
+///   剩 1 天、到期了各提醒一次；不在用的号也提醒。重新登录后到期时间变了，重新算
 pub fn due_alerts(
     data: &Value,
     st: &mut Value,
@@ -166,6 +168,50 @@ pub fn due_alerts(
             )
         });
     }
+    for a in accs {
+        if s(a, "kind") != Some("claude_code") {
+            continue;
+        }
+        let Some(ms) = a
+            .get("login_expires_at")
+            .filter(|v| v.is_number())
+            .and_then(|v| v.as_f64())
+        else {
+            continue;
+        };
+        let ms = ms as i64;
+        let n = super::usage::login_days(ms, now * 1000);
+        let stage = if n <= 0 {
+            "over".to_string()
+        } else if n <= 1 {
+            "1".to_string()
+        } else if n <= super::usage::LOGIN_ALERT_DAYS {
+            super::usage::LOGIN_ALERT_DAYS.to_string()
+        } else {
+            continue;
+        };
+        let k = format!("{}|login|{}|{}", s(a, "id").unwrap_or_default(), ms, stage);
+        if warned.contains(&k) {
+            continue;
+        }
+        warned.push(k);
+        let how = "菜单栏 / 托盘里点这个号的“重新登录”，或终端运行 cam login 加上它的名字（现在在用的登录不动）";
+        out.push(if stage == "over" {
+            (
+                format!("{} 的登录到期了", name_of(a)),
+                format!("要重新登录才能接着用：{}", how),
+            )
+        } else {
+            (
+                format!("{} 的登录还剩 {} 天", name_of(a), n),
+                format!(
+                    "{}到期前重新登录一次：{}",
+                    super::usage::LOGIN_EXPIRY_ADVICE,
+                    how
+                ),
+            )
+        });
+    }
     let start = warned.len().saturating_sub(80);
     st["warned"] = json!(warned[start..]);
     let skip = keep.len().saturating_sub(50);
@@ -173,12 +219,14 @@ pub fn due_alerts(
     out
 }
 
-/// 按现在的时间和本地日期算一轮（桌面版的后台用）
+/// 按现在的时间和本地日期算一轮（桌面版的后台用）。登录到期时间在各号保存的登录里，先带上（usage::with_login_expiry）
 pub fn due_alerts_now(data: &Value, st: &mut Value) -> Vec<(String, String)> {
+    let now = chrono::Utc::now();
+    let data = super::usage::with_login_expiry(&Store::new(), data, now.timestamp_millis());
     due_alerts(
-        data,
+        &data,
         st,
-        chrono::Utc::now().timestamp(),
+        now.timestamp(),
         chrono::Local::now().date_naive(),
     )
 }

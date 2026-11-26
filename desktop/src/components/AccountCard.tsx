@@ -2,6 +2,8 @@ import type { Account, DesktopApp, LocalWindow, SessionsBrief, Window5, WindowKe
 import { Ico } from "./Icon";
 import { BREAKDOWN, KIND, PLAN, WINDOW_KEYS, WINDOW_MS, WINDOW_NAME, ago, dur, noReset, planTier, resetText, usd, wan } from "../format";
 import { maskMail, usePrefs } from "../prefs";
+import { copyText, shellArg } from "../clipboard";
+import { useState } from "react";
 import { PaceCard, PaceSvg, RingBox, SessionLine, expiryLine, quotaRings, verdict, whenShort, type Points } from "./Pace";
 
 const PLAN_CLASS: Record<string, string> = {
@@ -131,6 +133,38 @@ function dueInfo(a: Account) {
   };
 }
 
+/** Claude Code 号这份登录本身的有效期（约 30 天，Claude Code 续期不会延长，到期要重新登录）。没有这一项的（老版本存的）不显示 */
+const LOGIN_SOON_DAYS = 7;
+const pad2 = (n: number) => String(n).padStart(2, "0");
+export function loginInfo(a: Account) {
+  const n = a.login_days_left;
+  if (a.kind !== "claude_code" || typeof n !== "number") return null;
+  const t = new Date(a.login_expires_at || "");
+  const when = isNaN(t.getTime()) ? "" : `${t.getMonth() + 1}月${t.getDate()}日 ${pad2(t.getHours())}:${pad2(t.getMinutes())}`;
+  if (n <= 0) return { n, cls: "hot", tile: "登录到期了，要重新登录", text: `已经到期${when ? `（${when}）` : ""}，要重新登录才能用` };
+  return { n, cls: n <= LOGIN_SOON_DAYS ? "warn" : "", tile: `登录还剩 ${n} 天`, text: `还剩 ${n} 天${when ? `（${when} 到期）` : ""}` };
+}
+const reloginCmd = (a: Account) => `cam login ${shellArg(a.label || a.id)}`;
+
+/** “重新登录”：浏览器登录要在终端里跑，点一下复制好命令，按钮上说一声 */
+function ReloginButton({ a, primary }: { a: Account; primary: boolean }) {
+  const [said, setSaid] = useState("");
+  const cmd = reloginCmd(a);
+  return (
+    <button
+      className={`btn${primary ? " primary" : ""}`}
+      title={`复制 ${cmd}，到终端里运行，在浏览器里登录这个号${a.is_active ? "" : "；现在在用的登录不动"}`}
+      onClick={async () => {
+        setSaid((await copyText(cmd)) ? "已复制命令，到终端里运行" : `到终端里运行 ${cmd}`);
+        setTimeout(() => setSaid(""), 4000);
+        window.dispatchEvent(new CustomEvent("cam-relogin", { detail: { id: a.id, email: a.email || "" } })); // 绑了邮箱的号：顺便开始等登录邮件
+      }}
+    >
+      {said || "重新登录"}
+    </button>
+  );
+}
+
 /** 每天的最高用量（后台刷新时记下的，最近 30 天）：一天一根小柱子，没记到的那天是一条细线。idx 0 是 5 小时，1 是 7 天 */
 export function DayBars({ a, idx }: { a: Account; idx: 0 | 1 }) {
   const days = a.usage_days || {};
@@ -253,6 +287,7 @@ export function AccountTile({
   const rings = quotaRings(a);
   const v = verdict(a) || (a.kind === "claude_desktop" && rings.length ? { cls: "", text: `${desktopStale(a) ? "旧快照" : "本地额度"} · ${ago(a.usage?.fetched_at)}` } : null);
   const ex = expiryLine(a);
+  const li = loginInfo(a);
   return (
     <button type="button" className={cls} aria-pressed={selected} onClick={() => onSelect(a)}>
       <span className="t-top">
@@ -282,6 +317,7 @@ export function AccountTile({
       )}
       {v && <span className={`t-verdict ${v.cls}`}>{v.text}</span>}
       {ex && <span className={`t-exp ${ex.cls}`}>{ex.text}</span>}
+      {li && li.cls && <span className={`t-exp ${li.cls}`}>{li.tile}</span>}
     </button>
   );
 }
@@ -312,7 +348,11 @@ export function AccountDetail({ a, points, desktopApp, busy, onSwitch, onOpen, o
     empty = "网页版账号默认不读取用量。填写 sessionKey 后可以自动获取，或者在“编辑”里手动记录到期日。";
   else if (a.kind === "api" && !a.has_admin_key) empty = "填写 Admin Key 后可以显示本月花费。";
   const due = dueInfo(a);
+  const li = loginInfo(a);
   const issues = a.health?.issues ?? [];
+  const relogin =
+    a.kind === "claude_code" &&
+    ((li && li.n <= LOGIN_SOON_DAYS) || issues.some((i) => ["login_invalid", "no_credentials", "login_expired"].includes(i.kind)));
   return (
     <section className="detail" aria-label={`${maskMail(nameOf(a), mask)} 的详情`}>
       <div className="d-head">
@@ -340,6 +380,7 @@ export function AccountDetail({ a, points, desktopApp, busy, onSwitch, onOpen, o
               {a.is_active ? "重新打开" : "切换桌面版"}
             </button>
           )}
+          {relogin && <ReloginButton a={a} primary={a.health?.level === "error"} />}
           <button className="btn" disabled={busy} onClick={() => onRefresh(a)}>
             {busy ? "处理中…" : a.kind === "claude_desktop" ? "读取本地额度" : "刷新"}
           </button>
@@ -411,6 +452,18 @@ export function AccountDetail({ a, points, desktopApp, busy, onSwitch, onOpen, o
             {KIND[a.kind]}
             {a.org_name ? ` · ${a.org_name}` : ""}
           </span></dd>
+          {li && (
+            <>
+              <dt>登录有效期</dt>
+              <dd><span className="v">
+                <span className={li.cls === "hot" ? "due-now" : li.cls === "warn" ? "due-soon" : ""}>{li.text}</span>
+                <span className="sub">
+                  每次登录约 30 天有效，Claude Code 自动续期不会延长；{li.n > 0 ? "到期前" : ""}重新登录：<code>{reloginCmd(a)}</code>
+                  {a.is_active ? "（或在 claude 里 /login）" : "（现在在用的登录不动）"}
+                </span>
+              </span></dd>
+            </>
+          )}
           {due && (
             <>
               <dt>到期</dt>

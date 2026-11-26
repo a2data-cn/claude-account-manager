@@ -700,10 +700,19 @@ def bg_error(store, st):
         return None
 
 
+def login_ms_of(store, a):
+    """Claude Code 号这份登录什么时候到期（毫秒，约 30 天一次要重新登录）；不知道是 None。"""
+    if a["kind"] != "claude_code":
+        return None
+    return cam.login_expiry_ms(store.load_secret(a["id"]).get("claudeAiOauth"))
+
+
 def health_of(store, a):
-    """账号健康状态（正常 / 注意 / 异常），规则见 cam.account_health。"""
-    has = a["kind"] == "claude_code" and bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
-    return cam.account_health(a, has, cam.days_left(a))
+    """账号健康状态（正常 / 注意 / 异常），规则见 cam.account_health（登录快到期、到期了也算）。"""
+    ob = (store.load_secret(a["id"]).get("claudeAiOauth") or {}) if a["kind"] == "claude_code" else {}
+    ms = cam.login_expiry_ms(ob)
+    return cam.account_health(dict(a, login_days_left=cam.login_days(ms) if ms else None),
+                              bool(ob.get("refreshToken")), cam.days_left(a))
 
 
 def status_light(store, data, accs, active, st):
@@ -886,6 +895,16 @@ def render(store, st, out=print, rich=None, phase=None):
             if dl is not None and dl >= 0:
                 exp = (a.get("manual") or {}).get("expires_at")
                 out(f"--{dl} 天后到期（{exp}）" + (" | color=#BF3B33,#EE776E" if dl <= 2 else ""))
+            ms = login_ms_of(store, a)  # 登录本身的有效期：约 30 天，续期不会延长，到期要重新登录
+            if ms:
+                n = cam.login_days(ms)
+                out(f"--登录到期了（{cam.login_until_text(ms)}），要重新登录 | color={RED}" if n <= 0 else
+                    f"--登录还剩 {n} 天（{cam.login_until_text(ms)} 到期）" + (f" | color={YELLOW}" if n <= cam.LOGIN_SOON_DAYS else ""))
+            if (ms and cam.login_days(ms) <= cam.LOGIN_SOON_DAYS) or any(
+                    i["kind"] in ("login_invalid", "no_credentials", "login_expired") for i in h["issues"]):
+                # 不在用的号在旁边登录（cam login 认出是已保存的号），现在的登录和会话不动；当前号就是正常的重新登录
+                tip = "重新登录…" if a["id"] == act_id else "重新登录…（现在在用的号不受影响）"
+                out(f"--{tip} | sfimage=arrow.clockwise.circle {action('login', a['id'], terminal=True)}")
             if a.get("email") and a.get("email") != a.get("label"):
                 out(f"--{esc(a['email'])} | color=gray")
             if rich and needs_number(a):  # 菜单栏显示的是序号：子菜单里提示起个短名（面板“编辑”里有昵称一键选）

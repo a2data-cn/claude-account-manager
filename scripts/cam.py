@@ -7,6 +7,7 @@
 常用命令：
   cam import [--label 名字]        把当前 Claude Code 登录的账号存进来
   cam login [名字]                 登录另一个账号并存进来（先存好当前账号，再 claude auth login）
+  cam login <已保存的号>           重新登录这个号（每次登录约 30 天到期）；不在用的号在旁边登录，现在的登录不动
   cam ls                           列出所有账号和用量
   cam switch <账号>                切换 Claude Code 账号（id / 序号 / 名字 / 邮箱）
   cam usage                        刷新并显示用量
@@ -663,12 +664,12 @@ def find_account(data, key):
 
 # --------------------------------------------------------------------------- Claude Code 凭据
 
-def keychain_read():
-    """读不出来（没有条目、被拒绝、超时）都返回 None。"""
+def keychain_read(service=KEYCHAIN_SERVICE):
+    """读不出来（没有条目、被拒绝、超时）都返回 None。service 默认是 Claude Code 平常用的那一条。"""
     # 有些版本 account 不是用户名，查不到时退一步只按 service 查
     for by_user in (["-a", getpass.getuser()], []):
         try:
-            r = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, *by_user, "-w"],
+            r = subprocess.run(["security", "find-generic-password", "-s", service, *by_user, "-w"],
                                capture_output=True, text=True, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -1087,6 +1088,7 @@ def adopt_pending_for(store, data, target, force=False, only_candidate=True):
         if tok.get("refresh_token"):
             ob["refreshToken"] = tok["refresh_token"]
         ob["expiresAt"] = int((time.time() + (tok.get("expires_in") or 28800)) * 1000)
+        set_renewed_login_expiry(ob, tok)
         raw = dict(p.get("raw") or {})
         raw["claudeAiOauth"] = ob
         p["raw"], p["claudeAiOauth"] = raw, ob
@@ -1767,6 +1769,7 @@ def renew_saved_login(store, acc):
     if tok.get("refresh_token"):
         ob["refreshToken"] = tok["refresh_token"]
     ob["expiresAt"] = int((time.time() + int(tok.get("expires_in") or 28800)) * 1000)
+    set_renewed_login_expiry(ob, tok)
     secret["claudeAiOauth"] = ob
     if isinstance(secret.get("raw"), dict):
         secret["raw"]["claudeAiOauth"] = ob
@@ -4130,6 +4133,83 @@ def days_left(acc, today=None):
     return (d - (today or dt.date.today())).days
 
 
+# ---- 登录本身的有效期：Claude Code 登录时存下 refreshTokenExpiresAt（约 30 天），续 access token 时只取新旧两个里更早的，
+# 不会往后延，到期只能重新登录（/login 或 cam login 名字）。Claude Code 只在剩 3 天以内提醒正在用的号；cam 每个号都看
+LOGIN_SOON_DAYS = 7  # 登录还剩这么多天以内：账号标“注意”
+LOGIN_ALERT_DAYS = 3  # 还剩这么多天以内发一次通知，剩 1 天再发一次，到期了再发一次
+DAY_MS = 86400000
+LOGIN_EXP_MIN_MS = 1735689600000  # 2025-01-01（UTC）：比这早的不是真的到期时间。和 Claude Code 的判断一样，另外不超过 10 年后
+LOGIN_EXPIRY_ADVICE = "Anthropic 规定每次登录大约 30 天有效，Claude Code 自动续期不会延长它，到期只能重新登录。"
+
+
+def login_exp_valid(v, now=None):
+    """refreshTokenExpiresAt 是不是一个像样的到期时间（毫秒）：数字，2025 年以后、10 年以内。和 Claude Code 的判断一致。"""
+    now = time.time() if now is None else now
+    return (not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+            and LOGIN_EXP_MIN_MS <= v <= now * 1000 + 3650 * DAY_MS)
+
+
+def login_expiry_ms(ob, now=None):
+    """这份登录什么时候到期（毫秒）。没有这一项（老版本 Claude Code 存的），或者 access token 比它还晚 3 天以上才过期
+    （Claude Code 这时也不提醒）：None。"""
+    ob = ob if isinstance(ob, dict) else {}
+    v = ob.get("refreshTokenExpiresAt")
+    if not login_exp_valid(v, now):
+        return None
+    exp = ob.get("expiresAt")
+    if not isinstance(exp, bool) and isinstance(exp, (int, float)) and exp > v + 3 * DAY_MS:
+        return None
+    return int(v)
+
+
+def login_days(exp_ms, now=None):
+    """离登录到期还有几天，向上取整（和 Claude Code 的“expires in N days”一样）；已经到期是 0。"""
+    now = time.time() if now is None else now
+    left = exp_ms - now * 1000
+    return 0 if left <= 0 else math.ceil(left / DAY_MS)
+
+
+def login_until_text(exp_ms):
+    """到期时间给人看：12月15日 23:37（本地时间）。"""
+    t = dt.datetime.fromtimestamp(exp_ms / 1000, dt.timezone.utc).astimezone()
+    return f"{t.month}月{t.day}日 {t:%H:%M}"
+
+
+def renewed_login_expiry(old_ob, tok, now=None):
+    """续 access token 之后这份登录的到期时间：和 Claude Code 一样取原来的和接口新给的里更早的那个，
+    原来没有（或不像样）就还是没有。返回毫秒或 None。"""
+    now = time.time() if now is None else now
+    old = (old_ob or {}).get("refreshTokenExpiresAt")
+    if not login_exp_valid(old, now):
+        return None
+    sec = (tok or {}).get("refresh_token_expires_in")
+    new = int((now + sec) * 1000) if not isinstance(sec, bool) and isinstance(sec, (int, float)) and math.isfinite(sec) else None
+    if new is None or not login_exp_valid(new, now):
+        return int(old)
+    return int(min(old, new))
+
+
+def set_renewed_login_expiry(ob, tok):
+    """续过 access token 的 oauth 块（ob 里还是原来的 refreshTokenExpiresAt）改成续后的到期时间，见 renewed_login_expiry。"""
+    rexp = renewed_login_expiry(ob, tok)
+    if rexp is None:
+        ob.pop("refreshTokenExpiresAt", None)
+    else:
+        ob["refreshTokenExpiresAt"] = rexp
+
+
+def with_login_expiry(store, data, now=None):
+    """data 的副本：每个 Claude Code 号带上 login_expires_at（毫秒，没有是 None）和 login_days_left（见 login_days）。
+    数据在各号保存的登录里（secrets），提醒和账号状态要用，accounts.json 里不存。"""
+    accs = []
+    for a in data.get("accounts") or []:
+        if a.get("kind") == "claude_code":
+            ms = login_expiry_ms(store.load_secret(a["id"]).get("claudeAiOauth"), now)
+            a = dict(a, login_expires_at=ms, login_days_left=None if ms is None else login_days(ms, now))
+        accs.append(a)
+    return dict(data, accounts=accs)
+
+
 HEALTH_LEVELS = ("ok", "info", "warn", "error")
 HEALTH_LABEL = {"ok": "正常", "info": "正常", "warn": "注意", "error": "异常"}
 HEALTH_TEXT = {  # kind → (level, 一句话, 怎么办)。规则和 Rust 版 api::account_health 一致（tests/shared/health.json）
@@ -4144,6 +4224,13 @@ HEALTH_TEXT = {  # kind → (level, 一句话, 怎么办)。规则和 Rust 版 a
     "network": ("warn", "用量暂时拿不到（网络或服务问题）", "稍后再刷新；和账号本身无关，不影响切换。"),
     "usage_error": ("warn", "用量获取失败", "稍后再刷新；持续出现请把错误信息发给作者。"),
     "expired": ("warn", "订阅已过期", "续费后在“编辑”里改到期日；没续的话这个号可能已经降级为免费版。"),
+    # 怎么办放在前面：菜单栏 / 托盘子菜单里这一句只放得下前 80 个字
+    "login_expiring": ("warn", "登录快到期了，到期后要重新登录",
+                       "到期前用这个号重新登录一次：菜单栏 / 托盘里点这个号的“重新登录”，或终端运行 cam login 名字"
+                       "（只更新这个号，现在在用的登录不动）；正在用的号也可以直接在 claude 里 /login。" + LOGIN_EXPIRY_ADVICE),
+    "login_expired": ("error", "登录到期了，要重新登录",
+                      "用这个号重新登录一次：菜单栏 / 托盘里点这个号的“重新登录”，或终端运行 cam login 名字"
+                      "（只更新这个号，现在在用的登录不动）。在那之前切换到它也用不了。" + LOGIN_EXPIRY_ADVICE),
 }
 
 
@@ -4187,11 +4274,20 @@ def account_health(acc, has_creds, days):
         kinds.append(("key_invalid", u.get("key_error")))
     if isinstance(days, int) and days < 0:
         kinds.append(("expired", None))
+    # 登录本身的有效期（login_days_left 由 with_login_expiry 算好放在账号上）：到期了就是它，“登录已失效”“过期了没续”不再另说
+    ld = acc.get("login_days_left")
+    if acc.get("kind") == "claude_code" and isinstance(ld, int) and not isinstance(ld, bool):
+        if ld <= 0:
+            kinds = [x for x in kinds if x[0] not in ("login_invalid", "stale", "live_expired")] + [("login_expired", None)]
+        elif ld <= LOGIN_SOON_DAYS:
+            kinds.append(("login_expiring", None))
     issues = []
     for k, detail in kinds:
         level, text, advice = HEALTH_TEXT[k]
         if k == "expired":
             text = f"订阅已过期 {-days} 天"
+        elif k == "login_expiring":
+            text = f"登录还剩 {ld} 天，到期后要重新登录"
         issues.append({"kind": k, "level": level, "text": text, "advice": advice, "detail": detail})
     level = max((i["level"] for i in issues), key=HEALTH_LEVELS.index, default="ok")
     return {"level": level, "label": HEALTH_LABEL[level], "issues": issues}
@@ -4232,10 +4328,15 @@ def public_state(store, data):
         p["pace"] = usage_pace(samples.get(a["id"]), p["usage"], now) if a.get("kind") in SAMPLE_KINDS else None
         p["days_left"] = days_left(a)
         p["plan_display"] = a.get("plan") or (a.get("manual") or {}).get("plan")
-        has_creds = False
+        has_creds, login_ms = False, None
         if a["kind"] == "claude_code":
-            has_creds = bool((store.load_secret(a["id"]).get("claudeAiOauth") or {}).get("refreshToken"))
-        p["health"] = account_health(dict(a, usage=None) if legacy_desktop else a,
+            ob = store.load_secret(a["id"]).get("claudeAiOauth") or {}
+            has_creds, login_ms = bool(ob.get("refreshToken")), login_expiry_ms(ob, now)
+        # 登录本身什么时候到期（约 30 天一次，要重新登录）：没有这一项的是老版本 Claude Code 存的，不显示
+        p["login_expires_at"] = (dt.datetime.fromtimestamp(login_ms / 1000, dt.timezone.utc).replace(microsecond=0).isoformat()
+                                 if login_ms else None)
+        p["login_days_left"] = login_days(login_ms, now) if login_ms else None
+        p["health"] = account_health(dict(a, usage=None) if legacy_desktop else dict(a, login_days_left=p["login_days_left"]),
                                      has_creds, p["days_left"])
         inc = (a.get("incidents") or [None])[0]  # 上次出问题的现场摘要，面板账号详情直接显示；完整的在“导出诊断”里
         ir, ie = (inc or {}).get("region") or {}, (inc or {}).get("env") or {}
@@ -5599,6 +5700,8 @@ def vault_route(store, method, parts, body=None):
             return cam_vault.lock(store)
         if method == "POST" and parts == ["vault", "entries"]:
             return cam_vault.save_entry(store, body)
+        if method == "POST" and parts == ["vault", "detect"]:
+            return cam_mailbox.detect((body or {}).get("email"))
         if len(parts) == 3 and parts[:2] == ["vault", "oauth"] and method == "GET":
             return cam_mailbox.oauth_status(store, parts[2])
         if len(parts) >= 3 and parts[:2] == ["vault", "entries"]:
@@ -5611,6 +5714,8 @@ def vault_route(store, method, parts, body=None):
                     return cam_mailbox.connect(store, parts[2])
                 if parts[3] == "messages":
                     return cam_mailbox.messages(store, parts[2], body)
+                if parts[3] == "message":
+                    return cam_mailbox.message(store, parts[2], body)
                 if parts[3] == "open-verification":
                     return open_verification_url(store, parts[2], body.get("url"))
         raise CamError("未找到账号库接口")
@@ -6029,6 +6134,8 @@ def due_alerts(data, st, now=None, today=None):
     - 当前 Claude Code 号和有额度的网页号：5 小时、7 天额度超过阈值（cam rule alert，默认 90%）各提醒一次，每个额度窗口一次
     - 有额度的号（Claude Code、网页、桌面版）某个窗口用满了先记下来，过了它的重置时间提醒一次“恢复了”
     - 手动填了到期日、没勾自动续期的号：还剩 ALERT_SOON_DAYS 天以内提醒一次，过了到期日再提醒一次
+    - Claude Code 号的登录（账号上的 login_expires_at，见 with_login_expiry）：还剩 LOGIN_ALERT_DAYS 天以内、剩 1 天、
+      到期了各提醒一次；不在用的号也提醒（Claude Code 只提醒正在用的）。重新登录后到期时间变了，重新算
     规则和 Rust 版 alerts::due_alerts 一致（tests/shared/alerts.json）。"""
     now = time.time() if now is None else now
     today = today or dt.date.today()
@@ -6081,6 +6188,23 @@ def due_alerts(data, st, now=None, today=None):
         else:
             out.append((f"{name_of(a)} 今天到期" if n == 0 else f"{name_of(a)} 还有 {n} 天到期（{m['expires_at']}）",
                         "要接着用就记得续费；续了在“编辑”里改到期日，或者勾上“自动续期”"))
+    for a in accs:
+        ms = a.get("login_expires_at")
+        if a.get("kind") != "claude_code" or isinstance(ms, bool) or not isinstance(ms, (int, float)):
+            continue
+        n = login_days(ms, now)
+        stage = "over" if n <= 0 else "1" if n <= 1 else str(LOGIN_ALERT_DAYS) if n <= LOGIN_ALERT_DAYS else None
+        if not stage:
+            continue
+        k = f"{a['id']}|login|{int(ms)}|{stage}"
+        if k in warned:
+            continue
+        warned.append(k)
+        how = "菜单栏 / 托盘里点这个号的“重新登录”，或终端运行 cam login 加上它的名字（现在在用的登录不动）"
+        if stage == "over":
+            out.append((f"{name_of(a)} 的登录到期了", f"要重新登录才能接着用：{how}"))
+        else:
+            out.append((f"{name_of(a)} 的登录还剩 {n} 天", f"{LOGIN_EXPIRY_ADVICE}到期前重新登录一次：{how}"))
     st["warned"] = warned[-80:]
     st["exhausted"] = dict(list(exhausted.items())[-50:])
     return out
@@ -6163,8 +6287,8 @@ def background_round(store, st, refresh_min, tell, import_live=True):
                 fail("环境检测", env_err[0])
             if not failed:  # 这一轮前面有哪步出过错就留着，体检里的“后台上一轮出错”才看得到
                 st.pop("last_error", None)
-            # 额度快满、用满后恢复、快到期：见 due_alerts
-            for title, body in due_alerts(data, st):
+            # 额度快满、用满后恢复、快到期、登录快到期：见 due_alerts（登录到期时间在各号保存的登录里，先带上）
+            for title, body in due_alerts(with_login_expiry(store, data), st):
                 tell(title, body)
         except Exception as e:  # noqa: BLE001
             fail("刷新用量", e)
@@ -6664,6 +6788,9 @@ def print_accounts(store, data):
             if (a.get("manual") or {}).get("auto_renew"):
                 tag += " 自动续期"
             print("     " + color(tag, "r" if dl < 3 else "y" if dl < 7 else "d"))
+        ld = a.get("login_days_left")
+        if ld and ld > LOGIN_SOON_DAYS:  # 快到期、到期了的在下面的“注意 / 异常”里说
+            print("     " + color(f"登录还剩 {ld} 天（每次登录约 30 天有效）", "d"))
         u = a.get("usage") or {}
         if a["kind"] == "claude_desktop":
             source = {"desktop_cache": "桌面本地缓存", "desktop_history": "桌面历史快照"}.get(u.get("source"), "尚无桌面额度快照")
@@ -6777,9 +6904,113 @@ def cmd_import(store, args):
     print("要添加另一个账号：运行 cam login 名字。它会先把当前账号最新的登录存好，再打开浏览器登录新账号，之前的账号不会丢。")
 
 
-def claude_auth_login(exe):
-    """在当前终端里运行 claude auth login（浏览器登录，替换 Claude Code 当前的登录）。返回退出码。"""
-    return subprocess.call([exe, "auth", "login"])
+def claude_auth_login(exe, env=None):
+    """在当前终端里运行 claude auth login（浏览器登录）。返回退出码。
+    env 不传：替换 Claude Code 当前的登录；传了带 CLAUDE_CONFIG_DIR 的环境：登录存进那个目录，当前登录不动（见 relogin_aside）。"""
+    return subprocess.call([exe, "auth", "login"], env=env)
+
+
+RELOGIN_DIR = "relogin"  # 数据目录下：重新登录不在用的号时，claude auth login 用的临时配置目录放这里，登录完就删
+RELOGIN_STALE_SECS = 3600
+
+
+def relogin_target(data, key):
+    """cam login 后面给的名字（或 id、邮箱）正好是一个已保存的 Claude Code 号：返回它，这次是重新登录它；否则是添加新号。
+    只认完全一样的，不按开头猜，免得新号的名字碰巧是哪个老号名字的开头。"""
+    if not key:
+        return None
+    k = str(key).strip().lower()
+    for field in ("id", "label", "email"):
+        hits = [a for a in data["accounts"] if a.get("kind") == "claude_code" and (a.get(field) or "").lower() == k]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            raise CamError(f"“{key}”匹配到多个账号，请用 id（cam ls 查看）")
+    return None
+
+
+def isolated_keychain_service(config_dir):
+    """macOS 上 Claude Code 给自定义配置目录的登录用的钥匙串条目名：平常那个名字后面加 - 和目录路径 sha256 的前 8 位。
+    cam 同时设了 CLAUDE_SECURESTORAGE_CONFIG_DIR，新版本按它算，老版本按 CLAUDE_CONFIG_DIR 算，两个是同一个路径。"""
+    h = hashlib.sha256(unicodedata.normalize("NFC", config_dir).encode()).hexdigest()[:8]
+    return f"{KEYCHAIN_SERVICE}-{h}"
+
+
+def read_isolated_login(config_dir):
+    """claude auth login 在临时配置目录里存下的登录：(creds, where)，没读到是 (None, None)。macOS 先看钥匙串，再看目录里的文件。"""
+    if IS_MAC and os.environ.get("CAM_NO_KEYCHAIN") != "1":
+        kc = keychain_read(isolated_keychain_service(config_dir))
+        if kc:
+            return kc, "keychain"
+    got = read_json(os.path.join(config_dir, ".credentials.json"), None)
+    if got:
+        return got, "file"
+    return None, None
+
+
+def drop_isolated_login(config_dir):
+    """删掉临时配置目录和（macOS）它在钥匙串里的那一条。出错不报：不影响已经存好的登录。"""
+    shutil.rmtree(config_dir, ignore_errors=True)
+    if IS_MAC and os.environ.get("CAM_NO_KEYCHAIN") != "1":
+        try:
+            keychain_delete(isolated_keychain_service(config_dir))
+        except CamError:
+            pass
+
+
+def relogin_aside(store, acc, exe):
+    """重新登录一个不在用的号：claude auth login 在数据目录下的临时配置目录里跑，登录存进那里，cam 读出来存进这个号，
+    再把临时目录（和钥匙串里那一条）删掉。Claude Code 现在的登录、正在跑的会话都不动，不用切过去再切回来。
+    浏览器里登录的不是这个号：不保存，说一声。返回存好后的账号。"""
+    label = acc.get("label") or acc["id"]
+    root = os.path.join(store.root, RELOGIN_DIR)
+    os.makedirs(root, exist_ok=True)
+    if not IS_WIN:
+        os.chmod(root, 0o700)
+    for n in os.listdir(root):  # 上次中途被打断留下的（里面有登录）：放了一小时以上的删掉
+        old = os.path.join(root, n)
+        try:
+            if time.time() - os.path.getmtime(old) > RELOGIN_STALE_SECS:
+                drop_isolated_login(old)
+        except OSError:
+            pass
+    d = os.path.realpath(tempfile.mkdtemp(prefix="login-", dir=root))
+    env = dict(os.environ, CLAUDE_CONFIG_DIR=d, CLAUDE_SECURESTORAGE_CONFIG_DIR=d)
+    who = acc.get("email") or label
+    print(f"正在重新登录 {label}：按提示在浏览器里登录 {who}。", flush=True)
+    print(color("  Claude Code 现在的登录和正在跑的 claude 会话都不受影响，登录完只更新这个号。", "d"), flush=True)
+    try:
+        rc = claude_auth_login(exe, env=env)
+        if rc != 0:
+            raise CamError(f"claude auth login 没有完成（退出码 {rc}），{label} 保存的登录没有变。"
+                           "Claude Code 太旧没有这个命令的话，先运行 claude update")
+        creds, where = read_isolated_login(d)
+        ob = oauth_block(creds) if creds else {}
+        if not ob.get("refreshToken"):
+            raise CamError(f"登录好像完成了，但 cam 没读到新的登录，{label} 保存的登录没有变。"
+                           f"可以改用：cam switch {label} 切过去，再在 claude 里 /login")
+        oa = (read_json(os.path.join(d, ".claude.json"), {}) or {}).get("oauthAccount") or {}
+        uuid, email = oa.get("accountUuid"), oa.get("emailAddress")
+        if not (uuid or email) and ob.get("accessToken"):
+            owner = token_owner(ob["accessToken"])
+            uuid, email = (owner or {}).get("uuid"), (owner or {}).get("email")
+        if not (uuid or email):
+            raise CamError(f"登录完成了，但问不出登录的是哪个号（网络不通？），这次没有保存。稍后再运行一次 cam login {label}")
+        with store.lock():
+            data = store.load()
+            cur = next((a for a in data["accounts"] if a["id"] == acc["id"]), None)
+            if cur is None:
+                raise CamError("账号已被删除")
+            if not (cur.get("account_uuid") or cur.get("email")) or not identity_agrees(cur, uuid, email):
+                raise CamError(f"浏览器里登录的是 {email or uuid}，不是 {label}（{cur.get('email') or '-'}），这次没有保存。"
+                               f"重新运行 cam login {label}，登录时选这个号")
+            if data["active"].get("claude_code") == cur["id"]:
+                raise CamError(f"登录期间 {label} 变成了当前账号，这次没有保存。直接在 claude 里 /login 就行")
+            file_credentials(store, cur, ob, creds, where, oauth_account=oa or None)
+            store.save(data)
+            return cur
+    finally:
+        drop_isolated_login(d)
 
 
 def cmd_login(store, args):
@@ -6790,6 +7021,16 @@ def cmd_login(store, args):
     exe = shutil.which("claude")
     if not exe:
         raise CamError("找不到 claude 命令，请先安装 Claude Code（cam env install）")
+    data = store.load()
+    target = relogin_target(data, args.label)
+    if target and target["id"] != data["active"].get("claude_code"):
+        # 重新登录一个不在用的号（登录约 30 天到期）：在临时目录里登录，现在的登录和会话不动
+        acc = relogin_aside(store, target, exe)
+        ms = login_expiry_ms(store.load_secret(acc["id"]).get("claudeAiOauth"))
+        until = f"，登录有效期到 {login_until_text(ms)}（还剩 {login_days(ms)} 天）" if ms else ""
+        print(color(f"✓ 已重新登录 {acc['label']}（{acc.get('email') or '-'}）{until}", "g"))
+        print("  Claude Code 现在的登录没有动；要用这个号时 cam switch " + acc["label"])
+        return
     with store.lock():
         data = store.load()
         before = {a["id"] for a in data["accounts"]}
@@ -6807,7 +7048,7 @@ def cmd_login(store, args):
         raise CamError(f"claude auth login 没有完成（退出码 {rc}），之前的账号都已保存。"
                        "Claude Code 太旧没有这个命令的话，先运行 claude update")
     before = {a["id"] for a in store.load()["accounts"]}
-    acc = import_current(store, args.label)
+    acc = import_current(store, None if target else args.label)  # 重新登录当前号：给的可能是 id、邮箱，不拿来改名字
     print(color(f"✓ {'已添加' if acc['id'] not in before else '已更新'}：{acc['label']}（{acc.get('email') or '-'}）"
                 f"id={acc['id']}", "g"))
     print("  Claude Code 现在登录的就是这个账号；cam switch <账号> 可以切回其它账号")
@@ -8677,12 +8918,12 @@ def remove_path(p):
         os.unlink(p)
 
 
-def keychain_delete():
+def keychain_delete(service=KEYCHAIN_SERVICE):
     try:
-        r = subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", getpass.getuser()],
+        r = subprocess.run(["security", "delete-generic-password", "-s", service, "-a", getpass.getuser()],
                            capture_output=True, timeout=15)
         if r.returncode != 0:  # 和 keychain_read 一样，account 不是用户名时只按 service 删
-            subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE],
+            subprocess.run(["security", "delete-generic-password", "-s", service],
                            capture_output=True, timeout=15)
     except subprocess.TimeoutExpired:
         raise CamError("删除钥匙串里的 Claude Code 登录超时（可能在等授权弹窗）。重新运行，弹窗时点“始终允许”")
@@ -12490,16 +12731,25 @@ def checkup_account(store, p, live_ob, before_exp, offline):
     label, kind, u = p.get("label") or p["id"], p["kind"], p.get("usage") or {}
     err = u.get("error")
     covered = {"expired"}  # 下面单独写过的问题，健康状态里不再重复
-    relogin = f"cam login {label}（在浏览器里重新登录这个账号，登录完自动保存）"
+    relogin = (f"cam login {label}（在浏览器里重新登录这个号，登录完自动保存）；也可以直接在 claude 里 /login" if p.get("is_active")
+               else f"cam login {label}（在浏览器里重新登录这个号，登录完自动保存；现在在用的登录不动）")
     seen = u.get("checked_at") or u.get("fetched_at")  # 这个结论是什么时候查出来的
     when = f"（{fmt_ago(seen)}）" if offline and seen else ""
     left = 0
     if kind == "claude_code":
         ob = live_ob or store.load_secret(p["id"]).get("claudeAiOauth") or {}
         left = (ob.get("expiresAt") or 0) / 1000 - time.time()
+        # 登录本身的到期时间：当前号看 Claude Code 手上那份（刚 /login 过、还没存进来的也算），其它号看保存的
+        pe = parse_iso(p.get("login_expires_at"))
+        login_ms = login_expiry_ms(ob) or (int(pe.timestamp() * 1000) if pe else None)
+        login_left = login_days(login_ms) if login_ms else None
         if not ob.get("refreshToken"):
             covered.add("no_credentials")
             out.append(ck("bad", "没有保存可用的凭据，切换到它也用不了", relogin))
+        elif login_left == 0:  # 登录本身到期了（约 30 天一次）：续不了，只能重新登录；“登录已失效”就是它引起的，不另说
+            covered.update({"login_expired", "login_invalid", "stale", "live_expired"})
+            out.append(ck("bad", f"登录到期了（{login_until_text(login_ms) if login_ms else '-'}），要重新登录才能用",
+                          f"{LOGIN_EXPIRY_ADVICE}{relogin}"))
         elif p.get("is_active"):  # 当前登录从不替它续，交给 Claude Code
             out.append(ck("ok", f"当前登录：access token {fmt_span(left)}后过期，Claude Code 会自己续") if left > 0 else
                        ck("info", "当前登录：access token 已过期，Claude Code 下次运行时会自己续（cam 从不替当前登录续）"))
@@ -12519,6 +12769,13 @@ def checkup_account(store, p, live_ob, before_exp, offline):
             out.append(ck("ok", f"保存的登录还能续：刚用它自己的 refresh token 续了一次，新的 access token {fmt_span(left)}后过期"))
         elif not err:
             out.append(ck("ok", f"保存的登录有效：access token {fmt_span(left)}后过期"))
+    if kind == "claude_code" and login_left:
+        n, until = login_left, login_until_text(login_ms)
+        if n <= LOGIN_SOON_DAYS:
+            covered.add("login_expiring")
+            out.append(ck("warn", f"登录还剩 {n} 天（{until} 到期），到期后要重新登录", f"{LOGIN_EXPIRY_ADVICE}到期前运行 {relogin}"))
+        else:
+            out.append(ck("ok", f"登录还剩 {n} 天（{until} 到期；每次登录约 30 天有效，到期前 cam 会提醒）"))
     # 用量：网页号就是 sessionKey 能不能用，API 号是 Key 能不能用
     hk = _health_kind_of_error(kind, err) if err else None
     if kind == "claude_desktop":
@@ -13725,8 +13982,16 @@ def cmd_vault(store, args):
         state = vault_route(store, "POST", ["vault", "unlock"], {"master_password": getpass.getpass("账号库主密码：")})
     if args.cmd == "mail":
         if args.mail_cmd == "read":
-            result = vault_route(store, "POST", ["vault", "entries", args.entry, "messages"], {"since": args.since} if args.since else {})
+            body = {"since": args.since} if args.since else {}
+            if args.all:
+                body["all"] = True
+                body.setdefault("since", (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)).isoformat())
+            result = vault_route(store, "POST", ["vault", "entries", args.entry, "messages"], body)
             print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.mail_cmd == "show":
+            result = vault_route(store, "POST", ["vault", "entries", args.entry, "message"], {"id": args.message})
+            print(f"{result.get('subject') or '（无标题）'}\n{result.get('sender_name') or ''} <{result.get('sender')}>  {result.get('received_at') or ''}\n")
+            print(result.get("text") or "（这封信只有网页格式，到面板里点开看）")
         else:
             result = vault_route(store, "POST", ["vault", "entries", args.entry, "connect"])
             print("请在本机系统浏览器打开此地址完成邮箱授权：\n" + result["authorization_url"])
@@ -13747,6 +14012,11 @@ def cmd_vault(store, args):
         if not state["entries"]:
             print("账号库还没有条目，可在管理界面的“账号库与邮箱”里添加。")
     elif args.vault_cmd == "add":
+        found = vault_route(store, "POST", ["vault", "detect"], {"email": args.email}) if args.provider == "auto" else None
+        if found:
+            args.provider = found["provider"]
+            args.imap_host = args.imap_host or found["imap_host"]
+            print(f"认出是 {found['name'] or '其它邮箱'}：{found['note']}")
         body = {"label": args.label or args.email, "email": args.email, "provider": args.provider,
                 "account_id": find_account(store.load(), args.account)["id"] if args.account else None,
                 "config": {"client_id": args.client_id or "", "tenant": args.tenant,
@@ -13785,7 +14055,8 @@ def main(argv=None):
     vsub.add_parser("ls", help="解锁并列出账号库条目")
     v = vsub.add_parser("add", help="添加账号资料或邮箱连接")
     v.add_argument("--email", required=True)
-    v.add_argument("--provider", choices=("credential", "gmail", "outlook", "imap"), default="credential")
+    v.add_argument("--provider", choices=("auto", "credential", "gmail", "outlook", "imap"), default="credential",
+                   help="auto：按邮箱后缀自动选收信方式和服务器")
     v.add_argument("--label")
     v.add_argument("--account", help="绑定已有的 Claude 账号")
     v.add_argument("--client-id")
@@ -13801,14 +14072,19 @@ def main(argv=None):
     m = msub.add_parser("connect", help="等待本机浏览器完成 Gmail / Outlook 授权")
     m.add_argument("entry")
     m.add_argument("--open-browser", action="store_true")
-    m = msub.add_parser("read", help="只读获取近期 Claude 登录邮件摘要")
+    m = msub.add_parser("read", help="只读获取近期 Claude 邮件（--all 看收件箱全部邮件）")
     m.add_argument("entry")
     m.add_argument("--since")
+    m.add_argument("--all", action="store_true", help="收件箱里最近 7 天的全部邮件，不只 Claude 发的")
+    m = msub.add_parser("show", help="看一封邮件的正文（编号来自 cam mail read）")
+    m.add_argument("entry")
+    m.add_argument("message")
 
     s = sub.add_parser("import", help="保存当前 Claude Code 登录的账号")
     s.add_argument("--label")
-    s = sub.add_parser("login", help="登录另一个 Claude Code 账号并保存（先存好当前账号，再 claude auth login）")
-    s.add_argument("label", nargs="?", help="给新账号起的名字（可选）")
+    s = sub.add_parser("login", help="登录另一个 Claude Code 账号并保存（先存好当前账号，再 claude auth login）；"
+                                     "给的是已保存的号：重新登录它（登录约 30 天到期），现在在用的登录不动")
+    s.add_argument("label", nargs="?", help="给新账号起的名字（可选）；已保存的号的名字、id 或邮箱：重新登录这个号")
     sub.add_parser("ls", aliases=["list"], help="列出账号（不联网）")
     s = sub.add_parser("usage", help="刷新用量并列出")
     s.add_argument("account", nargs="?")

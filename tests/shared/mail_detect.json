@@ -1,0 +1,25 @@
+{
+  "_说明": "按邮箱后缀自动识别收信方式（规则在 web/mail-providers.json）。脚本版 cam_mailbox.detect 和 Rust 版 mailbox::detect 都跑这些用例；expect 为 null 表示邮箱格式不对、要报错",
+  "cases": [
+    {"email": "a@outlook.com", "expect": {"provider": "imap", "imap_host": "outlook.office365.com", "name": "Outlook / Hotmail", "oauth": "outlook"}},
+    {"email": "a@hotmail.co.uk", "expect": {"provider": "imap", "imap_host": "outlook.office365.com", "name": "Outlook / Hotmail", "oauth": "outlook"}},
+    {"email": "a@live.cn", "expect": {"provider": "imap", "imap_host": "outlook.office365.com", "name": "Outlook / Hotmail", "oauth": "outlook"}},
+    {"email": "a@outlook.com.au", "expect": {"provider": "imap", "imap_host": "outlook.office365.com", "name": "Outlook / Hotmail", "oauth": "outlook"}},
+    {"email": "a@outlook.example.org", "expect": {"provider": "imap", "imap_host": "", "name": "", "oauth": null}},
+    {"email": "a@hotmail.c0m", "expect": {"provider": "imap", "imap_host": "", "name": "", "oauth": null}},
+    {"email": " A@Gmail.com ", "expect": {"provider": "imap", "imap_host": "imap.gmail.com", "name": "Gmail", "oauth": "gmail"}},
+    {"email": "a@gmx.de", "expect": {"provider": "imap", "imap_host": "imap.gmx.net", "name": "GMX", "oauth": null}},
+    {"email": "a@gmx.com", "expect": {"provider": "imap", "imap_host": "imap.gmx.com", "name": "GMX", "oauth": null}},
+    {"email": "a@mail.com", "expect": {"provider": "imap", "imap_host": "imap.mail.com", "name": "mail.com", "oauth": null}},
+    {"email": "a@consultant.com", "expect": {"provider": "imap", "imap_host": "imap.mail.com", "name": "mail.com", "oauth": null}},
+    {"email": "a@onet.pl", "expect": {"provider": "imap", "imap_host": "imap.poczta.onet.pl", "name": "Onet", "oauth": null}},
+    {"email": "a@qq.com", "expect": {"provider": "imap", "imap_host": "imap.qq.com", "name": "QQ 邮箱", "oauth": null}},
+    {"email": "a@163.com", "expect": {"provider": "imap", "imap_host": "imap.163.com", "name": "网易 163", "oauth": null}},
+    {"email": "a@icloud.com", "expect": {"provider": "imap", "imap_host": "imap.mail.me.com", "name": "iCloud", "oauth": null}},
+    {"email": "a@proton.me", "expect": {"provider": "credential", "imap_host": "", "name": "Proton", "oauth": null}},
+    {"email": "a@company.cn", "expect": {"provider": "imap", "imap_host": "", "name": "", "oauth": null}},
+    {"email": "a@mail.company.cn.", "expect": {"provider": "imap", "imap_host": "", "name": "", "oauth": null}},
+    {"email": "not-an-email", "expect": null},
+    {"email": "a@localhost", "expect": null}
+  ]
+}

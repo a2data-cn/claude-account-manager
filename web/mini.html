@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claude 账号卡片</title>
+<!-- 网页图标和管理面板、桌面版一样（橙色方块里一个 C）；Windows 托盘用 Edge / Chrome 应用模式开卡片小窗，没有它标题栏和任务栏上是个地球 -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7.7' fill='%23D97757'/><circle cx='16' cy='16' r='6.72' fill='none' stroke='%23FFF6EE' stroke-width='4' stroke-linecap='round' stroke-dasharray='31.67 42.22' transform='rotate(45 16 16)'/></svg>">
 <style>
 /* 菜单栏小工具 / Windows 托盘点开的卡片小面板：380 宽，高度由插件按账号数算，内容多了整页上下滑。
    颜色、卡片、分段开关、标签、悬停说明和管理面板（web/panel.html）、桌面版是同一套；顶上一条红绿灯，下面“额度 / 用量”两个页签 */
@@ -139,6 +141,7 @@ button { font: inherit; color: inherit; }
 .mc .vd.warn, .mc .ex.warn { color: var(--warn); font-weight: 600; }
 .mc .vd.hot, .mc .ex.hot { color: var(--hot); font-weight: 600; }
 .mc .ex { margin-top: auto; padding-top: 5px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc .ex + .ex { margin-top: 0; padding-top: 2px; border-top: 0; }  /* 到期日下面再一行“登录还剩 N 天” */
 .mc .none { font-size: 11px; color: var(--muted); line-height: 1.4; padding: 6px 0; }
 .mc .none svg { display: block; width: 22px; height: 22px; margin-bottom: 4px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 /* 当前的 Claude Code 号：占一整行的大卡，放明细（和旧版一样）：每个额度一根条带重置倒计时、节奏小线和结论、今天本机用了多少、到期 */
@@ -260,10 +263,11 @@ button { font: inherit; color: inherit; }
 .mbp-item svg, .mbp-sys svg { display: block; flex: none; }
 .mbp-sys { display: inline-flex; align-items: center; gap: 10px; flex: none; opacity: .85; }
 .mb-pulse .mb-lit { animation: mbPulse 1s step-end infinite; }  /* 在回答：彩色那段每秒闪一次（和插件一个节奏） */
-.mb-blink svg { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪 */
+.mb-blink svg:not(.mb-keep), .mb-blink .mb-dot { animation: mbBlink .5s step-end infinite; }  /* 等你确认：整个图标快一倍地闪（Windows 托盘的红绿灯 + 数字只闪灯，数字不闪） */
+.mb-blink .mb-d-bad { fill: var(--mb-bad); } .mb-blink .mb-d-busy { fill: var(--mb-warn); } .mb-blink .mb-d-ok { fill: var(--mb-ok); }  /* 等你确认时三颗灯一起亮着闪 */
 @keyframes mbPulse { 50% { opacity: .35; } }
 @keyframes mbBlink { 50% { opacity: .25; } }
-@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .mb-pulse .mb-lit, .mb-blink svg, .mb-blink .mb-dot { animation: none; } }
 .mbopt { display: grid; gap: 5px; padding: 8px 2px 2px; }
 .mbopt .k { font-size: 11px; color: var(--muted); }
 .mbopt .seg-mini { align-self: start; justify-self: start; }
@@ -312,7 +316,7 @@ button { font: inherit; color: inherit; }
   const MB_TEXT = [["name", "名字"], ["five", "5 小时 %"], ["seven", "7 天 %"], ["sessions", "在回答的会话数"]];
   const TRAY_ICONS = [["badge", "数字方块"], ...MB_ICONS];  // Windows 托盘：多一种数字方块（托盘图标旁边不能写字）
   let lightNow = { lv: "ok", anim: "" };  // 顶上红绿灯最要紧的那条：级别和动画（lightHtml 记下，预览用）
-  function mbIcon(style, lv, p5, p7) {
+  function mbIcon(style, lv, p5, p7, tray) {
     const tone = `var(--mb-${lv === "bad" ? "bad" : lv === "busy" ? "warn" : "ok"})`, q5 = p5 == null ? 100 : Math.max(0, Math.min(100, p5));
     const trk = (r, w) => `<circle cx="8" cy="8" r="${r}" fill="none" stroke="var(--mb-track)" stroke-width="${w}"/>`;
     const arc = (r, w, p, c, cls) => {
@@ -323,6 +327,12 @@ button { font: inherit; color: inherit; }
     if (style === "badge") {  // Windows 托盘的数字方块：底色跟着 5 小时额度（70% 以下绿、70–89% 黄、90% 以上红），写着百分比
       const c = p5 == null ? "#6E6E73" : p5 >= 90 ? "#BF3B33" : p5 >= 70 ? "#B87A08" : "#1F8A4C", t = p5 == null ? "C" : p5 >= 100 ? "满" : String(Math.round(p5));
       return `<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect class="mb-lit" width="16" height="16" rx="4" fill="${c}"/><text x="8" y="12" text-anchor="middle" font-size="${t.length >= 2 ? 10.5 : 12.5}" font-weight="700" fill="#fff" font-family="Segoe UI, system-ui, sans-serif">${t}</text></svg>`;
+    }
+    if (style === "lamp" && tray && p5 != null) {  // Windows 托盘的红绿灯：左边三颗小灯、右边写 5 小时用了百分之几（照 cam_tray.py 的 lamp_dots 排）；等你确认时只有灯闪，数字不闪
+      const t = p5 >= 100 ? "满" : String(Math.round(Math.max(0, p5))), fit = t.length >= 2 ? ' textLength="10" lengthAdjust="spacingAndGlyphs"' : "";
+      return `<svg class="mb-keep" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">${
+        [["bad", 2.16], ["busy", 8], ["ok", 13.84]].map(([l, cy]) => `<circle class="mb-dot mb-d-${l}${l === lv ? " mb-lit" : ""}" cx="2.48" cy="${cy}" r="2.16" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")
+      }<text x="10.8" y="12" text-anchor="middle" font-size="${t.length >= 2 ? 10.5 : 12}" font-weight="700" fill="var(--mb-fg)" font-family="Segoe UI, system-ui, sans-serif"${fit}>${t}</text></svg>`;
     }
     if (style === "lamp") return `<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><rect x=".6" y=".6" width="10.8" height="18.8" rx="4.4" fill="none" stroke="var(--mb-glyph)" stroke-width="1.2"/>${
       [["bad", 4.2], ["busy", 10], ["ok", 15.8]].map(([l, cy]) => `<circle class="${l === lv ? "mb-lit" : ""}" cx="6" cy="${cy}" r="2.5" fill="${l === lv ? tone : "var(--mb-dim)"}"/>`).join("")}</svg>`;
@@ -346,7 +356,7 @@ button { font: inherit; color: inherit; }
   function mbPreview(s, info) {
     const t = mbTitle(s.text || [], info.name, info.p5, info.p7, info.answering), now = new Date();
     const wifi = `<svg width="15" height="11" viewBox="0 0 17 12" aria-hidden="true"><path fill="currentColor" d="M8.5 11.2l2.2-2.7a3.4 3.4 0 0 0-4.4 0zM8.5 4.6a6.6 6.6 0 0 1 4.3 1.6l1.2-1.4a8.5 8.5 0 0 0-11 0l1.2 1.4a6.6 6.6 0 0 1 4.3-1.6zM8.5.6a10.7 10.7 0 0 1 7 2.6l1-1.3A12.5 12.5 0 0 0 .5 1.9l1 1.3A10.7 10.7 0 0 1 8.5.6z"/></svg>`;
-    return `<div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${info.anim ? " mb-" + info.anim : ""}">${mbIcon(s.icon, info.lv, info.p5, info.p7)}${t ? `<span>${esc(t)}</span>` : ""}</span>
+    return `<div class="mbp" role="img" aria-label="菜单栏预览：${esc(t || "只有图标")}"><span class="mbp-item${info.anim ? " mb-" + info.anim : ""}">${mbIcon(s.icon, info.lv, info.p5, info.p7, !s.available && s.tray)}${t ? `<span>${esc(t)}</span>` : ""}</span>
       <span class="mbp-sys">${wifi}<span>${pad(now.getHours())}:${pad(now.getMinutes())}</span></span></div>`;
   }
   // 预览用的数：当前的 Claude Code 号（名字按菜单栏的规则，太长或是邮箱时写“1号”）、它的 5 小时 / 7 天、在回答的会话数、红绿灯的级别
@@ -365,7 +375,7 @@ button { font: inherit; color: inherit; }
       <div class="row"><div class="lab"><b>等你确认时闪灯</b><span>${s.hooks ? "Claude Code 弹权限确认（yes / no）时红绿灯三盏灯一起闪，答了就恢复" : "关着看不出 Claude Code 在等你点 yes。打开会往 ~/.claude/settings.json 加几条钩子，正在跑的 claude 重开后生效"}</span></div>
         <label class="sw"><input type="checkbox" data-set="hooks" ${s.hooks ? "checked" : ""}><i></i></label></div>`;
     if (!s.available && s.tray) return `<div class="tile glass set">${confirmRow}
-      <div class="row mbrow"><div class="lab"><b>托盘图标</b><span>任务栏右下角 cam 的图标，选了一分钟内换上。颜色和闪法表示状态，鼠标停在图标上能看到额度</span></div></div>
+      <div class="row mbrow"><div class="lab"><b>托盘图标</b><span>任务栏右下角 cam 的图标，选了一分钟内换上。颜色和闪法表示状态；数字方块和红绿灯写着 5 小时用了百分之几，别的样式鼠标停在图标上能看到额度</span></div></div>
       ${mbPreview({ ...s, text: [] }, menubarInfo())}
       <div class="mbopt"><span class="k">图标</span><span class="seg-mini tight" role="group" aria-label="托盘图标">${TRAY_ICONS.map(([v, t]) => `<button type="button" data-icon="${v}" aria-pressed="${s.icon === v}">${t}</button>`).join("")}</span></div>
       <div class="hint">托盘图标右键菜单的“更多”里也能换。<a href="#" data-act="set-close">收起</a></div></div>`;
@@ -514,6 +524,14 @@ button { font: inherit; color: inherit; }
     if (d <= ALERT_SOON_DAYS) return { cls: "warn", text: d === 0 ? `今天到期${date ? `（${date}）` : ""}` : `到期 ${date} · 还有 ${d} 天` };
     return { cls: "", text: `到期 ${date}` };
   }
+  // Claude Code 号这份登录本身的有效期（约 30 天，续期不会延长，到期要重新登录）：剩 7 天以内卡片上多一行，悬停时写到期时间
+  function loginLine(a) {
+    const n = a.login_days_left;
+    if (a.kind !== "claude_code" || typeof n !== "number") return null;
+    const t = new Date(a.login_expires_at || ""), when = isNaN(t) ? "" : `${t.getMonth() + 1}月${t.getDate()}日 ${pad(t.getHours())}:${pad(t.getMinutes())}`;
+    if (n <= 0) return { cls: "hot", text: "登录到期了，要重新登录", tip: `已经到期${when ? `（${when}）` : ""}，菜单里点这个号的“重新登录”` };
+    return { cls: n <= 7 ? "warn" : "", text: `登录还剩 ${n} 天`, tip: `还剩 ${n} 天${when ? `（${when} 到期）` : ""}；每次登录约 30 天有效，续期不会延长` };
+  }
   // 7 天额度的节奏小线：虚线匀速，实线实际（采样点 + 现在），比匀速快的部分涂浅黄，点线按速度往后推
   function paceSvg(a) {
     const p = a.pace;
@@ -611,6 +629,7 @@ button { font: inherit; color: inherit; }
       ["套餐", `${PLAN[a.plan_display] || a.plan_display || "未知"}${tier ? " " + tier[1] + "x" : ""}${a.org_name ? " · " + a.org_name : ""}`],
       due ? ["到期", `${due.text}${m.expires_at ? `（${m.expires_at}）` : ""}${m.auto_renew ? " · 自动续期" : ""}`, due.cls] : ["到期", "没记到期日，管理面板里“编辑”可以填"],
       m.price ? ["价格", m.price] : null,
+      loginLine(a) ? ["登录有效期", loginLine(a).tip, loginLine(a).cls] : null,
       win("5 小时", u.five_hour), win("7 天", u.seven_day), win("7 天 Opus", u.seven_day_opus), win("7 天 Sonnet", u.seven_day_sonnet),
       ...(u.models || []).map((w) => win(w.name, w)),
       a.pace && a.pace.state && verdict(a) ? ["7 天节奏", `已用 ${Math.round(a.pace.used)}%，匀速应在 ${Math.round(a.pace.even)}% · ${verdict(a).text}`, a.pace.state === "out" ? "warn" : ""] : null,
@@ -872,7 +891,7 @@ button { font: inherit; color: inherit; }
     const ss = state.sessions || {};
     const mc = (a) => {
       const hh = a.health || {}, nm = nameOf(a, pos), desk = a.kind === "claude_desktop", on = !desk && a.is_active;
-      const rings = quotaRings(a), v = verdict(a), ex = expiry(a);
+      const rings = quotaRings(a), v = verdict(a), ex = expiry(a), li = loginLine(a);
       const what = [ss.answering ? `${ss.answering} 个在回答` : ss.busy ? "正在回答" : "", ss.waiting ? `${ss.waiting} 个等你确认` : ""].filter(Boolean).join(" · ");
       const sess = on && ss.count > 0 ? `<span class="ss${ss.busy || ss.waiting ? " busy" : ""}"><i></i>${ss.count} 个会话${ss.busy || ss.waiting ? "在跑 · " + what : "开着 · 空闲"}</span>` : "";
       const body = rings.length ? `<span class="rr">${rings.map(ringBox).join("")}</span>${a.pace ? `<span class="sp">${paceSvg(a)}</span>` : ""}`
@@ -880,12 +899,12 @@ button { font: inherit; color: inherit; }
       const tail = v ? `<span class="vd ${v.cls}">${esc(v.text)}</span>` : on ? "" : `<span class="vd">${desk ? "点一下打开" : "点一下切换"}</span>`;
       return `<div class="mc glass${on ? " sel" : ""}" ${cardAttrs(a, nm, on, desk)}>
         <span class="nm">${on ? '<span class="ok">✓</span>' : ""}<b>${esc(nm)}</b>${on ? penBtn(a) : ""}${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}</span>
-        ${sess}${body}${tail}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : ""}</div>`;
+        ${sess}${body}${tail}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : ""}${li && li.cls ? `<span class="ex ${li.cls}">${esc(li.text)}</span>` : ""}</div>`;
     };
     // 大卡：名字、邮箱、几个会话在跑；每个额度（5 小时、7 天、用得最多的两个按模型周额度）一根条，写几点后重置和百分比；
     // 节奏结论和小线；今天这台电脑用了多少（本机记录）；到期。窗口早该重置了就不拿旧数字，写“已重置”
     const big = (a) => {
-      const u = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), on = a.is_active, v = verdict(a), ex = expiry(a);
+      const u = a.usage || {}, hh = a.health || {}, nm = nameOf(a, pos), on = a.is_active, v = verdict(a), ex = expiry(a), li = loginLine(a);
       const models = (u.models || []).filter((m) => pct(m) !== null).sort((x, y) => y.utilization - x.utilization).slice(0, 2);
       const meters = [["5 小时", u.five_hour], ["7 天", u.seven_day], ...models.map((m) => [m.name, m])].filter(([, w]) => pct(w) !== null).map(([label, w]) => {
         const p = pct(w), old = passed(w), t = old ? "已重置，点刷新看最新" : resetShort(w.resets_at) || noReset(p);
@@ -898,7 +917,7 @@ button { font: inherit; color: inherit; }
       const mail = a.email && a.email !== nm ? `<span class="em">${esc(a.email)}</span>` : "";
       return `<div class="mc big glass${on ? " sel" : ""}" ${cardAttrs(a, nm, on, false)}>
         <span class="nm">${on ? '<span class="ok">✓</span>' : ""}<b>${esc(nm)}</b>${penBtn(a)}${hh.level === "error" ? `<span class="chip bad">异常</span>` : planChip(a)}${on ? `<span class="chip live">正在用</span>` : ""}</span>
-        ${mail}${sess}${meters}${none}${pv}${todayHtml(a)}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : on ? "" : `<span class="ex">点一下切换到这个号</span>`}</div>`;
+        ${mail}${sess}${meters}${none}${pv}${todayHtml(a)}${ex ? `<span class="ex ${ex.cls}">${esc(ex.text)}</span>` : on || (li && li.cls) ? "" : `<span class="ex">点一下切换到这个号</span>`}${li && li.cls ? `<span class="ex ${li.cls}">${esc(li.text)}</span>` : ""}</div>`;
     };
     const bigAcc = code.find((a) => a.is_active) || code[0], rest = list.filter((a) => a !== bigAcc);
     const rn = renaming && list.some((a) => a.id === renaming) ? `<div class="tile glass rn-tile"><div class="t">给 ${esc(nameOf(list.find((a) => a.id === renaming), pos))} 改名：菜单栏、命令行、聊天机器人里都用这个名字</div>${renameForm(list.find((a) => a.id === renaming))}</div>` : "";

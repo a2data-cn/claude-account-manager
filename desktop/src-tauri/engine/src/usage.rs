@@ -13,6 +13,107 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
+// ---- 登录本身的有效期：Claude Code 登录时存下 refreshTokenExpiresAt（约 30 天），续 access token 时只取新旧两个里更早的，
+// 不会往后延，到期只能重新登录。和 cam.py 的 login_expiry_ms 等一致（tests/shared/login_expiry.json）
+/// 登录还剩这么多天以内：账号标“注意”
+pub const LOGIN_SOON_DAYS: i64 = 7;
+/// 还剩这么多天以内发一次通知，剩 1 天再发一次，到期了再发一次
+pub const LOGIN_ALERT_DAYS: i64 = 3;
+pub const DAY_MS: i64 = 86_400_000;
+/// 2025-01-01（UTC）：比这早的不是真的到期时间。和 Claude Code 的判断一样，另外不超过 10 年后
+const LOGIN_EXP_MIN_MS: f64 = 1_735_689_600_000.0;
+pub const LOGIN_EXPIRY_ADVICE: &str =
+    "Anthropic 规定每次登录大约 30 天有效，Claude Code 自动续期不会延长它，到期只能重新登录。";
+
+/// refreshTokenExpiresAt 是不是一个像样的到期时间（毫秒）：数字，2025 年以后、10 年以内
+pub fn login_exp_valid(v: Option<&Value>, now_ms: i64) -> bool {
+    match v.and_then(|v| if v.is_number() { v.as_f64() } else { None }) {
+        Some(x) => x.is_finite() && x >= LOGIN_EXP_MIN_MS && x <= (now_ms + 3650 * DAY_MS) as f64,
+        None => false,
+    }
+}
+
+/// 这份登录什么时候到期（毫秒）。没有这一项，或者 access token 比它还晚 3 天以上才过期：None
+pub fn login_expiry_ms(ob: &Value, now_ms: i64) -> Option<i64> {
+    let v = ob.get("refreshTokenExpiresAt");
+    if !login_exp_valid(v, now_ms) {
+        return None;
+    }
+    let ms = v?.as_f64()?;
+    if let Some(exp) = ob
+        .get("expiresAt")
+        .filter(|x| x.is_number())
+        .and_then(|x| x.as_f64())
+    {
+        if exp > ms + (3 * DAY_MS) as f64 {
+            return None;
+        }
+    }
+    Some(ms as i64)
+}
+
+/// 离登录到期还有几天，向上取整（和 Claude Code 的“expires in N days”一样）；已经到期是 0
+pub fn login_days(exp_ms: i64, now_ms: i64) -> i64 {
+    let left = exp_ms - now_ms;
+    if left <= 0 {
+        0
+    } else {
+        (left + DAY_MS - 1) / DAY_MS
+    }
+}
+
+/// 续 access token 之后这份登录的到期时间：取原来的和接口新给的里更早的那个；原来没有（或不像样）就还是没有
+pub fn renewed_login_expiry(old_ob: &Value, tok: &Value, now_ms: i64) -> Option<i64> {
+    let old = old_ob.get("refreshTokenExpiresAt");
+    if !login_exp_valid(old, now_ms) {
+        return None;
+    }
+    let old = old?.as_f64()? as i64;
+    let new = tok
+        .get("refresh_token_expires_in")
+        .filter(|x| x.is_number())
+        .and_then(|x| x.as_f64())
+        .filter(|x| x.is_finite())
+        .map(|sec| now_ms + (sec * 1000.0) as i64)
+        .filter(|n| login_exp_valid(Some(&json!(n)), now_ms));
+    Some(new.map_or(old, |n| old.min(n)))
+}
+
+/// 续过 access token 的 oauth 块（里面还是原来的 refreshTokenExpiresAt）改成续后的到期时间
+pub fn set_renewed_login_expiry(ob: &mut Value, tok: &Value) {
+    match renewed_login_expiry(ob, tok, now_ms()) {
+        Some(v) => ob["refreshTokenExpiresAt"] = json!(v),
+        None => {
+            if let Some(o) = ob.as_object_mut() {
+                o.remove("refreshTokenExpiresAt");
+            }
+        }
+    }
+}
+
+/// data 的副本：每个 Claude Code 号带上 login_expires_at（毫秒，没有是 null）和 login_days_left。
+/// 数据在各号保存的登录里（secrets），提醒和账号状态要用，accounts.json 里不存
+pub fn with_login_expiry(store: &Store, data: &Value, now_ms: i64) -> Value {
+    let mut out = data.clone();
+    if let Some(accs) = out.get_mut("accounts").and_then(|a| a.as_array_mut()) {
+        for a in accs.iter_mut() {
+            if s(a, "kind") != Some("claude_code") {
+                continue;
+            }
+            let id = s(a, "id").unwrap_or_default().to_string();
+            let ob = store
+                .load_secret(&id)
+                .get("claudeAiOauth")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let ms = login_expiry_ms(&ob, now_ms);
+            a["login_expires_at"] = json!(ms);
+            a["login_days_left"] = json!(ms.map(|m| login_days(m, now_ms)));
+        }
+    }
+    out
+}
+
 pub(crate) fn api_base() -> String {
     std::env::var("CAM_API_BASE").unwrap_or_else(|_| "https://api.anthropic.com".into())
 }
@@ -413,6 +514,7 @@ pub(crate) fn renew_saved_login(store: &Store, data: &mut Value, id: &str) -> R<
         .and_then(|v| v.as_i64())
         .unwrap_or(28800);
     ob["expiresAt"] = json!(now_ms() + secs * 1000);
+    set_renewed_login_expiry(&mut ob, &tok); // 登录本身的到期时间：只取更早的，续期不会往后延
     secret["claudeAiOauth"] = ob.clone();
     if secret.get("raw").map(|r| r.is_object()).unwrap_or(false) {
         secret["raw"]["claudeAiOauth"] = ob.clone();

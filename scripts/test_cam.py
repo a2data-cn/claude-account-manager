@@ -2517,14 +2517,24 @@ class CamTest(unittest.TestCase):
             self.assertEqual([c["text"].split("（")[0] for c in styles], ["数字方块", "信号格", "红绿灯", "圆环", "双环", "两根小条"])
             self.assertTrue(styles[0]["checked"])
             self.assertEqual(styles[2]["run"], ["icon", "lamp"])
-            # 换成红绿灯：一张 PNG，按 24 像素高画（竖的，14×24）；在回答时 8 帧，亮暗轮着
+            # 换成红绿灯：托盘上画成左边三颗小灯（整格 24×24 的 PNG）+ 右边的数字（5 小时用了 42%，cam-tray.ps1 写）；
+            # 在回答时 8 帧，亮暗轮着
             notes = tray.Notes()
             self.assertEqual(tray.do(store, "icon", ["lamp"], notes), 0)
             self.assertEqual(tray.do(store, "icon", ["neon"], notes), 2)
             out = tray.menu(store, tray.Notes(), 24)
-            self.assertEqual((out["icon"]["style"], len(out["icon"]["frames"])), ("lamp", 1))
-            self.assertEqual(size(out["icon"]["frames"][0]), (14, 24))
-            self.assertTrue(out["icon"]["frames"][0].startswith(icons))
+            icon = out["icon"]
+            self.assertEqual((icon["style"], len(icon["frames"]), icon["text"], icon["dark"]), ("lamp", 1, "42", True))
+            self.assertEqual(size(icon["frames"][0]), (24, 24))
+            self.assertTrue(icon["frames"][0].startswith(icons))
+            self.assertTrue(6 < icon["text_at"] < 9)  # 小灯占左边三分之一不到，数字在右边
+            self.assertIn("红绿灯（三颗小灯 + 5 小时 %）", json.dumps(out["items"], ensure_ascii=False))
+            with mock.patch.object(tray.cam_menu, "pct", lambda *a: 100):
+                self.assertEqual(tray.menu(store, tray.Notes(), 24, full=False)["icon"]["text"], "满")
+            with mock.patch.object(tray.cam_menu, "pct", lambda *a: None):  # 还没有额度的数：原来的大红绿灯（竖的，14×24），不写字
+                icon = tray.menu(store, tray.Notes(), 24, full=False)["icon"]
+            self.assertNotIn("text", icon)
+            self.assertEqual(size(icon["frames"][0]), (14, 24))
             busy = ("busy", "1 个会话 · 正在回答", "pulse", 0)
             with mock.patch.object(tray.cam_menu, "status_light", lambda *a: busy):
                 out = tray.menu(store, tray.Notes(), 24, full=False)
@@ -2536,6 +2546,29 @@ class CamTest(unittest.TestCase):
                 lit, dim, lit2 = f0.read(), f2.read(), f4.read()
             self.assertNotEqual(lit, dim)  # 亮半秒、暗半秒
             self.assertEqual(lit, lit2)
+            self.assertEqual(out["icon"]["text"], "42")  # 数字不闪：每帧都写
+            # 三颗小灯：工作中只有中间那颗（橙）亮，等你确认时三颗都是彩色；按像素看灯心的颜色
+            def dots(png):
+                import zlib
+                pos, raw = 8, b""
+                while pos < len(png):
+                    n, tag = st_.unpack(">I", png[pos:pos + 4])[0], png[pos + 4:pos + 8]
+                    if tag == b"IDAT":
+                        raw += png[pos + 8:pos + 8 + n]
+                    pos += 12 + n
+                rows, w = zlib.decompress(raw), 24
+                dia, cx, _ = tray.lamp_layout(24)
+                gap = (24 - 3 * dia) / 2
+                return [tuple(rows[int(dia / 2 + i * (dia + gap)) * (1 + w * 4) + 1 + int(cx) * 4:][:4]) for i in range(3)]
+            red, amber, green = dots(lit)
+            self.assertEqual(amber[:3], tray.cam_menu.FILL["warn"][1])
+            self.assertLess(red[3], 128)  # 没亮的是淡淡的点
+            self.assertLess(green[3], 128)
+            waiting = ("busy", "等你确认", "blink", 0)
+            with mock.patch.object(tray.cam_menu, "status_light", lambda *a: waiting):
+                out = tray.menu(store, tray.Notes(), 24, full=False)
+            with open(out["icon"]["frames"][0], "rb") as f0:
+                self.assertTrue(all(d[3] > 200 for d in dots(f0.read())))
             # 画额度的样式按 5 小时 / 7 天的数画；横的两根小条按宽 24 画
             self.cam.save_menubar_settings(store, {"icon": "twobar"})
             out = tray.menu(store, tray.Notes(), 24)
@@ -3259,6 +3292,131 @@ foreach ($dark in @($false, $true)) {{
         self.assertIn("没有换号登录", err.getvalue())
         self.assertEqual(self.live()[0]["refreshToken"], "rt-B2")
         self.assertEqual(self.cam.Store().load_secret(self.cam.PENDING_ID)["claudeAiOauth"]["refreshToken"], "rt-B2")
+
+    # ---- 登录本身的有效期（约 30 天，续期不延长）：显示、提醒、在旁边重新登录
+
+    def _set_login_expiry(self, acc_id, ms):
+        store = self.cam.Store()
+        sec = store.load_secret(acc_id)
+        sec["claudeAiOauth"]["refreshTokenExpiresAt"] = ms
+        store.save_secret(acc_id, sec)
+
+    def test_login_expiry_shows_and_reminds(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B
+        now_ms = int(time.time() * 1000)
+        self._set_login_expiry(a_id, now_ms + 2 * 86400000 - 60000)
+        store = self.cam.Store()
+        st = self.cam.public_state(store, store.load())
+        a = next(x for x in st["accounts"] if x["id"] == a_id)
+        b = next(x for x in st["accounts"] if x["id"] == b_id)
+        self.assertEqual(a["login_days_left"], 2)
+        self.assertTrue(a["login_expires_at"].endswith("+00:00"))
+        self.assertEqual([i["kind"] for i in a["health"]["issues"]], ["login_expiring"])
+        self.assertEqual(a["health"]["issues"][0]["text"], "登录还剩 2 天，到期后要重新登录")
+        self.assertEqual((b["login_days_left"], b["login_expires_at"], b["health"]["level"]), (None, None, "ok"))  # 老版本存的没有这一项
+        # 后台提醒：不在用的号也提醒，提醒过的不重复
+        mem = {}
+        got = self.cam.due_alerts(self.cam.with_login_expiry(store, store.load()), mem)
+        self.assertEqual([t for t, _ in got], ["A 的登录还剩 2 天"])
+        self.assertEqual(self.cam.due_alerts(self.cam.with_login_expiry(store, store.load()), mem), [])
+        # cam ls、体检里都看得到
+        code, out = self.run_cam_out("ls")
+        self.assertIn("登录还剩 2 天，到期后要重新登录", out)
+        code, out = self.run_cam_out("doctor", "--offline")
+        self.assertIn("登录还剩 2 天（", out)
+        self.assertIn("cam login A", out)
+        # 到期了：异常，不再另报“登录已失效”
+        self._set_login_expiry(a_id, now_ms - 1000)
+        st = self.cam.public_state(store, store.load())
+        a = next(x for x in st["accounts"] if x["id"] == a_id)
+        self.assertEqual((a["login_days_left"], a["health"]["level"]), (0, "error"))
+        self.assertEqual([i["kind"] for i in a["health"]["issues"]], ["login_expired"])
+        self.assertEqual([t for t, _ in self.cam.due_alerts(self.cam.with_login_expiry(store, store.load()), mem)], ["A 的登录到期了"])
+        code, out = self.run_cam_out("doctor", "--offline")
+        self.assertIn("登录到期了（", out)
+
+    def test_renew_keeps_the_earlier_login_expiry(self):
+        """替不在用的号续 access token：登录本身的到期时间只取更早的，和 Claude Code 一样不会往后延。"""
+        a_id, b_id = self._two_accounts(a_expires=self._expired_ms())
+        now_ms = int(time.time() * 1000)
+        self._set_login_expiry(a_id, now_ms + 10 * 86400000)
+        MockAnthropic.refresh_map = {"rt-A1": ("at-A2", "rt-A2")}
+        MockAnthropic.tokens = {"at-A2": {"u5": 1.0, "u7": 1.0, "email": "a@x.com", "plan": "max"},
+                                "at-B1": {"u5": 1.0, "u7": 1.0, "email": "b@x.com", "plan": "max"}}
+        self.assertEqual(self.run_cam("usage", "A"), 0)
+        ob = self.cam.Store().load_secret(a_id)["claudeAiOauth"]
+        self.assertEqual(ob["refreshToken"], "rt-A2")
+        self.assertEqual(ob["refreshTokenExpiresAt"], now_ms + 10 * 86400000)
+
+    def _relogin_writes(self, uuid, email, rt, days=30):
+        """假的 claude auth login：只能往 cam 给的临时配置目录里写（不碰 Claude Code 现在的登录），记下它拿到的目录。"""
+        seen = {}
+
+        def fn(exe, env=None):
+            d = env["CLAUDE_CONFIG_DIR"]
+            seen["dir"] = d
+            self.assertEqual(env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR"), d)
+            self.assertTrue(d.startswith(os.path.realpath(os.path.join(self.cam.Store().root, "relogin"))))
+            c = creds("at-" + rt, rt, int((time.time() + 3600) * 1000))
+            c["claudeAiOauth"]["refreshTokenExpiresAt"] = int((time.time() + days * 86400) * 1000)
+            with open(os.path.join(d, ".credentials.json"), "w") as f:
+                json.dump(c, f)
+            with open(os.path.join(d, ".claude.json"), "w") as f:
+                json.dump({"oauthAccount": oauth_account(uuid, email)}, f)
+            return 0
+        return fn, seen
+
+    def test_relogin_inactive_account_keeps_current_login(self):
+        a_id, b_id = self._two_accounts()  # 当前是 B，正在用
+        live_before = self.live()
+        fn, seen = self._relogin_writes("uuid-A", "a@x.com", "rt-A9")
+        out = io.StringIO()
+        with self._fake_claude_login(fn), contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cam("login", "A"), 0)
+        self.assertIn("已重新登录 A", out.getvalue())
+        self.assertIn("还剩 30 天", out.getvalue())
+        self.assertEqual(self.live(), live_before)  # Claude Code 现在的登录一点没动
+        self.assertEqual(self.data()["active"]["claude_code"], b_id)
+        ob = self.cam.Store().load_secret(a_id)["claudeAiOauth"]
+        self.assertEqual(ob["refreshToken"], "rt-A9")
+        self.assertEqual(self.cam.login_days(ob["refreshTokenExpiresAt"]), 30)
+        self.assertFalse(os.path.exists(seen["dir"]))  # 临时目录（里面有登录）用完就删
+        # 切过去用的就是新登录
+        self.assertEqual(self.run_cam("switch", "A"), 0)
+        self.assertEqual(self.live()[0]["refreshToken"], "rt-A9")
+
+    def test_relogin_refuses_another_account_and_failed_login(self):
+        a_id, b_id = self._two_accounts()
+        before = self.cam.Store().load_secret(a_id)
+        # 浏览器里登录成了 B：不存进 A
+        fn, seen = self._relogin_writes("uuid-B", "b@x.com", "rt-B9")
+        err = io.StringIO()
+        with self._fake_claude_login(fn), contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cam("login", a_id), 1)
+        self.assertIn("不是 A", err.getvalue())
+        self.assertEqual(self.cam.Store().load_secret(a_id), before)
+        self.assertFalse(os.path.exists(seen["dir"]))
+        # claude auth login 没完成：什么都不变
+        with self._fake_claude_login(lambda exe, env=None: 1), contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cam("login", "a@x.com"), 1)
+        self.assertEqual(self.cam.Store().load_secret(a_id), before)
+        self.assertEqual(os.listdir(os.path.join(self.cam.Store().root, "relogin")), [])
+        # 上次中途被打断留下的临时目录：一小时以上的下次重新登录时删掉
+        stale = os.path.join(self.cam.Store().root, "relogin", "login-old")
+        os.makedirs(stale)
+        os.utime(stale, (time.time() - 7200, time.time() - 7200))
+        fn, _ = self._relogin_writes("uuid-A", "a@x.com", "rt-A9")
+        with self._fake_claude_login(fn), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cam("login", "A"), 0)
+        self.assertFalse(os.path.exists(stale))
+        # 重新登录当前号（给的是 id）：照常替换当前登录，名字不改成 id
+        with self._fake_claude_login(lambda exe, env=None: self.login("at-B2", "rt-B2", "uuid-B", "b@x.com") or 0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.run_cam("login", b_id), 0)
+        b = next(x for x in self.data()["accounts"] if x["id"] == b_id)
+        self.assertEqual((b["label"], self.cam.Store().load_secret(b_id)["claudeAiOauth"]["refreshToken"]), ("B", "rt-B2"))
+        self.assertEqual(len(self.data()["accounts"]), 2)
 
     # ---- 等会话结束再切换
 
@@ -7550,6 +7708,21 @@ class SharedFixtureTest(unittest.TestCase):
             self.assertEqual(got, c["want"], c["name"])
             self.assertEqual(cam.region_view({"region": reg})["domains"], c["view"], c["name"])
             self.assertEqual(cam.risk_score(items)["score"], c["score"], c["name"])
+
+    def test_login_expiry(self):
+        """登录本身的有效期：认不认这个到期时间、还剩几天、续期后取哪个（和 Claude Code 一致）。"""
+        fx = shared("login_expiry.json")
+        now = fx["now_ms"] / 1000
+        for c in fx["expiry"]:
+            self.assertEqual(self.cam.login_expiry_ms(c["ob"], now), c["expect"], c["name"])
+        for c in fx["days"]:
+            self.assertEqual(self.cam.login_days(c["exp_ms"], now), c["expect"], c["name"])
+        for c in fx["renew"]:
+            self.assertEqual(self.cam.renewed_login_expiry(c["old"], c["tok"], now), c["expect"], c["name"])
+            ob = dict(c["old"])
+            with mock.patch.object(self.cam.time, "time", lambda: now):
+                self.cam.set_renewed_login_expiry(ob, c["tok"])
+            self.assertEqual(ob.get("refreshTokenExpiresAt"), c["expect"], c["name"])
 
     def test_regions(self):
         """支持地区：给界面的名单和说明、每个地区算不算支持、地区的写法。"""

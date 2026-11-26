@@ -17,6 +17,7 @@ use cam_engine::health::{
 use cam_engine::health::{parse_windows_env, parse_windows_processes};
 use cam_engine::health::{progress_open, service_steps, Progress};
 use cam_engine::local_report::{report_event, usage_report};
+use cam_engine::mailbox::detect;
 use cam_engine::pace::{note_usage_samples, pace_series, usage_pace};
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::sessions::{
@@ -25,6 +26,7 @@ use cam_engine::sessions::{
 };
 use cam_engine::store::{accounts, find_index, parse_day, s};
 use cam_engine::usage::note_usage_day;
+use cam_engine::usage::{login_days, login_expiry_ms, renewed_login_expiry};
 use cam_engine::usage::{message_cost, parse_usage_body, roll_renewals_at};
 use serde_json::{json, Value};
 
@@ -324,6 +326,37 @@ fn rule_cases() {
             .unwrap();
         let got = match_time_rule(&data, at).and_then(|r| s(&r, "id").map(|x| json!(x)));
         assert_eq!(got.unwrap_or(Value::Null), c["expect"], "{}", c["name"]);
+    }
+}
+
+/// 登录本身的有效期：认不认这个到期时间、还剩几天、续期后取哪个（和 cam.py、Claude Code 一致）
+#[test]
+fn login_expiry_cases() {
+    let fx = fixture("login_expiry.json");
+    let now = fx["now_ms"].as_i64().unwrap();
+    for c in cases(&fx, "expiry") {
+        assert_eq!(
+            json!(login_expiry_ms(&c["ob"], now)),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "days") {
+        assert_eq!(
+            json!(login_days(c["exp_ms"].as_i64().unwrap(), now)),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "renew") {
+        assert_eq!(
+            json!(renewed_login_expiry(&c["old"], &c["tok"], now)),
+            c["expect"],
+            "{}",
+            c["name"]
+        );
     }
 }
 
@@ -1075,5 +1108,24 @@ fn regions_cases() {
     }
     for c in cases(&fx, "labels") {
         assert_eq!(json!(region_label(c[0].as_str())), c[1], "{}", c[0]);
+    }
+}
+
+#[test]
+fn mail_detect_cases() {
+    let fx = fixture("mail_detect.json");
+    for c in fx["cases"].as_array().unwrap() {
+        let email = c["email"].as_str().unwrap();
+        let got = detect(email);
+        if c["expect"].is_null() {
+            assert!(got.is_err(), "{email}");
+            continue;
+        }
+        let got = got.unwrap_or_else(|e| panic!("{email}: {e}"));
+        for (key, want) in c["expect"].as_object().unwrap() {
+            assert_eq!(&got[key], want, "{email} {key}");
+        }
+        assert_eq!(got["imap_port"], 993, "{email}");
+        assert!(!got["note"].as_str().unwrap().is_empty(), "{email}");
     }
 }
