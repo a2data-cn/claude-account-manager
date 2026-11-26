@@ -355,11 +355,11 @@ fn scan(app: Option<&Path>, max_age: Duration) -> R<Vec<(DesktopProcess, String)
 /// Windows 进程表（health::win_processes）里的桌面版主进程。scan 的 Windows 部分，单独拿出来在别的系统上也能编译、能测。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_desktop_rows(
-    rows: &[(u32, String, String, String)],
+    rows: &[super::health::WinProc],
     candidates: &[PathBuf],
 ) -> R<Vec<(DesktopProcess, String)>> {
     let mut found = Vec::new();
-    for (pid, exe, name, cmd) in rows {
+    for (pid, exe, name, cmd, _) in rows {
         if exe.is_empty() {
             if name.eq_ignore_ascii_case("claude.exe") {
                 return Err("无法读取 Claude 进程路径，不能安全区分桌面版和 Claude Code；请先手动退出后再操作".into());
@@ -1162,24 +1162,27 @@ mod tests {
     #[test]
     fn windows_rows_pick_the_desktop_main_process() {
         let rows = vec![
-            (4, String::new(), "System".to_string(), String::new()),
+            (4, String::new(), "System".to_string(), String::new(), None),
             (
                 10,
                 r"C:\Users\me\AppData\Local\AnthropicClaude\app-1.0.3\claude.exe".to_string(),
                 "claude.exe".to_string(),
                 r#""C:\Users\me\AppData\Local\AnthropicClaude\app-1.0.3\claude.exe" --user-data-dir=C:\p"#.to_string(),
+                None,
             ),
             (
                 11,
                 r"C:\Users\me\AppData\Local\AnthropicClaude\app-1.0.3\claude.exe".to_string(),
                 "claude.exe".to_string(),
                 "claude.exe --type=renderer".to_string(),
+                None,
             ),
             (
                 12,
                 r"C:\Users\me\.local\bin\claude.exe".to_string(),
                 "claude.exe".to_string(),
                 "claude --resume".to_string(),
+                None,
             ),
         ];
         let found = windows_desktop_rows(&rows, &[]).unwrap();
@@ -1192,7 +1195,13 @@ mod tests {
             found[0].1
         );
         // claude.exe 看不到路径：分不清是桌面版还是 Claude Code，不能当作没有
-        let blind = vec![(20, String::new(), "claude.exe".to_string(), String::new())];
+        let blind = vec![(
+            20,
+            String::new(),
+            "claude.exe".to_string(),
+            String::new(),
+            None,
+        )];
         assert!(windows_desktop_rows(&blind, &[]).is_err());
     }
 

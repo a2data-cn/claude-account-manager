@@ -1,5 +1,5 @@
 {
-  "_说明": "Windows 上合并以后的两次 PowerShell 查询怎么解析：parse_windows_env（DNS、系统语言、默认路由的网卡，ConvertTo-Json 的输出）、parse_windows_processes（进程表，每行 pid、程序路径、名字、命令行，用 Tab 分开）。Python 与 Rust 两边按同一份数据跑。",
+  "_说明": "Windows 上合并以后的两次 PowerShell 查询怎么解析：parse_windows_env（DNS、系统语言、默认路由的网卡，ConvertTo-Json 的输出）、parse_windows_processes（进程表，每行 pid、程序路径、名字、启动时间（Unix 秒，拿不到是空的）、命令行，用 Tab 分开；解析成 [pid, 程序路径, 名字, 命令行, 启动时间或 null]）。Python 与 Rust 两边按同一份数据跑。",
   "env": [
     {"name": "正常：两个 DNS、语言、默认路由的网卡", "output": "{\"dns\":[\"192.168.1.1\",\"fe80::1\"],\"culture\":\"zh-CN\",\"route\":\"WLAN\",\"route_desc\":\"Intel(R) Wi-Fi 6 AX201 160MHz\"}", "expect": {"dns": ["192.168.1.1", "fe80::1"], "culture": "zh-CN", "route": "WLAN", "route_desc": "Intel(R) Wi-Fi 6 AX201 160MHz", "wlan": ""}},
     {"name": "只有一个 DNS 时 PowerShell 可能给成字符串", "output": "{\"dns\":\"10.0.0.1\",\"culture\":\"en-US\",\"route\":\"以太网\",\"route_desc\":\"Realtek PCIe GbE Family Controller\"}", "expect": {"dns": ["10.0.0.1"], "culture": "en-US", "route": "以太网", "route_desc": "Realtek PCIe GbE Family Controller", "wlan": ""}},
@@ -12,7 +12,8 @@
     {"name": "wlan 不是 base64：当没有", "output": "{\"dns\": [], \"culture\": \"en-US\", \"route\": \"\", \"route_desc\": \"\", \"wlan\": \"\\u4e0d\\u662f base64 !!\"}", "expect": {"dns": [], "culture": "en-US", "route": "", "route_desc": "", "wlan": ""}}
   ],
   "processes": [
-    {"name": "正常的几行：程序路径、名字、命令行", "output": "4\t\tSystem\t\r\n1234\tC:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\tclaude.exe\t\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\" --user-data-dir=C:\\x\r\n5678\tC:\\Program Files\\nodejs\\node.exe\tnode.exe\tnode C:\\npm\\claude\\cli.js --resume\tx\r\n", "expect": [[4, "", "System", ""], [1234, "C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe", "claude.exe", "\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\" --user-data-dir=C:\\x"], [5678, "C:\\Program Files\\nodejs\\node.exe", "node.exe", "node C:\\npm\\claude\\cli.js --resume\tx"]]},
-    {"name": "pid 不是数字、少了几列的不要", "output": "abc\tx\ty\tz\n12\tonly\ttwo\n", "expect": []}
+    {"name": "正常的几行：程序路径、名字、启动时间、命令行（命令行里有 Tab 也算命令行）", "output": "4\t\tSystem\t\t\r\n1234\tC:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\tclaude.exe\t1795500000\t\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\" --user-data-dir=C:\\x\r\n5678\tC:\\Program Files\\nodejs\\node.exe\tnode.exe\t1795503600\tnode C:\\npm\\claude\\cli.js --resume\tx\r\n", "expect": [[4, "", "System", "", null], [1234, "C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe", "claude.exe", "\"C:\\Users\\me\\AppData\\Local\\AnthropicClaude\\app-1.0.3\\claude.exe\" --user-data-dir=C:\\x", 1795500000], [5678, "C:\\Program Files\\nodejs\\node.exe", "node.exe", "node C:\\npm\\claude\\cli.js --resume\tx", 1795503600]]},
+    {"name": "启动时间不是正整数的当没有", "output": "7\ta.exe\ta.exe\t-5\tx\n8\tb.exe\tb.exe\t12.5\ty\n9\tc.exe\tc.exe\t0\tz\n", "expect": [[7, "a.exe", "a.exe", "x", null], [8, "b.exe", "b.exe", "y", null], [9, "c.exe", "c.exe", "z", null]]},
+    {"name": "pid 不是数字、少了几列的不要（老格式的四列也不要）", "output": "abc\tx\ty\tz\tw\n12\tonly\ttwo\n13\tC:\\a.exe\ta.exe\tcmd\n", "expect": []}
   ]
 }

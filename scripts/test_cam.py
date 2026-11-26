@@ -2124,6 +2124,41 @@ class CamTest(unittest.TestCase):
         with mock.patch.object(cam, "IS_WIN", False):
             self.assertEqual(pick(), {301: (None, None), 302: ("s-pid", "hook"), 303: (None, None)})
 
+    def test_windows_sessions_know_which_account(self):
+        """Windows：进程表里带着启动时间，会话按它对切换记录认出用的是哪个号；认不出时间（进程表里没有、比第一条切换记录还早）
+        而只有一个 Claude Code 号、它就是当前登录时，写这个号。"""
+        import datetime as dt
+        cam = self.cam
+        now = time.time()
+        iso = lambda secs: dt.datetime.fromtimestamp(now - secs, dt.timezone.utc).isoformat()  # noqa: E731
+        table = [(301, "C:\\npm\\node.exe", "node.exe", "node C:\\npm\\claude\\cli.js", int(now - 3600)),
+                 (302, "C:\\bin\\claude.exe", "claude.exe", "claude --resume", None),
+                 (303, "C:\\bin\\claude.exe", "claude.exe", "claude", int(now - 60))]
+        procs = [(p, c) for p, _, _, c, _ in table]
+        cam._ACTIVITY["rates"] = {}
+        with mock.patch.object(cam, "IS_WIN", True), mock.patch.object(cam, "proc_root", lambda: None), \
+                mock.patch.object(cam, "windows_processes", lambda max_age=0: table), \
+                mock.patch.object(cam, "running_claude_processes", lambda: procs), \
+                mock.patch.object(cam, "claude_activity", return_value=False):
+            info = cam.claude_proc_info(procs)
+            self.assertAlmostEqual(info[301]["secs"], 3600, delta=5)
+            self.assertNotIn("secs", info[302])
+            two = {"accounts": [{"id": "a1", "kind": "claude_code", "label": "个人号"},
+                                {"id": "b1", "kind": "claude_code", "label": "工作号"}],
+                   "active": {"claude_code": "a1"}, "switch_log": [{"at": iso(10000), "id": "b1"}, {"at": iso(600), "id": "a1"}]}
+            rows = {r["pid"]: r for r in cam.sessions_view(two)["sessions"]}
+            self.assertEqual(rows[301]["account"], "工作号")  # 一小时前启动：那时登录的是工作号
+            self.assertEqual(rows[303]["account"], "个人号")
+            self.assertIsNone(rows[302]["account_id"])  # 两个号、不知道什么时候启动的：不猜
+            one = {"accounts": [{"id": "a1", "kind": "claude_code", "label": "个人号"},
+                                {"id": "w1", "kind": "web", "label": "网页号"}],
+                   "active": {"claude_code": "a1"}, "switch_log": [{"at": iso(60 * 5), "id": "a1"}]}  # 五分钟前才导入
+            rows = {r["pid"]: r for r in cam.sessions_view(one)["sessions"]}
+            self.assertEqual({p: r["account"] for p, r in rows.items()}, {301: "个人号", 302: "个人号", 303: "个人号"})
+            one["active"]["claude_code"] = None  # 退出登录了：不算它的
+            rows = {r["pid"]: r for r in cam.sessions_view(one)["sessions"]}
+            self.assertEqual(rows[302]["account_id"], None)
+
     def test_windows_console_programs_run_without_window(self):
         """Windows：后台起的 cam 进程（面板服务、环境检测）带一个看不见的控制台，不用 DETACHED_PROCESS（没有控制台时它再调
         powershell 每次都会弹一个蓝框）；查进程、读系统设置、git 这些控制台程序都加 CREATE_NO_WINDOW。"""

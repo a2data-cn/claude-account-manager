@@ -4678,3 +4678,43 @@ fn sessions_page_matches_processes_and_reads_transcripts() {
         json!(false)
     );
 }
+
+#[test]
+fn sessions_know_the_account_without_a_start_time() {
+    // 会话按启动时间对切换记录认出用的是哪个号；认不出时间（Windows 进程表里没有、比第一条切换记录还早）
+    // 而只有一个 Claude Code 号、它就是当前登录时，写这个号。对应 test_cam.py 的 test_windows_sessions_know_which_account
+    let _e = Env::new();
+    fake_sessions("301:3600,302,303:60");
+    let store = Store::new();
+    let accounts_of = |store: &Store| -> HashMap<u64, Value> {
+        let (code, view) = route(store, "GET", "/api/sessions", &Value::Null);
+        assert_eq!(code, 200, "{view}");
+        view["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["pid"].as_u64().unwrap(), r["account"].clone()))
+            .collect()
+    };
+    let mut d = store.load().unwrap();
+    d["accounts"] = json!([{"id": "a1", "kind": "claude_code", "label": "个人号"}, {"id": "b1", "kind": "claude_code", "label": "工作号"}]);
+    d["active"] = json!({"claude_code": "a1"});
+    d["switch_log"] = json!([{"at": ago(10000), "id": "b1"}, {"at": ago(600), "id": "a1"}]);
+    store.save(&mut d).unwrap();
+    let got = accounts_of(&store);
+    assert_eq!(
+        (&got[&301], &got[&302], &got[&303]),
+        (&json!("工作号"), &Value::Null, &json!("个人号"))
+    );
+    let mut d = store.load().unwrap();
+    d["accounts"] = json!([{"id": "a1", "kind": "claude_code", "label": "个人号"}, {"id": "w1", "kind": "web", "label": "网页号"}]);
+    d["switch_log"] = json!([{"at": ago(300), "id": "a1"}]); // 五分钟前才导入
+    store.save(&mut d).unwrap();
+    let got = accounts_of(&store);
+    assert!(got.values().all(|v| v == "个人号"), "{got:?}");
+    let mut d = store.load().unwrap();
+    d["active"] = json!({"claude_code": null}); // 退出登录了：不算它的
+    store.save(&mut d).unwrap();
+    assert_eq!(accounts_of(&store)[&302], Value::Null);
+    fake_sessions("");
+}

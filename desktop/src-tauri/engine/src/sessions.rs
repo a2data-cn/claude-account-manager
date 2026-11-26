@@ -801,7 +801,18 @@ struct ProcInfo {
 /// macOS 上 lsof 查到的工作目录：(pid, 命令行) → 目录。同一个进程的工作目录不会变，查到就记着
 static MAC_CWDS: Mutex<Option<HashMap<(u32, String), String>>> = Mutex::new(None);
 
-/// 正在跑的 claude 进程各自的工作目录、运行时长、登录方式。Linux 读 /proc；macOS 用 ps 和 lsof；Windows 都看不出来。
+/// Windows 进程表里的启动时间 → 每个进程已经运行了几秒（启动时间在将来一分钟以后的不算）
+fn win_ages(rows: &[super::health::WinProc], now: f64) -> HashMap<u32, f64> {
+    rows.iter()
+        .filter_map(|(pid, _, _, _, started)| {
+            let t = (*started)? as f64;
+            (t <= now + 60.0).then_some((*pid, (now - t).max(0.0)))
+        })
+        .collect()
+}
+
+/// 正在跑的 claude 进程各自的工作目录、运行时长、登录方式。Linux 读 /proc；macOS 用 ps 和 lsof；
+/// Windows 只看得出运行时长（进程表里的启动时间）。
 fn proc_info(procs: &[(u32, String)]) -> HashMap<u32, ProcInfo> {
     let mut out: HashMap<u32, ProcInfo> = procs
         .iter()
@@ -823,6 +834,14 @@ fn proc_info(procs: &[(u32, String)]) -> HashMap<u32, ProcInfo> {
         return out;
     }
     if cfg!(target_os = "windows") {
+        // 和 list_claude_processes 共用一次进程表；有了运行时长，才能按切换记录认出会话用的是哪个号
+        if let Some(rows) = super::health::win_processes(std::time::Duration::from_secs(1)) {
+            for (pid, secs) in win_ages(&rows, now_secs()) {
+                if let Some(i) = out.get_mut(&pid) {
+                    i.secs = Some(secs);
+                }
+            }
+        }
         return out;
     }
     let pids: Vec<u32> = procs.iter().map(|(p, _)| *p).collect();
@@ -1092,6 +1111,24 @@ fn iso_of(secs: f64) -> Option<String> {
 }
 
 /// 正在跑的会话一行一个，再加上每行的记录文件。detail=false 时只算状态（红绿灯数“几个在回答”用，不读记录内容）
+/// 只有一个 Claude Code 号、它就是当前登录时返回它的 id：用本机登录的会话认不出时间（Windows 上拿不到启动时间、
+/// 会话比第一条切换记录还早）也只可能是它。和 cam.py 的 sole_claude_code_account 一致。
+fn sole_claude_code_account(data: &Value) -> Option<String> {
+    let ids: Vec<&str> = accounts(data)
+        .iter()
+        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("claude_code"))
+        .filter_map(|a| a.get("id").and_then(Value::as_str))
+        .collect();
+    let active = data
+        .get("active")
+        .and_then(|a| a.get("claude_code"))
+        .and_then(Value::as_str);
+    match (ids.as_slice(), active) {
+        ([id], Some(act)) if *id == act => Some(act.to_string()),
+        _ => None,
+    }
+}
+
 fn session_rows(
     procs: &[(u32, String)],
     data: Option<&Value>,
@@ -1103,6 +1140,7 @@ fn session_rows(
     let rates = recent_cpu_rates();
     let now = now_secs();
     let owner_of = data.map(super::usage::owner_finder);
+    let only_cc = data.and_then(sole_claude_code_account);
     let names: HashMap<String, String> = data
         .map(accounts)
         .into_iter()
@@ -1168,8 +1206,10 @@ fn session_rows(
             let (win, exact) = context_window(model.as_deref());
             let used = meta.as_ref().and_then(|x| x.context_used);
             let login = inf.login.clone();
-            let acc_id = match (&owner_of, started, login.as_deref()) {
-                (Some(f), Some(t), None | Some("machine") | Some("unknown")) => f(t),
+            let acc_id = match (&owner_of, login.as_deref()) {
+                (Some(f), None | Some("machine") | Some("unknown")) => {
+                    started.and_then(f).or_else(|| only_cc.clone())
+                }
                 _ => None,
             };
             let unix = cwd.replace('\\', "/");
@@ -1346,4 +1386,27 @@ pub fn sessions_brief() -> Value {
         String::new()
     };
     json!({"count": n, "busy": busy, "answering": answering, "waiting": waiting, "text": text})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_start_times_become_ages() {
+        let row = |pid: u32, started: Option<i64>| {
+            (pid, String::new(), String::new(), String::new(), started)
+        };
+        let ages = win_ages(
+            &[
+                row(1, Some(1000)),
+                row(2, None),
+                row(3, Some(1030)),
+                row(4, Some(2000)),
+            ],
+            1010.0,
+        );
+        // 3 在将来 20 秒：时钟差一点，算刚启动；4 在将来十几分钟：不对，不算
+        assert_eq!(ages, HashMap::from([(1, 10.0), (3, 0.0)]));
+    }
 }

@@ -1246,25 +1246,29 @@ class ProcsUnknown(list):
 
 WIN_PROCS_SECS = 3  # 只是显示的地方（桌面版开着没有、体检）几秒内共用一次进程表
 WIN_PROCS_REUSE = 1  # 数 Claude Code 会话（切换前也要看）只用一秒内查过的：PowerShell 查一次本身就要半秒多
-WIN_PROCS_PS = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { "
-                "\"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$($_.CommandLine)\" }")
+# 每行：pid、程序路径、名字、启动时间（Unix 秒，拿不到是空的）、命令行；命令行放最后，里面有 Tab 也不怕
+WIN_PROCS_PS = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { $t = ''; "
+                "try { if ($_.CreationDate) { $t = ([DateTimeOffset]$_.CreationDate).ToUnixTimeSeconds() } } catch {}; "
+                "\"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$t`t$($_.CommandLine)\" }")
 _WIN_PROCS = {"t": 0.0, "rows": None}
 _WIN_PROCS_LOCK = threading.Lock()
 
 
 def parse_windows_processes(text):
-    """WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行)]。规则和 Rust 版 health::parse_windows_processes 一致
-    （tests/shared/windows_env.json）。"""
+    """WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行, 启动时间（Unix 秒）或 None)]。
+    规则和 Rust 版 health::parse_windows_processes 一致（tests/shared/windows_env.json）。"""
     rows = []
     for line in str(text or "").splitlines():
-        parts = line.rstrip("\r").split("\t", 3)
-        if len(parts) == 4 and parts[0].strip().isdigit():
-            rows.append((int(parts[0].strip()), parts[1].strip(), parts[2].strip(), parts[3].strip()))
+        parts = line.rstrip("\r").split("\t", 4)
+        if len(parts) == 5 and parts[0].strip().isdigit():
+            st = parts[3].strip()
+            rows.append((int(parts[0].strip()), parts[1].strip(), parts[2].strip(), parts[4].strip(),
+                         int(st) if st.isdigit() and int(st) > 0 else None))
     return rows
 
 
 def windows_processes(max_age=0):
-    """Windows 上的全部进程 [(pid, 程序路径, 名字, 命令行)]：Claude Code 会话、桌面版、cam 自己的面板服务共用一次 PowerShell 查询，
+    """Windows 上的全部进程 [(pid, 程序路径, 名字, 命令行, 启动时间)]：Claude Code 会话、桌面版、cam 自己的面板服务共用一次 PowerShell 查询，
     max_age 秒内查过的直接用（0 是现查：切换、退出桌面版这些要据此做决定的地方）。查不出来抛 OSError。"""
     with _WIN_PROCS_LOCK:
         if max_age > 0 and _WIN_PROCS["rows"] is not None and time.monotonic() - _WIN_PROCS["t"] < max_age:
@@ -1342,7 +1346,7 @@ def running_claude_processes():
         if IS_WIN:
             # 用完整路径而不是 Name：桌面 App 的判断看的是路径，只给文件名的话
             # Claude 桌面 App（AnthropicClaude\…\claude.exe）会被当成 Claude Code
-            for pid, exe, name, cmd in windows_processes(WIN_PROCS_REUSE):
+            for pid, exe, name, cmd, _ in windows_processes(WIN_PROCS_REUSE):
                 if pid != me and name.lower() in ("claude.exe", "node.exe", "bun.exe") and _is_claude_cmd(exe or name, cmd):
                     found.append((pid, cmd or exe or name))
         elif proc_root():  # Linux 的 /proc（测试里 CAM_TEST_PROC_ROOT 指向一个假的）
@@ -3695,7 +3699,7 @@ def _desktop_scan(max_age=0):
     found = []
     try:
         if IS_WIN:
-            rows = [(str(pid), f"{exe} {cmd}") for pid, exe, _, cmd in windows_processes(max_age)]
+            rows = [(str(pid), f"{exe} {cmd}") for pid, exe, _, cmd, _ in windows_processes(max_age)]
         else:
             out = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True, timeout=10)
             if out.returncode != 0:
@@ -5096,7 +5100,7 @@ _MAC_CWDS = {}  # (pid, 命令行) -> 工作目录：macOS 上 lsof 要几十到
 
 def claude_proc_info(procs):
     """正在跑的 claude 进程各自的 {"cwd", "secs"（已经跑了几秒）, "bot", "login"}，看不出来的不填。
-    Linux 读 /proc（都看得出）；macOS 用 ps 看运行时长、lsof 看工作目录；Windows 都看不出来。"""
+    Linux 读 /proc（都看得出）；macOS 用 ps 看运行时长、lsof 看工作目录；Windows 只看得出运行时长（进程表里的启动时间）。"""
     out = {pid: {} for pid, _ in procs}
     if not procs:
         return out
@@ -5106,6 +5110,16 @@ def claude_proc_info(procs):
                 out[s["pid"]] = {"cwd": s["cwd"], "secs": s["secs"], "bot": s["bot"], "login": s["login"]}
         return out
     if IS_WIN:
+        # 和 running_claude_processes 共用一次进程表；有了运行时长，才能按切换记录认出会话用的是哪个号
+        try:
+            started = {pid: st for pid, _, _, _, st in windows_processes(WIN_PROCS_REUSE)}
+        except OSError:
+            return out
+        now = time.time()
+        for pid in out:
+            st = started.get(pid)
+            if st and st <= now + 60:
+                out[pid]["secs"] = max(0.0, now - st)
         return out
     for pid, et in _ps_etimes(list(out)).items():
         if pid in out:
@@ -5239,6 +5253,14 @@ def _mtime(path):
         return None
 
 
+def sole_claude_code_account(data):
+    """只有一个 Claude Code 号、它就是当前登录时返回它的 id：用本机登录的会话认不出时间（Windows 上拿不到启动时间、
+    会话比第一条切换记录还早）也只可能是它。和 Rust 版 sessions::sole_claude_code_account 一致。"""
+    ids = [a.get("id") for a in (data or {}).get("accounts", []) if a.get("kind") == "claude_code"]
+    active = ((data or {}).get("active") or {}).get("claude_code")
+    return active if len(ids) == 1 and ids[0] == active else None
+
+
 def _session_rows(procs, data=None, detail=False):
     """正在跑的会话一行一个（见 sessions_view）。detail=False 时只算状态（红绿灯数“几个在回答”用，不读记录内容）。"""
     pids = [p for p, _ in procs]
@@ -5250,6 +5272,7 @@ def _session_rows(procs, data=None, detail=False):
     now = time.time()
     owner_of = owner_finder(data) if data else None
     names = {a["id"]: a.get("label") or a.get("email") or a["id"] for a in (data or {}).get("accounts", [])}
+    only_cc = sole_claude_code_account(data)
     out = []
     matched = match_sessions(procs, info, recs)
     for pid, sid, rec, path, how in matched:
@@ -5269,8 +5292,8 @@ def _session_rows(procs, data=None, detail=False):
             used = (meta or {}).get("context_used")
             login = inf.get("login")
             acc_id = None
-            if login in (None, "machine", "unknown") and owner_of and started:
-                acc_id = owner_of(started)
+            if login in (None, "machine", "unknown") and owner_of:
+                acc_id = (owner_of(started) if started else None) or only_cc
             bot = inf.get("bot")
             h = home().replace("\\", "/").rstrip("/")
             shown = cwd.replace("\\", "/")
@@ -10756,7 +10779,7 @@ def process_names():
         return [x for x in t.split(",") if x]
     try:
         if IS_WIN:
-            return [name for _, _, name, _ in windows_processes(WIN_PROCS_SECS)]
+            return [name for _, _, name, *_ in windows_processes(WIN_PROCS_SECS)]
         return subprocess.run(["ps", "-A", "-o", "comm="], capture_output=True, text=True, timeout=10).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return []
@@ -12530,7 +12553,7 @@ def process_table():
         return out
     try:
         if IS_WIN:  # 和会话数、桌面版共用一次进程表
-            txt = "\n".join(f"{pid}\t{cmd}" for pid, _, _, cmd in windows_processes(WIN_PROCS_SECS))
+            txt = "\n".join(f"{pid}\t{cmd}" for pid, _, _, cmd, _ in windows_processes(WIN_PROCS_SECS))
         else:
             txt = subprocess.run(["ps", "-A", "-o", "pid=,args="], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):

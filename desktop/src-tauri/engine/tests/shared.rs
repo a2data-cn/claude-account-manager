@@ -158,7 +158,7 @@ fn windows_parsing_cases() {
     for c in cases(&fx, "processes") {
         let got: Vec<Value> = parse_windows_processes(c["output"].as_str().unwrap())
             .into_iter()
-            .map(|(pid, exe, name, cmd)| json!([pid, exe, name, cmd]))
+            .map(|(pid, exe, name, cmd, started)| json!([pid, exe, name, cmd, started]))
             .collect();
         assert_eq!(json!(got), c["expect"], "{}", c["name"]);
     }

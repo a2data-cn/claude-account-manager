@@ -1291,7 +1291,7 @@ pub fn list_claude_processes() -> Option<Vec<(u32, String)>> {
         // 和桌面版共用一次进程表（一秒内查过的直接用：PowerShell 查一次本身就要半秒多）；
         // PowerShell 没起来、超时、自己出错了：不是“没有进程”
         let rows = super::health::win_processes(Duration::from_secs(1))?;
-        for (pid, exe, name, cmd) in rows {
+        for (pid, exe, name, cmd, _) in rows {
             let lname = name.to_lowercase();
             if pid == me || !matches!(lname.as_str(), "claude.exe" | "node.exe" | "bun.exe") {
                 continue;

@@ -2530,9 +2530,14 @@ const WIN_ENV_PS: &str = "$ErrorActionPreference='SilentlyContinue'; \
     $w = ''; try { $w = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((netsh wlan show interfaces | Out-String))) } catch {}; \
     [pscustomobject]@{ dns = $dns; culture = (Get-Culture).Name; route = \"$($r.InterfaceAlias)\"; \
     route_desc = \"$($a.InterfaceDescription)\"; wlan = $w } | ConvertTo-Json -Compress";
+// 每行：pid、程序路径、名字、启动时间（Unix 秒，拿不到是空的）、命令行；命令行放最后，里面有 Tab 也不怕
 const WIN_PROCS_PS: &str =
-    "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { \
-    \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$($_.CommandLine)\" }";
+    "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { $t = ''; \
+    try { if ($_.CreationDate) { $t = ([DateTimeOffset]$_.CreationDate).ToUnixTimeSeconds() } } catch {}; \
+    \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.Name)`t$t`t$($_.CommandLine)\" }";
+
+/// Windows 进程表的一行：(pid, 程序路径（可能是空的）, 名字, 命令行, 启动时间（Unix 秒）)
+pub type WinProc = (u32, String, String, String, Option<i64>);
 
 /// WIN_ENV_PS 的输出（ConvertTo-Json）→ {dns: [...], culture, route, route_desc, wlan}；前后有别的输出也认，解析不了的项是空的。
 /// wlan 是 netsh wlan show interfaces 的原文（脚本里转成了 base64，中文系统的代码页过管道不会乱）
@@ -2573,23 +2578,31 @@ pub fn parse_windows_env(text: &str) -> Value {
     json!({"dns": dns, "culture": txt("culture"), "route": txt("route"), "route_desc": txt("route_desc"), "wlan": wlan})
 }
 
-/// WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行)]
-pub fn parse_windows_processes(text: &str) -> Vec<(u32, String, String, String)> {
+/// WIN_PROCS_PS 的输出 → [(pid, 程序路径（可能是空的）, 名字, 命令行, 启动时间)]
+pub fn parse_windows_processes(text: &str) -> Vec<WinProc> {
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
     text.lines()
         .filter_map(|line| {
-            let parts: Vec<&str> = line.trim_end_matches('\r').splitn(4, '\t').collect();
-            let [pid, exe, name, cmd] = parts[..] else {
+            let parts: Vec<&str> = line.trim_end_matches('\r').splitn(5, '\t').collect();
+            let [pid, exe, name, started, cmd] = parts[..] else {
                 return None;
             };
             let pid = pid.trim();
-            if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+            if !digits(pid) {
                 return None;
             }
+            let started = started.trim();
+            let started = if digits(started) {
+                started.parse::<i64>().ok().filter(|t| *t > 0)
+            } else {
+                None
+            };
             Some((
                 pid.parse().ok()?,
                 exe.trim().to_string(),
                 name.trim().to_string(),
                 cmd.trim().to_string(),
+                started,
             ))
         })
         .collect()
@@ -2627,8 +2640,8 @@ fn windows_env() -> Value {
 
 /// Windows 上的全部进程：Claude Code 会话、桌面版共用一次 PowerShell 查询，max_age 内查过的直接用（零是现查）。
 /// 查不出来是 None。
-pub fn win_processes(max_age: Duration) -> Option<Vec<(u32, String, String, String)>> {
-    type Rows = Vec<(u32, String, String, String)>;
+pub fn win_processes(max_age: Duration) -> Option<Vec<WinProc>> {
+    type Rows = Vec<WinProc>;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, Rows)>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
