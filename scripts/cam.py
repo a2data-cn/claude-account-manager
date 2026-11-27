@@ -4379,9 +4379,10 @@ def _count_sessions(now):
         try:  # 各会话分开看：几个在回答、几个在等你确认（钩子记的 + 每个会话自己的记录文件和 CPU）
             rows = _session_rows(procs)
             _SESSION_STATES.update(answering=sum(r["state"] == "busy" for r in rows),
-                                   waiting=sum(r["state"] == "waiting" for r in rows))
+                                   waiting=sum(r["state"] == "waiting" for r in rows),
+                                   sure=bool(rows) and all(r["state_by"] != "guess" for r in rows))
         except Exception:  # noqa: BLE001  分不开就只说“正在回答”
-            _SESSION_STATES.update(answering=None, waiting=0)
+            _SESSION_STATES.update(answering=None, waiting=0, sure=False)
         _SESSION_CACHE[:] = [now, len(procs)]
     except Exception:  # noqa: BLE001  数不出来就沿用上次的
         _SESSION_CACHE[0] = now
@@ -4415,7 +4416,10 @@ def session_count(max_age=20):
 
 
 def session_busy():
-    """session_count 数到的会话里有没有真的在执行任务的（和 session_count 一起更新，先调它）。"""
+    """session_count 数到的会话里有没有真的在执行任务的（和 session_count 一起更新，先调它）。
+    每个会话的状态都有记录（不是猜的）时只看有没有在回答的：后台挂着的命令吃 CPU 不算。"""
+    if _SESSION_STATES.get("sure"):
+        return bool(_SESSION_STATES.get("answering"))
     return _SESSION_BUSY[0] or bool(_SESSION_STATES.get("answering"))
 
 
@@ -4423,7 +4427,7 @@ def session_counts():
     """session_count 数到的会话里几个在回答、几个在等你确认（和 session_count 一起更新，先调它）：{"answering", "waiting"}。
     answering 是 None 时看不出是哪个在回答（只知道有在执行的）。"""
     answering = _SESSION_STATES.get("answering")
-    if not answering and _SESSION_BUSY[0]:
+    if not answering and _SESSION_BUSY[0] and not _SESSION_STATES.get("sure"):
         answering = None
     return {"answering": answering, "waiting": _SESSION_STATES.get("waiting") or 0}
 
@@ -4439,7 +4443,8 @@ def sessions_brief():
 ACTIVE_WINDOW = 20  # 秒：会话记录文件这么久内写过就算在执行（跑着的时候每条消息、每个工具结果都往里追加；等你输入时不写）
 CPU_BUSY = 0.02  # claude 进程和它的子进程这段时间平均占 CPU 超过 2% 就算在执行（算 token、画界面、跑工具）；闲着等输入时接近 0
 _SESSION_BUSY = [False]
-_SESSION_STATES = {"answering": 0, "waiting": 0}  # 和 _SESSION_CACHE 一起更新：几个在回答、几个在等你确认
+_SESSION_STATES = {"answering": 0, "waiting": 0, "sure": False}  # 和 _SESSION_CACHE 一起更新：几个在回答、几个在等你确认；
+# sure：每个会话的状态都不是猜的（Claude Code 自己记的或钩子记的），这时只看它们，不再按整体 CPU 说“正在回答”
 _ACTIVITY = {"t": 0.0, "cpu": None, "busy": False, "rates": {}}  # 上次采样：时间、每个 claude 进程（含子进程）的累计 CPU 秒、结论
 _ACTIVITY_LOCK = threading.Lock()
 
@@ -4692,9 +4697,29 @@ def hook_items():
 
 def attention_view():
     """有没有 Claude Code 会话在等你确认（权限提示）：钩子记下来的，去掉答过的（会话记录在那之后又写了）和过期的；
-    没有 claude 进程在跑也不算。给红绿灯和面板用：{"count", "text", "since"}，没有就 None。"""
+    没有 claude 进程在跑也不算。再和会话页数出来的“等你确认”（Claude Code 自己记的，没装钩子也有）合起来（attention_merge）。
+    给红绿灯和面板用：{"count", "text", "since"}，没有就 None。"""
+    if not session_count():
+        return None
+    return attention_merge(_hook_attention(), session_counts()["waiting"])
+
+
+def attention_merge(hook, waiting):
+    """钩子记的（_hook_attention，没有是 None）和会话页上等你确认的个数合起来：钩子记的不比它少就用钩子的（写得出是哪个工具），
+    少了就只写个数。规则和 Rust 版 claude::attention_merge 一致（tests/shared/sessions.json）。"""
+    have = (hook or {}).get("count") or 0
+    n = max(have, waiting or 0)
+    if not n:
+        return None
+    if hook and have >= n:
+        return hook
+    return {"count": n, "text": f"{n} 个 Claude Code 会话在等你确认" if n > 1 else "Claude Code 在等你确认",
+            "since": (hook or {}).get("since")}
+
+
+def _hook_attention():
     sessions = _load_attention()["sessions"]
-    if not sessions or not session_count():
+    if not sessions:
         return None
     now, live = time.time(), []
     for s in sessions.values():
@@ -5098,9 +5123,73 @@ def _prune_session_caches(keep):
 _MAC_CWDS = {}  # (pid, 命令行) -> 工作目录：macOS 上 lsof 要几十到几百毫秒，同一个进程的工作目录不会变，查到就记着
 
 
+# Claude Code 自己在 sessions/<pid>.json 里记的状态 → 会话页的状态。shell 是这一轮答完了、后台还挂着命令
+# （Monitor、后台跑的服务，能挂好几天），不算在回答；它自己界面上也只把 busy 当在干活、waiting 当要你处理
+REGISTRY_STATES = {"busy": "busy", "waiting": "waiting", "idle": "idle", "shell": "idle"}
+
+
+def registry_entry(v, pid):
+    """Claude Code（新版）给每个正在跑的会话记的 <配置目录>/sessions/<pid>.json → {"sid", "cwd", "started"（Unix 秒）, "state"}，
+    看不出来的是 None；不是这个 pid 的、格式不对的返回 None。规则和 Rust 版 sessions::registry_entry 一致（tests/shared/sessions.json）。"""
+    if not isinstance(v, dict) or type(v.get("pid")) is not int or v["pid"] != pid:
+        return None
+    txt = lambda k: v[k].strip() if isinstance(v.get(k), str) and v[k].strip() else None  # noqa: E731
+    st = v.get("startedAt")
+    ok = isinstance(st, (int, float)) and not isinstance(st, bool) and st > 0
+    status = v.get("status")
+    return {"sid": txt("sessionId"), "cwd": txt("cwd"), "started": st / 1000 if ok else None,
+            "state": REGISTRY_STATES.get(status) if isinstance(status, str) else None}
+
+
+def merge_registry(info, e, now):
+    """把 registry_entry 并进 claude_proc_info 的一项：只补看不出来的工作目录、运行时长，再加上会话 id（"sid"）和状态（"state"）。
+    看得出运行时长、又和文件里的启动时间差 5 分钟以上：文件是以前一个同 pid 的进程留下的，不用。"""
+    if not e:
+        return info
+    secs = info.get("secs")
+    if secs is not None and e["started"] is not None and abs((now - secs) - e["started"]) > 300:
+        return info
+    out = dict(info)
+    if not out.get("cwd") and e["cwd"]:
+        out["cwd"] = e["cwd"]
+    if secs is None and e["started"] is not None and e["started"] <= now + 60:
+        out["secs"] = max(0.0, now - e["started"])
+    if e["sid"]:
+        out["sid"] = e["sid"]
+    if e.get("state"):
+        out["state"] = e["state"]
+    return out
+
+
+def claude_session_registry(pids):
+    """这些 pid 在 <配置目录>/sessions/ 里的记录：{pid: registry_entry}。没有这个目录（老版本 Claude Code）、读不了的跳过。"""
+    d = os.path.join(claude_config_dir(), "sessions")
+    if not os.path.isdir(d):
+        return {}
+    out = {}
+    for pid in pids:
+        try:
+            e = registry_entry(read_json(os.path.join(d, f"{pid}.json"), None), pid)
+        except (CamError, OSError, ValueError):  # Claude Code 正在写，读到一半
+            e = None
+        if e:
+            out[pid] = e
+    return out
+
+
 def claude_proc_info(procs):
-    """正在跑的 claude 进程各自的 {"cwd", "secs"（已经跑了几秒）, "bot", "login"}，看不出来的不填。
-    Linux 读 /proc（都看得出）；macOS 用 ps 看运行时长、lsof 看工作目录；Windows 只看得出运行时长（进程表里的启动时间）。"""
+    """正在跑的 claude 进程各自的 {"cwd", "secs"（已经跑了几秒）, "bot", "login", "sid", "state"}，看不出来的不填。
+    先看系统：Linux 读 /proc（都看得出）；macOS 用 ps 看运行时长、lsof 看工作目录；Windows 只看得出运行时长（进程表里的启动时间）。
+    再用 Claude Code 自己记的 <配置目录>/sessions/<pid>.json 补上工作目录、运行时长，加上会话 id 和状态（"state"）。"""
+    out = _proc_info_os(procs)
+    if procs:
+        now = time.time()
+        for pid, e in claude_session_registry(list(out)).items():
+            out[pid] = merge_registry(out[pid], e, now)
+    return out
+
+
+def _proc_info_os(procs):
     out = {pid: {} for pid, _ in procs}
     if not procs:
         return out
@@ -5188,8 +5277,9 @@ def _project_transcripts(cwd):
 def match_sessions(procs, info, recs):
     """把正在跑的 claude 进程对上会话：[(pid, 会话 id, 钩子记录, 记录文件, 怎么对上的)]。
 
-    先按钩子记的 pid（Linux 记得到父进程和祖父进程），再按工作目录对钩子记录，最后用那个工作目录里最新的、还没被
-    别的进程占走的记录文件。Windows 看不出工作目录：剩下的钩子记录按最近有动静的先后分给还没对上的进程。"""
+    先用 Claude Code 自己记的会话 id（<配置目录>/sessions/<pid>.json，claude_proc_info 放在 "sid"），再按钩子记的 pid
+    （Linux 记得到父进程和祖父进程），再按工作目录对钩子记录，最后用那个工作目录里最新的、还没被别的进程占走的记录文件。
+    Windows 看不出工作目录（老版本 Claude Code 没有那个文件时）：剩下的钩子记录按最近有动静的先后分给还没对上的进程。"""
     rec_items = sorted(((sid, r) for sid, r in recs.items() if isinstance(r, dict)),
                        key=lambda x: -float(x[1].get("last_ts") or 0))
     by_pid = {}
@@ -5197,7 +5287,14 @@ def match_sessions(procs, info, recs):
         for p in r.get("pids") or []:
             by_pid.setdefault(p, []).append(sid)
     used_sids, used_files, out = set(), set(), {}
+    for pid, _ in procs:  # 0. Claude Code 自己记的
+        sid = (info.get(pid) or {}).get("sid")
+        if sid and sid not in used_sids:
+            used_sids.add(sid)
+            out[pid] = [sid, "registry"]
     for pid, _ in procs:  # 1. pid
+        if pid in out:
+            continue
         sid = next((s for s in by_pid.get(pid, []) if s not in used_sids), None)
         if sid:
             used_sids.add(sid)
@@ -5278,8 +5375,12 @@ def _session_rows(procs, data=None, detail=False):
     for pid, sid, rec, path, how in matched:
         inf = info.get(pid) or {}
         mt = _mtime(path)
-        state = session_state(rec, bool(sid) and sid in waiting, (now - mt) if mt else None, rates.get(pid), now)
-        row = {"id": sid or f"pid-{pid}", "pid": pid, "state": state, "matched": how}
+        hooked = bool(sid) and sid in waiting
+        state, by = inf.get("state"), "claude_code"  # Claude Code 自己记的为准；没有再看钩子记的，再没有才按记录文件和 CPU 猜
+        if not state:
+            state = session_state(rec, hooked, (now - mt) if mt else None, rates.get(pid), now)
+            by = "hook" if hooked or (isinstance(rec, dict) and rec.get("state") in SESSION_STATE_NAMES) else "guess"
+        row = {"id": sid or f"pid-{pid}", "pid": pid, "state": state, "state_by": by, "matched": how}
         if detail:
             meta = transcript_meta(path) if path else None
             cwd = inf.get("cwd") or (rec or {}).get("cwd") or (meta or {}).get("cwd") or ""
@@ -5367,10 +5468,16 @@ def cmd_hooks(args):
         print(f"已写入 {st['settings']}：{'、'.join(HOOK_EVENTS)} 各一条钩子，命令是 {st['command']}")
         print("正在跑的 claude 要重开一次才会加载钩子。以后 Claude Code 弹权限确认（yes / no）时，菜单栏红绿灯三盏灯一起闪，卡片和面板的红绿灯写着在等你确认。")
     elif act == "remove":
+        before = hooks_status()
+        if not (before["installed"] or before["partial"] or before["stale"]):
+            print(f"{before['settings']} 里没有 cam 的钩子。")
+            return 0
         st = hooks_remove()
         print(f"已从 {st['settings']} 去掉 cam 的钩子（别的钩子没动）。")
     else:
         st = hooks_status()
+        if getattr(args, "check", False):  # 安装脚本用：装好了（而且是现在这份代码的快入口）退出码 0，否则 1，不打印
+            return 0 if st["installed"] and not st["slow"] else 1
         state = ("已装（旧写法，能用；重新 cam hooks install 换成快一些的入口）" if st["installed"] and st["slow"]
                  else "已装" if st["installed"] else "过期：指向别的 cam.py 或 python，重新 cam hooks install" if st["stale"]
                  else "只装了一部分，重新 cam hooks install" if st["partial"] else "没装（cam hooks install）")
@@ -14171,8 +14278,10 @@ def main(argv=None):
     sub.add_parser("verify", help="按 SHA256SUMS 校验代码文件是否完整（安装和更新时会自动做）")
     s = sub.add_parser("completion", help="输出 Tab 补全脚本（子命令和账号名），见 README“命令行补全”")
     s.add_argument("shell", choices=["bash", "zsh", "powershell"])
-    s = sub.add_parser("hooks", help="Claude Code 钩子：装了之后弹权限确认（yes / no）时红绿灯三盏灯一起闪（status / install / remove）")
+    s = sub.add_parser("hooks", help="Claude Code 钩子：会话页和红绿灯靠它认出“在回答 / 等你确认”，新版 Claude Code 自己也记着，"
+                                     "这是给老版本兜底（status / install / remove）")
     s.add_argument("action", nargs="?", choices=["status", "install", "remove"], default="status")
+    s.add_argument("--check", action="store_true", help="只用退出码说装没装好（0 装好了，1 没有），给安装脚本用")
     sub.add_parser("hook", help="（Claude Code 的钩子调用的，不用手动运行）从 stdin 读事件")
     s = sub.add_parser("env", help="Claude Code 环境：检查 / 安装 / 清理")
     esub = s.add_subparsers(dest="env_cmd")

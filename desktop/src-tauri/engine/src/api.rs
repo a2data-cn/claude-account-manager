@@ -472,6 +472,11 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
     };
     let brief = super::sessions::sessions_brief(); // 几个会话、几个在回答、几个等你确认
     let sessions = brief["count"].as_u64().unwrap_or(0) as usize;
+    let attention = if sessions > 0 {
+        attention_merge(attention_view(true), brief["waiting"].as_u64().unwrap_or(0))
+    } else {
+        Value::Null
+    };
     json!({
         "version": VERSION, "backend": "desktop", "host": host, "platform": platform,
         "active": data.get("active").cloned().unwrap_or(json!({})), "accounts": accs,
@@ -485,7 +490,7 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
         "risk_rules": super::health::risk_rules(),
         "regions": super::health::regions_info(),  // 支持地区卡：名单和说明
         "sessions": brief,  // 标题旁的红绿灯：真在执行任务才闪黄，开着等输入不算；几个在回答、几个等你确认
-        "attention": attention_view(sessions > 0),  // Claude Code 弹着权限确认等你（cam 的钩子记的）
+        "attention": attention,  // Claude Code 弹着权限确认等你：cam 的钩子记的，加上 Claude Code 自己记的
         "desktop_app": desk_app,  // 有桌面版的号时才有：装没装、版本、开着没有、开着的是哪个号
         "generated_at": now_iso()
     })

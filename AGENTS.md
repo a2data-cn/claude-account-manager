@@ -10,7 +10,7 @@
 ## 在新电脑上装
 
 - macOS / Linux：`bash install.sh --yes`；Windows：`powershell -ExecutionPolicy Bypass -File install.ps1 -Yes`
-- `--yes` 按默认选择：装 `cam` 命令，macOS 装菜单栏小工具，Windows 装托盘小工具（没有 Python 时先用 winget 装）；不装 Claude Code（要装就运行 `cam env install -y`），不装 Linux 后台服务。后台服务要先问过用户再装（不加 `--yes` 重新运行，问到时回答 y）：这台电脑上可能有别的程序在用同一个 Claude Code 登录
+- `--yes` 按默认选择：装 `cam` 命令和 Claude Code 钩子（`~/.claude/settings.json` 里加 cam 的几条，别的不动；会话状态的兜底），macOS 装菜单栏小工具，Windows 装托盘小工具（没有 Python 时先用 winget 装）；不装 Claude Code（要装就运行 `cam env install -y`），不装 Linux 后台服务。后台服务要先问过用户再装（不加 `--yes` 重新运行，问到时回答 y）：这台电脑上可能有别的程序在用同一个 Claude Code 登录
 - 要人来做的事：
   - 每个 Claude 账号在浏览器里登录一次：`cam login 名字`。走邮箱链接或 Google 授权，由用户自己完成，不要代劳，也不要想办法自动化
   - macOS 装菜单栏小工具时 Homebrew 可能要输密码；第一次读钥匙串时弹窗要点“始终允许”；第一次运行 python3 可能要装“命令行开发者工具”

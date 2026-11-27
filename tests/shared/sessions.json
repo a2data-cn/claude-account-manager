@@ -1,5 +1,5 @@
 {
- "_说明": "会话页的规则（cam.py 的 context_window / context_health / project_dir_name / session_state / session_phrase / transcript_meta / transcript_composition，Rust 版 sessions.rs）。transcripts 里每个 lines 按顺序写成一个 .jsonl（字符串原样写，对象写成紧凑 JSON），读出摘要和组成（top 是列出前几项）。",
+ "_说明": "会话页的规则（cam.py 的 context_window / context_health / project_dir_name / session_state / session_phrase / transcript_meta / transcript_composition，Rust 版 sessions.rs）。transcripts 里每个 lines 按顺序写成一个 .jsonl（字符串原样写，对象写成紧凑 JSON），读出摘要和组成（top 是列出前几项）。 registry：Claude Code（新版）给每个正在跑的会话记的 <配置目录>/sessions/<pid>.json 怎么读（registry_entry）、怎么并进系统看到的进程信息（merge_registry：只补工作目录、运行时长，加上会话 id 和状态；运行时长和文件里的启动时间差 5 分钟以上的不用）；file 是文件内容，expect 是并完以后的 {cwd, secs, sid, state}（null 是看不出来）。 attention_merge：红绿灯的“等你确认”，钩子记的（hook，attention_view 算的）和会话页上等你确认的个数（waiting，Claude Code 自己记的也算）合起来；registry 的 state 是 Claude Code 记的 status 换成会话页的状态（shell 是后台挂着命令，算空闲）。",
  "windows": [
   {
    "model": "claude-opus-5-5",
@@ -1229,6 +1229,303 @@
       5
      ]
     ]
+   }
+  }
+ ],
+ "registry": [
+  {
+   "name": "Windows：系统看不出工作目录和运行时长，全从文件里补",
+   "pid": 4321,
+   "now": 1795500000,
+   "file": {
+    "pid": 4321,
+    "sessionId": "b60e7eda-0bbd-4ca3-8d2b-0620cd65e15a",
+    "cwd": "C:\\Users\\me\\work\\shop",
+    "startedAt": 1795496400000,
+    "status": "idle"
+   },
+   "info": {},
+   "expect": {
+    "cwd": "C:\\Users\\me\\work\\shop",
+    "secs": 3600,
+    "sid": "b60e7eda-0bbd-4ca3-8d2b-0620cd65e15a",
+    "state": "idle"
+   }
+  },
+  {
+   "name": "系统看得出的不改，只加会话 id",
+   "pid": 7,
+   "now": 1795500000,
+   "file": {
+    "pid": 7,
+    "sessionId": "s-7",
+    "cwd": "/elsewhere",
+    "startedAt": 1795496500000
+   },
+   "info": {
+    "cwd": "/home/me/proj",
+    "secs": 3600
+   },
+   "expect": {
+    "cwd": "/home/me/proj",
+    "secs": 3600,
+    "sid": "s-7",
+    "state": null
+   }
+  },
+  {
+   "name": "启动时间和进程对不上（以前同 pid 的进程留下的）：不用",
+   "pid": 7,
+   "now": 1795500000,
+   "file": {
+    "pid": 7,
+    "sessionId": "s-old",
+    "cwd": "/old",
+    "startedAt": 1795410000000,
+    "status": "busy"
+   },
+   "info": {
+    "secs": 60
+   },
+   "expect": {
+    "cwd": null,
+    "secs": 60,
+    "sid": null,
+    "state": null
+   }
+  },
+  {
+   "name": "文件里的 pid 不是这个进程：不用",
+   "pid": 8,
+   "now": 1795500000,
+   "file": {
+    "pid": 9,
+    "sessionId": "s-9",
+    "cwd": "/x",
+    "startedAt": 1795499940000
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": null,
+    "state": null
+   }
+  },
+  {
+   "name": "pid 写成 true 不算",
+   "pid": 1,
+   "now": 1795500000,
+   "file": {
+    "pid": true,
+    "sessionId": "s-1",
+    "cwd": "/x"
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": null,
+    "state": null
+   }
+  },
+  {
+   "name": "缺项、类型不对、空字符串的当看不出来",
+   "pid": 5,
+   "now": 1795500000,
+   "file": {
+    "pid": 5,
+    "sessionId": "  ",
+    "cwd": 3,
+    "startedAt": "1795496400000"
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": null,
+    "state": null
+   }
+  },
+  {
+   "name": "启动时间在将来一分钟以后：不算运行时长",
+   "pid": 5,
+   "now": 1795500000,
+   "file": {
+    "pid": 5,
+    "sessionId": "s-5",
+    "startedAt": 1795500600000
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": "s-5",
+    "state": null
+   }
+  },
+  {
+   "name": "不是 JSON 对象",
+   "pid": 5,
+   "now": 1795500000,
+   "file": [
+    "pid",
+    5
+   ],
+   "info": {
+    "secs": 10
+   },
+   "expect": {
+    "cwd": null,
+    "secs": 10,
+    "sid": null,
+    "state": null
+   }
+  },
+  {
+   "name": "Claude Code 说在忙：在回答",
+   "pid": 11,
+   "now": 1795500000,
+   "file": {
+    "pid": 11,
+    "sessionId": "s-11",
+    "status": "busy"
+   },
+   "info": {
+    "secs": 30
+   },
+   "expect": {
+    "cwd": null,
+    "secs": 30,
+    "sid": "s-11",
+    "state": "busy"
+   }
+  },
+  {
+   "name": "等你处理（权限确认、问你问题）：等你确认",
+   "pid": 12,
+   "now": 1795500000,
+   "file": {
+    "pid": 12,
+    "status": "waiting"
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": null,
+    "state": "waiting"
+   }
+  },
+  {
+   "name": "后台挂着命令（shell）：答完了，算空闲",
+   "pid": 13,
+   "now": 1795500000,
+   "file": {
+    "pid": 13,
+    "sessionId": "s-13",
+    "status": "shell"
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": "s-13",
+    "state": "idle"
+   }
+  },
+  {
+   "name": "不认识的状态、类型不对的：当没记",
+   "pid": 14,
+   "now": 1795500000,
+   "file": {
+    "pid": 14,
+    "status": "thinking"
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": null,
+    "state": null
+   }
+  },
+  {
+   "name": "状态写成列表也不出错",
+   "pid": 15,
+   "now": 1795500000,
+   "file": {
+    "pid": 15,
+    "status": [
+     "busy"
+    ]
+   },
+   "info": {},
+   "expect": {
+    "cwd": null,
+    "secs": null,
+    "sid": null,
+    "state": null
+   }
+  }
+ ],
+ "attention_merge": [
+  {
+   "name": "都没有",
+   "hook": null,
+   "waiting": 0,
+   "expect": null
+  },
+  {
+   "name": "只有钩子记的：原样用（写得出是哪个工具）",
+   "hook": {
+    "count": 1,
+    "text": "Claude Code 在等你确认 · Bash：npm test",
+    "since": "2026-11-27T10:00:00+08:00"
+   },
+   "waiting": 1,
+   "expect": {
+    "count": 1,
+    "text": "Claude Code 在等你确认 · Bash：npm test",
+    "since": "2026-11-27T10:00:00+08:00"
+   }
+  },
+  {
+   "name": "钩子记的比会话页多（会话页还没数到）：用钩子的",
+   "hook": {
+    "count": 2,
+    "text": "2 个 Claude Code 会话在等你确认",
+    "since": "2026-11-27T10:00:00+08:00"
+   },
+   "waiting": 0,
+   "expect": {
+    "count": 2,
+    "text": "2 个 Claude Code 会话在等你确认",
+    "since": "2026-11-27T10:00:00+08:00"
+   }
+  },
+  {
+   "name": "没装钩子，Claude Code 自己记着一个在等",
+   "hook": null,
+   "waiting": 1,
+   "expect": {
+    "count": 1,
+    "text": "Claude Code 在等你确认",
+    "since": null
+   }
+  },
+  {
+   "name": "会话页比钩子记的多：只写个数，时间用钩子的",
+   "hook": {
+    "count": 1,
+    "text": "Claude Code 在等你确认 · Edit",
+    "since": "2026-11-27T10:00:00+08:00"
+   },
+   "waiting": 3,
+   "expect": {
+    "count": 3,
+    "text": "3 个 Claude Code 会话在等你确认",
+    "since": "2026-11-27T10:00:00+08:00"
    }
   }
  ]

@@ -139,7 +139,9 @@ export interface SessionRow {
   id: string;
   pid: number;
   state: "busy" | "waiting" | "idle";
-  matched: "hook" | "cwd" | "newest" | "guess" | null;
+  matched: "registry" | "hook" | "cwd" | "newest" | "guess" | null;
+  /** 状态从哪来：Claude Code 自己记的 / cam 的钩子记的 / 按记录文件和 CPU 猜的 */
+  state_by: "claude_code" | "hook" | "guess";
   project?: string;
   cwd?: string | null;
   login?: string | null;

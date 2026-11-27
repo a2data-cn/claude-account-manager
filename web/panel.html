@@ -680,6 +680,7 @@ details.pg-kept[open] > summary { margin-bottom: 10px; }
 .ss-row > span { min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; }
 .ss-row b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-row .hint { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-row > .ss-acc > span, .ss-row > .ss-st > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }  /* 号是很长的邮箱时截短，不压到旁边一栏上（鼠标放上去看全） */
 .ss-row > .chip { justify-self: start; }
 .ss-led { width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); margin-left: 3px; }
 .ss-led.busy { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); animation: led-breathe 2s ease-in-out infinite; }
@@ -721,6 +722,7 @@ details.pg-kept[open] > summary { margin-bottom: 10px; }
 @media (max-width: 720px) {
   .ss-row { grid-template-columns: 14px minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 12px; }
   .ss-row > .ss-acc, .ss-row > .ss-st { grid-column: 2 / 4; flex-direction: row; gap: 8px; align-items: baseline; }
+  .ss-row > .ss-acc > .hint { flex: none; }  /* 窄屏上号和模型排一行：长邮箱截短，模型名不挤掉 */
   .ss-row > .ss-ctxc { grid-column: 2 / 3; }
   .ss-row > .chip { grid-row: 1; grid-column: 3; justify-self: end; }
   .ss-top { grid-template-columns: 1fr; gap: 12px; }
@@ -3058,7 +3060,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
     return `<button type="button" class="ss-row" data-act="ss-pick" data-sid="${esc(r.id)}" aria-pressed="${r.id === ssSel}" title="${esc((r.login_text || "") + guess)}">
       <span><i class="ss-led ${led}"></i></span>
       <span><b>${esc(r.project || "看不出是哪个项目")}</b><span class="hint">${esc(r.cwd || "")}</span></span>
-      <span class="ss-acc"><span>${esc(who)}</span><span class="hint">${r.model ? esc(modelName(r.model)) : "还没有回复"}</span></span>
+      <span class="ss-acc"><span title="${esc(who)}">${esc(who)}</span><span class="hint">${r.model ? esc(modelName(r.model)) : "还没有回复"}</span></span>
       <span class="ss-st"><span>${stText}</span><span class="hint">${ran}${r.turns != null ? ` · ${r.turns} 轮` : ""}</span></span>
       <span class="ss-ctxc"><span><b>${kTok(r.context_used)}</b> <span class="hint" style="display:inline">/ ${kTok(r.context_window)}${r.window_exact ? "" : "（约）"}${pct == null ? "" : ` · ${Math.round(pct)}%`}</span></span>
         <span class="ss-bar"><i class="${h ? h[2] : ""}" style="width:${pct == null ? 0 : pct.toFixed(1)}%"></i></span></span>
@@ -3077,7 +3079,7 @@ dialog h3 { margin: 0 0 12px; font-size: 17px; font-weight: 650; }
       return;
     }
     box.innerHTML = rows.map(ssRow).join("")
-      + (v.hooks ? "" : `<p class="hint ss-note">没装 cam 的钩子：“在回答 / 空闲 / 等你确认”是按记录文件和 CPU 猜的。终端运行 <code>cam hooks install</code> 后会准一些（正在跑的会话要重开一次）。</p>`);
+      + (v.hooks || !rows.some((r) => r.state_by === "guess") ? "" : `<p class="hint ss-note">有的会话“在回答 / 空闲 / 等你确认”是按记录文件和 CPU 猜的：Claude Code 版本旧，自己没记状态，也没装 cam 的钩子。升级 Claude Code（<code>claude update</code>），或者终端运行 <code>cam hooks install</code> 后就准了（正在跑的会话要重开一次）。</p>`);
   }
   // 方块图：面积按 token 分。squarify：一行一行地摆，每行挑能让方块最接近正方形的个数
   function squarify(items, x, y, w, h) {

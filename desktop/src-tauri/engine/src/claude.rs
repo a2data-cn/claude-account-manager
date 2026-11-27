@@ -1844,6 +1844,25 @@ pub fn attention_view(procs_running: bool) -> Value {
     json!({ "count": live.len(), "text": text, "since": first.get("since").cloned().unwrap_or(Value::Null) })
 }
 
+/// 钩子记的（attention_view，没有是 Null）和会话页上等你确认的个数（Claude Code 自己记的，没装钩子也有）合起来：
+/// 钩子记的不比它少就用钩子的（写得出是哪个工具），少了就只写个数。和 cam.py 的 attention_merge 一致（tests/shared/sessions.json）
+pub fn attention_merge(hook: Value, waiting: u64) -> Value {
+    let have = hook.get("count").and_then(Value::as_u64).unwrap_or(0);
+    let n = have.max(waiting);
+    if n == 0 {
+        return Value::Null;
+    }
+    if have >= n {
+        return hook;
+    }
+    let text = if n > 1 {
+        format!("{n} 个 Claude Code 会话在等你确认")
+    } else {
+        "Claude Code 在等你确认".to_string()
+    };
+    json!({ "count": n, "text": text, "since": hook.get("since").cloned().unwrap_or(Value::Null) })
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;

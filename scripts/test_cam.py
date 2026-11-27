@@ -2159,6 +2159,73 @@ class CamTest(unittest.TestCase):
             rows = {r["pid"]: r for r in cam.sessions_view(one)["sessions"]}
             self.assertEqual(rows[302]["account_id"], None)
 
+    def test_sessions_use_claude_code_own_registry(self):
+        """Claude Code（新版）自己记的 <配置目录>/sessions/<pid>.json：Windows 上看不出工作目录、没装钩子，也能对上会话，
+        读出项目、模型、上下文；启动时间也从这里来。文件对不上的进程照旧。"""
+        cam = self.cam
+        now = time.time()
+        proj = os.path.join(self.tmp, "work", "shop")
+        os.makedirs(proj)
+        cfg = cam.claude_config_dir()
+        tr = os.path.join(cfg, "projects", cam.project_dir_name(proj), "sid-shop.jsonl")
+        write(tr, json.dumps({"type": "user", "message": {"role": "user", "content": "SECRET"}, "cwd": proj,
+                              "timestamp": "2026-11-26T01:00:00Z"}) + "\n" +
+              json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5-5",
+                                                           "usage": {"input_tokens": 5, "cache_read_input_tokens": 1000,
+                                                                     "cache_creation_input_tokens": 10, "output_tokens": 3},
+                                                           "content": [{"type": "text", "text": "SECRET"}]}}) + "\n")
+        write(os.path.join(cfg, "projects", cam.project_dir_name(proj), "newer-other.jsonl"), "")  # 同目录里更新的别的记录：不能抢
+        write(os.path.join(cfg, "sessions", "401.json"), json.dumps(
+            {"pid": 401, "sessionId": "sid-shop", "cwd": proj, "startedAt": int((now - 7200) * 1000), "status": "idle"}))
+        write(os.path.join(cfg, "sessions", "402.json"), "{\"pid\": 402, \"sessionId\"")  # 正在写、读到一半
+        write(os.path.join(cfg, "sessions", "403.json"), json.dumps(  # 弹着权限确认，没装钩子
+            {"pid": 403, "sessionId": "sid-wait", "cwd": os.path.join(self.tmp, "work", "blog"), "status": "waiting"}))
+        table = [(401, "C:\\bin\\claude.exe", "claude.exe", "claude", None),
+                 (402, "C:\\bin\\claude.exe", "claude.exe", "claude", int(now - 60)),
+                 (403, "C:\\bin\\claude.exe", "claude.exe", "claude", int(now - 30))]
+        procs = [(p, c) for p, _, _, c, _ in table]
+        data = {"accounts": [{"id": "a1", "kind": "claude_code", "label": "个人号"},
+                             {"id": "b1", "kind": "claude_code", "label": "工作号"}],
+                "active": {"claude_code": "a1"},
+                "switch_log": [{"at": dt.datetime.fromtimestamp(now - 10000, dt.timezone.utc).isoformat(), "id": "b1"},
+                               {"at": dt.datetime.fromtimestamp(now - 600, dt.timezone.utc).isoformat(), "id": "a1"}]}
+        cam._ACTIVITY["rates"] = {}
+        with mock.patch.object(cam, "IS_WIN", True), mock.patch.object(cam, "proc_root", lambda: None), \
+                mock.patch.object(cam, "windows_processes", lambda max_age=0: table), \
+                mock.patch.object(cam, "running_claude_processes", lambda: procs), \
+                mock.patch.object(cam, "claude_activity", return_value=False):
+            view = cam.sessions_view(data)
+            cam._SESSION_CACHE[:] = [0.0, 0]
+            att = cam.attention_view()  # 红绿灯：没装钩子也知道有一个在等你确认
+        rows = {r["pid"]: r for r in view["sessions"]}
+        a = rows[401]
+        self.assertEqual((a["id"], a["matched"], a["project"], a["model"], a["turns"], a["account"]),
+                         ("sid-shop", "registry", "shop", "claude-opus-5-5", 1, "工作号"))  # 两小时前启动：那时是工作号
+        self.assertEqual(a["context_used"], 1018)
+        self.assertEqual((rows[402]["matched"], rows[402]["account"]), (None, "个人号"))
+        self.assertNotIn("SECRET", json.dumps(view, ensure_ascii=False))
+        # 状态：Claude Code 自己记的为准，记不了的才猜；等你确认的排最前面
+        self.assertEqual([(r["pid"], r["state"], r["state_by"]) for r in view["sessions"]],
+                         [(403, "waiting", "claude_code"), (401, "idle", "claude_code"), (402, "idle", "guess")])
+        self.assertEqual((rows[403]["project"], view["waiting"]), ("blog", 1))
+        self.assertEqual(att, {"count": 1, "text": "Claude Code 在等你确认", "since": None})
+
+        # 每个会话都有记录时，后台挂着的命令吃 CPU 不算“正在回答”；有猜的会话时照旧按 CPU 说
+        write(os.path.join(cfg, "sessions", "402.json"), json.dumps({"pid": 402, "sessionId": "sid-bg", "status": "shell"}))
+        def counts():
+            with mock.patch.object(cam, "IS_WIN", True), mock.patch.object(cam, "proc_root", lambda: None), \
+                    mock.patch.object(cam, "windows_processes", lambda max_age=0: table), \
+                    mock.patch.object(cam, "running_claude_processes", lambda: procs), \
+                    mock.patch.object(cam, "claude_activity", return_value=True):  # 整体看在吃 CPU
+                cam._SESSION_CACHE[:] = [0.0, 0]
+                self.assertEqual(cam.session_count(), 3)
+                return cam.session_busy(), cam.session_counts()
+
+        write(os.path.join(cfg, "sessions", "402.json"), json.dumps({"pid": 402, "sessionId": "sid-bg", "status": "shell"}))
+        self.assertEqual(counts(), (False, {"answering": 0, "waiting": 1}))
+        os.remove(os.path.join(cfg, "sessions", "402.json"))
+        self.assertEqual(counts(), (True, {"answering": None, "waiting": 1}))
+
     def test_windows_console_programs_run_without_window(self):
         """Windows：后台起的 cam 进程（面板服务、环境检测）带一个看不见的控制台，不用 DETACHED_PROCESS（没有控制台时它再调
         powershell 每次都会弹一个蓝框）；查进程、读系统设置、git 这些控制台程序都加 CREATE_NO_WINDOW。"""
@@ -7952,6 +8019,11 @@ class SharedFixtureTest(unittest.TestCase):
             self.assertEqual(cam.session_state(c["rec"], c["waiting"], c["written_ago"], c["cpu"], c["now"]), c["expect"], c["name"])
         for c in fx["phrases"]:
             self.assertEqual(cam.session_phrase(c["n"], c["busy"], c["answering"], c["waiting"]), c["expect"], c)
+        for c in fx["registry"]:
+            got = cam.merge_registry(c["info"], cam.registry_entry(c["file"], c["pid"]), c["now"])
+            self.assertEqual({k: got.get(k) for k in ("cwd", "secs", "sid", "state")}, c["expect"], c["name"])
+        for c in fx["attention_merge"]:
+            self.assertEqual(cam.attention_merge(c["hook"], c["waiting"]), c["expect"], c["name"])
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         for c in fx["transcripts"]:
@@ -9018,7 +9090,8 @@ class InstallTest(unittest.TestCase):
     def test_install_twice_then_uninstall(self):
         write(self.rc, "alias ll='ls -l'")  # 最后一行没换行
         write(os.path.join(self.home, ".claude-accounts", "accounts.json"), "{}\n")
-        write(os.path.join(self.home, ".claude", "settings.json"), "{}\n")
+        settings = os.path.join(self.home, ".claude", "settings.json")
+        write(settings, '{"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}}\n')
         menu_py = os.path.join(ROOT, "extras", "swiftbar", "cam_menu.py")
         if sys.platform == "darwin":  # 菜单栏插件已经装好：不再跑 SwiftBar 的安装（会用 Homebrew）
             write(os.path.join(self.plugins, "Claude 账号.1m.sh"), f'exec python3 "{menu_py}"\n')
@@ -9033,6 +9106,16 @@ class InstallTest(unittest.TestCase):
             self.assertIn("安装完成", out)
             self.assertIn("cam login", out)
             self.assertIn("已经装好了：" if i else "末尾加了一行", out)
+            # Claude Code 钩子默认装上（兜底），第二次不再装；别的设置、别人的钩子不动
+            self.assertIn("已经装好了（cam hooks status" if i else "装 Claude Code 钩子吗？ → 是", out)
+            with open(settings) as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg["model"], "opus")
+            self.assertEqual(sorted(cfg["hooks"]), sorted(["PermissionRequest", "PostToolUse", "PostToolUseFailure", "PermissionDenied",
+                                                           "UserPromptSubmit", "Stop", "SessionEnd"]))
+            self.assertEqual(cfg["hooks"]["Stop"][0], {"hooks": [{"type": "command", "command": "say done"}]})
+            self.assertEqual(len(cfg["hooks"]["Stop"]), 2)
+            self.assertIn(os.path.join(ROOT, "scripts", "cam_hook.py"), cfg["hooks"]["PostToolUse"][0]["hooks"][0]["command"])
         self.assertFalse(os.path.exists(self.unit))  # 后台服务默认不装
         self.assertEqual(self.calls_made(), [])
         if sys.platform.startswith("linux"):
@@ -9055,6 +9138,9 @@ class InstallTest(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(self.plugins, "claude-accounts.1m.sh")))
         for kept in (".claude-accounts/accounts.json", ".claude/settings.json"):  # 账号数据和 Claude Code 配置不动
             self.assertTrue(os.path.exists(os.path.join(self.home, kept)), kept)
+        with open(settings) as f:  # 只去掉 cam 的钩子
+            self.assertEqual(json.load(f), {"model": "opus", "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}})
+        self.assertIn("去掉 cam 的钩子", out)
 
     def test_verify_failure_stops_install(self):
         root = os.path.join(self.tmp, "code")

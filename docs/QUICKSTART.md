@@ -24,10 +24,11 @@ git clone https://github.com/a2data-cn/claude-account-manager.git
 - 检查 Python 3.8 以上。Windows 上没有的话会问你，再用系统自带的 winget 装
 - 按 `SHA256SUMS` 校验文件
 - 装好 `cam` 命令
+- 装上 Claude Code 钩子：会话页和红绿灯靠它认出“在回答 / 等你确认”（新版 Claude Code 自己也记着，这是兜底）
 - macOS 装菜单栏小工具，Windows 装托盘小工具
 - 最后运行一次 `cam doctor`
 
-它不碰你的账号数据，也不碰 Claude Code 的配置。想全部按默认、一句都不问，就加 `--yes`（Windows 写 `-Yes`）。
+它不碰你的账号数据；Claude Code 的配置只在 `settings.json` 里加几条 cam 的钩子，别的不动（`cam hooks remove` 去掉）。想全部按默认、一句都不问，就加 `--yes`（Windows 写 `-Yes`）。
 
 装完新开一个终端，运行 `cam --version` 能看到版本号就好了。还没装 Claude Code 的，运行 `cam env install`。
 

@@ -2,7 +2,7 @@
 
 use cam_engine::alerts::due_alerts;
 use cam_engine::api::{account_health, apply_manual, days_left_at};
-use cam_engine::claude::{identify, identity_agrees};
+use cam_engine::claude::{attention_merge, identify, identity_agrees};
 use cam_engine::desktop_app::{login_state, version_from_path};
 use cam_engine::health::{
     addr_special, auth_item, der_issuer, exit_note, net_fingerprint_of, note_risk_in, parse_hosts,
@@ -21,7 +21,7 @@ use cam_engine::mailbox::detect;
 use cam_engine::pace::{note_usage_samples, pace_series, usage_pace};
 use cam_engine::rules::{match_time_rule, validate};
 use cam_engine::sessions::{
-    context_health, context_window, project_dir_name, session_phrase, session_state,
+    context_health, context_window, project_dir_name, registry_rule, session_phrase, session_state,
     transcript_composition, transcript_meta,
 };
 use cam_engine::store::{accounts, find_index, parse_day, s};
@@ -915,6 +915,35 @@ fn session_cases() {
     for c in cases(&fx, "health") {
         let got = context_health(c["used"].as_u64(), c["window"].as_u64().unwrap());
         assert_eq!(json!(got), c["expect"], "{c}");
+    }
+    for c in cases(&fx, "registry") {
+        let got = registry_rule(
+            &c["info"],
+            &c["file"],
+            c["pid"].as_u64().unwrap() as u32,
+            c["now"].as_f64().unwrap(),
+        );
+        let want = &c["expect"];
+        assert_eq!(
+            (
+                &got["cwd"],
+                &got["sid"],
+                &got["state"],
+                got["secs"].as_f64()
+            ),
+            (
+                &want["cwd"],
+                &want["sid"],
+                &want["state"],
+                want["secs"].as_f64()
+            ),
+            "{}",
+            c["name"]
+        );
+    }
+    for c in cases(&fx, "attention_merge") {
+        let got = attention_merge(c["hook"].clone(), c["waiting"].as_u64().unwrap());
+        assert_eq!(got, c["expect"], "{}", c["name"]);
     }
     for c in cases(&fx, "project_dir") {
         assert_eq!(

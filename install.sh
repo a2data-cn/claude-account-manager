@@ -1,10 +1,11 @@
 #!/bin/bash
 # 一键安装 cam（macOS / Linux）。macOS 上也可以在访达里双击“安装.command”。
 # 用法：bash install.sh [--yes] [--skip-verify] [--uninstall]
-#   --yes          不提问，全部按默认选择（菜单栏小工具装；Claude Code 和后台服务不装）
+#   --yes          不提问，全部按默认选择（菜单栏小工具、Claude Code 钩子装；Claude Code 和后台服务不装）
 #   --skip-verify  跳过 SHA256SUMS 文件校验（自己改过代码时用）
-#   --uninstall    卸载：去掉 cam 命令、加进 shell 配置的那一行、菜单栏插件、后台服务
-# 可以重复运行，装好的部分会跳过。账号数据（~/.claude-accounts）和 Claude Code 配置（~/.claude）都不会动。
+#   --uninstall    卸载：去掉 cam 命令、加进 shell 配置的那一行、菜单栏插件、后台服务、Claude Code 里 cam 的钩子
+# 可以重复运行，装好的部分会跳过。账号数据（~/.claude-accounts）不会动；Claude Code 的配置只在 settings.json 里加几条 cam 的钩子
+#（别的设置不动）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -139,6 +140,18 @@ uninstall() {
     ok "已停止并删除 $UNIT"
   fi
 
+  # Claude Code 的钩子指着这份代码：不去掉的话代码删了以后，Claude Code 每次调用工具都白跑一个找不到的命令
+  step "Claude Code 钩子"
+  local py out
+  py="$(command -v python3 || true)"
+  if [[ -z "$py" ]]; then
+    warn "没找到 python3，Claude Code 的 settings.json 里 cam 的钩子没去掉。装回 python3 后运行：python3 $ROOT/scripts/cam.py hooks remove"
+  elif out="$("$py" "$ROOT/scripts/cam.py" hooks remove 2>&1)"; then
+    if [[ "$out" == 已* ]]; then ok "$out"; else note "$out"; fi
+  else
+    warn "钩子没去掉：${out}"
+  fi
+
   echo
   echo "✓ 卸载完成。代码目录 $ROOT 和账号数据 ~/.claude-accounts 都还在；数据目录里有各账号的登录凭据，确定不要了再自己删。"
 }
@@ -219,7 +232,25 @@ else
   fi
 fi
 
-# ---- 5. macOS：菜单栏小工具
+# ---- 5. Claude Code 钩子：会话页、红绿灯认“在回答 / 等你确认”的兜底。新版 Claude Code 自己记着状态，老版本靠它
+step "Claude Code 钩子"
+if "$PY" "$ROOT/scripts/cam.py" hooks status --check >/dev/null 2>&1; then
+  ok "已经装好了（cam hooks status 查看）"
+else
+  note "在 Claude Code 的 settings.json 里加几条 cam 的钩子，别的设置不动：会话页、红绿灯靠它认出“在回答 / 等你确认”。新版 Claude Code 自己也记着，这是给老版本兜底"
+  note "每次 Claude 调用工具时顺带跑一下 cam（不让 Claude 等它）；不想要了运行 cam hooks remove"
+  if ask "装 Claude Code 钩子吗？" y; then
+    if out="$("$PY" "$ROOT/scripts/cam.py" hooks install 2>&1)"; then
+      ok "装好了（正在跑的 claude 要重开一次才加载）"
+    else
+      warn "没装成：${out}。以后可以运行 cam hooks install 再试"
+    fi
+  else
+    note "以后想装：cam hooks install"
+  fi
+fi
+
+# ---- 6. macOS：菜单栏小工具
 if [[ $OS == Darwin ]]; then
   step "菜单栏小工具（SwiftBar 插件）"
   PLUGIN="$(swiftbar_plugin)"
@@ -237,7 +268,7 @@ if [[ $OS == Darwin ]]; then
   fi
 fi
 
-# ---- 6. Linux：后台 cam serve（默认不装，要问过才装）
+# ---- 7. Linux：后台 cam serve（默认不装，要问过才装）
 if [[ $OS == Linux ]]; then
   step "后台服务（可选）"
   if [[ -f "$UNIT_FILE" ]]; then
@@ -266,7 +297,7 @@ if [[ $OS == Linux ]]; then
   fi
 fi
 
-# ---- 7. 环境检查
+# ---- 8. 环境检查
 step "环境检查（cam doctor，会联网测一下 Claude 服务，要几秒钟）"
 DOCTOR="$("$PY" "$ROOT/scripts/cam.py" doctor 2>&1)" || true
 echo "  ${DOCTOR%%$'\n'*}"

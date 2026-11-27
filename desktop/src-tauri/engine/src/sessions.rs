@@ -790,12 +790,104 @@ fn prune_caches(keep: &HashSet<PathBuf>) {
     }
 }
 
-/// 一个 claude 进程能看出来的：工作目录、已经跑了几秒、用的哪个登录
+/// 一个 claude 进程能看出来的：工作目录、已经跑了几秒、用的哪个登录、会话 id 和状态（这两项是 Claude Code 自己记的）
 #[derive(Clone, Default, Debug)]
 struct ProcInfo {
     cwd: Option<String>,
     secs: Option<f64>,
     login: Option<String>,
+    sid: Option<String>,
+    state: Option<&'static str>,
+}
+
+/// Claude Code（新版）给每个正在跑的会话记的 <配置目录>/sessions/<pid>.json 里用得上的几项
+#[derive(Clone, Default, Debug)]
+pub struct RegistryEntry {
+    pub sid: Option<String>,
+    pub cwd: Option<String>,
+    /// 启动时间，Unix 秒
+    pub started: Option<f64>,
+    /// 状态换成会话页的说法（registry_state）
+    pub state: Option<&'static str>,
+}
+
+/// Claude Code 自己在 sessions/<pid>.json 里记的状态 → 会话页的状态。shell 是这一轮答完了、后台还挂着命令
+/// （Monitor、后台跑的服务，能挂好几天），不算在回答。和 cam.py 的 REGISTRY_STATES 一致
+fn registry_state(status: &str) -> Option<&'static str> {
+    match status {
+        "busy" => Some("busy"),
+        "waiting" => Some("waiting"),
+        "idle" | "shell" => Some("idle"),
+        _ => None,
+    }
+}
+
+/// <配置目录>/sessions/<pid>.json 的内容 → 会话 id、工作目录、启动时间、状态，看不出来的是 None；不是这个 pid 的、格式不对的返回 None。
+/// 和 cam.py 的 registry_entry 一致（tests/shared/sessions.json）
+pub fn registry_entry(v: &Value, pid: u32) -> Option<RegistryEntry> {
+    if v.get("pid").and_then(Value::as_u64) != Some(u64::from(pid)) {
+        return None;
+    }
+    let txt = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+    };
+    let started = v
+        .get("startedAt")
+        .and_then(Value::as_f64)
+        .filter(|t| *t > 0.0)
+        .map(|t| t / 1000.0);
+    Some(RegistryEntry {
+        sid: txt("sessionId"),
+        cwd: txt("cwd"),
+        started,
+        state: v
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(registry_state),
+    })
+}
+
+/// 把 registry_entry 并进系统看到的进程信息：只补看不出来的工作目录、运行时长，再加上会话 id 和状态。
+/// 看得出运行时长、又和文件里的启动时间差 5 分钟以上：文件是以前一个同 pid 的进程留下的，不用。和 cam.py 的 merge_registry 一致
+fn merge_registry(i: &mut ProcInfo, e: &RegistryEntry, now: f64) {
+    if let (Some(secs), Some(st)) = (i.secs, e.started) {
+        if ((now - secs) - st).abs() > 300.0 {
+            return;
+        }
+    }
+    if i.cwd.as_deref().is_none_or(str::is_empty) {
+        if let Some(c) = &e.cwd {
+            i.cwd = Some(c.clone());
+        }
+    }
+    if i.secs.is_none() {
+        if let Some(st) = e.started.filter(|st| *st <= now + 60.0) {
+            i.secs = Some((now - st).max(0.0));
+        }
+    }
+    if e.sid.is_some() {
+        i.sid.clone_from(&e.sid);
+    }
+    if e.state.is_some() {
+        i.state = e.state;
+    }
+}
+
+/// 两边共用的测试数据用：info 是 {cwd, secs}，file 是 <pid>.json 的内容，返回并完以后的 {cwd, secs, sid, state}
+pub fn registry_rule(info: &Value, file: &Value, pid: u32, now: f64) -> Value {
+    let mut i = ProcInfo {
+        cwd: info.get("cwd").and_then(Value::as_str).map(String::from),
+        secs: info.get("secs").and_then(Value::as_f64),
+        ..ProcInfo::default()
+    };
+    if let Some(e) = registry_entry(file, pid) {
+        merge_registry(&mut i, &e, now);
+    }
+    json!({"cwd": i.cwd, "secs": i.secs, "sid": i.sid, "state": i.state})
 }
 
 /// macOS 上 lsof 查到的工作目录：(pid, 命令行) → 目录。同一个进程的工作目录不会变，查到就记着
@@ -811,9 +903,30 @@ fn win_ages(rows: &[super::health::WinProc], now: f64) -> HashMap<u32, f64> {
         .collect()
 }
 
-/// 正在跑的 claude 进程各自的工作目录、运行时长、登录方式。Linux 读 /proc；macOS 用 ps 和 lsof；
-/// Windows 只看得出运行时长（进程表里的启动时间）。
+/// 正在跑的 claude 进程各自的工作目录、运行时长、登录方式、会话 id。先看系统（proc_info_os），
+/// 再用 Claude Code 自己记的 <配置目录>/sessions/<pid>.json 补上工作目录、运行时长，加上会话 id。和 cam.py 的 claude_proc_info 一致
 fn proc_info(procs: &[(u32, String)]) -> HashMap<u32, ProcInfo> {
+    let mut out = proc_info_os(procs);
+    let dir = claude_config_dir().join("sessions");
+    if procs.is_empty() || !dir.is_dir() {
+        return out;
+    }
+    let now = now_secs();
+    for (pid, i) in out.iter_mut() {
+        // 读不了、Claude Code 正在写读到一半的跳过
+        let entry = fs::read_to_string(dir.join(format!("{pid}.json")))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| registry_entry(&v, *pid));
+        if let Some(e) = entry {
+            merge_registry(i, &e, now);
+        }
+    }
+    out
+}
+
+/// 系统看得出的：Linux 读 /proc；macOS 用 ps 和 lsof；Windows 只看得出运行时长（进程表里的启动时间）。
+fn proc_info_os(procs: &[(u32, String)]) -> HashMap<u32, ProcInfo> {
     let mut out: HashMap<u32, ProcInfo> = procs
         .iter()
         .map(|(p, _)| (*p, ProcInfo::default()))
@@ -828,6 +941,8 @@ fn proc_info(procs: &[(u32, String)]) -> HashMap<u32, ProcInfo> {
                     cwd: f.cwd,
                     secs: f.secs,
                     login: f.login,
+                    sid: None,
+                    state: None,
                 };
             }
         }
@@ -990,6 +1105,17 @@ fn match_sessions(
     let mut used_files: HashSet<PathBuf> = HashSet::new();
     let mut hit: HashMap<u32, (String, &'static str)> = HashMap::new();
     for (pid, _) in procs {
+        // 0. Claude Code 自己记的会话 id
+        if let Some(sid) = info.get(pid).and_then(|i| i.sid.clone()) {
+            if used_sids.insert(sid.clone()) {
+                hit.insert(*pid, (sid, "registry"));
+            }
+        }
+    }
+    for (pid, _) in procs {
+        if hit.contains_key(pid) {
+            continue;
+        }
         if let Some(sid) = by_pid
             .get(&(*pid as u64))
             .and_then(|v| v.iter().find(|s| !used_sids.contains(s.as_str())))
@@ -1163,15 +1289,34 @@ fn session_rows(
             .as_ref()
             .and_then(|p| fs::metadata(p).ok())
             .map(|md| mtime_secs(&md));
-        let state = session_state(
-            m.rec.as_ref(),
-            m.sid.as_ref().is_some_and(|s| waiting.contains(s)),
-            mt.map(|t| now - t),
-            rates.get(&m.pid).copied(),
-            now,
-        );
+        let hooked = m.sid.as_ref().is_some_and(|s| waiting.contains(s));
+        // Claude Code 自己记的为准；没有再看钩子记的，再没有才按记录文件和 CPU 猜。和 cam.py 一致
+        let (state, by) = match inf.state {
+            Some(st) => (st, "claude_code"),
+            None => {
+                let st = session_state(
+                    m.rec.as_ref(),
+                    hooked,
+                    mt.map(|t| now - t),
+                    rates.get(&m.pid).copied(),
+                    now,
+                );
+                let rec_state = m
+                    .rec
+                    .as_ref()
+                    .filter(|r| r.is_object())
+                    .and_then(|r| s(r, "state"));
+                let by = if hooked || matches!(rec_state, Some("busy" | "idle" | "waiting")) {
+                    "hook"
+                } else {
+                    "guess"
+                };
+                (st, by)
+            }
+        };
         let id = m.sid.clone().unwrap_or_else(|| format!("pid-{}", m.pid));
-        let mut row = json!({"id": id, "pid": m.pid, "state": state, "matched": m.how});
+        let mut row =
+            json!({"id": id, "pid": m.pid, "state": state, "state_by": by, "matched": m.how});
         if detail {
             let meta = m.path.as_deref().and_then(transcript_meta);
             let cwd = inf
@@ -1342,9 +1487,12 @@ fn hooks_installed() -> bool {
     })
 }
 
-/// 红绿灯用的：(几个在回答, 几个等你确认)。缓存 10 秒；看不出是哪个在回答（只知道有在执行的）时第一个是 None
-pub fn session_counts(busy: bool) -> (Option<usize>, usize) {
-    static CACHE: Mutex<Option<(Instant, (usize, usize))>> = Mutex::new(None);
+/// 红绿灯用的：(几个在回答, 几个等你确认, 每个会话的状态都不是猜的)。缓存 10 秒；
+/// 看不出是哪个在回答（只知道有在执行的）时第一个是 None
+pub fn session_counts(busy: bool) -> (Option<usize>, usize, bool) {
+    /// (几个在回答, 几个等你确认, 都不是猜的)
+    type Counts = (usize, usize, bool);
+    static CACHE: Mutex<Option<(Instant, Counts)>> = Mutex::new(None);
     let fresh = || {
         let procs = list_claude_processes().unwrap_or_default();
         let rows = session_rows(&procs, None, false);
@@ -1353,9 +1501,10 @@ pub fn session_counts(busy: bool) -> (Option<usize>, usize) {
                 .filter(|(r, _)| s(r, "state") == Some(st))
                 .count()
         };
-        (n("busy"), n("waiting"))
+        let sure = !rows.is_empty() && rows.iter().all(|(r, _)| s(r, "state_by") != Some("guess"));
+        (n("busy"), n("waiting"), sure)
     };
-    let (a, w) = if super::claude::faking_processes() {
+    let (a, w, sure) = if super::claude::faking_processes() {
         fresh()
     } else {
         let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -1368,18 +1517,27 @@ pub fn session_counts(busy: bool) -> (Option<usize>, usize) {
             }
         }
     };
-    (if a == 0 && busy { None } else { Some(a) }, w)
+    (
+        if a == 0 && busy && !sure {
+            None
+        } else {
+            Some(a)
+        },
+        w,
+        sure,
+    )
 }
 
 /// /api/state 里的 sessions：{"count", "busy", "answering", "waiting", "text"}。与 cam.py 的 sessions_brief 一致
 pub fn sessions_brief() -> Value {
     let (n, busy) = super::claude::sessions_view();
-    let (answering, waiting) = if n > 0 {
+    let (answering, waiting, sure) = if n > 0 {
         session_counts(busy)
     } else {
-        (Some(0), 0)
+        (Some(0), 0, false)
     };
-    let busy = busy || answering.is_some_and(|a| a > 0);
+    // 每个会话的状态都有记录（不是猜的）时只看有没有在回答的：后台挂着的命令吃 CPU 不算
+    let busy = (busy && !sure) || answering.is_some_and(|a| a > 0);
     let text = if n > 0 {
         session_phrase(n, busy, answering, waiting)
     } else {

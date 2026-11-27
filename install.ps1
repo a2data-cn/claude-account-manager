@@ -1,10 +1,10 @@
 ﻿# 一键安装 cam（Windows）。也可以直接双击“安装.cmd”。
 # 用法：powershell -ExecutionPolicy Bypass -File install.ps1 [-Yes] [-SkipVerify] [-Uninstall]
-#   -Yes         不提问，全部按默认选择：没有 Python 时用 winget 装、装托盘小工具；Claude Code 不装
+#   -Yes         不提问，全部按默认选择：没有 Python 时用 winget 装、装托盘小工具和 Claude Code 钩子；Claude Code 不装
 #   -SkipVerify  跳过 SHA256SUMS 文件校验（自己改过代码时用）
-#   -Uninstall   卸载：把 scripts 目录从用户 PATH 里去掉，删掉托盘小工具
+#   -Uninstall   卸载：把 scripts 目录从用户 PATH 里去掉，删掉托盘小工具，去掉 Claude Code 里 cam 的钩子
 # 也认 --yes / --skip-verify / --uninstall 的写法。可以重复运行，装好的部分会跳过；
-# 账号数据（%USERPROFILE%\.claude-accounts）和 Claude Code 配置（%USERPROFILE%\.claude）都不会动。
+# 账号数据（%USERPROFILE%\.claude-accounts）不会动；Claude Code 的配置只在 settings.json 里加几条 cam 的钩子（别的设置不动）。
 param([switch]$Yes, [switch]$SkipVerify, [switch]$Uninstall)
 
 # python 等外部命令会往 stderr 写正常输出，Windows PowerShell 在 Stop 模式下会把它当成错误中断，所以只看退出码
@@ -81,6 +81,20 @@ function Stop-TrayProcess {
 }
 function Start-Tray { Start-Process -FilePath $Conhost -ArgumentList $TrayArgs -WindowStyle Hidden }
 
+# 依次试 py -3、python、python3。Microsoft Store 的 python 占位程序跑不起来，要真的运行一下才知道能不能用
+$PyExe = $null
+$PyArgs = @()
+function Find-Python {
+  foreach ($cand in "py -3", "python", "python3") {
+    $parts = $cand -split " "
+    $cmd = Get-Command $parts[0] -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cmd) { continue }
+    $extra = @($parts | Select-Object -Skip 1)
+    & $cmd.Source @extra -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $script:PyExe = $cmd.Source; $script:PyArgs = $extra; return }
+  }
+}
+
 if ($Uninstall) {
   Write-Host "卸载 cam（账号数据和 Claude Code 配置都不动）"
   Step "cam 命令"
@@ -102,6 +116,17 @@ if ($Uninstall) {
     Note "没装托盘小工具"
   }
   if ($running.Count) { Ok "已关掉正在运行的托盘小工具（任务栏上的图标鼠标移过去就会消失）" }
+  # Claude Code 的钩子指着这份代码：不去掉的话代码删了以后，Claude Code 每次调用工具都白跑一个找不到的命令
+  Step "Claude Code 钩子"
+  Find-Python
+  if (-not $PyExe) {
+    Warn "没找到 Python，Claude Code 的 settings.json 里 cam 的钩子没去掉。装回 Python 后运行：python `"$CamPy`" hooks remove"
+  } else {
+    $out = (@(& $PyExe @PyArgs $CamPy hooks remove 2>&1 | ForEach-Object { "$_" }) -join " ").Trim()
+    if ($LASTEXITCODE -ne 0) { Warn "钩子没去掉：$out" }
+    elseif ($out.StartsWith("已")) { Ok $out }
+    else { Note $out }
+  }
   Write-Host ""
   Write-Host "✓ 卸载完成。代码目录 $Root 和账号数据 $env:USERPROFILE\.claude-accounts 都还在；数据目录里有各账号的登录凭据，确定不要了再自己删。"
   Write-Host "  装过桌面版的话，在`“设置 → 应用`”里卸载。"
@@ -112,19 +137,6 @@ Write-Host "安装 cam（Claude 多账号管理）：$Root"
 
 # ---- 1. Python：后面的校验和 cam 本身都要用
 Step "检查 Python"
-# 依次试 py -3、python、python3。Microsoft Store 的 python 占位程序跑不起来，要真的运行一下才知道能不能用
-$PyExe = $null
-$PyArgs = @()
-function Find-Python {
-  foreach ($cand in "py -3", "python", "python3") {
-    $parts = $cand -split " "
-    $cmd = Get-Command $parts[0] -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $cmd) { continue }
-    $extra = @($parts | Select-Object -Skip 1)
-    & $cmd.Source @extra -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)" 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) { $script:PyExe = $cmd.Source; $script:PyArgs = $extra; return }
-  }
-}
 Find-Python
 if (-not $PyExe) {
   $winget = Get-Command winget -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -189,7 +201,24 @@ if ($claude) {
   }
 }
 
-# ---- 5. 托盘小工具：任务栏右下角显示当前账号和额度，顺带做后台任务
+# ---- 5. Claude Code 钩子：会话页、红绿灯认“在回答 / 等你确认”的兜底。新版 Claude Code 自己记着状态，老版本靠它
+Step "Claude Code 钩子"
+& $PyExe @PyArgs $CamPy hooks status --check 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) {
+  Ok "已经装好了（cam hooks status 查看）"
+} else {
+  Note "在 Claude Code 的 settings.json 里加几条 cam 的钩子，别的设置不动：会话页、托盘图标靠它认出`“在回答 / 等你确认`”。新版 Claude Code 自己也记着，这是给老版本兜底"
+  Note "每次 Claude 调用工具时顺带跑一下 cam（不让 Claude 等它）；不想要了运行 cam hooks remove"
+  if (Ask "装 Claude Code 钩子吗？" $true) {
+    $out = (@(& $PyExe @PyArgs $CamPy hooks install 2>&1 | ForEach-Object { "$_" }) -join " ").Trim()
+    if ($LASTEXITCODE -eq 0) { Ok "装好了（正在跑的 claude 要重开一次才加载）" }
+    else { Warn "没装成：$out。以后可以运行 cam hooks install 再试" }
+  } else {
+    Note "以后想装：cam hooks install"
+  }
+}
+
+# ---- 6. 托盘小工具：任务栏右下角显示当前账号和额度，顺带做后台任务
 Step "托盘小工具"
 $ws = New-Object -ComObject WScript.Shell
 $TrayOn = $false
@@ -218,7 +247,7 @@ if ((Test-Path -LiteralPath $TrayLink) -and $ws.CreateShortcut($TrayLink).Argume
   }
 }
 
-# ---- 6. 环境检查
+# ---- 7. 环境检查
 Step "环境检查（cam doctor，会联网测一下 Claude 服务，要几秒钟）"
 $out = @(& $PyExe @PyArgs $CamPy doctor 2>&1 | ForEach-Object { "$_" })
 if ($out.Count) { Write-Host "  $($out[0])" }

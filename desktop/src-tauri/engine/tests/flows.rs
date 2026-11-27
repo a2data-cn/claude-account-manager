@@ -4718,3 +4718,125 @@ fn sessions_know_the_account_without_a_start_time() {
     assert_eq!(accounts_of(&store)[&302], Value::Null);
     fake_sessions("");
 }
+
+#[test]
+fn sessions_use_claude_code_own_registry() {
+    // Claude Code（新版）自己记的 <配置目录>/sessions/<pid>.json：看不出工作目录、没装钩子也能对上会话，读出项目、模型、上下文；
+    // 启动时间也从这里来。对应 test_cam.py 的 test_sessions_use_claude_code_own_registry
+    let e = Env::new();
+    let now = chrono::Utc::now().timestamp();
+    let proj = e.root.join("work/shop");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj = proj.to_string_lossy().into_owned();
+    let dir = e
+        .root
+        .join("claude/projects")
+        .join(cam_engine::sessions::project_dir_name(&proj));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sid-shop.jsonl"),
+        json!({"type": "user", "message": {"role": "user", "content": "SECRET"}, "cwd": proj,
+               "timestamp": "2026-11-26T01:00:00Z"})
+        .to_string()
+            + "\n"
+            + &json!({"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-5-5",
+                "usage": {"input_tokens": 5, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 10, "output_tokens": 3},
+                "content": [{"type": "text", "text": "SECRET"}]}})
+            .to_string()
+            + "\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("newer-other.jsonl"), "").unwrap(); // 同目录里更新的别的记录：不能抢
+    let reg = e.root.join("claude/sessions");
+    std::fs::create_dir_all(&reg).unwrap();
+    std::fs::write(
+        reg.join("401.json"),
+        json!({"pid": 401, "sessionId": "sid-shop", "cwd": proj, "startedAt": (now - 7200) * 1000, "status": "idle"})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(reg.join("402.json"), "{\"pid\": 402, \"sessionId\"").unwrap(); // 正在写、读到一半
+    let blog = e.root.join("work/blog").to_string_lossy().into_owned();
+    std::fs::write(
+        reg.join("403.json"), // 弹着权限确认，没装钩子
+        json!({"pid": 403, "sessionId": "sid-wait", "cwd": blog, "status": "waiting"}).to_string(),
+    )
+    .unwrap();
+    fake_sessions("401,402:60,403:30");
+    let store = Store::new();
+    let mut d = store.load().unwrap();
+    d["accounts"] = json!([{"id": "a1", "kind": "claude_code", "label": "个人号"}, {"id": "b1", "kind": "claude_code", "label": "工作号"}]);
+    d["active"] = json!({"claude_code": "a1"});
+    d["switch_log"] = json!([{"at": ago(10000), "id": "b1"}, {"at": ago(600), "id": "a1"}]);
+    store.save(&mut d).unwrap();
+    let (code, view) = route(&store, "GET", "/api/sessions", &Value::Null);
+    assert_eq!(code, 200, "{view}");
+    let row = |pid: u64| {
+        view["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["pid"] == pid)
+            .unwrap()
+            .clone()
+    };
+    let a = row(401);
+    assert_eq!(
+        (
+            &a["id"],
+            &a["matched"],
+            &a["project"],
+            &a["model"],
+            &a["turns"],
+            &a["account"]
+        ),
+        (
+            &json!("sid-shop"),
+            &json!("registry"),
+            &json!("shop"),
+            &json!("claude-opus-5-5"),
+            &json!(1),
+            &json!("工作号") // 两小时前启动：那时是工作号
+        )
+    );
+    assert_eq!(a["context_used"], json!(1018));
+    let b = row(402);
+    assert_eq!(
+        (&b["matched"], &b["account"]),
+        (&Value::Null, &json!("个人号"))
+    );
+    assert!(!view.to_string().contains("SECRET"));
+    // 状态：Claude Code 自己记的为准，记不了的才猜；等你确认的排最前面
+    let states: Vec<(u64, Value, Value)> = view["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["pid"].as_u64().unwrap(),
+                r["state"].clone(),
+                r["state_by"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (403, json!("waiting"), json!("claude_code")),
+            (401, json!("idle"), json!("claude_code")),
+            (402, json!("idle"), json!("guess"))
+        ]
+    );
+    assert_eq!(
+        (&row(403)["project"], &view["waiting"]),
+        (&json!("blog"), &json!(1))
+    );
+    // 红绿灯：没装钩子也知道有一个在等你确认
+    let st = public_state(&store, &store.load().unwrap());
+    assert_eq!(
+        st["attention"],
+        json!({"count": 1, "text": "Claude Code 在等你确认", "since": null})
+    );
+    assert_eq!(st["sessions"]["waiting"], json!(1));
+    fake_sessions("");
+}

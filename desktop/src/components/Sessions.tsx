@@ -172,7 +172,7 @@ function Row({ r, on, onPick }: { r: SessionRow; on: boolean; onPick: () => void
         <span className="hint">{r.cwd || ""}</span>
       </span>
       <span className="ss-acc">
-        <span>{who}</span>
+        <span title={who}>{who}</span>
         <span className="hint">{r.model ? modelName(r.model) : "还没有回复"}</span>
       </span>
       <span className="ss-st">
@@ -408,9 +408,9 @@ export function Sessions() {
         {view.sessions.map((r) => (
           <Row key={r.id} r={r} on={r.id === sel} onPick={() => pick(r.id)} />
         ))}
-        {!view.hooks && (
+        {!view.hooks && view.sessions.some((r) => r.state_by === "guess") && (
           <p className="hint ss-note">
-            没装 cam 的钩子：“在回答 / 空闲 / 等你确认”是按记录文件和 CPU 猜的。终端运行 <code>cam hooks install</code> 后会准一些（正在跑的会话要重开一次）。
+            有的会话“在回答 / 空闲 / 等你确认”是按记录文件和 CPU 猜的：Claude Code 版本旧，自己没记状态，也没装 cam 的钩子。升级 Claude Code（<code>claude update</code>），或者终端运行 <code>cam hooks install</code> 后就准了（正在跑的会话要重开一次）。
           </p>
         )}
       </>

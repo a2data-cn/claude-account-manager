@@ -667,6 +667,7 @@ details.pg-kept[open] > summary { margin-bottom: 10px; }
 .ss-row > span { min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12.5px; }
 .ss-row b { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-row .hint { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ss-row > .ss-acc > span, .ss-row > .ss-st > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }  /* 号是很长的邮箱时截短，不压到旁边一栏上（鼠标放上去看全） */
 .ss-row > .chip { justify-self: start; }
 .ss-led { width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-soft); margin-left: 3px; }
 .ss-led.busy { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); animation: led-breathe 2s ease-in-out infinite; }
@@ -708,6 +709,7 @@ details.pg-kept[open] > summary { margin-bottom: 10px; }
 @media (max-width: 720px) {
   .ss-row { grid-template-columns: 14px minmax(0, 1fr) auto; gap: 4px 10px; padding: 10px 12px; }
   .ss-row > .ss-acc, .ss-row > .ss-st { grid-column: 2 / 4; flex-direction: row; gap: 8px; align-items: baseline; }
+  .ss-row > .ss-acc > .hint { flex: none; }  /* 窄屏上号和模型排一行：长邮箱截短，模型名不挤掉 */
   .ss-row > .ss-ctxc { grid-column: 2 / 3; }
   .ss-row > .chip { grid-row: 1; grid-column: 3; justify-self: end; }
   .ss-top { grid-template-columns: 1fr; gap: 12px; }
