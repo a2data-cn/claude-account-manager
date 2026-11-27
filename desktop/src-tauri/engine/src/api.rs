@@ -473,7 +473,8 @@ pub fn public_state(store: &Store, data: &Value) -> Value {
     let brief = super::sessions::sessions_brief(); // 几个会话、几个在回答、几个等你确认
     let sessions = brief["count"].as_u64().unwrap_or(0) as usize;
     let attention = if sessions > 0 {
-        attention_merge(attention_view(true), brief["waiting"].as_u64().unwrap_or(0))
+        // 钩子记的和 Claude Code 自己记的都现读，不用会话数的缓存：答完确认马上停
+        attention_merge(attention_view(true), super::sessions::registry_waiting())
     } else {
         Value::Null
     };

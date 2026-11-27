@@ -4366,6 +4366,7 @@ def public_state(store, data):
 
 
 _SESSION_CACHE = [0.0, 0]  # [上次数的时间, 个数]
+_SESSION_PIDS = []  # 上次数到的 claude 进程，registry_waiting 现读它们的状态用
 _SESSION_COUNTING = threading.Lock()  # 后台线程正在数：同一时间只起一个
 
 
@@ -4375,6 +4376,7 @@ def _count_sessions(now):
         if isinstance(procs, ProcsUnknown):  # 这次没查出来：沿用上次的数
             _SESSION_CACHE[0] = now
             return
+        _SESSION_PIDS[:] = [p for p, _ in procs]
         _SESSION_BUSY[0] = claude_activity([p for p, _ in procs], max_age=0)
         try:  # 各会话分开看：几个在回答、几个在等你确认（钩子记的 + 每个会话自己的记录文件和 CPU）
             rows = _session_rows(procs)
@@ -4697,15 +4699,21 @@ def hook_items():
 
 def attention_view():
     """有没有 Claude Code 会话在等你确认（权限提示）：钩子记下来的，去掉答过的（会话记录在那之后又写了）和过期的；
-    没有 claude 进程在跑也不算。再和会话页数出来的“等你确认”（Claude Code 自己记的，没装钩子也有）合起来（attention_merge）。
-    给红绿灯和面板用：{"count", "text", "since"}，没有就 None。"""
+    没有 claude 进程在跑也不算。再和 Claude Code 自己记的“等你确认”（没装钩子也有，registry_waiting 现读）合起来（attention_merge）。
+    两边都现读、不用 session_count 缓存的会话状态：答完确认红绿灯马上停。给红绿灯和面板用：{"count", "text", "since"}，没有就 None。"""
     if not session_count():
         return None
-    return attention_merge(_hook_attention(), session_counts()["waiting"])
+    return attention_merge(_hook_attention(), registry_waiting())
+
+
+def registry_waiting():
+    """上次数到的 claude 进程里，Claude Code 自己记着在等你确认的有几个：现读 <配置目录>/sessions/<pid>.json（几个小文件），
+    不等 session_count 的缓存（最多 20 秒前的）。和 Rust 版 sessions::registry_waiting 一致。"""
+    return sum(e.get("state") == "waiting" for e in claude_session_registry(list(_SESSION_PIDS)).values())
 
 
 def attention_merge(hook, waiting):
-    """钩子记的（_hook_attention，没有是 None）和会话页上等你确认的个数合起来：钩子记的不比它少就用钩子的（写得出是哪个工具），
+    """钩子记的（_hook_attention，没有是 None）和 Claude Code 自己记着在等你确认的个数（registry_waiting）合起来：钩子记的不比它少就用钩子的（写得出是哪个工具），
     少了就只写个数。规则和 Rust 版 claude::attention_merge 一致（tests/shared/sessions.json）。"""
     have = (hook or {}).get("count") or 0
     n = max(have, waiting or 0)

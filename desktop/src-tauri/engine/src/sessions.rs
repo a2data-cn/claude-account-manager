@@ -913,16 +913,32 @@ fn proc_info(procs: &[(u32, String)]) -> HashMap<u32, ProcInfo> {
     }
     let now = now_secs();
     for (pid, i) in out.iter_mut() {
-        // 读不了、Claude Code 正在写读到一半的跳过
-        let entry = fs::read_to_string(dir.join(format!("{pid}.json")))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|v| registry_entry(&v, *pid));
-        if let Some(e) = entry {
+        if let Some(e) = read_registry(&dir, *pid) {
             merge_registry(i, &e, now);
         }
     }
     out
+}
+
+/// <配置目录>/sessions/<pid>.json 读成 registry_entry；没有、读不了、Claude Code 正在写读到一半的是 None
+fn read_registry(dir: &Path, pid: u32) -> Option<RegistryEntry> {
+    fs::read_to_string(dir.join(format!("{pid}.json")))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| registry_entry(&v, pid))
+}
+
+/// 上次数会话（session_counts）时看到的 claude 进程，registry_waiting 现读它们的状态用
+static LAST_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// 上次数到的 claude 进程里，Claude Code 自己记着在等你确认的有几个：现读 <配置目录>/sessions/<pid>.json（几个小文件），
+/// 不等 session_counts 的缓存（最多 10 秒前的），答完确认红绿灯马上停。和 cam.py 的 registry_waiting 一致
+pub fn registry_waiting() -> u64 {
+    let pids = LAST_PIDS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let dir = claude_config_dir().join("sessions");
+    pids.iter()
+        .filter(|pid| read_registry(&dir, **pid).is_some_and(|e| e.state == Some("waiting")))
+        .count() as u64
 }
 
 /// 系统看得出的：Linux 读 /proc；macOS 用 ps 和 lsof；Windows 只看得出运行时长（进程表里的启动时间）。
@@ -1495,6 +1511,8 @@ pub fn session_counts(busy: bool) -> (Option<usize>, usize, bool) {
     static CACHE: Mutex<Option<(Instant, Counts)>> = Mutex::new(None);
     let fresh = || {
         let procs = list_claude_processes().unwrap_or_default();
+        *LAST_PIDS.lock().unwrap_or_else(|e| e.into_inner()) =
+            procs.iter().map(|(p, _)| *p).collect();
         let rows = session_rows(&procs, None, false);
         let n = |st: &str| {
             rows.iter()

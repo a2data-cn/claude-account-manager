@@ -2197,6 +2197,13 @@ class CamTest(unittest.TestCase):
             view = cam.sessions_view(data)
             cam._SESSION_CACHE[:] = [0.0, 0]
             att = cam.attention_view()  # 红绿灯：没装钩子也知道有一个在等你确认
+            wait = os.path.join(cfg, "sessions", "403.json")
+            with open(wait, encoding="utf-8") as f:
+                waiting_file = f.read()
+            write(wait, waiting_file.replace('"waiting"', '"busy"'))  # 答完确认：红绿灯马上停，不等会话数的缓存
+            answered = cam.attention_view()
+            write(wait, waiting_file)
+        self.assertIsNone(answered)
         rows = {r["pid"]: r for r in view["sessions"]}
         a = rows[401]
         self.assertEqual((a["id"], a["matched"], a["project"], a["model"], a["turns"], a["account"]),
@@ -2211,7 +2218,6 @@ class CamTest(unittest.TestCase):
         self.assertEqual(att, {"count": 1, "text": "Claude Code 在等你确认", "since": None})
 
         # 每个会话都有记录时，后台挂着的命令吃 CPU 不算“正在回答”；有猜的会话时照旧按 CPU 说
-        write(os.path.join(cfg, "sessions", "402.json"), json.dumps({"pid": 402, "sessionId": "sid-bg", "status": "shell"}))
         def counts():
             with mock.patch.object(cam, "IS_WIN", True), mock.patch.object(cam, "proc_root", lambda: None), \
                     mock.patch.object(cam, "windows_processes", lambda max_age=0: table), \

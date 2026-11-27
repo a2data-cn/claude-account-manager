@@ -4838,5 +4838,13 @@ fn sessions_use_claude_code_own_registry() {
         json!({"count": 1, "text": "Claude Code 在等你确认", "since": null})
     );
     assert_eq!(st["sessions"]["waiting"], json!(1));
+    // 答完确认：现读 Claude Code 记的状态，红绿灯马上停，不等会话数的缓存
+    assert_eq!(cam_engine::sessions::registry_waiting(), 1);
+    std::fs::write(
+        reg.join("403.json"),
+        json!({"pid": 403, "sessionId": "sid-wait", "cwd": blog, "status": "busy"}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(cam_engine::sessions::registry_waiting(), 0);
     fake_sessions("");
 }

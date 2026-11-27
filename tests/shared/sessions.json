@@ -1,5 +1,5 @@
 {
- "_说明": "会话页的规则（cam.py 的 context_window / context_health / project_dir_name / session_state / session_phrase / transcript_meta / transcript_composition，Rust 版 sessions.rs）。transcripts 里每个 lines 按顺序写成一个 .jsonl（字符串原样写，对象写成紧凑 JSON），读出摘要和组成（top 是列出前几项）。 registry：Claude Code（新版）给每个正在跑的会话记的 <配置目录>/sessions/<pid>.json 怎么读（registry_entry）、怎么并进系统看到的进程信息（merge_registry：只补工作目录、运行时长，加上会话 id 和状态；运行时长和文件里的启动时间差 5 分钟以上的不用）；file 是文件内容，expect 是并完以后的 {cwd, secs, sid, state}（null 是看不出来）。 attention_merge：红绿灯的“等你确认”，钩子记的（hook，attention_view 算的）和会话页上等你确认的个数（waiting，Claude Code 自己记的也算）合起来；registry 的 state 是 Claude Code 记的 status 换成会话页的状态（shell 是后台挂着命令，算空闲）。",
+ "_说明": "会话页的规则（cam.py 的 context_window / context_health / project_dir_name / session_state / session_phrase / transcript_meta / transcript_composition，Rust 版 sessions.rs）。transcripts 里每个 lines 按顺序写成一个 .jsonl（字符串原样写，对象写成紧凑 JSON），读出摘要和组成（top 是列出前几项）。 registry：Claude Code（新版）给每个正在跑的会话记的 <配置目录>/sessions/<pid>.json 怎么读（registry_entry）、怎么并进系统看到的进程信息（merge_registry：只补工作目录、运行时长，加上会话 id 和状态；运行时长和文件里的启动时间差 5 分钟以上的不用）；file 是文件内容，expect 是并完以后的 {cwd, secs, sid, state}（null 是看不出来）。 attention_merge：红绿灯的“等你确认”，钩子记的（hook，attention_view 算的）和 Claude Code 自己记着在等你确认的个数（waiting，registry_waiting 现读 sessions/<pid>.json）合起来；registry 的 state 是 Claude Code 记的 status 换成会话页的状态（shell 是后台挂着命令，算空闲）。",
  "windows": [
   {
    "model": "claude-opus-5-5",
